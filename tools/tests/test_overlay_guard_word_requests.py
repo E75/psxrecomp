@@ -335,6 +335,52 @@ class RecompilerWarningTests(unittest.TestCase):
         self.assertNotIn('WARNING: entry point', proc.stdout)
 
 
+class StaticModeTests(unittest.TestCase):
+    """--static binds captured dispatch entries to demands before the
+    classifier runs; the guard word must not become one there either."""
+
+    def setUp(self):
+        if not RECOMPILER:
+            self.skipTest('pass --recompiler (ctest always does)')
+
+    def test_static_mode_never_demands_the_guard_word(self):
+        host = LOAD + 0xF00
+        data = ac3_shape({LAST: JR_RA, GUARD: NOP})
+        rec = capture(function_entry_pcs=[host],
+                      dispatch_entry_pcs=[host, GUARD],
+                      executed_pcs=[host, GUARD])
+        rec.update({'load_addr': f'0x{LOAD:08X}', 'size': SIZE,
+                    'bytes_b64': __import__('base64').b64encode(data).decode()})
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / 'captures.json').write_text(__import__('json').dumps([rec]))
+            header = bytearray(0x800)
+            header[:8] = b'PS-X EXE'
+            struct.pack_into('<I', header, 0x18, 0x80010000)
+            struct.pack_into('<I', header, 0x1C, 0x10)
+            (tmp / 'MAIN.EXE').write_bytes(bytes(header) + bytes(0x10))
+            (tmp / 'game.toml').write_text(
+                '[game]\nid = "TEST-00000"\nname = "x"\nexe = "MAIN.EXE"\n'
+                'load_address = "0x80010000"\nentry_pc = "0x80010000"\n'
+                'text_size = "0x10"\nstack_base = "0x801FFFF0"\n\n'
+                '[recompiler]\nseeds = "seeds.txt"\nout_dir = "generated"\n')
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / 'tools' / 'compile_overlays.py'),
+                 '--static', '--captures', str(tmp / 'captures.json'),
+                 '--out-dir', str(tmp / 'out'),
+                 '--game-toml', str(tmp / 'game.toml'),
+                 '--recompiler', RECOMPILER, '--project-root', str(ROOT),
+                 '--runtime-include', str(ROOT / 'runtime' / 'include'),
+                 '--force-interior', f'0x{GUARD:08X}'],
+                capture_output=True, text=True, timeout=300, cwd=str(ROOT))
+        out = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 0, out[-3000:])
+        self.assertIn(f'demand 0x{GUARD:08X} excluded: GUARD_WORD', out)
+        self.assertNotIn('recompiler WARNING', out)
+        self.assertNotIn('no-func-ids', out)
+        self.assertNotIn('SHARD FAIL', out)
+
+
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('--recompiler')

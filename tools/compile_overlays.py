@@ -6775,7 +6775,20 @@ def _static_capture_job(cap, args, toml, forced_interiors, static_out, result):
         result['outcome'] = 'fail'
         result['fail'] = (cls, detail)
 
+    # The delay-slot guard word is not code of this image and the recompiler
+    # cannot analyse it (beads-eio.3.190): never a static demand either.
+    analysable_hi = phys_addr + size - guard_bytes
+    for captured_entry in sorted(
+            _parse_addr_list(cap.get('dispatch_entry_pcs', [])) |
+            {forced for forced in forced_interiors
+             if phys_addr <= (forced & 0x1FFFFFFF) < phys_addr + size}):
+        if (captured_entry & 0x1FFFFFFF) >= analysable_hi:
+            print(f'  demand 0x{captured_entry:08X} excluded: GUARD_WORD '
+                  f'(past analysable end 0x{analysable_hi | 0x80000000:08X}; '
+                  f'never requested)')
     for captured_entry in _parse_addr_list(cap.get('dispatch_entry_pcs', [])):
+        if (captured_entry & 0x1FFFFFFF) >= analysable_hi:
+            continue
         entry = ((captured_entry & 0x1FFFFFFF) | 0x80000000)
         key = (entry, crc32)
         result['requested_entries'].add(key)
@@ -6785,10 +6798,9 @@ def _static_capture_job(cap, args, toml, forced_interiors, static_out, result):
     # entry was observed even if the retained capture lost its classifier
     # provenance. Bind the requested PC to this capture's exact bytes; the
     # post-pass builds a content-validated isolated shard for it.
-    region_hi = phys_addr + size
     for forced_entry in forced_interiors:
         forced_phys = forced_entry & 0x1FFFFFFF
-        if phys_addr <= forced_phys < region_hi:
+        if phys_addr <= forced_phys < analysable_hi:
             entry = forced_phys | 0x80000000
             key = (entry, crc32)
             result['requested_entries'].add(key)
