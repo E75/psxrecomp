@@ -23,6 +23,18 @@ psxrecomp_add_runtime_target(psx-runtime
 # (docs/ENHANCEMENTS.md G1.10). Titles get their <exe>_pgxp the same way.
 
 if(BUILD_TESTING)
+    # Netplay: which BIOS a match boots, and its wire helpers.
+    add_executable(netplay_bios_settle_test
+        tests/test_netplay_bios_settle.c
+        src/netplay_bios_settle.c)
+    target_include_directories(netplay_bios_settle_test PRIVATE include)
+    add_test(NAME netplay_bios_settle_test COMMAND netplay_bios_settle_test)
+    # Netplay: why a match ended, and when a boot-digest mismatch is final.
+    add_executable(netplay_exit_reason_test
+        tests/test_netplay_exit_reason.c
+        src/netplay_exit_reason.c)
+    target_include_directories(netplay_exit_reason_test PRIVATE include)
+    add_test(NAME netplay_exit_reason_test COMMAND netplay_exit_reason_test)
     add_executable(ws_scene_hold_test tests/test_ws_scene_hold.c)
     target_include_directories(ws_scene_hold_test PRIVATE include)
     add_test(NAME ws_scene_hold_test COMMAND ws_scene_hold_test)
@@ -796,9 +808,21 @@ if(BUILD_TESTING)
             # is needed and none can drift from what the runtime links.
             target_sources(lobby_chat_ring_test PRIVATE
                 "${PSXRECOMP_ROOT}/runtime/src/lobby_ws/rnet_ws.c"
-                "${PSXRECOMP_ROOT}/runtime/src/lobby_ws/rnet_sha1.c")
+                "${PSXRECOMP_ROOT}/runtime/src/lobby_ws/rnet_sha1.c"
+                "${PSXRECOMP_ROOT}/runtime/src/netplay_bios_settle.c")
             target_link_libraries(lobby_chat_ring_test PRIVATE recomp_net)
             add_test(NAME lobby_chat_ring_test COMMAND lobby_chat_ring_test)
+            add_executable(netplay_bios_wire_test
+                tests/test_netplay_bios_wire.c
+                src/netplay_bios_settle.c
+                src/lobby_ws/rnet_ws.c
+                src/lobby_ws/rnet_sha1.c)
+            target_include_directories(netplay_bios_wire_test PRIVATE
+                include src src/lobby_ws ${_RNET_ROOT}/include)
+            target_compile_definitions(netplay_bios_wire_test PRIVATE
+                PSX_HAS_LOBBY_CLIENT=1 PSX_HAS_RECOMP_NET=1)
+            target_link_libraries(netplay_bios_wire_test PRIVATE recomp_net)
+            add_test(NAME netplay_bios_wire_test COMMAND netplay_bios_wire_test)
         endif()
 
         add_executable(rb_post_tip_filter_test tests/test_rb_post_tip_filter.c)
