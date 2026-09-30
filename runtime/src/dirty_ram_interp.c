@@ -36,6 +36,7 @@
 #include "lockstep.h"
 #include "starvation_ring.h"
 #include "fntrace.h"  /* fntrace_is_game_started / fntrace_mark_game_started */
+#include "psx_segment_miss.h"  /* segment misses in static game code (§5.5) */
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -218,6 +219,8 @@ DirtyRamPcEntry g_dirty_ram_pc_table[DIRTY_RAM_PC_TABLE_SIZE] = {0};
 uint32_t g_dirty_ram_exec_pc_bitmap[DIRTY_RAM_EXEC_BITMAP_WORDS] = {0};
 uint32_t g_dirty_ram_exec_page_bitmap[DIRTY_RAM_EXEC_PAGE_BITMAP_WORDS] = {0};
 uint32_t g_dirty_ram_dispatch_pc_bitmap[DIRTY_RAM_EXEC_BITMAP_WORDS] = {0};
+uint32_t g_dirty_ram_dispatch_seg_bitmap[PSX_CODE_SEGMENT_COUNT]
+                                        [DIRTY_RAM_EXEC_BITMAP_WORDS] = {{0}};
 
 DirtyRamBlockLogEntry g_dirty_ram_block_log[DIRTY_RAM_BLOCK_LOG_CAP] = {0};
 uint64_t              g_dirty_ram_block_log_seq = 0;
@@ -2867,6 +2870,15 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
          * dirty interpreter execute the real RAM bytes. */
         clean_game_text_miss = 1;
     }
+    /* Segment miss (docs/SEGMENT_AWARE_CODE.md §5.5): the table is keyed by
+     * the full PC, so a PC whose physical word has a compiled row only in
+     * another segment misses above and is interpreted here like any clean
+     * text miss, never run through the other segment's body. Record it with
+     * the full PC; the fix is a segment-qualified seed and regeneration. */
+    if (clean_game_text_miss)
+        (void)psx_segment_miss_note(addr, psx_game_is_function_entry,
+                                    cpu->gpr[31], cpu->gpr[29],
+                                    (uint32_t)s_frame_count);
 #endif
 
     /* B-2: statically-compiled overlay functions (generated/overlays_static.c).
@@ -2970,6 +2982,13 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
     {
         uint32_t word = phys >> 2;
         g_dirty_ram_dispatch_pc_bitmap[word >> 5] |= 1u << (word & 31u);
+        /* ...and the segment it entered through, from the full PC
+         * (docs/SEGMENT_AWARE_CODE.md §5.7): capture records it so the next
+         * compile builds a shard for that segment. One bit per interpreted
+         * dispatch, not per instruction. */
+        int seg = psx_code_segment_index(addr);
+        if (seg >= 0)
+            g_dirty_ram_dispatch_seg_bitmap[seg][word >> 5] |= 1u << (word & 31u);
     }
 
     /* External-entry attribution: when the previous interp run exited by
