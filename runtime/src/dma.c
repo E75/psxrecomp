@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "gpu_timeline.h"
 
 /* Word-aligned main-RAM offset of a DMA address (MADR / stepped cursor)
  * through the live geometry: retail folds to 2 MiB exactly as the DMAC's
@@ -727,6 +728,8 @@ static void gpu_ll_complete(void *opaque, int hit_limit) {
     (void)opaque;
     gpu_ot_stats.completes++;
     gpu_ot_record_walk_stats(psx_cycle_count - gpu_ot_start_cycle);
+    gpu_timeline_note(GTL_LL_END, gpu_linked_list.nodes_processed,
+                      gpu_linked_list.total_words);
     channels[2].madr = hit_limit ? gpu_linked_list.current_addr
                                  : 0x00FFFFFFu;
     gpu_ws_end_linked_list();
@@ -754,6 +757,7 @@ static void start_async_gpu_linked_list(void) {
      * header and payload read at its consumption boundary. */
     gpu_ws_prepass_linked_list(start_addr);
     dma_gpu_ll_start(&gpu_linked_list, start_addr, 0x40000u);
+    gpu_timeline_note(GTL_LL_START, start_addr, 0);
     event_ring_record_aux(EV_DMA_SCHED, 2u, channels[2].chcr);
     gpu_ot_stats.starts++;
     gpu_ot_start_cycle = psx_cycle_count;

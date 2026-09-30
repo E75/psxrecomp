@@ -213,6 +213,16 @@ on a fixed region -> next.
 
 ## 5. Status / Log (update every session)
 
+- **2026-09-29 (Phase 5 enhancement media):** Added format-8 verified donor
+  resources (exact canonical size/SHA-256, immutable snapshots scoped to the
+  owning plugin). N64 byte orders normalize before hashing; PSX identity covers
+  the first data track using the existing disc reader. Mixed-mode retail volume
+  sizes include audio and are not data-track lengths. Framework media/package/
+  runtime tests pass; V8's isolated headless importer validates Super Dreamland
+  64 from owner media. No CPU execution or timing changes. Arena conversion and
+  gameplay integration remain open. Local uncommitted work tracked by
+  `beads-09ww` and `beads-ip30`; content epic `beads-eio.5.13` remains open.
+
 - **2026-09-13 (SIO card hack removal — branch-only review checkpoint):**
   Reproduced fixed-Ape-RAM IRQ7/mask injection after an absent-card probe,
   plus SELECT-time ACK fabrication and INTC-pending ACK requeueing with the

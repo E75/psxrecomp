@@ -31,6 +31,9 @@
 #include "gpu.h"
 #include "gpu_render.h"   /* gr_scale + gr_render_display_hires (screenshot_hires) */
 #include "present_ring.h"
+#include "gpu_timeline.h"
+#include "gte_nclip_stats.h"
+#include "present_image_ring.h"
 #include "load_transition_ring.h"
 #include "cdrom.h"
 #include "sio.h"
@@ -7810,6 +7813,72 @@ static void handle_ws_hud_mode(int id, const char *json)
     send_fmt("{\"id\":%d,\"ok\":true,\"tag_rects\":%d}", id, v ? 1 : 0);
 }
 
+/* Named plugin counters (psx_mod_counter_add), always on:
+ *   {"cmd":"mod_counters"}
+ * -> counters: [{name, count, last_frame}], overflow. */
+static void handle_mod_counters(int id, const char *json)
+{
+    extern int psx_mod_counters_snapshot(const char **names, uint64_t *counts,
+                                         uint64_t *last_frames, int cap,
+                                         uint64_t *overflow);
+    (void)json;
+    enum { CAP = 128 };
+    const char *names[CAP];
+    uint64_t counts[CAP], last[CAP], overflow = 0;
+    int n = psx_mod_counters_snapshot(names, counts, last, CAP, &overflow);
+    if (n > CAP) n = CAP;
+    size_t cap = 256u + (size_t)n * 160u;
+    char *buf = (char *)malloc(cap);
+    if (!buf) { send_err(id, "alloc failed"); return; }
+    size_t off = 0;
+    off += (size_t)snprintf(buf + off, cap - off,
+                            "{\"id\":%d,\"ok\":true,\"frame\":%llu,\"counters\":[",
+                            id, (unsigned long long)s_frame_count);
+    for (int i = 0; i < n && off < cap; i++) {
+        char esc[96];
+        size_t e = 0;
+        for (const char *p = names[i]; *p && e + 2 < sizeof esc; p++)
+            if (*p != '"' && *p != '\\' && (unsigned char)*p >= 0x20) esc[e++] = *p;
+        esc[e] = '\0';
+        off += (size_t)snprintf(buf + off, cap - off,
+                                "%s{\"name\":\"%s\",\"count\":%llu,\"last_frame\":%llu}",
+                                i ? "," : "", esc, (unsigned long long)counts[i],
+                                (unsigned long long)last[i]);
+    }
+    if (off < cap)
+        snprintf(buf + off, cap - off, "],\"overflow\":%llu}",
+                 (unsigned long long)overflow);
+    debug_server_send_line(buf);
+    free(buf);
+}
+
+/* Explicit HUD-anchor / background tag pipeline counters (always on):
+ *   {"cmd":"ws_tag_stats"}
+ * -> hud / background: tag_calls, tag_rejected, hit, stale, guard_mismatch,
+ *    last_tag_frame, last_hit_frame. A title plugin that tags but never hits
+ *    is either tagging the wrong address or rewriting packets after tagging. */
+static void handle_ws_tag_stats(int id, const char *json)
+{
+    (void)json;
+    GpuWsTagStats hud, bg;
+    gpu_ws_get_tag_stats(&hud, &bg);
+    const GpuWsTagStats *s[2] = { &hud, &bg };
+    char part[2][256];
+    for (int i = 0; i < 2; i++)
+        snprintf(part[i], sizeof part[i],
+                 "{\"tag_calls\":%llu,\"tag_rejected\":%llu,\"hit\":%llu,"
+                 "\"stale\":%llu,\"guard_mismatch\":%llu,"
+                 "\"last_tag_frame\":%u,\"last_hit_frame\":%u}",
+                 (unsigned long long)s[i]->tag_calls,
+                 (unsigned long long)s[i]->tag_rejected,
+                 (unsigned long long)s[i]->hit,
+                 (unsigned long long)s[i]->stale,
+                 (unsigned long long)s[i]->guard_mismatch,
+                 s[i]->last_tag_frame, s[i]->last_hit_frame);
+    send_fmt("{\"id\":%d,\"ok\":true,\"frame\":%llu,\"hud\":%s,\"background\":%s}",
+             id, (unsigned long long)s_frame_count, part[0], part[1]);
+}
+
 /* Kernel-image bless state: {"cmd":"kernel_bless"} ->
  * entries/clean/mismatch/native_hits/verifies/invalidations, plus the
  * declared kernel patch ranges and the segments they made the verifier
@@ -7973,7 +8042,7 @@ static void handle_display_aspect(int id, const char *json) {
     int num=json_get_int(json,"num",-1), den=json_get_int(json,"den",-1);
     int adaptive=json_get_int(json,"adaptive",0);
     if (!psx_debug_display_aspect(num,den,adaptive)) {
-        send_err(id,"invalid display aspect (4:3 through 32:9)");return;
+        send_err(id,"invalid display aspect (4:3 or wider, terms 1..99)");return;
     }
     send_fmt("{\"id\":%d,\"ok\":true,\"num\":%d,\"den\":%d,\"adaptive\":%d}",id,num,den,adaptive!=0);
 }
@@ -8689,6 +8758,12 @@ typedef struct {
     uint16_t *vram;               /* full 1024x512 */
 } DispRingEntry;
 static PSX_BSS DispRingEntry s_disp_ring[DISP_RING_CAP];
+/* Capture mark state (debug_server_capture_mark / capture_mark). */
+static int      s_capture_frozen = 0;
+static uint64_t s_capture_mark_frame = 0;
+static uint64_t s_capture_mark_count = 0;
+static char     s_capture_wide_path[512];
+static int      s_capture_wide_ok = 0;
 static uint16_t     *s_disp_ring_px = NULL;   /* one block for all entries */
 
 static void disp_ring_capture(void)
@@ -8702,7 +8777,7 @@ static void disp_ring_capture(void)
         const char *e = getenv("PSX_DISPLAY_RING");
         enabled = (!e || !*e || *e != '0') ? 1 : 0;
     }
-    if (!enabled) return;
+    if (!enabled || s_capture_frozen) return;
     if (!s_disp_ring_px) {
         size_t per  = (size_t)DISP_RING_MAX_W * DISP_RING_MAX_H;
         size_t vram = (size_t)1024 * 512;
@@ -8720,6 +8795,7 @@ static void disp_ring_capture(void)
     GpuDisplayInfo di;
     gpu_get_display_info(&di);
     if (di.disabled || di.width == 0 || di.height == 0) return;
+    gpu_timeline_note(GTL_DISP_CAPTURE, 0, di.display_x | (di.display_y << 16));
     uint32_t w = di.width, h = di.height;
     if (w > DISP_RING_MAX_W) w = DISP_RING_MAX_W;
     if (h > DISP_RING_MAX_H) h = DISP_RING_MAX_H;
@@ -9055,7 +9131,10 @@ static void handle_dump_buffer(int id, const char *json)
  * present path uses (gr_render_wide_display into a scratch buffer), so the dump
  * reflects the composited wide frame 1:1, orientation included. Errors if the
  * active backend has no wide compositor or native-wide isn't engaged. */
-static void handle_wide_shot(int id, const char *json)
+/* Write the presented native-wide frame to `path`. Returns NULL on success
+ * (and the pixel size), or a static error string. Shared by wide_shot and
+ * the capture mark. */
+static const char *write_wide_png(const char *path, int *out_w, int *out_h)
 {
     extern int gr_wide_supported(void);
     extern int gr_scale(void);
@@ -9064,33 +9143,28 @@ static void handle_wide_shot(int id, const char *json)
     extern void gl_renderer_sync_cpu(void);
     gl_renderer_sync_cpu();   /* no-op on SW / when no GL frame pending */
 
-    if (!gr_wide_supported()) { send_err(id, "active backend has no wide compositor"); return; }
+    if (!gr_wide_supported()) return "active backend has no wide compositor";
     int extra = ws_nw_extra();
-    if (extra <= 0) { send_err(id, "native-wide not engaged (extra=0; need a wide game frame)"); return; }
+    if (extra <= 0) return "native-wide not engaged (extra=0; need a wide game frame)";
 
     GpuDisplayInfo di;
     gpu_get_display_info(&di);
-    if (di.disabled || di.width == 0 || di.height == 0) { send_err(id, "display disabled"); return; }
+    if (di.disabled || di.width == 0 || di.height == 0) return "display disabled";
 
     int scale = gr_scale(); if (scale < 1) scale = 1;
     int present_w = (int)di.width + extra;
     int W = present_w * scale, H = (int)di.height * scale;
 
-    char path[512];
-    if (!json_get_str(json, "path", path, sizeof(path)))
-        strncpy(path, "psx_wide.png", sizeof(path) - 1);
-    path[sizeof(path) - 1] = '\0';
-
     uint32_t *buf = (uint32_t *)malloc((size_t)W * H * sizeof(uint32_t));
-    if (!buf) { send_err(id, "alloc failed"); return; }
+    if (!buf) return "alloc failed";
     int n = gr_render_wide_display(buf, W * (int)sizeof(uint32_t),
                                    (int)di.display_x, (int)di.display_y, (int)di.height);
-    if (n <= 0) { free(buf); send_err(id, "no wide surface for displayed buffer"); return; }
+    if (n <= 0) { free(buf); return "no wide surface for displayed buffer"; }
 
     /* ARGB8888 (0xAARRGGBB) -> RGB, written in the buffer's row order (so the
      * PNG shows exactly the present orientation — the point of this probe). */
     uint8_t *rgb = (uint8_t *)malloc((size_t)W * H * 3);
-    if (!rgb) { free(buf); send_err(id, "alloc failed"); return; }
+    if (!rgb) { free(buf); return "alloc failed"; }
     for (int y = 0; y < H; y++) {
         for (int x = 0; x < W; x++) {
             uint32_t px = buf[(size_t)y * W + x];
@@ -9102,12 +9176,112 @@ static void handle_wide_shot(int id, const char *json)
     }
     free(buf);
     FILE *f = fopen(path, "wb");
-    if (!f) { free(rgb); send_err(id, "cannot open file"); return; }
+    if (!f) { free(rgb); return "cannot open file"; }
     int ok = png_write_rgb(f, rgb, (uint32_t)W, (uint32_t)H);
     free(rgb); fclose(f);
-    if (!ok) { send_err(id, "png encode failed"); return; }
+    if (!ok) return "png encode failed";
+    if (out_w) *out_w = W;
+    if (out_h) *out_h = H;
+    return NULL;
+}
+
+static void handle_wide_shot(int id, const char *json)
+{
+    char path[512];
+    if (!json_get_str(json, "path", path, sizeof(path)))
+        strncpy(path, "psx_wide.png", sizeof(path) - 1);
+    path[sizeof(path) - 1] = '\0';
+    int W = 0, H = 0;
+    const char *err = write_wide_png(path, &W, &H);
+    if (err) { send_err(id, err); return; }
     send_fmt("{\"id\":%d,\"ok\":true,\"path\":\"%s\",\"width\":%d,\"height\":%d}",
              id, path, W, H);
+}
+
+/* Operator capture mark. Runs on the present thread (hotkey handler), where
+ * the renderer's context is current. Freezes the display and GP0 rings so the
+ * frames and draw lists leading up to the mark survive until read, and saves
+ * the presented native-wide frame (the only record of the compositor output).
+ * A second mark while frozen is ignored; release with capture_mark op=release. */
+void debug_server_capture_mark(void)
+{
+    if (s_capture_frozen) return;
+    s_capture_mark_frame = s_frame_count;
+    s_capture_mark_count++;
+    snprintf(s_capture_wide_path, sizeof s_capture_wide_path,
+             "capture_mark_%llu_wide.png", (unsigned long long)s_frame_count);
+    s_capture_wide_ok = write_wide_png(s_capture_wide_path, NULL, NULL) == NULL;
+    s_capture_frozen = 1;
+    gpu_gp0_ring_set_frozen(1);
+    present_image_ring_set_frozen(1);
+    gpu_timeline_set_frozen(1);
+}
+
+/* Presented-image ring (see present_image_ring.h):
+ *   {"cmd":"present_image_ring_stats"} -> oldest, newest, count, frozen
+ *   {"cmd":"present_image_ring_get","frame":N,"path":"x.png"} */
+static void handle_present_image_ring_stats(int id, const char *json)
+{
+    (void)json;
+    uint32_t lo = 0, hi = 0; int n = 0;
+    present_image_ring_span(&lo, &hi, &n);
+    send_fmt("{\"id\":%d,\"ok\":true,\"oldest\":%u,\"newest\":%u,\"count\":%d,"
+             "\"frozen\":%d,\"capacity\":%d,\"height\":%d}",
+             id, lo, hi, n, present_image_ring_frozen(),
+             PRESENT_IMAGE_RING_CAP, PRESENT_IMAGE_RING_H);
+}
+static void handle_present_image_ring_get(int id, const char *json)
+{
+    int f = json_get_int(json, "frame", -1);
+    char path[512];
+    if (f < 0 || !json_get_str(json, "path", path, sizeof path)) {
+        send_err(id, "need frame and path"); return;
+    }
+    uint8_t *rgb = NULL; int w = 0, h = 0;
+    if (!present_image_ring_get_rgb((uint32_t)f, &rgb, &w, &h)) {
+        send_err(id, "frame not in presented-image ring"); return;
+    }
+    FILE *fp = fopen(path, "wb");
+    int ok = fp && png_write_rgb(fp, rgb, (uint32_t)w, (uint32_t)h);
+    if (fp) fclose(fp);
+    free(rgb);
+    if (!ok) { send_err(id, "png write failed"); return; }
+    send_fmt("{\"id\":%d,\"ok\":true,\"frame\":%d,\"width\":%d,\"height\":%d}",
+             id, f, w, h);
+}
+
+/* {"cmd":"capture_mark","op":"status"|"mark"|"release"}
+ * status  -> frozen, mark_frame, count, wide_path/wide_ok, and the frozen
+ *            display-ring / GP0-ring frame spans to query.
+ * mark    -> same as the hotkey (use only when nobody is at the window).
+ * release -> resume continuous capture. */
+static void handle_capture_mark(int id, const char *json)
+{
+    char op[16] = "status";
+    (void)json_get_str(json, "op", op, sizeof op);
+    if (!strcmp(op, "mark")) debug_server_capture_mark();
+    else if (!strcmp(op, "release")) {
+        s_capture_frozen = 0;
+        gpu_gp0_ring_set_frozen(0);
+        present_image_ring_set_frozen(0);
+        gpu_timeline_set_frozen(0);
+    } else if (strcmp(op, "status")) { send_err(id, "op must be status|mark|release"); return; }
+    uint32_t oldest = 0, newest = 0;
+    gpu_gp0_ring_frame_span(&oldest, &newest);
+    uint32_t d_old = UINT32_MAX, d_new = 0;
+    for (int i = 0; i < DISP_RING_CAP; i++) {
+        if (!s_disp_ring[i].valid) continue;
+        if (s_disp_ring[i].frame < d_old) d_old = s_disp_ring[i].frame;
+        if (s_disp_ring[i].frame > d_new) d_new = s_disp_ring[i].frame;
+    }
+    if (d_old == UINT32_MAX) d_old = 0;
+    send_fmt("{\"id\":%d,\"ok\":true,\"frozen\":%d,\"mark_frame\":%llu,"
+             "\"count\":%llu,\"wide_path\":\"%s\",\"wide_ok\":%d,"
+             "\"display_ring\":[%u,%u],\"gp0_ring\":[%u,%u],\"frame\":%llu}",
+             id, s_capture_frozen, (unsigned long long)s_capture_mark_frame,
+             (unsigned long long)s_capture_mark_count, s_capture_wide_path,
+             s_capture_wide_ok, d_old, d_new, oldest, newest,
+             (unsigned long long)s_frame_count);
 }
 
 /* screenshot: capture what the player is actually being shown. Native-wide
@@ -9388,6 +9562,87 @@ static void handle_present_ring(int id, const char *json)
         first = 0;
     }
     pos += snprintf(buf + pos, bufsz - pos, "]}");
+    send_fmt("%s", buf);
+    free(buf);
+}
+
+/* Precise-NCLIP attribution (gte_nclip_stats.h).
+ *   {"cmd":"nclip_stats"}            totals + per-function + per-site tables
+ *   {"cmd":"nclip_stats","reset":1}  clear the tables after reading
+ *   {"cmd":"nclip_stats","exact":0|1} switch exact-site consumers off/on
+ * funcs: [near_store_pc, nclips, disagree, saturated, last_frame] (1 = unknown)
+ * sites: [pc, evals, flips, fallbacks, last_frame] */
+static void handle_nclip_stats(int id, const char *json)
+{
+    extern int gpu_ws_precise_nclip_enabled(void);
+    static GteNclipFuncStat funcs[GTE_NCLIP_STAT_CAP];
+    static GteNclipSiteStat sites[GTE_NCLIP_STAT_CAP];
+    uint64_t hits = 0, fallbacks = 0, disagree = 0;
+    gte_nclip_precise_stats(&hits, &fallbacks, &disagree);
+    const int nf = gte_nclip_func_stats(funcs, GTE_NCLIP_STAT_CAP);
+    const int ns = gte_nclip_site_stats(sites, GTE_NCLIP_STAT_CAP);
+    const int bufsz = 256 + (nf + ns) * 72;
+    char *buf = (char *)malloc((size_t)bufsz);
+    if (!buf) { send_err(id, "alloc failed"); return; }
+    int pos = snprintf(buf, bufsz,
+        "{\"id\":%d,\"ok\":true,\"enabled\":%d,\"exact\":%d,\"hits\":%llu,\"fallbacks\":%llu,"
+        "\"disagreements\":%llu,\"funcs\":[",
+        id, gpu_ws_precise_nclip_enabled(), gte_nclip_exact_enabled(),
+        (unsigned long long)hits,
+        (unsigned long long)fallbacks, (unsigned long long)disagree);
+    for (int i = 0; i < nf; i++)
+        pos += snprintf(buf + pos, bufsz - pos, "%s[\"0x%08X\",%u,%u,%u,%u]",
+                        i ? "," : "", funcs[i].func, funcs[i].nclips,
+                        funcs[i].disagree, funcs[i].saturated, funcs[i].last_frame);
+    pos += snprintf(buf + pos, bufsz - pos, "],\"sites\":[");
+    for (int i = 0; i < ns; i++)
+        pos += snprintf(buf + pos, bufsz - pos, "%s[\"0x%08X\",%u,%u,%u,%u]",
+                        i ? "," : "", sites[i].pc, sites[i].evals,
+                        sites[i].flips, sites[i].fallbacks, sites[i].last_frame);
+    snprintf(buf + pos, bufsz - pos, "]}");
+    if (json_get_int(json, "reset", 0)) gte_nclip_stats_reset();
+    {
+        const int exact = json_get_int(json, "exact", -1);
+        if (exact >= 0) gte_nclip_exact_set_enabled(exact);
+    }
+    send_fmt("%s", buf);
+    free(buf);
+}
+
+/* GPU frame timeline (gpu_timeline.h): cycle-ordered vblank / flip /
+ * draw-area / linked-list DMA / present events.
+ *   {"cmd":"gpu_timeline","from":F,"to":T}   frames [F,T] (default: last 8)
+ * events: [seq, cycle, frame, kind, a, b] */
+static void handle_gpu_timeline(int id, const char *json)
+{
+    uint64_t total = gpu_timeline_total();
+    uint64_t oldest = total > GPU_TIMELINE_CAP ? total - GPU_TIMELINE_CAP : 0;
+    GpuTimelineEntry last;
+    uint32_t newest_frame = (total && gpu_timeline_get(total - 1, &last)) ? last.frame : 0;
+    int to = json_get_int(json, "to", (int)newest_frame);
+    int from = json_get_int(json, "from", to - 7);
+    if (from < 0) from = 0;
+    if (to < from) { send_err(id, "to < from"); return; }
+    int bufsz = 256 + 4096 * 80;
+    char *buf = (char *)malloc((size_t)bufsz);
+    if (!buf) { send_err(id, "alloc failed"); return; }
+    GpuTimelineEntry first_e;
+    uint32_t oldest_frame = (total && gpu_timeline_get(oldest, &first_e)) ? first_e.frame : 0;
+    int pos = snprintf(buf, bufsz,
+                       "{\"id\":%d,\"ok\":true,\"total\":%llu,\"frames\":[%u,%u],\"events\":[",
+                       id, (unsigned long long)total, oldest_frame, newest_frame);
+    int first = 1, n = 0;
+    for (uint64_t s = oldest; s < total && pos < bufsz - 128 && n < 4096; s++) {
+        GpuTimelineEntry e;
+        if (!gpu_timeline_get(s, &e)) continue;
+        if ((int)e.frame < from || (int)e.frame > to) continue;
+        pos += snprintf(buf + pos, bufsz - pos, "%s[%llu,%llu,%u,\"%s\",%u,%u]",
+                        first ? "" : ",", (unsigned long long)s,
+                        (unsigned long long)e.cyc, e.frame,
+                        gpu_timeline_kind_name(e.kind), e.a, e.b);
+        first = 0; n++;
+    }
+    pos += snprintf(buf + pos, bufsz - pos, "],\"truncated\":%s}", n >= 4096 ? "true" : "false");
     send_fmt("%s", buf);
     free(buf);
 }
@@ -13831,6 +14086,11 @@ static const CmdEntry s_commands[] = {
     { "ws_aspect_cone_site", handle_ws_aspect_cone_site },
     { "ws_margin",         handle_ws_margin },
     { "ws_hud_mode",       handle_ws_hud_mode },
+    { "ws_tag_stats",      handle_ws_tag_stats },
+    { "mod_counters",      handle_mod_counters },
+    { "capture_mark",      handle_capture_mark },
+    { "present_image_ring_stats", handle_present_image_ring_stats },
+    { "present_image_ring_get",   handle_present_image_ring_get },
     { "kernel_bless",      handle_kernel_bless },
     { "ws_aspect",         handle_ws_aspect },
     { "display_aspect",    handle_display_aspect },
@@ -13851,6 +14111,8 @@ static const CmdEntry s_commands[] = {
     { "gl_coh_ring",       handle_gl_coh_ring },
     { "gl_present_ring",   handle_gl_present_ring },
     { "present_ring",      handle_present_ring },
+    { "gpu_timeline",      handle_gpu_timeline },
+    { "nclip_stats",       handle_nclip_stats },
     { "frame_perf",        handle_frame_perf },
     { "gl_ws_ablate",      handle_gl_ws_ablate },
     { "gl_interp",         handle_gl_interp },

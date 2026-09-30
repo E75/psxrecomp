@@ -263,6 +263,16 @@ uint32_t psx_ws_angle_widen(uint32_t vanilla) {
         ? g_cbs.ws_angle_widen(vanilla)
         : vanilla;
 }
+int32_t psx_ws_cull_scale(int32_t bound, int32_t half_extent) {
+    return g_cbs.ws_cull_scale
+        ? g_cbs.ws_cull_scale(bound, half_extent)
+        : bound;
+}
+int32_t gte_nclip_exact_sign(int32_t native_mac0, uint32_t pc) {
+    return g_cbs.nclip_exact_sign
+        ? g_cbs.nclip_exact_sign(native_mac0, pc)
+        : (native_mac0 < 0 ? -1 : (native_mac0 > 0 ? 1 : 0));
+}
 /* Sub-pixel GTE precision-store tracker (ABI v14). The emitter emits a direct
  * gte_precision_store_word() call for every swc2 (GTE store-word), including in
  * overlay-resident code, so the DLL must define it or the shard fails to link

@@ -53,6 +53,8 @@ extern "C" int fntrace_is_game_started(void);
 
 /* Declared in mod_plugins.h; see active_function_entry_hooks() below. */
 uint32_t g_psx_mod_function_entry_hooks = 0;
+/* Guest vblanks seen by the mod runtime: the plugin counters' time base. */
+static uint64_t g_mod_vblanks = 0;
 
 namespace PSXRecompV4 {
 namespace {
@@ -1422,6 +1424,7 @@ extern "C" void mod_runtime_activate_plugins(void) {
 
 extern "C" void mod_runtime_on_vblank(void) {
     using namespace PSXRecompV4;
+    ++g_mod_vblanks;
     RuntimeMods& s = state();
     if (!s.initialized || !s.plan.ok) return;
     for (const ModResolution::Plugin& plugin : s.plan.plugins) {
@@ -1484,6 +1487,27 @@ extern "C" uint8_t psx_mod_read_byte(uint32_t address) {
     return psx_read_byte(address);
 }
 
+extern "C" int psx_mod_current_resource_bytes(const char* resource_id,
+                                               const uint8_t** bytes,
+                                               uint64_t* size) {
+    using namespace PSXRecompV4;
+    if (bytes) *bytes = nullptr;
+    if (size) *size = 0;
+    if (!resource_id || !*resource_id || !bytes || !size) return 0;
+    const auto& s = state();
+    if (!s.initialized || !s.plan.ok || !s.current_plugin) return 0;
+    for (const auto& resource : s.plan.resources) {
+        if (resource.package_id == s.current_plugin->package_id &&
+            resource.feature_id == s.current_plugin->feature_id &&
+            resource.id == resource_id && resource.bytes) {
+            *bytes = resource.bytes->data();
+            *size = resource.bytes->size();
+            return 1;
+        }
+    }
+    return 0;
+}
+
 extern "C" void psx_mod_write_byte(uint32_t address, uint8_t value) {
     psx_write_byte(address, value);
 }
@@ -1517,6 +1541,53 @@ extern "C" uint32_t psx_mod_alloc_guest_memory(uint32_t size,
 extern "C" uint32_t psx_mod_alloc_gpu_dma_memory(uint32_t size,
                                                   uint32_t alignment) {
     return psx_mod_gpu_dma_memory_alloc(size, alignment);
+}
+
+namespace {
+struct ModCounter {
+    const char* name = nullptr;   /* caller literal; compared by content */
+    uint64_t count = 0;
+    uint64_t last_frame = 0;
+};
+constexpr size_t kModCounterCap = 128;
+ModCounter g_mod_counters[kModCounterCap];
+size_t g_mod_counter_count = 0;
+uint64_t g_mod_counter_overflow = 0;
+}  // namespace
+
+extern "C" void psx_mod_counter_add(const char* name, uint32_t delta) {
+    if (!name || !name[0]) return;
+    for (size_t i = 0; i < g_mod_counter_count; i++) {
+        ModCounter& c = g_mod_counters[i];
+        if (c.name == name || std::strcmp(c.name, name) == 0) {
+            c.count += delta;
+            c.last_frame = g_mod_vblanks;
+            return;
+        }
+    }
+    if (g_mod_counter_count == kModCounterCap) {
+        g_mod_counter_overflow += delta;
+        return;
+    }
+    ModCounter& c = g_mod_counters[g_mod_counter_count++];
+    c.name = name;
+    c.count = delta;
+    c.last_frame = g_mod_vblanks;
+}
+
+/* Debug-server accessor: copies up to `cap` entries; returns the total count
+ * of distinct counters and writes the overflow bucket. */
+extern "C" int psx_mod_counters_snapshot(const char** names, uint64_t* counts,
+                                         uint64_t* last_frames, int cap,
+                                         uint64_t* overflow) {
+    const int n = (int)g_mod_counter_count;
+    for (int i = 0; i < n && i < cap; i++) {
+        names[i] = g_mod_counters[i].name;
+        counts[i] = g_mod_counters[i].count;
+        last_frames[i] = g_mod_counters[i].last_frame;
+    }
+    if (overflow) *overflow = g_mod_counter_overflow;
+    return n;
 }
 
 extern "C" int32_t psx_mod_widescreen_x_margin(void) {

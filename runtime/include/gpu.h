@@ -256,6 +256,12 @@ void gpu_ws_set_cull_keep_sites(const uint32_t *addresses,
                                 const uint32_t *results, int nsites);
 void gpu_ws_set_angle_sites(const uint32_t *addresses,
                             const uint32_t *expected, int nsites);
+/* [[widescreen.cull.scale]]: full-word-guarded SLT/SLTU sites whose rs (0) or
+ * rt (1) operand is a runtime +/-half_extent*z frustum bound. */
+void gpu_ws_set_cull_scale_sites(const uint32_t *addresses,
+                                 const uint32_t *expected,
+                                 const uint32_t *operands,
+                                 const uint32_t *half_extents, int nsites);
 void gpu_ws_set_aspect_cone(const uint32_t *addresses,
                             const uint32_t *expected,
                             const uint32_t *cosine_thresholds,
@@ -289,6 +295,12 @@ int psx_ws_cull_keep_site(uint32_t pc, uint32_t instr, uint32_t vanilla,
                           uint32_t *out);
 uint32_t psx_ws_angle_widen(uint32_t vanilla);
 int psx_ws_angle_site(uint32_t pc, uint32_t instr, uint32_t *out);
+/* bound * (half_extent + margin) / half_extent; identity at 4:3. */
+int32_t psx_ws_cull_scale(int32_t bound, int32_t half_extent);
+/* Interpreter path for a configured scale site: returns 1 and the widened
+ * compare verdict in *out when (pc, instr) is a configured site. */
+int psx_ws_cull_scale_site(uint32_t pc, uint32_t instr, uint32_t rs_value,
+                           uint32_t rt_value, uint32_t *out);
 uint32_t psx_ws_aspect_cone_result(uint32_t site, uint32_t vanilla,
                                    uint32_t object, int32_t x, int32_t z,
                                    int32_t y);
@@ -366,6 +378,23 @@ void gpu_ws_tag_hud_prim(uint32_t prim, int anchor);
  * Tag the complete background composite before submitting its ordering table.
  * The caller proves background identity/coverage; no guest data is modified. */
 void gpu_ws_tag_background_prim(uint32_t prim);
+/* Always-on counters for the explicit HUD-anchor and background tag tables:
+ * how many tags a title plugin offered, how many were rejected at insert
+ * (native-wide not configured / unreadable or unsupported command), and why
+ * executing primitives that matched a tagged address were or were not
+ * honoured. TCP: {"cmd":"ws_tag_stats"}. */
+typedef struct GpuWsTagStats {
+    uint64_t tag_calls;
+    uint64_t tag_rejected;
+    uint64_t hit;
+    uint64_t stale;
+    uint64_t guard_mismatch;
+    uint32_t last_tag_frame;
+    uint32_t last_hit_frame;
+} GpuWsTagStats;
+void gpu_ws_get_tag_stats(GpuWsTagStats *hud, GpuWsTagStats *background);
+/* Freeze/unfreeze the always-on GP0 command ring (capture mark). */
+void gpu_gp0_ring_set_frozen(int frozen);
 /* Fresh packet tags are eligible for background classification. */
 int gpu_ws_background_stretch_active(void);
 /* A tagged background can remain in a wide surface after its packet expires.

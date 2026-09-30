@@ -32,6 +32,13 @@ void psx_mod_function_entry(struct CPUState* cpu, uint32_t address);
  * call, so a run without an active hook pays one load per interpreted entry. */
 extern uint32_t g_psx_mod_function_entry_hooks;
 
+/* Always-on named event counters for trusted plugins (observability, not
+ * logging): e.g. how often each guard in a hook rejected. `name` should be a
+ * string literal of the form "<plugin>.<event>"; up to 128 distinct names are
+ * kept, further names are counted in an overflow bucket. Emulation-thread only.
+ * TCP: {"cmd":"mod_counters"} lists every counter with its last frame. */
+void psx_mod_counter_add(const char* name, uint32_t delta);
+
 /* Narrow guest services available to trusted plugin callbacks. */
 int psx_mod_game_started(void);
 /* Read an original mounted-disc file without changing guest CD state/timing.
@@ -194,6 +201,17 @@ int psx_mod_option_value(const char* package_id, const char* feature_id,
  */
 int psx_mod_current_resource_path(const char* resource_id,
                                   char* out, uint32_t out_size);
+/* Read-only canonical media verified by the engine for this plugin's owning
+ * package/feature. The pointer lives until the committed plan is replaced or
+ * cleared. Available only during that plugin's callbacks; returns 0 for an
+ * ordinary unverified resource, an inactive feature, or a different owner. */
+int psx_mod_current_resource_bytes(const char* resource_id,
+                                   const uint8_t** bytes, uint64_t* size);
+
+/* Display aspects have no framework ceiling: the native-wide surfaces size
+ * themselves from the live width, and each title caps its own view at what
+ * it has validated (fixed ratio, or the adaptive maximum below). Requests
+ * must be at least native 4:3, with numerator and denominator in 1..99. */
 
 /*
  * Request a fixed host display aspect before renderer/window initialization.

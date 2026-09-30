@@ -118,6 +118,18 @@ uint32_t overlay_codegen_config_hash(const GameConfig& c) {
         h.u32(site.result);
     }
 
+    std::vector<WidescreenCullScaleSite> scale_sites = c.ws_cull_scale_sites;
+    std::sort(scale_sites.begin(), scale_sites.end(),
+              [](const auto& a, const auto& b) { return a.address < b.address; });
+    h.tag("cull_scale");
+    h.u32((uint32_t)scale_sites.size());
+    for (const auto& site : scale_sites) {
+        h.u32(site.address);
+        h.u32(site.expected);
+        h.u32(site.operand);
+        h.u32(site.half_extent);
+    }
+
     std::vector<WidescreenAngleSite> angle_sites = c.ws_cull_angle_sites;
     std::sort(angle_sites.begin(), angle_sites.end(),
               [](const auto& a, const auto& b) {
@@ -1723,6 +1735,7 @@ GameConfig load_game_config(const fs::path& config_path_in) {
     std::vector<uint32_t> ws_cull_nclip_exact_sites;
     std::vector<uint32_t> ws_cull_branch_keep_sites;
     std::vector<WidescreenCullKeepSite> ws_cull_keep_sites;
+    std::vector<WidescreenCullScaleSite> ws_cull_scale_sites;
     std::vector<WidescreenAngleSite> ws_cull_angle_sites;
     WidescreenAspectConeConfig ws_aspect_cone;
     int ws_cull_guard_pixels = 0;
@@ -1787,6 +1800,38 @@ GameConfig load_game_config(const fs::path& config_path_in) {
                             config_path.string(), site.address));
                     }
                     ws_cull_keep_sites.push_back(site);
+                }
+            }
+            if (cull.contains("scale")) {
+                std::set<uint32_t> seen;
+                for (const auto& item : toml::find<toml::array>(cull, "scale")) {
+                    WidescreenCullScaleSite site;
+                    site.address = parse_hex(toml::find<std::string>(item, "address"),
+                                             "widescreen.cull.scale.address");
+                    site.expected = parse_hex(toml::find<std::string>(item, "expected"),
+                                              "widescreen.cull.scale.expected");
+                    const std::string operand = toml::find<std::string>(item, "operand");
+                    if (operand == "rs") site.operand = 0;
+                    else if (operand == "rt") site.operand = 1;
+                    else throw std::runtime_error(fmt::format(
+                        "{}: [[widescreen.cull.scale]] operand must be rs or rt",
+                        config_path.string()));
+                    const int half = toml::find<int>(item, "half_extent");
+                    if (half <= 0 || half > 1024) throw std::runtime_error(fmt::format(
+                        "{}: [[widescreen.cull.scale]] half_extent must be 1..1024",
+                        config_path.string()));
+                    site.half_extent = (uint32_t)half;
+                    const uint32_t op = site.expected >> 26;
+                    const uint32_t fn = site.expected & 0x3Fu;
+                    if (!(op == 0u && (fn == 0x2Au || fn == 0x2Bu)))
+                        throw std::runtime_error(fmt::format(
+                            "{}: [[widescreen.cull.scale]] expected must be SLT/SLTU",
+                            config_path.string()));
+                    if (!seen.insert(site.address & 0x1FFFFFFFu).second)
+                        throw std::runtime_error(fmt::format(
+                            "{}: duplicate [[widescreen.cull.scale]] address 0x{:08X}",
+                            config_path.string(), site.address));
+                    ws_cull_scale_sites.push_back(site);
                 }
             }
             if (cull.contains("angle")) {
@@ -2190,6 +2235,7 @@ GameConfig load_game_config(const fs::path& config_path_in) {
         /*ws_cull_nclip_exact_sites*/ ws_cull_nclip_exact_sites,
         /*ws_cull_branch_keep_sites*/ ws_cull_branch_keep_sites,
         /*ws_cull_keep_sites*/    ws_cull_keep_sites,
+        /*ws_cull_scale_sites*/   ws_cull_scale_sites,
         /*ws_cull_angle_sites*/   ws_cull_angle_sites,
         /*ws_aspect_cone*/         ws_aspect_cone,
         /*ws_cull_guard_pixels*/  ws_cull_guard_pixels,

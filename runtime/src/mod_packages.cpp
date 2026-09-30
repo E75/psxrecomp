@@ -2,6 +2,7 @@
 
 #include "crc32.h"
 #include "mod_plugins.h"
+#include "mod_media.h"
 #include "psx_sha256.h"
 #include "toml.hpp"
 
@@ -23,7 +24,7 @@ namespace PSXRecompV4 {
 namespace {
 
 constexpr uint32_t kMinFormatVersion = 1;
-constexpr uint32_t kMaxFormatVersion = 7;
+constexpr uint32_t kMaxFormatVersion = 8;
 constexpr uint64_t kMaxArchiveBytes = 256ull * 1024ull * 1024ull;
 constexpr uint32_t kMaxArchiveFiles = 4096;
 
@@ -760,7 +761,13 @@ std::string canonical_resolution(const std::vector<const ModPackage*>& ordered,
     }
     for (const ModResolution::Resource& resource : resources) {
         out << "resource:" << resource.package_id << ':' << resource.feature_id
-            << ':' << resource.id << '=' << resource.path.string() << '\n';
+            << ':' << resource.id << '=';
+        if (resource.bytes)
+            out << resource.format << ':' << resource.bytes->size() << ':'
+                << resource.sha256;
+        else
+            out << resource.path.string();
+        out << '\n';
     }
     return out.str();
 }
@@ -1496,6 +1503,47 @@ void mod_clear_plugins_for_tests() {
     registered_plugins().clear();
 }
 
+std::vector<std::string> mod_registered_plugin_ids() {
+    std::vector<std::string> ids;
+    for (const auto& entry : registered_plugins())
+        if (entry.second.activation || entry.second.vblank ||
+            !entry.second.function_entries.empty())
+            ids.push_back(entry.first);
+    return ids;  /* std::map keeps them sorted */
+}
+
+ModPluginAudit mod_audit_registered_plugins(
+    const std::vector<fs::path>& manifest_roots) {
+    ModPluginAudit audit;
+    std::set<std::string> declared;
+    for (const fs::path& root : manifest_roots) {
+        std::error_code ec;
+        if (!fs::is_directory(root, ec)) {
+            audit.errors.push_back(root.string() + ": not a directory");
+            continue;
+        }
+        for (fs::recursive_directory_iterator it(root, ec), end;
+             !ec && it != end; it.increment(ec)) {
+            if (!it->is_regular_file(ec) || it->path().filename() != "manifest.toml")
+                continue;
+            ModPackage package;
+            std::string error;
+            if (!ModPackageManager::read_manifest(it->path(), package, &error)) {
+                audit.errors.push_back(it->path().string() + ": " + error);
+                continue;
+            }
+            ++audit.manifests;
+            for (const ModPlugin& plugin : package.plugins)
+                declared.insert(plugin.id);
+        }
+        if (ec) audit.errors.push_back(root.string() + ": " + ec.message());
+    }
+    audit.declared.assign(declared.begin(), declared.end());
+    for (const std::string& id : mod_registered_plugin_ids())
+        if (!declared.count(id)) audit.undeclared.push_back(id);
+    return audit;
+}
+
 const char* mod_channel_name(ModChannel channel) {
     switch (channel) {
         case ModChannel::Experimental: return "experimental";
@@ -1795,6 +1843,19 @@ bool ModPackageManager::read_manifest(const fs::path& path, ModPackage& out,
                     toml::find_or<std::string>(v, "format", "file");
                 resource.required =
                     toml::find_or<bool>(v, "required", false);
+                if (v.contains("size") || v.contains("sha256") ||
+                    resource.format == "n64-rom" || resource.format == "psx-disc") {
+                    if (out.format_version < 8)
+                        throw std::runtime_error("verified media requires format_version 8");
+                    const int64_t size = toml::find<int64_t>(v, "size");
+                    resource.sha256 = toml::find<std::string>(v, "sha256");
+                    if (size <= 0 || size > 512ll * 1024 * 1024 ||
+                        !valid_sha256(resource.sha256) ||
+                        (resource.format != "file" && resource.format != "n64-rom" &&
+                         resource.format != "psx-disc"))
+                        throw std::runtime_error("invalid verified media identity or format");
+                    resource.size = static_cast<uint64_t>(size);
+                }
                 if (!find_feature(out, resource.feature_id))
                     throw std::runtime_error(
                         "resource references unknown feature");
@@ -1807,9 +1868,11 @@ bool ModPackageManager::read_manifest(const fs::path& path, ModPackage& out,
                     throw std::runtime_error("resource label is empty");
                 if (resource.format != "file" &&
                     resource.format != "directory" &&
-                    resource.format != "folder")
+                    resource.format != "folder" &&
+                    resource.format != "n64-rom" &&
+                    resource.format != "psx-disc")
                     throw std::runtime_error(
-                        "resource format must be file or directory");
+                        "unsupported resource format");
                 out.resources.push_back(std::move(resource));
             }
         }
@@ -3692,6 +3755,17 @@ ModResolution ModPackageManager::resolve(const std::string& game_id,
             resolved.feature_id = resource.feature_id;
             resolved.id = resource.id;
             resolved.path = path;
+            resolved.format = resource.format;
+            resolved.sha256 = resource.sha256;
+            if (!resource.sha256.empty()) {
+                std::string media_error;
+                if (!load_mod_media(path, resource.format, resource.size,
+                                    resource.sha256, resolved.bytes, &media_error)) {
+                    result.errors.push_back(package->id + "/" + resource.feature_id +
+                                            ": " + resource.id + ": " + media_error);
+                    continue;
+                }
+            }
             result.resources.push_back(std::move(resolved));
         }
     }

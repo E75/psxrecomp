@@ -73,6 +73,7 @@
 #include "psx_savestate_menu.h"
 #include "host_time.h"
 #include "latency_ring.h"
+#include "gpu_timeline.h"
 #include "frame_pacing.h"
 #include "psx_rewind.h"
 
@@ -182,6 +183,9 @@ typedef void   (APIENTRY *PFN_glEndQuery)(GLenum);
 typedef void   (APIENTRY *PFN_glGetQueryObjectui64v)(GLuint, GLenum, GLuint64 *);
 typedef void   (APIENTRY *PFN_glGetQueryObjectiv)(GLuint, GLenum, GLint *);
 typedef void   (APIENTRY *PFN_glQueryCounter)(GLuint, GLenum);
+/* Buffer mapping for asynchronous pixel-pack readback (presented-image ring). */
+typedef void * (APIENTRY *PFN_glMapBuffer)(GLenum, GLenum);
+typedef GLboolean (APIENTRY *PFN_glUnmapBuffer)(GLenum);
 #ifndef GL_TIME_ELAPSED
 #define GL_TIME_ELAPSED            0x88BF
 #endif
@@ -195,6 +199,8 @@ typedef void   (APIENTRY *PFN_glQueryCounter)(GLuint, GLenum);
 #define GL_QUERY_RESULT_AVAILABLE  0x8867
 #endif
 
+static PFN_glMapBuffer         p_glMapBuffer;
+static PFN_glUnmapBuffer       p_glUnmapBuffer;
 static PFN_glCreateShader      p_glCreateShader;
 static PFN_glShaderSource      p_glShaderSource;
 static PFN_glCompileShader     p_glCompileShader;
@@ -297,6 +303,9 @@ static int load_modern_gl(void) {
     p_glGetQueryObjectui64v = (void *)SDL_GL_GetProcAddress("glGetQueryObjectui64v");
     p_glGetQueryObjectiv    = (void *)SDL_GL_GetProcAddress("glGetQueryObjectiv");
     p_glQueryCounter        = (void *)SDL_GL_GetProcAddress("glQueryCounter");
+    /* Optional: only the debug presented-image ring maps pack buffers. */
+    p_glMapBuffer           = (void *)SDL_GL_GetProcAddress("glMapBuffer");
+    p_glUnmapBuffer         = (void *)SDL_GL_GetProcAddress("glUnmapBuffer");
 #undef LOAD
     return ok;
 }
@@ -1635,18 +1644,21 @@ static void mark_prim_dirty(const int *xs, const int *ys, int n, int textured) {
  * boundary (MMX6: draw area alternates y=0/y=240, both bands in ONE wide
  * surface) bleed into the OTHER band's rows — presented one frame later as
  * top/bottom edge flicker (16:9 GL only). */
+/* Wide-surface scissor: full wide width, draw-area rows (see above). Every
+ * draw into a wide surface uses it, including the full-screen-overlay pass. */
+static void wide_band_scissor(void) {
+    int sy = s_area_y1, sh = s_area_y2 - s_area_y1 + 1;
+    if (sy < 0) { sh += sy; sy = 0; }
+    if (sy + sh > VRAM_H) sh = VRAM_H - sy;
+    if (sh < 0) sh = 0;
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(0, sy * s_scale, g_wide_w * s_scale, sh * s_scale);
+}
 static void wide_target_begin(int dx, GLint uXoff, GLint uXhalf) {
     if (s_ws_ablate != 3)   /* ablate 3: no FBO rebind (draws land in hr — perf probe) */
         p_glBindFramebuffer(PSXGL_FRAMEBUFFER, g_wide_cur);
     glViewport(0, 0, g_wide_w * s_scale, VRAM_H * s_scale);
-    glEnable(GL_SCISSOR_TEST);
-    {
-        int sy = s_area_y1, sh = s_area_y2 - s_area_y1 + 1;
-        if (sy < 0) { sh += sy; sy = 0; }
-        if (sy + sh > VRAM_H) sh = VRAM_H - sy;
-        if (sh < 0) sh = 0;
-        glScissor(0, sy * s_scale, g_wide_w * s_scale, sh * s_scale);
-    }
+    wide_band_scissor();
     p_glUniform1f(uXoff, (float)dx);
     p_glUniform1f(uXhalf, (float)g_wide_w / 2.0f);
 }
@@ -2159,7 +2171,8 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
 /* Draw a flat-colored rect (GEO program) DIRECTLY into the active wide surface
  * at wide-space coords [wx, wx+ww) × [y, y+h). Used only by the full-screen-
  * overlay path; positions are already in wide space so u_xoff stays 0. Mirrors
- * raster_flat_rect(&wt, ...) in sw_draw_flat_rect. Caller stays inside
+ * raster_flat_rect(&wt, ...) in sw_draw_flat_rect, including its draw-area row
+ * clip. Caller stays inside
  * hr_begin/hr_end. */
 static void wide_flat_rect_direct(int wx, int y, int ww, int h, uint16_t c, int semi) {
     if (ww <= 0 || h <= 0) return;
@@ -2172,12 +2185,13 @@ static void wide_flat_rect_direct(int wx, int y, int ww, int h, uint16_t c, int 
         fx0,fy0,r,g,b,a,  fx1,fy0,r,g,b,a,  fx0,fy1,r,g,b,a,
         fx1,fy0,r,g,b,a,  fx0,fy1,r,g,b,a,  fx1,fy1,r,g,b,a,
     };
-    /* Wide target: positions already wide-space so u_xoff = 0; full-width
-     * scissor; u_xhalf = g_wide_w/2. */
+    /* Wide target: positions already wide-space so u_xoff = 0; full-width,
+     * draw-area-rows scissor like rt_wide() — a full-height scissor let an
+     * overlay-width rect that canonically clips at a vertical double-buffer
+     * band boundary paint the OTHER band's rows; u_xhalf = g_wide_w/2. */
     p_glBindFramebuffer(PSXGL_FRAMEBUFFER, g_wide_cur);
     glViewport(0, 0, g_wide_w * s_scale, VRAM_H * s_scale);
-    glEnable(GL_SCISSOR_TEST);
-    glScissor(0, 0, g_wide_w * s_scale, VRAM_H * s_scale);  /* full surface (rt_wide) */
+    wide_band_scissor();
     if (semi >= 0) apply_psx_blend(semi); else glDisable(GL_BLEND);
     mask_stencil(s_mask_set);
     p_glUseProgram(s_geo_prog);
@@ -4227,7 +4241,95 @@ static void gl_draw_osd_image(const uint32_t *px, int ow, int oh,
 }
 
 /* Composite host toast + volume bar into the default framebuffer, then swap. */
+/* ---- presented-image ring feed (debug tools) ------------------------------
+ * Every present, before the host OSD is drawn: blit the composed default
+ * framebuffer (what the window shows, letterbox included) down to a
+ * PRESENT_IMAGE_RING_H-tall thumbnail FBO, and read it back through a pair of
+ * pixel-pack buffers so the GPU->CPU copy of frame N completes while frame
+ * N+1 is presented (no pipeline stall). Tagged with the frame number at issue
+ * time. Absent buffer-mapping entry points disable only this feed. */
+#ifndef PSX_NO_DEBUG_TOOLS
+#include "present_image_ring.h"
+extern uint64_t s_frame_count;
+#define PSXGL_PIXEL_PACK_BUFFER 0x88EB
+#define PSXGL_STREAM_READ       0x88E1
+#define PSXGL_READ_ONLY         0x88B8
+static GLuint   s_pir_fbo, s_pir_tex, s_pir_pbo[2];
+static int      s_pir_w, s_pir_pending[2], s_pir_pending_w[2], s_pir_idx;
+static uint32_t s_pir_frame[2];
+static int      s_pir_disabled;
+
+static void present_image_ring_capture_gl(void) {
+    if (s_pir_disabled || !p_glMapBuffer || !p_glUnmapBuffer) return;
+    if (!present_image_ring_accepting()) return;
+    int ww = 0, wh = 0;
+    SDL_GL_GetDrawableSize(s_win, &ww, &wh);
+    const int tw = present_image_ring_thumb_w(ww, wh);
+    const int th = PRESENT_IMAGE_RING_H;
+    if (tw <= 0) return;
+    if (!s_pir_fbo) {
+        glGenTextures(1, &s_pir_tex);
+        glBindTexture(GL_TEXTURE_2D, s_pir_tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, PRESENT_IMAGE_RING_MAX_W, th, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        p_glGenFramebuffers(1, &s_pir_fbo);
+        p_glBindFramebuffer(PSXGL_FRAMEBUFFER, s_pir_fbo);
+        p_glFramebufferTexture2D(PSXGL_FRAMEBUFFER, PSXGL_COLOR_ATTACHMENT0,
+                                 GL_TEXTURE_2D, s_pir_tex, 0);
+        const GLenum st = p_glCheckFramebufferStatus(PSXGL_FRAMEBUFFER);
+        p_glBindFramebuffer(PSXGL_FRAMEBUFFER, 0);
+        if (st != PSXGL_FRAMEBUFFER_COMPLETE) { s_pir_disabled = 1; return; }
+        p_glGenBuffers(2, s_pir_pbo);
+        for (int i = 0; i < 2; i++) {
+            p_glBindBuffer(PSXGL_PIXEL_PACK_BUFFER, s_pir_pbo[i]);
+            p_glBufferData(PSXGL_PIXEL_PACK_BUFFER,
+                           (ptrdiff_t)PRESENT_IMAGE_RING_MAX_W * th * 4, NULL,
+                           PSXGL_STREAM_READ);
+        }
+        p_glBindBuffer(PSXGL_PIXEL_PACK_BUFFER, 0);
+    }
+    /* Downscale the presented image (default framebuffer back buffer). */
+    glDisable(GL_SCISSOR_TEST);
+    p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, 0);
+    p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, s_pir_fbo);
+    p_glBlitFramebuffer(0, 0, ww, wh, 0, 0, tw, th, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    /* Queue this frame's readback into the current pack buffer. */
+    const int cur = s_pir_idx;
+    p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, s_pir_fbo);
+    p_glBindBuffer(PSXGL_PIXEL_PACK_BUFFER, s_pir_pbo[cur]);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glReadPixels(0, 0, tw, th, GL_RGBA, GL_UNSIGNED_BYTE, (void *)0);
+    s_pir_pending[cur] = 1;
+    s_pir_pending_w[cur] = tw;
+    s_pir_frame[cur] = (uint32_t)s_frame_count;
+    /* Harvest the previous frame's buffer (its copy finished during this one). */
+    const int prev = cur ^ 1;
+    if (s_pir_pending[prev]) {
+        p_glBindBuffer(PSXGL_PIXEL_PACK_BUFFER, s_pir_pbo[prev]);
+        const uint8_t *px = (const uint8_t *)p_glMapBuffer(PSXGL_PIXEL_PACK_BUFFER,
+                                                           PSXGL_READ_ONLY);
+        if (px) {
+            present_image_ring_push(s_pir_frame[prev], px, s_pir_pending_w[prev],
+                                    s_pir_pending_w[prev] * 4, 1 /* GL rows bottom-up */);
+            p_glUnmapBuffer(PSXGL_PIXEL_PACK_BUFFER);
+        }
+        s_pir_pending[prev] = 0;
+    }
+    p_glBindBuffer(PSXGL_PIXEL_PACK_BUFFER, 0);
+    p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, 0);
+    p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, 0);
+    s_pir_idx = prev;
+    s_pir_w = tw;
+}
+#endif
+
 static void gl_swap_with_osd(void) {
+#ifndef PSX_NO_DEBUG_TOOLS
+    if (s_ctx) present_image_ring_capture_gl();
+#endif
     if (s_present_prog && s_ctx) {
         int ww = 0, wh = 0;
         SDL_GL_GetDrawableSize(s_win, &ww, &wh);
@@ -4448,6 +4550,7 @@ int gl_renderer_present_hold_last(void) {
          * full-window image (GL without interp). */
         hold_capture_drawable();
     }
+    gpu_timeline_note(GTL_PRESENT, GTL_PATH_HOLD, 0);
     latency_ring_mark(LAT_SWAP_BEGIN);
     gl_swap_with_osd();
     latency_ring_mark(LAT_SWAP_END);
@@ -4470,6 +4573,8 @@ void gl_renderer_present_vram(int disp_x, int disp_y, int w, int h, int linear,
         !psx_present_vsync_owns_cadence() &&
         !gl_renderer_interpolation_owns_cadence()) {
         s_probe_skip++;
+        gpu_timeline_note(GTL_PRESENT_SKIP, GTL_PATH_VRAM_FBO,
+                          (uint32_t)disp_x | ((uint32_t)disp_y << 16));
         gl_perf_present_enter();
         gl_perf_present_exit(0);
         return;
@@ -4509,6 +4614,8 @@ void gl_renderer_present_vram(int disp_x, int disp_y, int w, int h, int linear,
     present_target_quad(s_hr_tex, VRAM_W, VRAM_H,
                         disp_x, disp_y, w, h, linear, lx, ly, lw, lh, 1, 1);
     pres_record(GL_PRES_VRAM, disp_x, disp_y, w, h, lx, ly, lw, lh);
+    gpu_timeline_note(GTL_PRESENT, GTL_PATH_VRAM_FBO,
+                      (uint32_t)disp_x | ((uint32_t)disp_y << 16));
     hold_capture_drawable();
     latency_ring_mark(LAT_SWAP_BEGIN);
     gl_swap_with_osd();
@@ -4581,6 +4688,8 @@ int gl_renderer_present_wide_fbo(int disp_x, int disp_y, int disp_h, int linear)
         !psx_present_vsync_owns_cadence() &&
         !gl_renderer_interpolation_owns_cadence()) {
         s_probe_skip++;
+        gpu_timeline_note(GTL_PRESENT_SKIP, GTL_PATH_WIDE_FBO,
+                          (uint32_t)disp_x | ((uint32_t)disp_y << 16));
         gl_perf_present_enter();
         gl_perf_present_exit(1);
         return 1;
@@ -4613,6 +4722,8 @@ int gl_renderer_present_wide_fbo(int disp_x, int disp_y, int disp_h, int linear)
     present_target_quad(tex, g_wide_w, VRAM_H,
                         0, disp_y, g_wide_w, disp_h, linear, lx, ly, lw, lh, 1, 1);
     pres_record(GL_PRES_WIDE, disp_x, disp_y, g_wide_w, disp_h, lx, ly, lw, lh);
+    gpu_timeline_note(GTL_PRESENT, GTL_PATH_WIDE_FBO,
+                      (uint32_t)disp_x | ((uint32_t)disp_y << 16));
     hold_capture_drawable();
     latency_ring_mark(LAT_SWAP_BEGIN);
     gl_swap_with_osd();

@@ -649,7 +649,11 @@ static int netplay_user_blocked(void) {
 }
 
 static int request_save_inner(int slot) {
-    if (!s_configured) { fprintf(stderr, "savestate: not configured\n"); return 0; }
+    if (!s_configured) {
+        fprintf(stderr, "savestate: not configured\n");
+        psx_frontend_on_savestate_refused(0, slot, "Save states are not available yet");
+        return 0;
+    }
     if (slot < 0 || slot >= SAVESTATE_SLOTS) return 0;
     s_save_failed = 0;
     s_last_save_pc = 0; /* block netplay transfer until this write stamps a PC */
@@ -662,13 +666,19 @@ static int request_save_inner(int slot) {
 }
 
 static int request_load_inner(int slot) {
-    if (!s_configured) { fprintf(stderr, "savestate: not configured\n"); return 0; }
+    if (!s_configured) {
+        fprintf(stderr, "savestate: not configured\n");
+        psx_frontend_on_savestate_refused(1, slot, "Save states are not available yet");
+        return 0;
+    }
     if (slot < 0 || slot >= SAVESTATE_SLOTS) return 0;
     if (!psx_hle_scheduler_enabled()) {
         /* LLE (host-fiber) mode: the restore longjmp target lives on the
          * scheduler fiber; cross-fiber unwind is unsafe. HLE is the default. */
         fprintf(stderr, "savestate: load requires the HLE scheduler (default); "
                         "PSX_HLE_SCHEDULER=0 run cannot load states.\n");
+        psx_frontend_on_savestate_refused(1, slot,
+            "Cannot load: this run uses the legacy thread scheduler");
         return 0;
     }
     s_load_failed = 0;
