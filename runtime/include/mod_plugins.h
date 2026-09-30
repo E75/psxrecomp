@@ -34,6 +34,11 @@ int psx_mod_register_function_entry_plugin(
 int psx_mod_register_function_filter_plugin(
     const char* id, uint32_t address, PSXModFunctionFilterCallback callback);
 int psx_mod_function_entry(struct CPUState* cpu, uint32_t address);
+/* Complete a guest function from its trusted entry callback after supplying
+ * its full result. Valid only for that callback's CPU. Publishes pc=$ra and
+ * prevents the original body from executing. Nested callbacks have separate
+ * completion scopes; requests outside an entry callback return zero. */
+int psx_mod_finish_function(struct CPUState* cpu);
 /* Active function-entry hook count (0 = none). Hot callers test it before the
  * call, so a run without an active hook pays one load per interpreted entry. */
 extern uint32_t g_psx_mod_function_entry_hooks;

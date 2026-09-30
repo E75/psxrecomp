@@ -363,6 +363,10 @@ typedef struct OverlayCallbacks {
     uint32_t *last_store_pc;
     int (*ws_masked_reject)(uint32_t flags, uint32_t mask);
     int (*ws_nclip_branch)(uint32_t pc, uint32_t instr, int32_t mac0, int vanilla);
+    /* Frustum-edge bound scale helper (ABI v24). */
+    int32_t (*ws_cull_scale)(int32_t bound, int32_t half_extent);
+    /* Exact-NCLIP branch sign (ABI v25). */
+    int32_t (*nclip_exact_sign)(int32_t native_mac0, uint32_t pc);
 } OverlayCallbacks;
 
 #ifdef __cplusplus

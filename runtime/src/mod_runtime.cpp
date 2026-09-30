@@ -8,6 +8,7 @@
 #include "gpu.h"
 #include "psx_memory.h"
 #include "psx_sha256.h"
+#include "cpu_state.h"
 
 #if defined(RECOMP_LAUNCHER)
 #include "recomp_launcher.h"
@@ -78,12 +79,41 @@ struct RuntimeMods {
     bool disc_enabled = false;
     bool disc_guard_failed = false;
     const ModResolution::Plugin* current_plugin = nullptr;
+    CPUState* current_function_cpu = nullptr;
+    bool current_function_finished = false;
 };
 
 RuntimeMods& state() {
     static RuntimeMods value;
     return value;
 }
+
+/* Guest calls made from an entry hook can deliver VBlank callbacks before
+ * returning. Every callback owns its resource/completion context; restoring
+ * only entry hooks would let VBlank erase the interrupted plugin or complete
+ * a function that belongs to another callback. */
+class PluginCallbackScope {
+    RuntimeMods& runtime;
+    const ModResolution::Plugin* previous_plugin;
+    CPUState* previous_cpu;
+    bool previous_finished;
+public:
+    PluginCallbackScope(RuntimeMods& s, const ModResolution::Plugin* plugin,
+                        CPUState* cpu = nullptr)
+        : runtime(s), previous_plugin(s.current_plugin),
+          previous_cpu(s.current_function_cpu), previous_finished(s.current_function_finished) {
+        s.current_plugin = plugin;
+        s.current_function_cpu = cpu;
+        s.current_function_finished = false;
+    }
+    ~PluginCallbackScope() {
+        runtime.current_plugin = previous_plugin;
+        runtime.current_function_cpu = previous_cpu;
+        runtime.current_function_finished = previous_finished;
+    }
+    PluginCallbackScope(const PluginCallbackScope&) = delete;
+    PluginCallbackScope& operator=(const PluginCallbackScope&) = delete;
+};
 
 /* Function-entry hooks of the ACTIVE plan, flattened at plugin activation into
  * one table sorted by code key (address with the segment bits stripped, so a
@@ -1417,9 +1447,8 @@ extern "C" void mod_runtime_activate_plugins(void) {
     psx_ram_reset_size_request();
     if (!s.initialized || !s.plan.ok) return;
     for (const ModResolution::Plugin& plugin : s.plan.plugins) {
-        s.current_plugin = &plugin;
+        PluginCallbackScope scope(s, &plugin);
         mod_invoke_activation_plugin(plugin.id);
-        s.current_plugin = nullptr;
     }
     build_function_entry_hooks(s);
 }
@@ -1429,9 +1458,8 @@ extern "C" void mod_runtime_on_vblank(void) {
     RuntimeMods& s = state();
     if (!s.initialized || !s.plan.ok) return;
     for (const ModResolution::Plugin& plugin : s.plan.plugins) {
-        s.current_plugin = &plugin;
+        PluginCallbackScope scope(s, &plugin);
         mod_invoke_vblank_plugin(plugin.id);
-        s.current_plugin = nullptr;
     }
 }
 
@@ -1586,6 +1614,14 @@ extern "C" int psx_mod_register_function_filter_plugin(
     return mod_register_function_filter_plugin(id, address, callback) ? 1 : 0;
 }
 
+extern "C" int psx_mod_finish_function(CPUState* cpu) {
+    using namespace PSXRecompV4;
+    RuntimeMods& s = state();
+    if (!cpu || s.current_function_cpu != cpu || !s.current_plugin) return 0;
+    s.current_function_finished = true;
+    return 1;
+}
+
 extern "C" int psx_mod_function_entry(CPUState* cpu, uint32_t address) {
     using namespace PSXRecompV4;
     if (!g_psx_mod_function_entry_hooks || !cpu) return 0;
@@ -1596,14 +1632,12 @@ extern "C" int psx_mod_function_entry(CPUState* cpu, uint32_t address) {
         table.begin(), table.end(), key,
         [](const ActiveFunctionEntryHook& hook, uint32_t k) { return hook.key < k; });
     for (; it != table.end() && it->key == key; ++it) {
-        const ModResolution::Plugin* previous = s.current_plugin;
-        s.current_plugin = it->plugin;
+        PluginCallbackScope scope(s, it->plugin, cpu);
         ++function_entry_depth;
         if (it->callback) it->callback(cpu, address);
-        const int handled = it->filter && it->filter(cpu, address);
+        const bool finished = s.current_function_finished || (it->filter && it->filter(cpu, address));
         --function_entry_depth;
-        s.current_plugin = previous;
-        if (handled) {
+        if (finished) {
             cpu->pc = cpu->gpr[31];
             return 1;
         }
