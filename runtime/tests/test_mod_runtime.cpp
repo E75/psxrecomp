@@ -81,8 +81,10 @@ extern "C" void gpu_ws_tag_hud_primitive(uint32_t, int) {}
 extern "C" void gpu_ws_tag_world_primitive(uint32_t, int) {}
 extern "C" void gpu_ws_set_adaptive_backdrop_preload(int) {}
 
+static CPUState* interrupted_entry_cpu;
 static void test_vblank_plugin(void) {
     plugin_calls++;
+    if (interrupted_entry_cpu && psx_mod_finish_function(interrupted_entry_cpu)) failures++;
 }
 
 /* Function-entry hooks: one owned by the plan's active plugin, one by a
@@ -91,9 +93,32 @@ static int active_entry_hits;
 static int disabled_entry_hits;
 static int unselected_entry_hits;
 static uint32_t active_entry_last;
-static void test_active_entry(CPUState*, uint32_t address) {
+static int entry_test_mode, nested_result;
+static uint32_t nested_pc;
+static void test_active_entry(CPUState* cpu, uint32_t address) {
     active_entry_hits++;
     active_entry_last = address;
+    if (entry_test_mode == 1) {
+        CPUState unrelated{};
+        if (psx_mod_finish_function(&unrelated) || !psx_mod_finish_function(cpu)) failures++;
+        cpu->gpr[2] = 0x12345678u;
+    } else if (entry_test_mode == 2 || entry_test_mode == 3) {
+        const int mode = entry_test_mode;
+        if (mode == 3 && !psx_mod_finish_function(cpu)) failures++;
+        CPUState nested{}; nested.gpr[31] = 0x80004000u;
+        entry_test_mode = mode == 2 ? 1 : 0;
+        nested_result = psx_mod_function_entry(&nested, address);
+        nested_pc = nested.pc;
+        entry_test_mode = mode;
+    } else if (entry_test_mode == 4) {
+        /* A native call made by a hook can cross a guest VBlank. Its
+         * callbacks must neither inherit nor discard the interrupted hook. */
+        interrupted_entry_cpu = cpu;
+        mod_runtime_on_vblank();
+        interrupted_entry_cpu = nullptr;
+        if (!psx_mod_finish_function(cpu)) failures++;
+        cpu->gpr[2] = 0x87654321u;
+    }
 }
 static void test_disabled_entry(CPUState*, uint32_t) { disabled_entry_hits++; }
 static void test_unselected_entry(CPUState*, uint32_t) { unselected_entry_hits++; }
@@ -403,6 +428,27 @@ int main() {
     check(active_entry_hits == 4 && disabled_entry_hits == 0 &&
               unselected_entry_hits == 0,
           "re-activation restores exactly the active plan's hooks");
+
+    entry_cpu.gpr[31] = 0x80005000u;
+    check(!psx_mod_finish_function(&entry_cpu) && !psx_mod_function_entry(nullptr, 0x80003000u),
+          "completion outside an entry callback or with no CPU is refused");
+    entry_test_mode = 1;
+    check(psx_mod_function_entry(&entry_cpu, 0x80003000u) == 1 &&
+              entry_cpu.pc == 0x80005000u && entry_cpu.gpr[2] == 0x12345678u,
+          "explicit completion returns handled and publishes guest return PC/results");
+    entry_test_mode = 2; entry_cpu.pc = 0;
+    check(!psx_mod_function_entry(&entry_cpu, 0x80003000u) && entry_cpu.pc == 0 &&
+              nested_result == 1 && nested_pc == 0x80004000u,
+          "inner completion cannot finish an ordinary outer callback");
+    entry_test_mode = 3;
+    check(psx_mod_function_entry(&entry_cpu, 0x80003000u) == 1 &&
+              entry_cpu.pc == 0x80005000u && nested_result == 0,
+          "outer completion survives a nested ordinary callback");
+    entry_test_mode = 4;
+    check(psx_mod_function_entry(&entry_cpu, 0x80003000u) == 1 &&
+              entry_cpu.pc == 0x80005000u && entry_cpu.gpr[2] == 0x87654321u,
+          "entry completion survives VBlank callbacks during a native call");
+    entry_test_mode = 0;
 
     ram[0x1000] = 1; ram[0x1001] = 2; ram[0x1002] = 3; ram[0x1003] = 4;
     ram[0x1100] = 0; ram[0x1101] = 0;

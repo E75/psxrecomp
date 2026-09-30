@@ -1189,6 +1189,19 @@ void cfg_codegen_load_delay_test() {
           "CFG codegen preserves MIPS-I dependent load-delay value semantics");
 }
 
+void mod_function_completion_codegen_test() {
+    PSXRecomp::CodeGenConfig config{};
+    config.mod_function_entry_funcs.insert(0x80010000u);
+    for (bool overlay : {false, true}) {
+        const auto code = generate_first_instruction(0x2402002Au, {}, overlay, config);
+        check(code.find("if (psx_mod_function_entry(cpu, 0x80010000u)) return;") != std::string::npos,
+              overlay ? "overlay body honors trusted mod completion" : "main body honors trusted mod completion");
+    }
+    const auto stock = generate_first_instruction(0x2402002Au, {}, false);
+    check(stock.find("psx_mod_function_entry(cpu,") == std::string::npos,
+          "unconfigured functions retain the stock entry path");
+}
+
 void cfg_fallthrough_reachability_test() {
     constexpr uint32_t base = 0x80010000u;
     PSXRecomp::PS1Executable exe{};
@@ -1238,6 +1251,7 @@ int main() {
         gte_codegen_classification_tests();
         jump_table_producer_codegen_test();
         cfg_codegen_load_delay_test();
+        mod_function_completion_codegen_test();
         cfg_fallthrough_reachability_test();
     } catch (const std::exception& e) {
         fmt::print(stderr, "FAIL  unexpected exception: {}\n", e.what());

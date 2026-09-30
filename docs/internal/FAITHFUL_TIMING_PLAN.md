@@ -213,6 +213,25 @@ on a fixed region -> next.
 
 ## 5. Status / Log (update every session)
 
+- **2026-09-30 (Phase 5 callback reentrancy):** Plugin activation, VBlank and
+  function-entry callbacks now use the same scoped resource/completion context.
+  A native call inside an entry hook can deliver VBlank; previously those
+  callbacks cleared its plugin, making explicit completion fail and executing
+  the original function again. A regression fails before the fix and passes
+  after it, also refusing VBlank completion of the interrupted function. The
+  runtime test and seven V8 checks pass; isolated six-contact construction now
+  produces one chassis and survives drive/save/load. Tracked by `beads-i3ow`.
+
+- **2026-09-29 (Phase 5 mod function completion):** Trusted entry callbacks
+  may explicitly complete the current guest function through
+  `psx_mod_finish_function`. Static codegen, native overlay forwarding and both
+  dirty-RAM entry paths honor the callback result; nested callback completion
+  remains scoped to its CPU and invocation. ABI 26 / codegen 16 reject old
+  caches and states. Five focused framework checks pass. V8's independent
+  sequel-bank integration is being exercised separately under `beads-jogl`;
+  the generic mechanism is tracked by `beads-i3ow`. No title address or content
+  behavior is embedded in the framework.
+
 - **2026-09-29 (Phase 5 enhancement media):** Added format-8 verified donor
   resources (exact canonical size/SHA-256, immutable snapshots scoped to the
   owning plugin). N64 byte orders normalize before hashing; PSX identity covers
