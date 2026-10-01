@@ -1244,6 +1244,9 @@ static int           g_video_renderer = PSXRecompV4::DEFAULT_VIDEO_RENDERER;
 static int           g_video_internal_res = PSX_IR_UNSET;
 static int           g_video_internal_res_env = PSX_IR_UNSET;
 static int           g_video_ref_lines = PSX_IR_DEFAULT_REF_LINES;
+/* game.toml [video] match_display_max_lines: Match display's target height is
+ * at most this (0 = the monitor's full pixel height). Other presets ignore it. */
+static int           g_video_match_display_max_lines = 0;
 /* The scale asked of the backend before its own clamp (GL reports its real
  * scale only after context init), and whether that request applies (netplay
  * software-only forces 1x). Used for the opt-in HiDPI window and Match display. */
@@ -1256,6 +1259,13 @@ static_assert(PSX_IR_LEGACY_SS_MAX == SW_MAX_INTERNAL_SCALE,
 
 static int video_scale_ceiling(void) {
     return g_video_renderer == 1 ? GL_MAX_INTERNAL_SCALE : SW_MAX_INTERNAL_SCALE;
+}
+
+/* The height Match display targets on window's monitor (nullptr: the primary
+ * one): its pixel height, capped by the title's match_display_max_lines. */
+static int ir_display_lines(SDL_Window* window) {
+    return psx_ir_match_display_lines(psx_sdl_display_pixel_height(window),
+                                      g_video_match_display_max_lines);
 }
 
 /* The preset in effect this run: the environment override, else the
@@ -12807,6 +12817,16 @@ namespace {
     static const char  kIrNote[] =
         "Above 4x: OpenGL only. Past 16x on Apple GPUs only the displayed "
         "frame is kept at full resolution.";
+    /* The row's note: kIrNote, led by the title's Match display cap when it
+     * sets one (the row itself is too narrow for a longer label). */
+    static char        g_ir_note[192];
+    static const char* internal_resolution_note(void) {
+        if (g_video_match_display_max_lines <= 0) return kIrNote;
+        std::snprintf(g_ir_note, sizeof g_ir_note,
+                      "Match display stops at %d lines in this game. %s",
+                      g_video_match_display_max_lines, kIrNote);
+        return g_ir_note;
+    }
     static void build_internal_resolution_vocab(int current) {
         g_ir_count = 0;
         for (int i = 0; i < PSX_IR_PRESET_COUNT; i++) {
@@ -12886,7 +12906,7 @@ namespace {
         gi->internal_resolution_labels = g_ir_labels;
         gi->internal_resolution_values = g_ir_values;
         gi->num_internal_resolutions = g_ir_count;
-        gi->internal_resolution_note = kIrNote;
+        gi->internal_resolution_note = internal_resolution_note();
 #endif
         if (language_labels && num_languages > 0) {
             gi->language_labels = language_labels;
@@ -13384,6 +13404,7 @@ int main(int argc, char** argv) {
                 gc.runtime.video_depth24_trailing_margin;
             g_video_internal_res = gc.runtime.video_internal_resolution;
             g_video_ref_lines    = gc.runtime.video_resolution_reference_lines;
+            g_video_match_display_max_lines = gc.runtime.video_match_display_max_lines;
             if (gc.runtime.video_window_width > 0) {
                 g_video_win_w = gc.runtime.video_window_width;
             }
@@ -14359,7 +14380,7 @@ int main(int argc, char** argv) {
             const int ir_preset_seeded = g_video_internal_res;
             const int ir_ss_seeded = psx_ir_launcher_seed_supersampling(
                 kLauncherHasInternalResolution, g_video_internal_res, g_video_scale,
-                g_video_ref_lines, psx_sdl_display_pixel_height(nullptr));
+                g_video_ref_lines, ir_display_lines(nullptr));
             seed.supersampling = ir_ss_seeded;            seed.has_supersampling = true;
             int ir_row_result = PSX_IR_UNSET;   /* the row's pick, when it has one */
 #if defined(RECOMP_LAUNCHER_HAS_INTERNAL_RESOLUTION)
@@ -15131,7 +15152,7 @@ int main(int argc, char** argv) {
                     const PsxIrAdopted ir = psx_ir_adopt_launcher(
                         kLauncherHasInternalResolution, ir_preset_seeded, ir_ss_seeded,
                         seed.supersampling, ir_row_result, g_video_ref_lines,
-                        psx_sdl_display_pixel_height(nullptr), video_scale_ceiling());
+                        ir_display_lines(nullptr), video_scale_ceiling());
                     g_video_internal_res = ir.preset;
                     g_video_scale        = ir.scale;
                     seed.supersampling   = ir.save_ss;
@@ -15494,7 +15515,7 @@ session_reboot:
         else std::fprintf(stdout, "psxrecomp: PSX_INTERNAL_RESOLUTION=%s not understood "
                           "(native, 720p, 1080p, 1440p, 4k, 5k, 8k, display, or lines)\n", e);
     }
-    apply_internal_resolution(psx_sdl_display_pixel_height(nullptr));
+    apply_internal_resolution(ir_display_lines(nullptr));
     if (g_video_scale < 1) g_video_scale = 1;
     {
         /* Per-backend ceiling. OpenGL allocates its hr surface at context init
@@ -15987,13 +16008,19 @@ session_reboot:
          * which monitor. glb_set_scale only records the request; the hr
          * surface is allocated at context init below. */
         if (effective_internal_resolution() == PSX_IR_DISPLAY && g_video_scale_applies) {
-            const int dh = psx_sdl_display_pixel_height(sdl_window);
+            const int px = psx_sdl_display_pixel_height(sdl_window);
+            const int dh = ir_display_lines(sdl_window);
             const int s = psx_resolve_internal_scale(PSX_IR_DISPLAY, g_video_ref_lines,
                                                      dh, GL_MAX_INTERNAL_SCALE);
             gr_set_scale(s);
             g_video_requested_scale = s;
-            std::fprintf(stdout, "psxrecomp: internal resolution Match display: "
-                         "%d px -> %dx requested\n", dh, s);
+            if (dh < px)
+                std::fprintf(stdout, "psxrecomp: internal resolution Match display: "
+                             "%d px, capped at %d lines (game.toml "
+                             "match_display_max_lines) -> %dx requested\n", px, dh, s);
+            else
+                std::fprintf(stdout, "psxrecomp: internal resolution Match display: "
+                             "%d px -> %dx requested\n", dh, s);
         }
         gl_renderer_set_swap_interval(present_effective_swap_interval()); /* applied at context init */
         g_gl_active = (gl_renderer_init_context(sdl_window) != 0);
@@ -16743,7 +16770,7 @@ soft_return_lobby:
         const int ir_preset_seeded = g_video_internal_res;
         const int ir_ss_seeded = psx_ir_launcher_seed_supersampling(
             kLauncherHasInternalResolution, g_video_internal_res, g_video_scale,
-            g_video_ref_lines, psx_sdl_display_pixel_height(nullptr));
+            g_video_ref_lines, ir_display_lines(nullptr));
         ls.supersampling = ir_ss_seeded;
 #if defined(RECOMP_LAUNCHER_HAS_INTERNAL_RESOLUTION)
         ls.internal_resolution = internal_resolution_for_launcher();
@@ -17049,7 +17076,7 @@ soft_return_lobby:
             const PsxIrAdopted ir = psx_ir_adopt_launcher(
                 kLauncherHasInternalResolution, ir_preset_seeded, ir_ss_seeded,
                 ls.supersampling, ir_row_result, g_video_ref_lines,
-                psx_sdl_display_pixel_height(nullptr),
+                ir_display_lines(nullptr),
                 ls.renderer == 1 ? GL_MAX_INTERNAL_SCALE : SW_MAX_INTERNAL_SCALE);
             /* Persist controller (and rematch video) choices without wiping
              * the rest of settings.toml — merge into the on-disk file. */

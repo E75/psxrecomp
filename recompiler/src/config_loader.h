@@ -402,6 +402,11 @@ struct RuntimeConfig {
     // preset divides into (S = ceil(target / reference)). 240 for NTSC
     // 320x240 games; 120..1024.
     int                   video_resolution_reference_lines = 240;
+    // match_display_max_lines: an upper bound on the Match display preset's
+    // target height (the monitor's pixel height), so a title's Match display
+    // default stays affordable on a 4K/5K panel. 0 (default) = no cap, the
+    // historical behaviour. Other presets are never capped. game.toml only.
+    int                   video_match_display_max_lines = 0;
 
     // Optional initial window width declared by the title profile. Zero keeps
     // the historical fit-to-display behavior; player settings may override it.

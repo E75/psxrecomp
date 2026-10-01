@@ -172,6 +172,27 @@ int main() {
     expect("display 4320 (8K)", psx_resolve_internal_scale(vd, 240, 4320, 32), 18);
     expect("display id", std::strcmp(psx_ir_id_for(vd), "display"), 0);
 
+    // A title's match_display_max_lines caps Match display's target height
+    // (0 = no cap); a smaller monitor and an unknown one pass through.
+    expect("cap none", psx_ir_match_display_lines(2338, 0), 2338);
+    expect("cap negative is none", psx_ir_match_display_lines(2338, -5), 2338);
+    expect("cap applies", psx_ir_match_display_lines(2338, 1440), 1440);
+    expect("cap above monitor", psx_ir_match_display_lines(1080, 1440), 1080);
+    expect("cap unknown monitor", psx_ir_match_display_lines(0, 1440), 0);
+    expect("capped display 2338 -> 6x",
+           psx_resolve_internal_scale(vd, 240, psx_ir_match_display_lines(2338, 1440), 32), 6);
+    expect("capped display 2160 (4K) -> 6x",
+           psx_resolve_internal_scale(vd, 240, psx_ir_match_display_lines(2160, 1440), 32), 6);
+    expect("capped display 1080 -> 5x",
+           psx_resolve_internal_scale(vd, 240, psx_ir_match_display_lines(1080, 1440), 32), 5);
+    expect("capped display 768 -> 4x",
+           psx_resolve_internal_scale(vd, 240, psx_ir_match_display_lines(768, 1440), 32), 4);
+    expect("uncapped display 2338 -> 10x",
+           psx_resolve_internal_scale(vd, 240, psx_ir_match_display_lines(2338, 0), 32), 10);
+    // The cap is a display height: it never touches a fixed preset.
+    expect("4k ignores the display height",
+           psx_resolve_internal_scale(2160, 240, psx_ir_match_display_lines(2338, 1440), 32), 9);
+
     // Integer line counts and rejects.
     int v = 0;
     expect("lines parse", psx_ir_parse("1600", &v), 1);

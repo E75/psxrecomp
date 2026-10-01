@@ -490,6 +490,7 @@ player's `settings.toml`, and a game may ship a default the same way:
 [video]
 internal_resolution = "4k"          # native | 720p | 1080p | 1440p | 4k | 5k | 8k | display, or a number of lines
 resolution_reference_lines = 240    # game.toml only: the title's usual display height (120..1024)
+match_display_max_lines = 0         # game.toml only: cap on Match display's target height (0 = none)
 ```
 
 A preset is a target height. The runtime renders at the integer scale
@@ -499,6 +500,15 @@ A preset is a target height. The runtime renders at the integer scale
 and is resolved down. **Match display** takes the monitor's pixel height,
 measured from the game window's display when it opens. The backend clamps S
 to what it can allocate (below); `video_info` over TCP reports both numbers.
+
+`match_display_max_lines` (game.toml only, default 0 = no cap) bounds the
+height Match display targets: the scale comes from the smaller of the
+monitor's pixel height and this value. A title that ships Match display as
+its default can set it so a 4K or 5K panel does not ask a modest GPU for
+9-12x; on a monitor no taller than the cap, Match display is unchanged. Only
+Match display is capped: a player who picks 4K, 5K or 8K gets it. The
+launcher's note under the row says "Match display stops at N lines in this
+game", and the log line says when the cap applied. 0 keeps the historical behaviour.
 
 Precedence: the game's `internal_resolution` is the default; a player's legacy
 `supersampling` in `settings.toml` outranks it; the player's own

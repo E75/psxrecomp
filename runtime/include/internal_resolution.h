@@ -104,6 +104,15 @@ static inline int psx_ir_scale_for(int value, int ref_lines, int display_px_h) {
     return (target + ref_lines - 1) / ref_lines;
 }
 
+/* Match display's target height: the monitor's pixel height, capped by a
+ * title's [video] match_display_max_lines (max_lines <= 0: no cap). Feed the
+ * result to psx_ir_scale_for / psx_resolve_internal_scale as display_px_h;
+ * it only matters for PSX_IR_DISPLAY, which is the only preset it caps. */
+static inline int psx_ir_match_display_lines(int display_px_h, int max_lines) {
+    if (max_lines > 0 && display_px_h > max_lines) return max_lines;
+    return display_px_h;
+}
+
 /* The scale to request: psx_ir_scale_for clamped to [1, s_max]. */
 static inline int psx_resolve_internal_scale(int value, int ref_lines,
                                              int display_px_h, int s_max) {
