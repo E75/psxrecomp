@@ -243,7 +243,8 @@ void gl_renderer_set_wide_fast(int on);
 /* Internal-resolution scale state of the live GL context (0 before init). */
 typedef struct GlScaleInfo {
     int requested;      /* scale requested before context init (gr_set_scale) */
-    int effective;      /* scale the hr surface was allocated at */
+    int effective;      /* scale rendered at now (the hr surface's allocation
+                         * unless dynamic resolution stepped below it) */
     int max_scale;      /* largest scale this context could allocate */
     int max_dim;        /* min(GL_MAX_TEXTURE_SIZE, _RENDERBUFFER_SIZE, _VIEWPORT_DIMS) */
     int clamp_reason;   /* PSX_GL_SCALE_* mask (gl_scale_limits.h) */
@@ -263,8 +264,51 @@ typedef struct GlScaleInfo {
     int window_grows;   /* tile allocations so far */
     int window_tiles;
     int window_mib;     /* all tiles */
+    /* Dynamic resolution: the scale the hr and native-wide surfaces are
+     * allocated at (the ceiling a step never exceeds); 0 when steps are not
+     * available (off, the window mode, dual raster). */
+    int alloc_scale;
 } GlScaleInfo;
 int gl_renderer_scale_info(GlScaleInfo *out);
+
+/* ---- Dynamic internal resolution ([video] dynamic_resolution) ---------------
+ * Opt-in. On, the hr and native-wide surfaces stay allocated at the scale
+ * context init gave them (the ceiling) and the internal scale may step to any
+ * integer level from 1 to it while the game runs; off (the default), nothing
+ * changes. A step keeps the guest-visible VRAM exact (the pack of every native
+ * block is preserved) and is presentation-only. Not available in the windowed
+ * high-resolution mode or with dual raster (netplay): the scale stays fixed. */
+void gl_renderer_set_dynamic_resolution(int on);   /* any time; before init too */
+/* The ceiling a level may step up to, or 0 when steps are not available. */
+int  gl_renderer_dynamic_resolution_ceiling(void);
+/* Ask for a level: applied at the next post-present point outside a render
+ * pass (clamped to 1..ceiling). Returns 0 when steps are not available. */
+int  gl_renderer_request_internal_scale(int scale);
+/* Step now (debug probes and tests): 1 when the level is `scale` on return,
+ * 0 when refused or deferred (inside a render pass; it then applies after
+ * the next present). Never call it inside a render pass. */
+int  gl_renderer_step_internal_scale_now(int scale);
+typedef struct GlDynresStats {
+    int      level, ceiling, pending;   /* pending: requested level, 0 = none */
+    uint64_t steps, deferred, refused;
+    int      last_from, last_to;
+    /* The last step's wall time (ms, glFinish'ed when timing is on) and its
+     * parts: draining queued work, the 1x top-left image and the saved rects,
+     * the reseed, the rects back, the native-wide surfaces. */
+    double   last_ms, last_prep_ms, last_seed_ms, last_rects_ms, last_wide_ms;
+    int      last_rects;                /* rects kept at full detail */
+} GlDynresStats;
+void gl_renderer_dynres_stats(GlDynresStats *out);
+/* Host time the renderer spent, as running totals in performance-counter
+ * ticks (only kept while dynamic resolution is on): waits for the frame
+ * blend's next present, render passes, blend presents' own work, and time
+ * blocked in the swap. The dynamic-resolution controller differences them per
+ * guest interval. */
+typedef struct GlHostLedger {
+    uint64_t idle_ticks, pass_ticks, interp_work_ticks, swap_ticks;
+    uint64_t interp_presents, swaps;
+} GlHostLedger;
+void gl_renderer_host_ledger(GlHostLedger *out);
 
 /* Narrow a native-wide display aspect num:den to the widest whose surface
  * this context can allocate at its internal scale (psx_gl_fit_wide_aspect;
