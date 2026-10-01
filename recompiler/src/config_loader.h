@@ -427,6 +427,14 @@ struct RuntimeConfig {
     // game.toml it is the shipped default ("native", "720p", "1080p",
     // "1440p", "4k", "5k", "8k", "display", or a number of lines).
     int                   video_internal_resolution = 0;
+    // dynamic_resolution: OpenGL only. Keep the internal resolution above as
+    // the ceiling and step the scale down (whole integer levels) only while
+    // the game would otherwise miss frames, back up when there is headroom
+    // (runtime/include/dynamic_resolution.h). Off by default; a title opts
+    // in. dynamic_resolution_min: the lowest level, a preset value as for
+    // internal_resolution (720 = "720p"; 1 = native).
+    bool                  video_dynamic_resolution = false;
+    int                   video_dynamic_resolution_min = 720;
     // resolution_reference_lines: the title's usual display height, which a
     // preset divides into (S = ceil(target / reference)). 240 for NTSC
     // 320x240 games; 120..1024.
@@ -1354,6 +1362,11 @@ struct UserSettings {
     // it wins over supersampling, which is still written (capped at 4) so an
     // older runtime reading the same file degrades gracefully.
     bool has_internal_resolution = false; int internal_resolution = 0;
+    // Dynamic resolution (RuntimeConfig::video_dynamic_resolution, _min).
+    // Written only once the player changed them, so a title's default can
+    // still move in a later release.
+    bool has_dynamic_resolution = false; bool dynamic_resolution = false;
+    bool has_dynamic_resolution_min = false; int dynamic_resolution_min = 720;
     // Window size: width in px; height is always width*3/4 (PSX 4:3). Applies to
     // both the launcher and the emulator window so they boot at the same size.
     bool has_window_width   = false; int  window_width   = 1280; // -> 1280x960

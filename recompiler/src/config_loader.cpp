@@ -650,6 +650,28 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
             }
             rt.video_internal_resolution = value;
         }
+        if (video.contains("dynamic_resolution")) {
+            rt.video_dynamic_resolution = toml::find<bool>(video, "dynamic_resolution");
+        }
+        if (video.contains("dynamic_resolution_min")) {
+            const toml::value& ir = toml::find(video, "dynamic_resolution_min");
+            int value = 0;
+            bool ok = false;
+            if (ir.is_string()) {
+                ok = psx_ir_parse(ir.as_string().str.c_str(), &value) != 0 &&
+                     value != PSX_IR_DISPLAY;
+            } else if (ir.is_integer()) {
+                const auto n = ir.as_integer();
+                ok = n >= PSX_IR_MIN_LINES && n <= PSX_IR_MAX_LINES;
+                value = static_cast<int>(n);
+            }
+            if (!ok) {
+                throw std::runtime_error(
+                    "[video] dynamic_resolution_min must be native, 720p, 1080p, "
+                    "1440p, 4k, 5k, 8k, or a number of lines");
+            }
+            rt.video_dynamic_resolution_min = value;
+        }
         if (video.contains("resolution_reference_lines")) {
             const auto n = toml::find<int64_t>(video, "resolution_reference_lines");
             if (n < 120 || n > 1024) {
@@ -2632,6 +2654,25 @@ UserSettings load_user_settings(const fs::path& path) {
                 }
             }
         });
+        if (v.contains("dynamic_resolution")) try_get([&]{
+            s.dynamic_resolution = toml::find<bool>(v, "dynamic_resolution");
+            s.has_dynamic_resolution = true;
+        });
+        if (v.contains("dynamic_resolution_min")) try_get([&]{
+            const toml::value& ir = toml::find(v, "dynamic_resolution_min");
+            int value = 0;
+            if (ir.is_string()) {
+                if (psx_ir_parse(ir.as_string().str.c_str(), &value) &&
+                    value != PSX_IR_DISPLAY) {
+                    s.dynamic_resolution_min = value; s.has_dynamic_resolution_min = true;
+                }
+            } else if (ir.is_integer()) {
+                const auto n = ir.as_integer();
+                if (n >= PSX_IR_MIN_LINES && n <= PSX_IR_MAX_LINES) {
+                    s.dynamic_resolution_min = (int)n; s.has_dynamic_resolution_min = true;
+                }
+            }
+        });
         if (v.contains("window_width")) try_get([&]{
             const auto n = toml::find<int64_t>(v, "window_width");
             if (n >= 640 && n <= 7680) { s.window_width = (int)n; s.has_window_width = true; }
@@ -3016,6 +3057,17 @@ bool save_user_settings(const fs::path& path, const UserSettings& s) {
             f << "internal_resolution = \"" << id << "\"\n";
         else
             f << "internal_resolution = " << s.internal_resolution << "\n";
+    }
+    if (s.has_dynamic_resolution)
+        f << "dynamic_resolution = " << (s.dynamic_resolution ? "true" : "false") << "\n";
+    if (s.has_dynamic_resolution_min &&
+        psx_ir_value_valid(s.dynamic_resolution_min) &&
+        s.dynamic_resolution_min != PSX_IR_DISPLAY) {
+        const char* id = psx_ir_id_for(s.dynamic_resolution_min);
+        if (id)
+            f << "dynamic_resolution_min = \"" << id << "\"\n";
+        else
+            f << "dynamic_resolution_min = " << s.dynamic_resolution_min << "\n";
     }
     if (s.has_window_width)
         f << "window_width      = " << s.window_width << "\n";
