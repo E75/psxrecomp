@@ -27,6 +27,26 @@ int psx_mod_register_vblank_plugin(const char* id,
                                    PSXModVBlankCallback callback);
 int psx_mod_register_function_entry_plugin(
     const char* id, uint32_t address, PSXModFunctionEntryCallback callback);
+/* Mod-defined guest functions have no original machine-code body. Addresses
+ * must be aligned and in physical 0x0F000000..0x0FFFFFFF (an unused bus range),
+ * never hardware/BIOS/game text. Only statically linked code can register one;
+ * the active package plan owns its availability and resource context. Address
+ * aliases share one globally unique registration. The callback supplies the
+ * full function behavior; return publishes $ra through normal dispatch. */
+int psx_mod_register_guest_function_plugin(
+    const char* id, uint32_t address, PSXModFunctionEntryCallback callback);
+int psx_mod_dispatch_guest_function(struct CPUState* cpu, uint32_t address);
+extern uint32_t g_psx_mod_guest_functions;
+/* Run immediately before a configured instruction, including delay slots.
+ * The complete instruction word must match both registration and live RAM.
+ * Callbacks may update registers/data but cannot redirect PC, finish a guest
+ * function, or re-enter guest execution (pending load/branch state is live).
+ * Native emits opt in with [recompiler] mod_instruction_sites; dirty-RAM
+ * execution uses the same guarded table. Inactive plans are inert. */
+int psx_mod_register_instruction_plugin(const char* id, uint32_t address,
+                                         uint32_t expected, PSXModFunctionEntryCallback callback);
+void psx_mod_instruction(struct CPUState* cpu, uint32_t address, uint32_t instruction);
+extern uint32_t g_psx_mod_instruction_hooks;
 /* Called from generated functions listed by the game config and from every
  * interpreted entry, so the hook contract does not depend on the backend.
  * Hooks match by code address (segment bits ignored) and run only for plugins
@@ -238,6 +258,26 @@ int psx_mod_option_value(const char* package_id, const char* feature_id,
  */
 int psx_mod_current_resource_path(const char* resource_id,
                                   char* out, uint32_t out_size);
+/* Read-only canonical media verified by the engine for this plugin's owning
+ * package/feature. The pointer lives until the committed plan is replaced or
+ * cleared. Available only during that plugin's callbacks; returns 0 for an
+ * ordinary unverified resource, an inactive feature, or a different owner. */
+int psx_mod_current_resource_bytes(const char* resource_id,
+                                   const uint8_t** bytes, uint64_t* size);
+
+/* Append raw Mode-2 sectors (2336 bytes, starting with the XA subheader)
+ * from a verified resource owned by this activation callback. Returns their
+ * native CD LBA in first_lba. Registration is deterministic, append-only and
+ * rejected outside activation, for invalid ranges or beyond 99:59:74.
+ * The immutable committed snapshot remains mounted until the plan changes;
+ * no host path or donor data is saved into guest RAM/savestates. */
+int psx_mod_append_disc_extent(const char* resource_id, uint64_t byte_offset,
+                               uint32_t sector_count, uint32_t* first_lba);
+
+/* Display aspects have no framework ceiling: the native-wide surfaces size
+ * themselves from the live width, and each title caps its own view at what
+ * it has validated (fixed ratio, or the adaptive maximum below). Requests
+ * must be at least native 4:3, with numerator and denominator in 1..99. */
 
 /*
  * Request a fixed host display aspect before renderer/window initialization.

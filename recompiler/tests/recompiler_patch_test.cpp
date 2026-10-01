@@ -1173,6 +1173,34 @@ void mod_function_completion_codegen_test() {
           "unconfigured functions retain the stock entry path");
 }
 
+void mod_instruction_codegen_test(const fs::path& root) {
+    const auto path = write_config(root, "instruction-hooks",
+        "mod_instruction_sites = [\"0x80010000\", \"0x80010004\"]\n");
+    const auto parsed = PSXRecompV4::load_game_config(path);
+    check(parsed.mod_instruction_sites.size() == 2, "instruction sites parse");
+    auto changed = parsed;
+    changed.mod_instruction_sites.clear();
+    check(PSXRecompV4::overlay_codegen_config_hash(parsed) !=
+          PSXRecompV4::overlay_codegen_config_hash(changed), "instruction sites invalidate cached code");
+    const auto invalid = write_config(root, "instruction-unaligned",
+        "mod_instruction_sites = [\"0x80010001\"]\n");
+    check_throws([&] { PSXRecompV4::load_game_config(invalid); }, "aligned main RAM",
+                 "instruction sites reject invalid addresses");
+    PSXRecomp::CodeGenConfig config{};
+    config.mod_instruction_sites = {0x80010000u, 0x80010004u};
+    for (bool overlay : {false, true}) {
+        for (uint32_t word : {0x2402002Au, 0x10400002u}) {
+            const auto code = generate_first_instruction(word, {}, overlay, config);
+            check(code.find(fmt::format("psx_mod_instruction(cpu, 0x80010000u, 0x{:08X}u);", word)) != std::string::npos,
+                  "native/overlay emits instruction guard for ALU and branch");
+            check(code.find("psx_mod_instruction(cpu, 0x80010004u, 0x00000000u);") != std::string::npos,
+                  "native/overlay includes sequential and branch delay-slot hooks");
+        }
+    }
+    check(generate_first_instruction(0x2402002Au, {}, false).find("psx_mod_instruction(cpu,") == std::string::npos,
+          "unconfigured code emits no instruction callbacks");
+}
+
 void cfg_fallthrough_reachability_test() {
     constexpr uint32_t base = 0x80010000u;
     PSXRecomp::PS1Executable exe{};
@@ -1223,6 +1251,7 @@ int main() {
         jump_table_producer_codegen_test();
         cfg_codegen_load_delay_test();
         mod_function_completion_codegen_test();
+        mod_instruction_codegen_test(root);
         cfg_fallthrough_reachability_test();
     } catch (const std::exception& e) {
         fmt::print(stderr, "FAIL  unexpected exception: {}\n", e.what());

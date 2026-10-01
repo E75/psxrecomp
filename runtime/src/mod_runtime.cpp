@@ -55,11 +55,19 @@ extern "C" int fntrace_is_game_started(void);
 
 /* Declared in mod_plugins.h; see active_function_entry_hooks() below. */
 uint32_t g_psx_mod_function_entry_hooks = 0;
+uint32_t g_psx_mod_guest_functions = 0;
+uint32_t g_psx_mod_instruction_hooks = 0;
+/* Guest vblanks seen by the mod runtime: the plugin counters' time base. */
+static uint64_t g_mod_vblanks = 0;
 
 namespace PSXRecompV4 {
 namespace {
 
 struct RuntimeMods {
+    struct DiscExtent { uint32_t lba, count; const uint8_t* data; };
+    std::vector<DiscExtent> disc_extents;
+    uint32_t extent_start = 0;
+    bool activating = false;
     ModPackageManager manager;
     ModResolution plan;
     ModResolution validation;
@@ -135,6 +143,21 @@ std::vector<ActiveFunctionEntryHook>& active_function_entry_hooks() {
 }
 unsigned function_entry_depth;
 
+std::vector<ActiveFunctionEntryHook>& active_guest_functions() {
+    static std::vector<ActiveFunctionEntryHook> value;
+    return value;
+}
+
+struct ActiveInstructionHook {
+    uint32_t key, expected;
+    PSXModFunctionEntryCallback callback;
+    const ModResolution::Plugin* plugin;
+};
+std::vector<ActiveInstructionHook>& active_instruction_hooks() {
+    static std::vector<ActiveInstructionHook> value;
+    return value;
+}
+
 inline uint32_t function_entry_key(uint32_t address) {
     return address & 0x1FFFFFFFu;
 }
@@ -142,6 +165,10 @@ inline uint32_t function_entry_key(uint32_t address) {
 void clear_function_entry_hooks() {
     active_function_entry_hooks().clear();
     g_psx_mod_function_entry_hooks = 0;
+    active_guest_functions().clear();
+    g_psx_mod_guest_functions = 0;
+    active_instruction_hooks().clear();
+    g_psx_mod_instruction_hooks = 0;
 }
 
 void build_function_entry_hooks(const RuntimeMods& s) {
@@ -157,6 +184,20 @@ void build_function_entry_hooks(const RuntimeMods& s) {
                      [](const ActiveFunctionEntryHook& a,
                         const ActiveFunctionEntryHook& b) { return a.key < b.key; });
     g_psx_mod_function_entry_hooks = (uint32_t)table.size();
+    auto& functions = active_guest_functions();
+    for (const auto& plugin : s.plan.plugins)
+        for (const auto& function : mod_guest_functions(plugin.id))
+            functions.push_back({function.address, function.callback, &plugin});
+    std::sort(functions.begin(), functions.end(),
+              [](const auto& a, const auto& b) { return a.key < b.key; });
+    g_psx_mod_guest_functions = (uint32_t)functions.size();
+    auto& instructions = active_instruction_hooks();
+    for (const auto& plugin : s.plan.plugins)
+        for (const auto& hook : mod_instruction_hooks(plugin.id))
+            instructions.push_back({hook.address, hook.expected, hook.callback, &plugin});
+    std::stable_sort(instructions.begin(), instructions.end(),
+                    [](const auto& a, const auto& b) { return a.key < b.key; });
+    g_psx_mod_instruction_hooks = (uint32_t)instructions.size();
 }
 
 const ModPackage* selected_package(const std::string& id) {
@@ -1185,6 +1226,8 @@ bool mod_runtime_initialize(const std::filesystem::path& root,
     RuntimeMods& s = state();
     s.manager.set_root({});
     clear_function_entry_hooks();
+    s.disc_extents.clear();
+    s.extent_start = 0;
     s.plan = {};
     s.validation = {};
     s.raw_disc_index.clear();
@@ -1239,6 +1282,8 @@ bool mod_runtime_clear_for_netplay(std::string* error) {
         return true;
     }
     clear_function_entry_hooks();
+    s.disc_extents.clear();
+    s.extent_start = 0;
     s.plan = {};
     s.validation = {};
     s.raw_disc_index.clear();
@@ -1312,6 +1357,8 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* err
     /* Hooks follow activation, never a bare commit: a new plan runs none of
      * its function-entry hooks until mod_runtime_activate_plugins(). */
     clear_function_entry_hooks();
+    s.disc_extents.clear();
+    s.extent_start = 0;
     s.plan = std::move(plan);
     build_disc_index(s);
     s.effective_disc_path = std::move(effective_disc);
@@ -1404,6 +1451,67 @@ extern "C" void mod_runtime_enable_disc_patches(void) {
     PSXRecompV4::state().disc_enabled = true;
 }
 
+extern "C" int psx_mod_append_disc_extent(const char* resource_id,
+        uint64_t byte_offset, uint32_t sector_count, uint32_t* first_lba) {
+    using namespace PSXRecompV4;
+    if (first_lba) *first_lba = 0;
+    auto& s = state();
+    const uint8_t* data = nullptr;
+    uint64_t size = 0;
+    if (!s.activating || !first_lba || !sector_count ||
+        !psx_mod_current_resource_bytes(resource_id, &data, &size) ||
+        byte_offset > size || uint64_t(sector_count)*2336 > size-byte_offset) return 0;
+    try {
+        uint32_t start = s.extent_start;
+        if (s.disc_extents.empty()) {
+            PS1::ISOReader reader;
+            const auto& mount = s.effective_disc_path.empty() ? s.disc_path : s.effective_disc_path;
+            if (mount.empty() || !reader.Open(mount.string()) || reader.TrackCount() >= 99) return 0;
+            start = reader.GetSectorCount();
+            if (!start) return 0;
+        }
+        const uint32_t lba = s.disc_extents.empty() ? start :
+            s.disc_extents.back().lba + s.disc_extents.back().count;
+        if (uint64_t(lba)+sector_count+150 > 450000) return 0;
+        // Mode-2's duplicated subheader is part of the format contract.
+        for (uint32_t i=0; i<sector_count; ++i) {
+            const auto* sector = data+byte_offset+uint64_t(i)*2336;
+            if (std::memcmp(sector,sector+4,4)) return 0;
+        }
+        s.disc_extents.push_back({lba,sector_count,data+byte_offset});
+        s.extent_start = start;
+        *first_lba = lba;
+        return 1;
+    } catch (...) { return 0; }
+}
+
+extern "C" uint32_t mod_runtime_disc_extent_start(void) {
+    const auto& s=PSXRecompV4::state();
+    return s.disc_enabled && !s.disc_extents.empty() ? s.extent_start : 0;
+}
+extern "C" uint32_t mod_runtime_disc_sector_count(uint32_t base_count) {
+    const auto& s=PSXRecompV4::state();
+    return mod_runtime_disc_extent_start() ?
+        std::max(base_count,s.disc_extents.back().lba+s.disc_extents.back().count) : base_count;
+}
+extern "C" int mod_runtime_read_disc_extent(uint32_t lba, int raw,
+        uint8_t* bytes, uint32_t size) {
+    if (!bytes || size < (raw ? 2352u : 2048u) || !mod_runtime_disc_extent_start()) return 0;
+    const auto& extents=PSXRecompV4::state().disc_extents;
+    for (const auto& e:extents) if (lba>=e.lba && lba-e.lba<e.count) {
+        const auto* sector=e.data+uint64_t(lba-e.lba)*2336;
+        if (raw) {
+            std::memset(bytes,0,16);std::memset(bytes+1,0xff,10);
+            const uint32_t msf=lba+150;
+            const auto bcd=[](uint32_t v) {return uint8_t((v/10)*16+v%10);};
+            bytes[12]=bcd(msf/4500);bytes[13]=bcd(msf/75%60);bytes[14]=bcd(msf%75);bytes[15]=2;
+            std::memcpy(bytes+16,sector,2336);
+        } else std::memcpy(bytes,sector+8,2048);
+        return 1;
+    }
+    return 0;
+}
+
 extern "C" int psx_mod_read_disc_file(const char* path, void* buffer,
                                       uint32_t capacity, uint32_t* size) {
     using namespace PSXRecompV4;
@@ -1446,10 +1554,14 @@ extern "C" void mod_runtime_activate_plugins(void) {
     RuntimeMods& s = state();
     psx_ram_reset_size_request();
     if (!s.initialized || !s.plan.ok) return;
+    s.disc_extents.clear();
+    s.extent_start = 0;
+    s.activating = true;
     for (const ModResolution::Plugin& plugin : s.plan.plugins) {
         PluginCallbackScope scope(s, &plugin);
         mod_invoke_activation_plugin(plugin.id);
     }
+    s.activating = false;
     build_function_entry_hooks(s);
 }
 
@@ -1620,6 +1732,47 @@ extern "C" int psx_mod_finish_function(CPUState* cpu) {
     if (!cpu || s.current_function_cpu != cpu || !s.current_plugin) return 0;
     s.current_function_finished = true;
     return 1;
+}
+
+extern "C" int psx_mod_register_guest_function_plugin(
+    const char* id, uint32_t address, PSXModFunctionEntryCallback callback) {
+    return id && PSXRecompV4::mod_register_guest_function_plugin(id, address, callback);
+}
+
+extern "C" int psx_mod_dispatch_guest_function(CPUState* cpu, uint32_t address) {
+    using namespace PSXRecompV4;
+    if (!g_psx_mod_guest_functions || !cpu || address >= 0xC0000000u) return 0;
+    const auto& functions = active_guest_functions();
+    const uint32_t key = function_entry_key(address);
+    auto it = std::lower_bound(functions.begin(), functions.end(), key,
+        [](const auto& function, uint32_t k) { return function.key < k; });
+    if (it == functions.end() || it->key != key) return 0;
+    PluginCallbackScope scope(state(), it->plugin, cpu);
+    it->callback(cpu, address);
+    cpu->pc = cpu->gpr[31];
+    return 1;
+}
+
+extern "C" int psx_mod_register_instruction_plugin(const char* id, uint32_t address,
+                                                    uint32_t expected, PSXModFunctionEntryCallback callback) {
+    return id && PSXRecompV4::mod_register_instruction_plugin(id, address, expected, callback);
+}
+
+extern "C" void psx_mod_instruction(CPUState* cpu, uint32_t address, uint32_t instruction) {
+    using namespace PSXRecompV4;
+    if (!g_psx_mod_instruction_hooks || !cpu || address >= 0xC0000000u) return;
+    const auto& hooks = active_instruction_hooks();
+    const auto key = function_entry_key(address);
+    auto it = std::lower_bound(hooks.begin(), hooks.end(), key,
+                              [](const auto& h, uint32_t k) { return h.key < k; });
+    for (; it != hooks.end() && it->key == key; ++it) {
+        if (it->expected != instruction || psx_mod_read_word(address) != instruction) continue;
+        PluginCallbackScope scope(state(), it->plugin, nullptr);
+        const uint32_t pc = cpu->pc;
+        it->callback(cpu, address);
+        if (cpu->pc != pc) std::abort();
+        cpu->gpr[0] = 0;
+    }
 }
 
 extern "C" int psx_mod_function_entry(CPUState* cpu, uint32_t address) {

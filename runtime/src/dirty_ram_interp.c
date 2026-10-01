@@ -1496,6 +1496,10 @@ static int exec_one_fetched(CPUState *cpu, uint32_t pc, uint32_t insn,
         }
     }
 
+    extern uint32_t g_psx_mod_instruction_hooks;
+    extern void psx_mod_instruction(CPUState*, uint32_t, uint32_t);
+    if (g_psx_mod_instruction_hooks) psx_mod_instruction(cpu, pc, insn);
+
     /* op 0x20..0x26 = LB/LH/LWL/LW/LBU/LHU/LWR. LWC2 (GTE, 0x32) targets a COP2
      * register, not a GPR, so it needs no deferral here. */
     const uint32_t ld_op = op_field(insn);

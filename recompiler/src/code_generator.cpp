@@ -887,7 +887,17 @@ std::string CodeGenerator::generate_branch_condition(uint32_t instr, uint32_t ad
     return keep_branch_if_wide("0 /* unknown branch condition: defaults to not-taken */");
 }
 
+std::string CodeGenerator::mod_instruction_call(uint32_t addr, uint32_t instr) const {
+    const bool selected = std::any_of(config_.mod_instruction_sites.begin(),
+        config_.mod_instruction_sites.end(), [=](uint32_t site) {
+            return (site & 0x1FFFFFFFu) == (addr & 0x1FFFFFFFu);
+        });
+    return selected ? fmt::format("psx_mod_instruction(cpu, 0x{:08X}u, 0x{:08X}u);\n", addr, instr) : "";
+}
 std::string CodeGenerator::translate_instruction(uint32_t addr, uint32_t instr) {
+    return mod_instruction_call(addr, instr) + translate_instruction_body(addr, instr);
+}
+std::string CodeGenerator::translate_instruction_body(uint32_t addr, uint32_t instr) {
     uint32_t opcode = (instr >> 26) & 0x3F;
     uint32_t funct = instr & 0x3F;
 
@@ -2141,6 +2151,7 @@ std::string CodeGenerator::translate_basic_block(
                 // Jumps (j/jal/jr/jalr) and reserved words never reach
                 // generate_branch_condition; check them here.
                 check_explicit_branch_site(addr, block.exit_instr.instruction);
+                ss << config_.indent << mod_instruction_call(addr, instr);
                 std::string delay_saved_cond;    // branch condition captured before delay
                 std::string delay_saved_target;  // JR/JALR target captured before delay
 
@@ -3455,6 +3466,7 @@ void CodeGenerator::emit_runtime_externs(std::ostream& ss) const {
     ss << "#endif\n";
     ss << "extern int  psx_game_text_native_ok(uint32_t addr);  /* stale-static guard (dispatch shard) */\n";
     ss << "extern int  psx_datashard_enter(CPUState* cpu, uint32_t key);  /* data-shard replay/capture (data_shards.c) */\n";
+    ss << "extern void psx_mod_instruction(CPUState*, uint32_t, uint32_t);\n";
     ss << "extern int psx_mod_function_entry(CPUState* cpu, uint32_t address);  /* trusted opt-in game-mod hook */\n";
     ss << "extern int psx_ws_masked_reject(uint32_t flags, uint32_t mask); /* guarded packed-coordinate reject */\n";
     ss << "extern int psx_ws_nclip_branch(uint32_t pc, uint32_t instr, int32_t mac0, int vanilla);\n";

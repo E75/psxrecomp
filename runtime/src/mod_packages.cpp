@@ -38,6 +38,8 @@ struct RegisteredPlugin {
     /* Generated-function entry hooks, keyed by guest address. One id may
      * observe several functions. */
     std::vector<ModFunctionEntryHook> function_entries;
+    std::vector<ModFunctionEntryHook> guest_functions;
+    std::vector<ModInstructionHook> instructions;
 };
 
 std::map<std::string, RegisteredPlugin>& registered_plugins() {
@@ -1478,7 +1480,45 @@ bool mod_plugin_registered(const std::string& id) {
     const auto found = registered_plugins().find(id);
     return found != registered_plugins().end() &&
         (found->second.activation || found->second.vblank ||
-         !found->second.function_entries.empty());
+         !found->second.function_entries.empty() || !found->second.guest_functions.empty() ||
+         !found->second.instructions.empty());
+}
+
+bool mod_register_guest_function_plugin(const std::string& id, uint32_t address,
+                                        PSXModFunctionEntryCallback callback) {
+    const uint32_t key = address & 0x1FFFFFFFu;
+    if (!valid_id(id) || !callback || (address & 3u) ||
+        key < 0x0F000000u || key >= 0x10000000u || address >= 0xC0000000u)
+        return false;
+    for (const auto& plugin : registered_plugins())
+        for (const auto& function : plugin.second.guest_functions)
+            if (function.address == key) return false;
+    registered_plugins()[id].guest_functions.push_back({key, callback});
+    return true;
+}
+
+std::vector<ModFunctionEntryHook> mod_guest_functions(const std::string& id) {
+    const auto found = registered_plugins().find(id);
+    return found == registered_plugins().end()
+        ? std::vector<ModFunctionEntryHook>{} : found->second.guest_functions;
+}
+
+bool mod_register_instruction_plugin(const std::string& id, uint32_t address,
+                                      uint32_t expected, PSXModFunctionEntryCallback callback) {
+    if (!valid_id(id) || !callback || (address & 3u) || address >= 0xC0000000u ||
+        (address & 0x1FFFFFFFu) >= 0x00800000u) return false;
+    auto& hooks = registered_plugins()[id].instructions;
+    const uint32_t key = address & 0x1FFFFFFFu;
+    for (const auto& hook : hooks)
+        if (hook.address == key) return false;
+    hooks.push_back({key, expected, callback});
+    return true;
+}
+
+std::vector<ModInstructionHook> mod_instruction_hooks(const std::string& id) {
+    const auto found = registered_plugins().find(id);
+    return found == registered_plugins().end()
+        ? std::vector<ModInstructionHook>{} : found->second.instructions;
 }
 
 void mod_invoke_activation_plugin(const std::string& id) {
@@ -1502,6 +1542,47 @@ std::vector<ModFunctionEntryHook> mod_function_entry_hooks(const std::string& id
 
 void mod_clear_plugins_for_tests() {
     registered_plugins().clear();
+}
+
+std::vector<std::string> mod_registered_plugin_ids() {
+    std::vector<std::string> ids;
+    for (const auto& entry : registered_plugins())
+        if (entry.second.activation || entry.second.vblank ||
+            !entry.second.function_entries.empty() || !entry.second.guest_functions.empty())
+            ids.push_back(entry.first);
+    return ids;  /* std::map keeps them sorted */
+}
+
+ModPluginAudit mod_audit_registered_plugins(
+    const std::vector<fs::path>& manifest_roots) {
+    ModPluginAudit audit;
+    std::set<std::string> declared;
+    for (const fs::path& root : manifest_roots) {
+        std::error_code ec;
+        if (!fs::is_directory(root, ec)) {
+            audit.errors.push_back(root.string() + ": not a directory");
+            continue;
+        }
+        for (fs::recursive_directory_iterator it(root, ec), end;
+             !ec && it != end; it.increment(ec)) {
+            if (!it->is_regular_file(ec) || it->path().filename() != "manifest.toml")
+                continue;
+            ModPackage package;
+            std::string error;
+            if (!ModPackageManager::read_manifest(it->path(), package, &error)) {
+                audit.errors.push_back(it->path().string() + ": " + error);
+                continue;
+            }
+            ++audit.manifests;
+            for (const ModPlugin& plugin : package.plugins)
+                declared.insert(plugin.id);
+        }
+        if (ec) audit.errors.push_back(root.string() + ": " + ec.message());
+    }
+    audit.declared.assign(declared.begin(), declared.end());
+    for (const std::string& id : mod_registered_plugin_ids())
+        if (!declared.count(id)) audit.undeclared.push_back(id);
+    return audit;
 }
 
 const char* mod_channel_name(ModChannel channel) {
