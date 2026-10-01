@@ -868,6 +868,8 @@ struct GameConfig {
     // entries that dispatch trusted, statically linked mod callbacks. Empty by
     // default, so projects that do not opt in emit no callback overhead.
     std::vector<uint32_t> mod_function_entry_funcs;
+    // Opt-in pre-instruction callbacks; plugins supply exact-word guards.
+    std::vector<uint32_t> mod_instruction_sites;
 
     // [recompiler] hot_funcs: guest addresses that get __attribute__((hot))
     // on their generated C bodies (profile/host locality; no guest semantics).

@@ -213,6 +213,57 @@ on a fixed region -> next.
 
 ## 5. Status / Log (update every session)
 
+- **2026-09-30 (Phase 5 owner-requested source checkpoint):** Preserve the
+  existing V8:2 combined-content title and generic callback/disc-extent support
+  on local `checkpoint/v82-combined-20260930` branches. Source, tests and
+  attribution only; donor media, generated outputs and playtest evidence stay
+  external. Owner explicitly paused further implementation, including
+  widescreen, original music and netplay, pending a check-in. No publication.
+
+- **2026-09-30 (Phase 5 Dreamland mushroom freeze):** `beads-eio.12.5`
+  identified an imported projectile flag write altering its callback, followed
+  by a skipped prologue and invalid return into the BIOS exception loop. The
+  title converter now tracks the local projectile factory and target pointers.
+  Added 4163 relocation/flag property cases and an opt-in native mushroom-event
+  stress driver; the old overlay fails and the repaired overlay completes both
+  families. All 16 title checks pass. No framework behavior changes.
+
+- **2026-09-30 (Phase 5 Dreamland effect cleanup):** `beads-eio.12.2` traced
+  the owner's frozen V8:2 match to an imported projectile effect writing its
+  matrix over the native child link. The title's input-overlay converter now
+  recognizes both effect-factory object returns. Five corrected field accesses,
+  owner-media regression checks, complete overlay code generation and a live
+  explosion allocation/free check validate the repair. No framework execution,
+  timing or generated-source changes; owner handoff remains at 1x rendering.
+
+- **2026-09-30 (Phase 5 instruction callbacks):** `beads-kbj0` adds plan-owned,
+  exact-word-guarded callbacks before opt-in game instructions, including branch
+  and delay slots. Native/overlay metadata participates in the codegen hash;
+  dirty-RAM execution routes through the same guard after load retirement.
+  Overlay ABI v27 forwards the callback. Runtime, parser/emitter and interpreter
+  routing checks pass. V8:2 uses seven seams for independent vehicle stats,
+  upgrades, transformation parts and special dependencies. Chassey's live match,
+  input/pause and savestate roundtrip were observed after correcting the title
+  allocator to retain shrinking allocations, matching its source implementation.
+
+- **2026-09-30 (Phase 5 mod-defined callbacks):** `beads-eio.3.212` adds
+  trusted mod-defined guest functions in an unused address range, separate
+  from original function-entry hooks. Active plans own availability and
+  callback resource context. Generated BIOS dispatch handles these through
+  its normal return/stack contract, with no synthetic guest instructions.
+  Runtime tests cover aliases, collisions, activation/clearing and nested
+  callback scopes; emitter tests cover routing before hardware dispatch.
+  OpenBIOS/SCPH1001 regenerated; V8:2 title rebuilt. Imported content still
+  needs its title-side runtime/selection adapters (`beads-eio.12.1`).
+
+- **2026-09-30 (Phase 5 combined V8 project):** Owner selected USA 2nd Offense
+  as the game-code base while retaining psxrecomp as the runtime/recompiler.
+  New local `Vigilante82PSXRecomp` builds against `071847ab`, reaches a stock
+  match, responds to driving input and reloads a savestate in an isolated run.
+  The reference's thirteen original-car conversions roundtrip successfully;
+  imported runtime/selector adapters remain title work (`beads-eio.12.1`).
+  No generic execution or hardware change was needed for this bring-up.
+
 - **2026-09-30 (Phase 5 callback reentrancy):** Plugin activation, VBlank and
   function-entry callbacks now use the same scoped resource/completion context.
   A native call inside an entry hook can deliver VBlank; previously those

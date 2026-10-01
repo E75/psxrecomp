@@ -786,6 +786,19 @@ valid until the committed plan is replaced or cleared. Decode into host or
 enhancement memory and rebuild derived data when activation changes; never
 reopen the owner path as a substitute for the verified snapshot.
 
+An activation callback can mount a slice of its verified resource for native CD
+streaming with `psx_mod_append_disc_extent(id, byte_offset, sector_count, &lba)`.
+The slice contains 2336-byte Mode-2 sectors beginning at the duplicated XA
+subheader. The runtime appends extents after the mounted disc, synthesizes raw
+sector headers and a data-track TOC/subchannel entry, and retains the original
+CD-ROM/XA decoder, interrupts and timing. The returned LBAs are deterministic
+for the same activation order. Registration rejects missing/unowned resources,
+invalid ranges/subheaders, late calls and addresses beyond the CD MSF limit.
+Plan replacement or netplay clearing removes the extents; base sectors remain
+unchanged. The game plugin supplies its own file lookup, names and stream
+selection. Donor bytes remain external and are covered by the resource fingerprint.
+
+
 Verified resource fingerprints include format, canonical size and SHA-256,
 rather than the selected path, so moving identical media or changing N64 byte
 order does not change save compatibility. Donor bytes are never package files,
@@ -802,6 +815,23 @@ The installer accepts stored or DEFLATE-compressed ZIP entries, validates CRCs,
 rejects encrypted entries and unsafe or absolute paths, limits archives to 4096
 files and 256 MiB expanded size, stages extraction, validates the manifest, and
 publishes the version atomically.
+
+### Guarded instruction callbacks
+
+Trusted plugins can register
+`psx_mod_register_instruction_plugin(id, address, expected_word, callback)`.
+List native code locations in `[recompiler] mod_instruction_sites` and regenerate.
+Callbacks run immediately before the instruction; the registered full word,
+executing word and current RAM word must agree. Segment aliases share a site.
+Only active resolved plugins run, with their feature's resource context.
+The dirty-RAM backend uses the same checks, including nested delay slots.
+Overlay ABI v27 carries the forwarder; site metadata changes the codegen hash.
+
+Callbacks may change registers and data. They must preserve PC and must not
+re-enter guest execution, because pending branch/load state is live.
+`psx_mod_finish_function` is unavailable in this callback scope. Inactive plans
+do not change guest behavior. Function entry replacement remains the separate
+`psx_mod_register_function_entry_plugin` interface.
 
 ### Presentation bezel packages
 

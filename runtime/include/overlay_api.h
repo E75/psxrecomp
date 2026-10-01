@@ -113,7 +113,7 @@
  *      in overlay code (all sign-branch shapes). Appended last; NULL keeps the
  *      native sign. */
 /* v26: trusted entry hooks return whether they completed the guest function. */
-#define PSX_OVERLAY_ABI_VERSION 26
+#define PSX_OVERLAY_ABI_VERSION 27
 
 /* Process-lifetime overlay candidate capacity.  Every accepted manifest F
  * record consumes one slot, even when another DLL carries an identical
@@ -356,6 +356,8 @@ typedef struct {
     int32_t (*ws_cull_scale)(int32_t bound, int32_t half_extent);
     /* Exact-NCLIP branch sign (ABI v25). */
     int32_t (*nclip_exact_sign)(int32_t native_mac0, uint32_t pc);
+    /* Guarded pre-instruction mod callback (ABI v27). */
+    void (*mod_instruction)(CPUState*, uint32_t, uint32_t);
 } OverlayCallbacks;
 
 #ifdef __cplusplus

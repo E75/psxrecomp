@@ -233,6 +233,10 @@ int32_t psx_ws_player_x_bound(int32_t vanilla) {
 int32_t psx_ws_screen_x_bound(int32_t vanilla) {
     return g_cbs.ws_screen_x_bound ? g_cbs.ws_screen_x_bound(vanilla) : vanilla;
 }
+void psx_mod_instruction(CPUState *cpu, uint32_t address, uint32_t word) {
+    overlay_flush_cycles();
+    if (g_cbs.mod_instruction) g_cbs.mod_instruction(cpu, address, word);
+}
 int psx_mod_function_entry(CPUState *cpu, uint32_t address) {
     overlay_flush_cycles();
     return g_cbs.mod_function_entry ? g_cbs.mod_function_entry(cpu, address) : 0;

@@ -529,6 +529,8 @@ bool mod_register_vblank_plugin(const std::string& id, void (*callback)(void));
  * select it by id, and it runs only while a resolved plan activates that id. */
 bool mod_register_function_entry_plugin(const std::string& id, uint32_t address,
                                         PSXModFunctionEntryCallback callback);
+bool mod_register_guest_function_plugin(const std::string& id, uint32_t address,
+                                        PSXModFunctionEntryCallback callback);
 bool mod_plugin_registered(const std::string& id);
 void mod_invoke_activation_plugin(const std::string& id);
 void mod_invoke_vblank_plugin(const std::string& id);
@@ -539,6 +541,14 @@ struct ModFunctionEntryHook {
 /* Hooks one implementation registered, in registration order. mod_runtime
  * flattens these into an address table when the plan's plugins activate. */
 std::vector<ModFunctionEntryHook> mod_function_entry_hooks(const std::string& id);
+std::vector<ModFunctionEntryHook> mod_guest_functions(const std::string& id);
+struct ModInstructionHook {
+    uint32_t address, expected;
+    PSXModFunctionEntryCallback callback;
+};
+bool mod_register_instruction_plugin(const std::string& id, uint32_t address,
+                                      uint32_t expected, PSXModFunctionEntryCallback callback);
+std::vector<ModInstructionHook> mod_instruction_hooks(const std::string& id);
 void mod_clear_plugins_for_tests();
 
 /* Every id a trusted implementation registered (activation, vblank or
