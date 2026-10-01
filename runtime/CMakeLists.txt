@@ -1171,6 +1171,16 @@ if(BUILD_TESTING)
         target_link_libraries(render_pass_projection_test PRIVATE m)
     endif()
     add_test(NAME render_pass_projection_test COMMAND render_pass_projection_test)
+    # Dynamic resolution's controller against synthetic load: step rules,
+    # hysteresis, transient spikes, CPU-bound stretches, holds, the floor.
+    add_executable(dynamic_resolution_test
+        tests/test_dynamic_resolution.c
+        src/dynamic_resolution.c)
+    target_include_directories(dynamic_resolution_test PRIVATE include)
+    if(NOT MSVC)
+        target_link_libraries(dynamic_resolution_test PRIVATE m)
+    endif()
+    add_test(NAME dynamic_resolution_test COMMAND dynamic_resolution_test)
 
     # Render-pass time freeze against mock devices (psx_cycles.c only).
     add_executable(render_pass_freeze_test
