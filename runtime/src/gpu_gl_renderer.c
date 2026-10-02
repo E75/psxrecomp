@@ -6490,6 +6490,19 @@ static void pass_apply_promotion(void) {
         g->promoted = 1;
         g->t_start = s_interp_schedule.frame_start;
         g->t_len = (double)g->period * sp;
+        /* Phase 0 is the image the game actually flipped to. The capture at
+         * the pass point is the same for a game that draws nothing more into
+         * the rect before its flip; a game that finishes the frame later (V8:2
+         * draws its HUD at the next submit, onto the rect about to be shown)
+         * would otherwise show its own frame without that last layer. The
+         * flip was matched to this generation's rect and presented geometry,
+         * and no guest code ran since it, so the rect holds that image. A
+         * FLIP_SHOWN generation's rect is not the one flipped to: it keeps
+         * the image taken when it opened. */
+        if (!g->shown) {
+            pass_capture_into(s_pgen_tex[s_pgen_cur][0], g);
+            p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, 0);
+        }
         s_pgen_promotions++;
         if (s_pdump_left > 0) pass_dump_generation(s_pgen_cur);
     }
