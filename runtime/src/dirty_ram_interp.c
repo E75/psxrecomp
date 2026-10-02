@@ -512,6 +512,17 @@ extern int psx_game_text_native_ok_full(uint32_t addr);
 #endif
 extern void psx_dispatch_call(CPUState* cpu, uint32_t addr, uint32_t return_addr);
 
+/* Guest span replay (dirty_ram_run_span, psx_mod_run_guest_span): while a span
+ * is open, every PC in [s_span_lo, s_span_hi) (CODE identity) is interpreted
+ * from the live RAM bytes, even where a compiled body or one of its resume
+ * points starts there. Calls the span makes leave the range and run on their
+ * normal backend. A span is a replay, not an entry: it stays out of capture,
+ * seeding and entry statistics. */
+static uint32_t s_span_lo, s_span_hi;
+static inline int span_forced(uint32_t phys) {
+    return phys >= s_span_lo && phys < s_span_hi;
+}
+
 /* Forward decls from memory.c — used to read instruction bytes. */
 extern uint8_t *memory_get_ram_ptr(void);
 extern void dirty_ram_mark_executable_range(uint32_t phys, uint32_t len);
@@ -1714,7 +1725,9 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
 #endif
             uint32_t _cr = callret_begin(cpu, pc, target);   /* call-resolution ring */
 #define CRET(code, rv) do { callret_end(_cr, cpu, (code)); return (rv); } while (0)
-            if (g_precise_mode || g_ls_replay_active) { cpu->pc = target; CRET(CRES_PLAIN, 1); }  /* slice / lockstep-replay: plain transfer, never execute the callee */
+            /* slice / lockstep-replay / guest span: plain transfer, never execute the
+             * callee (a span's runner calls it with the full trampoline). */
+            if (g_precise_mode || g_ls_replay_active || span_forced(pc & 0x1FFFFFFFu)) { cpu->pc = target; CRET(CRES_PLAIN, 1); }
             if (rd != 31) {
                 /* No architectural $ra contract: preserve the transfer as a
                  * pc-chain and let the callee's eventual JR choose the real
@@ -1934,7 +1947,9 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
 #else
 #define XRES(code) do { (void)(code); } while (0)
 #endif
-        if (g_precise_mode || g_ls_replay_active) { cpu->pc = target; return 1; }  /* slice / lockstep-replay: plain transfer, never execute the callee */
+        /* slice / lockstep-replay / guest span: plain transfer, never execute the
+         * callee (a span's runner calls it with the full trampoline). */
+        if (g_precise_mode || g_ls_replay_active || span_forced(pc & 0x1FFFFFFFu)) { cpu->pc = target; return 1; }
 #ifdef PSX_HAS_GAME_DISPATCH
         cpu->pc = 0;
         if (interp_enter_compiled(cpu, target)) {
@@ -2420,16 +2435,6 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
 
 static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_addr);
 
-/* Guest span replay (dirty_ram_run_span, psx_mod_run_guest_span): while a span
- * is open, every PC in [s_span_lo, s_span_hi) (CODE identity) is interpreted
- * from the live RAM bytes, even where a compiled body or one of its resume
- * points starts there. Calls the span makes leave the range and run on their
- * normal backend. A span is a replay, not an entry: it stays out of capture,
- * seeding and entry statistics. */
-static uint32_t s_span_lo, s_span_hi;
-static inline int span_forced(uint32_t phys) {
-    return phys >= s_span_lo && phys < s_span_hi;
-}
 
 /* Public entry point.  Caller (psx_dispatch) has translated `addr` to a
  * KSEG-stripped form already in some cases, so accept any address and
@@ -2580,28 +2585,62 @@ void dirty_ram_span_set(uint32_t lo, uint32_t hi) {
     s_span_hi = hi;
 }
 
+static DirtyRamSpanFailure s_span_failure;
+
+void dirty_ram_span_last_failure(DirtyRamSpanFailure *out) {
+    if (out) *out = s_span_failure;
+}
+
 int dirty_ram_run_span(CPUState* cpu, uint32_t start_pc, uint32_t stop_pc,
                        uint64_t max_insns) {
     const uint32_t lo = start_pc & 0x1FFFFFFFu, hi = stop_pc & 0x1FFFFFFFu;
+    DirtyRamSpanFailure f = {0u, start_pc, start_pc, stop_pc, 0u, 0u, 0u};
     if (!cpu || s_span_hi || ((start_pc | stop_pc) & 3u) || lo >= hi ||
-        (start_pc ^ stop_pc) & 0xE0000000u)
+        (start_pc ^ stop_pc) & 0xE0000000u) {
+        f.reason = 6u;
+        s_span_failure = f;
         return 0;
+    }
     const uint64_t first = g_dirty_ram_insns_run;
-    int reached = 0;
     s_span_lo = lo;
     s_span_hi = hi;
     cpu->pc = start_pc;
     for (;;) {
         const uint32_t pc = cpu->pc;
-        if (pc == stop_pc) { reached = 1; break; }
-        if (!pc || !span_forced(pc & 0x1FFFFFFFu) || g_psx_call_bail ||
-            g_dirty_ram_insns_run - first > max_insns)
-            break;
-        if (!dirty_ram_dispatch(cpu, pc, stop_pc)) break;
+        f.pc = pc;
+        f.ra = cpu->gpr[31];
+        if (pc == stop_pc) break;
+        if (!pc) { f.reason = 1u; break; }
+        if (g_psx_call_bail) { f.reason = 3u; break; }
+        if (!span_forced(pc & 0x1FFFFFFFu)) {
+            /* The interpreter hands a call out of clean code back as a tail
+             * transfer (pc = callee, $ra = the return address). A call made
+             * by the span returns into it: run it as the caller would. A
+             * transfer out that is not a call ends the span. */
+            const uint32_t ra = cpu->gpr[31];
+            const uint32_t site = ra - 8u;
+            /* The span's last instruction may be a call: it returns to stop. */
+            const uint32_t w = span_forced(site & 0x1FFFFFFFu) &&
+                               (span_forced(ra & 0x1FFFFFFFu) || ra == stop_pc)
+                               ? fetch_word(site & 0x1FFFFFFFu) : 0u;
+            const int is_call = (w >> 26) == 0x03u ||                 /* jal */
+                                ((w >> 26) == 0u && (w & 0x3Fu) == 0x09u); /* jalr */
+            if (!is_call) { f.reason = 2u; break; }
+            cpu->pc = 0;
+            psx_dispatch_call(cpu, pc, ra);
+            if (g_psx_call_bail) { f.reason = 3u; break; }
+            if (cpu->pc != 0u && cpu->pc != ra) { f.after = cpu->pc; f.reason = 7u; break; }
+            cpu->pc = ra;
+            continue;
+        }
+        if (g_dirty_ram_insns_run - first > max_insns) { f.reason = 4u; break; }
+        if (!dirty_ram_dispatch(cpu, pc, stop_pc)) { f.reason = 5u; break; }
     }
     s_span_lo = s_span_hi = 0;
     dirty_ram_ld_delay_flush(cpu);
-    return reached;
+    f.insns = g_dirty_ram_insns_run - first;
+    if (f.reason) s_span_failure = f;
+    return f.reason == 0u;
 }
 
 /* ===== Cycle-budgeted precise event slicing (PRECISE_IRQ_SLICE.md) ===== */

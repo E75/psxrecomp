@@ -56,6 +56,16 @@ int dirty_ram_dispatch(CPUState* cpu, uint32_t addr, uint32_t stop_addr);
  * Mods reach it through psx_mod_run_guest_span (render passes only). */
 int  dirty_ram_run_span(CPUState* cpu, uint32_t start_pc, uint32_t stop_pc,
                         uint64_t max_insns);
+/* Why the last span that failed stopped: 1 returned (pc 0), 2 left the range,
+ * 3 call-bail unwind, 4 instruction budget, 5 the interpreter declined the PC,
+ * 6 bad arguments or a span already open, 7 a call did not return to the
+ * span (`after`). `pc` is where control was. */
+typedef struct DirtyRamSpanFailure {
+    uint32_t reason, pc, start_pc, stop_pc;
+    uint32_t ra, after;   /* $ra at the exit; pc after a call that did not return */
+    uint64_t insns;
+} DirtyRamSpanFailure;
+void dirty_ram_span_last_failure(DirtyRamSpanFailure *out);
 /* The open span (0,0 = none), for landings that longjmp past its exit. */
 void dirty_ram_span_get(uint32_t *lo, uint32_t *hi);
 void dirty_ram_span_set(uint32_t lo, uint32_t hi);
