@@ -2009,6 +2009,15 @@ extern "C" int psx_debug_display_aspect(int num, int den, int adaptive) {
     return 1;
 }
 
+/* Resize the game window as a player would (Fit/adaptive widescreen follow the
+ * resulting window events). For TCP-driven checks of window-shaped behaviour
+ * in --hidden-window runs. */
+extern "C" int psx_debug_window_size(int w, int h) {
+    if (!sdl_window || w < 64 || h < 64 || w > 16384 || h > 16384) return 0;
+    SDL_SetWindowSize(sdl_window, w, h);
+    return 1;
+}
+
 static bool          g_gl_active = false;    /* GL context live -> GL present path */
 static bool          g_vk_active = false;    /* Vulkan context live -> VK present path */
 

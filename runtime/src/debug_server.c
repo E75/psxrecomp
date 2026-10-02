@@ -8143,6 +8143,13 @@ static void handle_display_aspect(int id, const char *json) {
     send_fmt("{\"id\":%d,\"ok\":true,\"num\":%d,\"den\":%d,\"adaptive\":%d}",id,num,den,adaptive!=0);
 }
 
+extern int psx_debug_window_size(int w, int h);
+static void handle_window_size(int id, const char *json) {
+    int w = json_get_int(json, "w", -1), h = json_get_int(json, "h", -1);
+    if (!psx_debug_window_size(w, h)) { send_err(id, "need a window and 64<=w,h<=16384"); return; }
+    send_fmt("{\"id\":%d,\"ok\":true,\"w\":%d,\"h\":%d}", id, w, h);
+}
+
 /* Live native-wide vs squash toggle (A/B): ws_nw on=<0|1> re-engages the wide
  * path in the chosen mode without a relaunch. 2 = native-wide, 1 = squash. */
 extern void psx_ws_set_native_wide(int on);
@@ -14363,6 +14370,7 @@ static const CmdEntry s_commands[] = {
     { "kernel_bless",      handle_kernel_bless },
     { "ws_aspect",         handle_ws_aspect },
     { "display_aspect",    handle_display_aspect },
+    { "window_size",       handle_window_size },
     { "ws_nw",             handle_ws_nw },
     { "scanline",          handle_scanline },
     { "ws_backdrop_ring",  handle_ws_backdrop_ring },
