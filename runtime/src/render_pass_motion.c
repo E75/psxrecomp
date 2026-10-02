@@ -108,6 +108,9 @@ static void read_entry(MotionEntry* e) {
         for (int i = 0; i < 3; i++) e->v[9 + i] = m.t[i];
         break;
     }
+    case PSX_MOTION_ROTATION:
+        for (int i = 0; i < 9; i++) e->v[i] = (int16_t)psx_mod_read_half(e->addr + 2u * (uint32_t)i);
+        break;
     case PSX_MOTION_VECTOR:
         for (int i = 0; i < 3; i++) e->v[i] = (int32_t)psx_mod_read_word(e->addr + 4u * (uint32_t)i);
         break;
@@ -123,7 +126,7 @@ static void read_entry(MotionEntry* e) {
 
 int psx_motion_track(PSXMotionSet* s, uint32_t kind, uint32_t addr, uint32_t identity) {
     MotionEntry* e;
-    if (!s || kind < PSX_MOTION_MATRIX || kind > PSX_MOTION_SCALAR) return 0;
+    if (!s || kind < PSX_MOTION_MATRIX || kind > PSX_MOTION_ROTATION) return 0;
     if (!s->began[s->cur] || s->n[s->cur] >= s->cap) return 0;
     e = &s->cap_buf[s->cur][s->n[s->cur]];
     memset(e, 0, sizeof *e);
@@ -270,10 +273,11 @@ static int within_limits(const MotionEntry* a, const MotionEntry* b,
                          const PSXMotionLimits* lim, uint32_t ticks) {
     const double move = lim->move_per_tick > 0 ? lim->move_per_tick * ticks : HUGE_VAL;
     switch (a->kind) {
-    case PSX_MOTION_MATRIX: {
+    case PSX_MOTION_MATRIX:
+    case PSX_MOTION_ROTATION: {
         double ang;
         int16_t ra[9], rb[9];
-        if (dist3(&a->v[9], &b->v[9]) > move) return 0;
+        if (a->kind == PSX_MOTION_MATRIX && dist3(&a->v[9], &b->v[9]) > move) return 0;
         for (int i = 0; i < 9; i++) { ra[i] = (int16_t)a->v[i]; rb[i] = (int16_t)b->v[i]; }
         ang = rotation_angle(ra, rb);
         if (ang >= 0) return ang <= turn_limit(lim->turn_radians);
@@ -344,7 +348,8 @@ uint32_t psx_motion_prepare(PSXMotionSet* s, const PSXMotionLimits* lim,
 /* Blend one pair into `v` (entry layout). */
 static void blend_entry(const MotionEntry* a, const MotionEntry* b, double t, int32_t* v) {
     switch (a->kind) {
-    case PSX_MOTION_MATRIX: {
+    case PSX_MOTION_MATRIX:
+    case PSX_MOTION_ROTATION: {
         int16_t ra[9], rb[9], ro[9];
         for (int i = 0; i < 9; i++) { ra[i] = (int16_t)a->v[i]; rb[i] = (int16_t)b->v[i]; }
         blend_rotation(ra, rb, t, MOTION_PI * 2, ro);   /* limits were applied at prepare */
@@ -388,6 +393,9 @@ static void write_entry(uint8_t kind, uint32_t addr, const int32_t* v) {
     case PSX_MOTION_SCALAR:
         psx_mod_write_word(addr, (uint32_t)v[0]);
         break;
+    case PSX_MOTION_ROTATION:
+        for (int i = 0; i < 9; i++) psx_mod_write_half(addr + 2u * (uint32_t)i, (uint16_t)v[i]);
+        break;
     }
 }
 
@@ -405,7 +413,8 @@ void psx_motion_apply(const PSXMotionSet* s, double t) {
 }
 
 static void export_value(uint8_t kind, const int32_t* v, void* out) {
-    if (kind == PSX_MOTION_MATRIX || kind == PSX_MOTION_MATRIX_TRANSLATION) {
+    if (kind == PSX_MOTION_MATRIX || kind == PSX_MOTION_MATRIX_TRANSLATION ||
+        kind == PSX_MOTION_ROTATION) {
         PSXMotionMatrix* m = (PSXMotionMatrix*)out;
         for (int i = 0; i < 9; i++) m->r[i] = (int16_t)v[i];
         for (int i = 0; i < 3; i++) m->t[i] = v[9 + i];
