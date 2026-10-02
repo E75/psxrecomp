@@ -242,6 +242,27 @@ int main(void) {
     assert(ws_ui_prepass_count == 3);
     assert(ws_ui_reject.backing == 0);
 
+    /* A letterbox bar spanning the whole display width in the HUD's own
+     * rank is a full-width overlay: never UI, drawn edge to edge. */
+    reset_state(1);
+    build_hud(60, 128, 64, 120);
+    {
+        const int16_t bx0 = (int16_t)ws_disp_x(), bx1 = (int16_t)(ws_disp_x() + ws_disp_w());
+        const uint32_t bar[5] = {
+            0x28000000u, pack_vertex(bx0, 0), pack_vertex(bx1, 0),
+            pack_vertex(bx0, 30), pack_vertex(bx1, 30),
+        };
+        put_node(NODE_FLAT, 0xFFFFFFu, bar, 5);
+        gpu_ws_prepass_linked_list(OT_HEAD);
+        assert(ws_ui_prepass_count == 2);        /* frame + gouraud fill only */
+        assert(ws_ui_reject.too_big == 1);
+        gpu_exec_reset_triangles();
+        load_packet(NODE_FLAT, 5);
+        gp0_exec_mono_quad();
+        assert(gpu_exec_triangles.min_x == bx0);
+        assert(gpu_exec_triangles.max_x == bx1);
+    }
+
     puts("ws_auto_ui_untextured_exec_test: PASS");
     return 0;
 }

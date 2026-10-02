@@ -5559,7 +5559,11 @@ static void ws_ui_prepass_add(const uint32_t *words, uint32_t word_count,
 
     int32_t width = max_x - min_x, height = max_y - min_y;
     int32_t X = ws_disp_x(), W = ws_disp_w(), H = ws_disp_h();
-    if ((min_x <= X && max_x >= X + W && min_y <= 0 && max_y >= H) ||
+    /* Anything spanning the whole display width is a full-width overlay --
+     * letterbox bars, fade strips, subtitle bands -- not a widget: it widens
+     * with the image. Squashed as UI, a cutscene's bars left the revealed
+     * margins showing whatever the frame cleared to (Spider-Man). */
+    if ((min_x <= X && max_x >= X + W) ||
         (width > W / 2 && height > H / 4)) {
         ws_ui_reject.too_big++;
         return;

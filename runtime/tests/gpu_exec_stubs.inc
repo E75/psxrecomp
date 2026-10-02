@@ -5,6 +5,7 @@
  * Draw calls that tests observe are recorded below. */
 
 uint64_t s_frame_count;
+uint64_t psx_cycle_count;          /* gpu_timeline.c stamps notes with it */
 int g_exec_phase;
 uint32_t g_debug_current_func_addr;
 uint32_t g_debug_last_store_pc;
