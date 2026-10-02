@@ -127,6 +127,9 @@ typedef struct {
     uint8_t  op;
     uint8_t  full_draw_area;
     uint8_t  shared_split_ui;
+    /* A triangle or a rotated quad: UI only as part of a widget it lies
+     * inside (ws_ui_prepass_admit_enclosed), never on its own. */
+    uint8_t  enclosed_only;
     WsPrepassPacketGuard packet_guard;
 } WsUiPrepassItem;
 static WsUiPrepassItem ws_ui_prepass[WS_UI_PREPASS_MAX];
@@ -163,6 +166,7 @@ static struct {
     uint32_t rank;        /* admitted, then dropped by the max_rank filter */
     uint32_t stale;       /* live packet no longer matches cached bytes    */
     uint32_t backing;     /* NOT a reject: lower-rank backing panels kept  */
+    uint32_t enclosed;    /* NOT a reject: needles/hands inside a widget   */
 } ws_ui_reject;
 
 /* Geometry of the primitives the max_rank filter discarded. A count alone
@@ -2059,13 +2063,13 @@ int psx_ws_ui_groups_json(char *buf, int cap) {
         "\"disp_x\":%d,\"disp_w\":%d,\"join_gap\":%d,"
         "\"rejected\":{\"opcode\":%u,\"not_axis\":%u,\"degenerate\":%u,"
         "\"too_big\":%u,\"cap\":%u,\"rank\":%u,\"stale\":%u},"
-        "\"backing_panels\":%u,\"n\":%u,",
+        "\"backing_panels\":%u,\"enclosed_parts\":%u,\"n\":%u,",
         ws_active(), ws_auto_ui_squash, ws_auto_ui_dense,
         ws_ui_prepass_rank != 0xFFFFu ? (int)ws_ui_prepass_rank : -1,
         ws_disp_x(), ws_disp_w(), WS_UI_GROUP_JOIN_GAP,
         ws_ui_reject.opcode, ws_ui_reject.not_axis, ws_ui_reject.degenerate,
         ws_ui_reject.too_big, ws_ui_reject.cap, ws_ui_reject.rank,
-        ws_ui_reject.stale, ws_ui_reject.backing,
+        ws_ui_reject.stale, ws_ui_reject.backing, ws_ui_reject.enclosed,
         ws_ui_prepass_count);
     off += snprintf(buf + off, (size_t)(cap - off), "\"rank_dropped\":[");
     for (uint32_t i = 0; i < ws_ui_rankdrop_count && off < cap - 120; i++) {
@@ -2738,9 +2742,22 @@ static int ws_axis_aligned_quad(const int32_t vx[4], const int32_t vy[4]) {
     return corners == 15u;
 }
 
+/* A widget part that is not an axis-aligned rectangle (a triangle, a rotated
+ * quad): squashed with its widget when the prepass admitted it as lying
+ * inside that widget (ws_ui_prepass_finish). */
+static int ws_auto_ui_transform_part(int32_t *vx, int n) {
+    if (psx_ws_prim_is_tagged()) return 0;
+    int32_t anchor;
+    if (!ws_auto_ui_anchor(&anchor)) return 0;
+    for (int i = 0; i < n; i++)
+        vx[i] = ws_scale_about(vx[i], anchor) + ws_shared_ui_delta();
+    ws_auto_ui_transform_count++;
+    return 1;
+}
+
 static int ws_auto_ui_transform_quad(int32_t vx[4], const int32_t vy[4]) {
-    if (psx_ws_prim_is_tagged() || !ws_axis_aligned_quad(vx, vy))
-        return 0;
+    if (psx_ws_prim_is_tagged()) return 0;
+    if (!ws_axis_aligned_quad(vx, vy)) return ws_auto_ui_transform_part(vx, 4);
 
     int32_t min_x = vx[0], max_x = vx[0], min_y = vy[0], max_y = vy[0];
     for (int i = 1; i < 4; i++) {
@@ -4358,6 +4375,7 @@ static void gp0_exec_mono_tri(void) {
         parse_vertex(gp0_cmd_buf[1 + i], &vx[i], &vy[i]);
     }
     if (psx_gpu_triangle_oversize(vx, vy, 0, 1, 2)) return;
+    ws_auto_ui_transform_part(vx, 3);
     ws_nw_hud_shift_vertices(vx, 3);
     for (int i = 0; i < 3; i++) {
         vx[i] += draw_offset_x;
@@ -4469,6 +4487,7 @@ static void gp0_exec_shaded_tri(void) {
         parse_vertex(gp0_cmd_buf[1 + i * 2], &vx[i], &vy[i]);
     }
     if (psx_gpu_triangle_oversize(vx, vy, 0, 1, 2)) return;
+    ws_auto_ui_transform_part(vx, 3);
     ws_nw_hud_shift_vertices(vx, 3);
     for (int i = 0; i < 3; i++) {
         vx[i] += draw_offset_x;
@@ -4593,6 +4612,7 @@ static void gp0_exec_textured_tri(void) {
     uint16_t tpage = tpage_word & 0x1FF;
     set_tpage_from_poly(tpage_word);   /* latches even for size-rejected polys */
     if (psx_gpu_triangle_oversize(vx, vy, 0, 1, 2)) return;
+    ws_auto_ui_transform_part(vx, 3);
 
     ws_nw_hud_shift_vertices(vx, 3);
     for (int i = 0; i < 3; i++) {
@@ -4727,6 +4747,7 @@ static void gp0_exec_shaded_textured_tri(void) {
     uint16_t tpage = tpage_word & 0x1FF;
     set_tpage_from_poly(tpage_word);   /* latches even for size-rejected polys */
     if (psx_gpu_triangle_oversize(vx, vy, 0, 1, 2)) return;
+    ws_auto_ui_transform_part(vx, 3);
 
     ws_nw_hud_shift_vertices(vx, 3);
     for (int i = 0; i < 3; i++) {
@@ -5487,8 +5508,27 @@ static void ws_ui_prepass_add(const uint32_t *words, uint32_t word_count,
     if (ws_ui_prepass_count >= WS_UI_PREPASS_MAX) { ws_ui_reject.cap++; return; }
     uint32_t op = words[0] >> 24;
     int32_t min_x, max_x, min_y, max_y;
+    int enclosed_only = 0;
 
-    if (op >= 0x20u && op <= 0x3Fu && (op & 0x08u)) {
+    if (op >= 0x20u && op <= 0x3Fu && !(op & 0x08u)) {
+        /* A triangle is a widget part only when it lies inside the widget:
+         * a compass needle, a dial hand (Spider-Man's compass arrow, two
+         * flat triangles in the ring's own rank). */
+        const int textured = (op & 0x04u) != 0;
+        const int shaded = (op & 0x10u) != 0;
+        const int step = 1 + (textured ? 1 : 0) + (shaded ? 1 : 0);
+        int32_t vx, vy;
+        parse_vertex(words[1], &min_x, &min_y);
+        max_x = min_x; max_y = min_y;
+        for (int i = 1; i < 3; i++) {
+            parse_vertex(words[1 + i * step], &vx, &vy);
+            if (vx < min_x) min_x = vx;
+            if (vx > max_x) max_x = vx;
+            if (vy < min_y) min_y = vy;
+            if (vy > max_y) max_y = vy;
+        }
+        enclosed_only = 1;
+    } else if (op >= 0x20u && op <= 0x3Fu && (op & 0x08u)) {
         /* Any 4-vertex polygon. Untextured HUD fills (health gradients,
          * meter bars) sit in the same front layer as the textured frames
          * around them; leaving them out kept their raw 4:3 X while the frame
@@ -5511,7 +5551,10 @@ static void ws_ui_prepass_add(const uint32_t *words, uint32_t word_count,
         int32_t vx[4], vy[4];
         for (int i = 0; i < 4; i++)
             parse_vertex(words[indices[i]], &vx[i], &vy[i]);
-        if (!ws_axis_aligned_quad(vx, vy)) { ws_ui_reject.not_axis++; return; }
+        if (!ws_axis_aligned_quad(vx, vy)) {
+            ws_ui_reject.not_axis++;
+            enclosed_only = 1;           /* a rotated piece: see triangles */
+        }
         min_x = max_x = vx[0]; min_y = max_y = vy[0];
         for (int i = 1; i < 4; i++) {
             if (vx[i] < min_x) min_x = vx[i];
@@ -5585,6 +5628,7 @@ static void ws_ui_prepass_add(const uint32_t *words, uint32_t word_count,
     item->op = (uint8_t)op;
     item->full_draw_area = full_draw_area ? 1 : 0;
     item->shared_split_ui = 0;
+    item->enclosed_only = (uint8_t)enclosed_only;
     item->packet_guard = ws_prepass_packet_guard(words, word_count);
 }
 
@@ -5619,7 +5663,7 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
     ws_auto_ui_dense = 0;
     ws_ui_reject.opcode = ws_ui_reject.not_axis = ws_ui_reject.degenerate =
         ws_ui_reject.too_big = ws_ui_reject.cap = ws_ui_reject.rank =
-        ws_ui_reject.stale = ws_ui_reject.backing = 0;
+        ws_ui_reject.stale = ws_ui_reject.backing = ws_ui_reject.enclosed = 0;
     ws_ui_rankdrop_count = 0;
     if (!ws_auto_ui_squash || !ws_active()) return;
 
@@ -5703,10 +5747,18 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
      * Selecting the last empty bucket made the memory-card glyph layer (rank
      * 4095 followed by an empty rank 4096) disappear from the correction
      * pass. Pick the highest rank that contains an eligible UI primitive. */
-    uint16_t max_rank = ws_ui_prepass[0].ot_rank;
-    for (uint32_t i = 1; i < ws_ui_prepass_count; i++) {
-        if (ws_ui_prepass[i].ot_rank > max_rank)
+    /* Candidates (triangles, rotated quads) never pick the rank: a world
+     * triangle sorted to the front would otherwise make itself the HUD. */
+    uint16_t max_rank = 0xFFFFu;
+    for (uint32_t i = 0; i < ws_ui_prepass_count; i++) {
+        if (ws_ui_prepass[i].enclosed_only) continue;
+        if (max_rank == 0xFFFFu || ws_ui_prepass[i].ot_rank > max_rank)
             max_rank = ws_ui_prepass[i].ot_rank;
+    }
+    if (max_rank == 0xFFFFu) {
+        ws_ui_reject.rank = ws_ui_prepass_count;
+        ws_ui_prepass_count = 0;
+        return;
     }
     ws_ui_prepass_rank = max_rank;
 
@@ -5727,18 +5779,20 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
     uint16_t backing_rank = 0xFFFFu;
     for (uint32_t i = 0; i < ws_ui_prepass_count; i++) {
         uint16_t r = ws_ui_prepass[i].ot_rank;
-        if (r < max_rank && (backing_rank == 0xFFFFu || r > backing_rank))
+        if (!ws_ui_prepass[i].enclosed_only && r < max_rank &&
+            (backing_rank == 0xFFFFu || r > backing_rank))
             backing_rank = r;
     }
     static uint8_t keep[WS_UI_PREPASS_MAX];
     for (uint32_t i = 0; i < ws_ui_prepass_count; i++)
-        keep[i] = ws_ui_prepass[i].ot_rank == max_rank;
+        keep[i] = ws_ui_prepass[i].ot_rank == max_rank &&
+                  !ws_ui_prepass[i].enclosed_only;
     const int32_t small_w = ws_disp_w() / 4, small_h = ws_disp_h() / 4;
     for (int changed = 1; changed && backing_rank != 0xFFFFu;) {
         changed = 0;
         for (uint32_t i = 0; i < ws_ui_prepass_count; i++) {
             const WsUiPrepassItem *it = &ws_ui_prepass[i];
-            if (keep[i] || it->ot_rank != backing_rank) continue;
+            if (keep[i] || it->enclosed_only || it->ot_rank != backing_rank) continue;
             const int small = it->group.width <= small_w && it->h <= small_h;
             const int untextured = ws_ui_untextured_op(it->op);
             for (uint32_t j = 0; j < ws_ui_prepass_count; j++) {
@@ -5751,6 +5805,37 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
                     break;
                 }
             }
+        }
+    }
+
+    /* Widget parts that are not axis-aligned rectangles -- a compass needle,
+     * a dial hand -- join from the HUD rank when they lie inside the admitted
+     * pieces they overlap (the union of their boxes). Left out, they stretch
+     * with the wide image while the frame around them squashes. */
+    for (uint32_t i = 0; i < ws_ui_prepass_count; i++) {
+        const WsUiPrepassItem *it = &ws_ui_prepass[i];
+        if (!it->enclosed_only || it->ot_rank != max_rank) continue;
+        const int32_t x0 = it->group.x, x1 = it->group.x + it->group.width;
+        const int32_t y0 = it->y, y1 = it->y + it->h;
+        int32_t ux0 = 0, ux1 = 0, uy0 = 0, uy1 = 0;
+        int any = 0;
+        for (uint32_t j = 0; j < ws_ui_prepass_count; j++) {
+            const WsUiPrepassItem *ui = &ws_ui_prepass[j];
+            if (!keep[j] || ui->enclosed_only) continue;
+            const int32_t a0 = ui->group.x, a1 = ui->group.x + ui->group.width;
+            const int32_t b0 = ui->y, b1 = ui->y + ui->h;
+            if (a0 >= x1 || x0 >= a1 || b0 >= y1 || y0 >= b1) continue;
+            if (!any) { ux0 = a0; ux1 = a1; uy0 = b0; uy1 = b1; any = 1; }
+            else {
+                if (a0 < ux0) ux0 = a0;
+                if (a1 > ux1) ux1 = a1;
+                if (b0 < uy0) uy0 = b0;
+                if (b1 > uy1) uy1 = b1;
+            }
+        }
+        if (any && ux0 <= x0 && x1 <= ux1 && uy0 <= y0 && y1 <= uy1) {
+            keep[i] = 1;
+            ws_ui_reject.enclosed++;
         }
     }
 
