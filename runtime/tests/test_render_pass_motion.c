@@ -164,6 +164,27 @@ static void test_angles_vectors_scalars(void) {
     psx_motion_set_destroy(s);
 }
 
+static void test_rotation_only(void) {
+    PSXMotionSet* s = psx_motion_set_create(4);
+    PSXMotionLimits lim = {100.0, 0};
+    PSXMotionStats st;
+    /* A bare rotation (as in a pose record) with other data right after it. */
+    put_matrix(0xA00, 0.0, 0, 0, 0);
+    psx_mod_write_word(0xA00 + 0x12, 0xDEADBEEFu);
+    psx_motion_begin(s, 1);
+    psx_motion_track(s, PSX_MOTION_ROTATION, 0xA00, 3);
+    psx_motion_prepare(s, &lim, &st);
+    put_matrix(0xA00, 1.0, 0, 0, 0);
+    psx_mod_write_word(0xA00 + 0x12, 0xDEADBEEFu);
+    psx_motion_begin(s, 2);
+    psx_motion_track(s, PSX_MOTION_ROTATION, 0xA00, 3);
+    CHECK(psx_motion_prepare(s, &lim, &st) == 1, "a bare rotation blends");
+    psx_motion_apply(s, 0.5);
+    CHECK(fabs(yaw_of(0xA00) - 0.5) < 0.002, "rotation-only slerps");
+    CHECK(psx_mod_read_word(0xA00 + 0x12) == 0xDEADBEEFu, "nothing past the 18 bytes is written");
+    psx_motion_set_destroy(s);
+}
+
 static int s_fn_calls;
 static double s_fn_last;
 static int frame_fn(struct CPUState* cpu, void* user, uint32_t alpha) {
@@ -209,6 +230,7 @@ int main(void) {
     test_matrix_slerp();
     test_identity_and_limits();
     test_angles_vectors_scalars();
+    test_rotation_only();
     test_frame_driver();
     printf(failures ? "FAILED (%d)\n" : "ALL PASS\n", failures);
     return failures ? 1 : 0;
