@@ -187,7 +187,7 @@ void build_function_entry_hooks(const RuntimeMods& s) {
     auto& functions = active_guest_functions();
     for (const auto& plugin : s.plan.plugins)
         for (const auto& function : mod_guest_functions(plugin.id))
-            functions.push_back({function.address, function.callback, &plugin});
+            functions.push_back({function.address, function.callback, nullptr, &plugin});
     std::sort(functions.begin(), functions.end(),
               [](const auto& a, const auto& b) { return a.key < b.key; });
     g_psx_mod_guest_functions = (uint32_t)functions.size();
