@@ -259,6 +259,15 @@ int main(void) {
         gpu_ws_prepass_linked_list(OT_HEAD);
         assert(ws_ui_prepass_count == 2);        /* frame + gouraud fill only */
         assert(ws_ui_reject.too_big == 1);
+        /* A rule stopping two pixels short of each edge is full width too. */
+        const uint32_t rule[5] = {
+            0x28000000u, pack_vertex((int16_t)(bx0 + 2), 40), pack_vertex((int16_t)(bx1 - 2), 40),
+            pack_vertex((int16_t)(bx0 + 2), 44), pack_vertex((int16_t)(bx1 - 2), 44),
+        };
+        put_node(NODE_FLAT, 0xFFFFFFu, rule, 5);
+        gpu_ws_prepass_linked_list(OT_HEAD);
+        assert(ws_ui_prepass_count == 2 && ws_ui_reject.too_big == 1);
+        put_node(NODE_FLAT, 0xFFFFFFu, bar, 5);
         gpu_exec_reset_triangles();
         load_packet(NODE_FLAT, 5);
         gp0_exec_mono_quad();
