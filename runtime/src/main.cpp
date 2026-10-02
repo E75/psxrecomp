@@ -1303,6 +1303,11 @@ static int           g_hotkey_pad_fast_forward_toggle = 0; /* unbound: latch fas
 static uint32_t      g_savestate_input_guard_min_until = 0;
 static uint32_t      g_savestate_input_guard_max_until = 0;
 static int           g_headless       = 0;   /* debug/CI frontend: no SDL window/audio */
+/* Test frontend: the full windowed runtime (presenter, frame interpolation,
+ * render passes) in a window that is never shown. For automated checks of
+ * presentation features without putting a window on the desktop; drive it
+ * over TCP like --headless. */
+static int           g_hidden_window  = 0;
 
 /* FMV instant-skip via the game's OWN end-of-movie path. Tomba's MDEC player
  * (FUN_8001efe8) tears a movie down when the streamed frame number reaches that
@@ -13297,6 +13302,8 @@ int main(int argc, char** argv) {
      *   --launcher          force the GUI launcher (overrides skip_launcher)
      *   --no-launcher       skip the GUI launcher (boot straight in)
      *   --headless          skip SDL window/audio; use TCP screenshots/state
+     *   --hidden-window     full presenter in a never-shown window (TCP-driven
+     *                       tests of interpolation / render passes)
      *   --netplay           enable delay-sync LAN (also PSX_NETPLAY=1)
      *   --net-slot N        local player slot (0|1)
      *   --net-input-player N  host device to sample (0=P1, 1=P2; default auto)
@@ -13337,6 +13344,9 @@ int main(int argc, char** argv) {
             force_no_launcher = true;
         } else if (std::strcmp(argv[i], "--headless") == 0) {
             g_headless = 1;
+            force_no_launcher = true;
+        } else if (std::strcmp(argv[i], "--hidden-window") == 0) {
+            g_hidden_window = 1;
             force_no_launcher = true;
         } else if (std::strcmp(argv[i], "--netplay") == 0) {
             net_cfg.enabled = 1;
@@ -16183,6 +16193,11 @@ session_reboot:
             win_flags |= PSX_SDL_WINDOW_HIGH_DENSITY;
     }
     if (g_video_renderer == 2) win_flags |= SDL_WINDOW_VULKAN;
+    if (g_hidden_window) {
+        win_flags &= ~(Uint32)SDL_WINDOW_SHOWN;
+        win_flags |= SDL_WINDOW_HIDDEN;
+        g_fullscreen = 0;
+    }
     /* Fullscreen on launch (launcher's tri-state Fullscreen control): 1 =
      * borderless desktop fullscreen (keeps the desktop resolution, letterboxes
      * the image), 2 = exclusive fullscreen (real display-mode change), 0 =
