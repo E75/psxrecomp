@@ -5353,6 +5353,40 @@ static void handle_pgxp_shadow(int id, const char *json)
     send_fmt("%s", buf);
 }
 
+/* pgxp_miss_ring — the newest refused perspective-depth lookups (always-on
+ * ring, PGXP_MISS_RING_CAP deep): {"cmd":"pgxp_miss_ring","count":N}. Each
+ * entry: packet word address (canonical RAM offset), the word the GPU
+ * consumed, the word/flags the shadow held, and the reason (untracked,
+ * mismatch, partial, no_z). Join addr with wtrace_dump to name the writer. */
+static void handle_pgxp_miss_ring(int id, const char *json)
+{
+    static const char *const reasons[] = { "?", "untracked", "mismatch",
+                                           "partial", "no_z" };
+    const PGXPWordMiss *ring; uint32_t cap;
+    uint64_t total = pgxp_word_miss_ring(&ring, &cap);
+    int count = json_get_int(json, "count", 256);
+    uint64_t avail = total < cap ? total : cap;
+    if (count < 0) count = 0;
+    if ((uint64_t)count > avail) count = (int)avail;
+    size_t sz = (size_t)count * 160u + 256u;
+    char *buf = (char *)malloc(sz);
+    if (!buf) { send_err(id, "oom"); return; }
+    size_t n = (size_t)snprintf(buf, sz, "{\"id\":%d,\"ok\":true,\"total\":%llu,\"entries\":[",
+                                id, (unsigned long long)total);
+    for (int i = 0; i < count; i++) {
+        const PGXPWordMiss *m = &ring[(total - (uint64_t)count + (uint64_t)i) % cap];
+        n += (size_t)snprintf(buf + n, sz - n,
+                              "%s{\"seq\":%llu,\"addr\":\"0x%08X\",\"packet\":\"0x%08X\","
+                              "\"shadow\":\"0x%08X\",\"flags\":%u,\"live\":%u,\"reason\":\"%s\"}",
+                              i ? "," : "", (unsigned long long)m->seq, m->addr, m->packet,
+                              m->shadow_value, m->shadow_flags, m->live,
+                              reasons[m->reason < 5 ? m->reason : 0]);
+    }
+    snprintf(buf + n, sz - n, "]}");
+    send_fmt("%s", buf);
+    free(buf);
+}
+
 /* pgxp — live-tune the value-propagation engine for one-toggle isolation runs
  * without a rebuild: {"cmd":"pgxp","cpu_mode":0|1,"tolerance":F}. Fields are
  * optional; the reply echoes the resulting state (same shape as
@@ -14402,6 +14436,7 @@ static const CmdEntry s_commands[] = {
     { "geom_correction",   handle_geom_correction },
     { "pgxp",              handle_pgxp },
     { "pgxp_shadow",       handle_pgxp_shadow },
+    { "pgxp_miss_ring",    handle_pgxp_miss_ring },
     { "ws_aspect_cone_site", handle_ws_aspect_cone_site },
     { "ws_margin",         handle_ws_margin },
     { "ws_hud_mode",       handle_ws_hud_mode },

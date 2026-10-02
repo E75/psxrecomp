@@ -823,21 +823,60 @@ extern "C" void pgxp_test_set_generation(uint32_t gen) { s_gen = gen; }
 /* Address-keyed depth lookup for the shipped perspective-texturing path
  * (gpu.c prepare_texture_triangle). Same contract as the retired hashed
  * table: hit only when the tracked word matches the packet word exactly. */
+/* Always-on ring of refused precise-word lookups: which packet word, what
+ * the shadow at its address held, and why it was refused. Join it with
+ * wtrace_dump (writer PC per address) to find the guest code path that drops
+ * provenance. */
+static PGXPWordMiss s_miss_ring[PGXP_MISS_RING_CAP];
+static uint64_t     s_miss_seq = 0;
+
+static void note_word_miss(uint32_t addr, uint32_t packed, const PGXPValue *pv,
+                           uint8_t reason) {
+    PGXPWordMiss *m = &s_miss_ring[s_miss_seq % PGXP_MISS_RING_CAP];
+    m->seq = s_miss_seq++;
+    m->addr = addr;
+    m->packet = packed;
+    m->shadow_value = pv ? pv->value : 0;
+    m->shadow_flags = pv ? (uint8_t)pv->flags : 0;
+    m->live = (pv && pv->gen == s_gen) ? 1 : 0;
+    m->reason = reason;
+}
+
+extern "C" uint64_t pgxp_word_miss_ring(const PGXPWordMiss **ring,
+                                        uint32_t *cap) {
+    *ring = s_miss_ring;
+    *cap = PGXP_MISS_RING_CAP;
+    return s_miss_seq;
+}
+
 extern "C" int pgxp_load_precise_word(uint32_t addr, uint32_t packed,
                                       int32_t *x16, int32_t *y16, uint16_t *z) {
     if (!s_enabled) return 0;
     s_stats.word_lookups++;
     PGXPValue *pv = pgxp_ptr(addr);
-    if (!pv || pv->gen != s_gen) { s_stats.word_untracked++; return 0; }
-    if (pv->value != packed)     { s_stats.word_mismatch++;  return 0; }
+    if (!pv || pv->gen != s_gen) {
+        s_stats.word_untracked++;
+        note_word_miss(addr, packed, pv, PGXP_MISS_UNTRACKED);
+        return 0;
+    }
+    if (pv->value != packed) {
+        s_stats.word_mismatch++;
+        note_word_miss(addr, packed, pv, PGXP_MISS_MISMATCH);
+        return 0;
+    }
     if ((pv->flags & PGXP_F_VXY) != PGXP_F_VXY) {
         s_stats.word_partial++;
+        note_word_miss(addr, packed, pv, PGXP_MISS_PARTIAL);
         return 0;
     }
     if (x16) *x16 = pv->x16;
     if (y16) *y16 = pv->y16;
     if (z) *z = (pv->flags & PGXP_F_VZ) ? pv->z : 0;
-    if (!(pv->flags & PGXP_F_VZ) || pv->z == 0) { s_stats.word_no_z++; return 0; }
+    if (!(pv->flags & PGXP_F_VZ) || pv->z == 0) {
+        s_stats.word_no_z++;
+        note_word_miss(addr, packed, pv, PGXP_MISS_NO_Z);
+        return 0;
+    }
     s_stats.word_hit++;
     return 1;
 }

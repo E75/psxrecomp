@@ -127,6 +127,26 @@ void pgxp_store_gte_reg(uint32_t addr, uint8_t reg);
 int pgxp_load_precise_word(uint32_t addr, uint32_t packed,
                            int32_t *x16, int32_t *y16, uint16_t *z);
 
+/* Refused precise-word lookups, newest at (seq - 1) % cap (TCP pgxp_miss_ring). */
+enum {
+    PGXP_MISS_UNTRACKED = 1,
+    PGXP_MISS_MISMATCH  = 2,
+    PGXP_MISS_PARTIAL   = 3,
+    PGXP_MISS_NO_Z      = 4
+};
+#define PGXP_MISS_RING_CAP 8192u
+typedef struct PGXPWordMiss {
+    uint64_t seq;
+    uint32_t addr;          /* packet word address (canonical RAM offset)   */
+    uint32_t packet;        /* the word the GPU consumed                    */
+    uint32_t shadow_value;  /* the word the shadow describes                */
+    uint8_t  shadow_flags;  /* 1 = X, 2 = Y, 4 = Z                          */
+    uint8_t  live;          /* shadow belongs to the current generation     */
+    uint8_t  reason;        /* PGXP_MISS_*                                  */
+} PGXPWordMiss;
+/* Returns the total number of misses ever recorded. */
+uint64_t pgxp_word_miss_ring(const PGXPWordMiss **ring, uint32_t *cap);
+
 /* Debug read of one shadow slot (TCP pgxp_shadow). `space`: 0 = guest
  * address (RAM / scratchpad), 1 = GPR index (32 = HI, 33 = LO), 2 = GTE data
  * register. Returns 0 when the slot does not exist; *live says whether it
