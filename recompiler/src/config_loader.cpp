@@ -63,7 +63,10 @@ uint32_t overlay_codegen_config_hash(const GameConfig& c) {
 
     h.words("sprite_tag_funcs", c.ws_sprite_tag_funcs);
     h.words("mod_function_entry_funcs", c.mod_function_entry_funcs);
-    h.words("mod_instruction_sites", c.mod_instruction_sites);
+    // Appended only when used, like the other late additions: a config that
+    // does not use the feature keeps the hash (and every overlay cache) it had.
+    if (!c.mod_instruction_sites.empty())
+        h.words("mod_instruction_sites", c.mod_instruction_sites);
     h.words("cull_bias", c.ws_cull_bias_sites);
     if (!c.ws_cull_bias_lower_sites.empty())
         h.words("cull_bias_lower", c.ws_cull_bias_lower_sites);
@@ -133,13 +136,15 @@ uint32_t overlay_codegen_config_hash(const GameConfig& c) {
     std::vector<WidescreenCullScaleSite> scale_sites = c.ws_cull_scale_sites;
     std::sort(scale_sites.begin(), scale_sites.end(),
               [](const auto& a, const auto& b) { return a.address < b.address; });
-    h.tag("cull_scale");
-    h.u32((uint32_t)scale_sites.size());
-    for (const auto& site : scale_sites) {
-        h.u32(site.address);
-        h.u32(site.expected);
-        h.u32(site.operand);
-        h.u32(site.half_extent);
+    if (!scale_sites.empty()) {   // appended only when used (see above)
+        h.tag("cull_scale");
+        h.u32((uint32_t)scale_sites.size());
+        for (const auto& site : scale_sites) {
+            h.u32(site.address);
+            h.u32(site.expected);
+            h.u32(site.operand);
+            h.u32(site.half_extent);
+        }
     }
 
     std::vector<WidescreenAngleSite> angle_sites = c.ws_cull_angle_sites;
