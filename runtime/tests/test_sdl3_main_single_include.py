@@ -21,9 +21,22 @@ def main() -> int:
                 if SDL_MAIN_HEADER in source:
                     owners.append(path.relative_to(ROOT).as_posix())
 
+    # The header's implementation is per executable. The app's entry point is
+    # runtime/src/main.cpp and nothing under src/ or include/ may pull it in
+    # (any of those would be linked into the app next to main.cpp). A test may
+    # include it only as the entry-point TU of its own standalone executable:
+    # the file defines main() itself, and is not linked into the app.
+    standalone = []
+    for owner in list(owners):
+        if owner.startswith("runtime/tests/"):
+            text = (ROOT / owner).read_text(encoding="utf-8")
+            if "int main(" in text:
+                standalone.append(owner)
+                owners.remove(owner)
     if owners != ["runtime/src/main.cpp"]:
         raise AssertionError(
-            "SDL_main.h must be included exactly once by runtime/src/main.cpp; "
+            "SDL_main.h must be included by runtime/src/main.cpp and, outside "
+            "tests with their own main(), nowhere else; "
             f"found {owners}"
         )
 
