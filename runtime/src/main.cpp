@@ -6059,7 +6059,16 @@ done:
  * into port 2 for as long as a test drives it, so headless runs can reach and
  * play two-player modes. Applied after the normal sampling so it wins. */
 static void apply_input_override_port2(int override_word) {
-    if (override_word < 0) return;
+    static int s_was_driven;
+    if (override_word < 0) {
+        /* Ending an injection releases its buttons: with no device in the
+         * port, nothing else would write the word again. A real device in
+         * port 2 is resampled each frame anyway. */
+        if (s_was_driven) sio_set_pad_state_slot(1, 0xFFFFu);
+        s_was_driven = 0;
+        return;
+    }
+    s_was_driven = 1;
     if (!sio_get_pad_connected(1)) {
         sio_set_pad_connected(1, 1);
         sio_set_pad_analog(1, 0, 0x80, 0x80, 0x80, 0x80);
