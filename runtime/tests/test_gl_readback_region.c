@@ -1,6 +1,10 @@
 /* Original source-owned GL readback-coherence regression. No retail payload. */
 #include "gpu_gl_renderer.c"
 #include "mod_texture_banks.c"
+#include "gpu_timeline.c"
+uint64_t psx_cycle_count=0;
+static int test_full_composite;
+int gpu_ws_background_requires_full_composite(void){return test_full_composite;}
 uint32_t psx_mod_gpu_dma_memory_alloc(uint32_t n,uint32_t a){(void)n;(void)a;return 0;}
 uint32_t psx_mod_read_word(uint32_t a){(void)a;return 0;}
 static uint16_t image[1024*512], oracle[1024*512];
@@ -60,6 +64,28 @@ static void verify_bank_batching(void) {
  }
  psx_mod_set_texture_bank_batching(0);s_tex_filter=0;
  glb_set_mask_bits(0,0);glb_set_semi_transparency(0,0);
+}
+/* Native-wide, vertically double-buffered (both bands in ONE wide surface):
+ * a full-width flat rect takes the full-screen-overlay wide pass. It spans
+ * above its draw area; canonical VRAM clips it at the band top, and the wide
+ * surface must clip it there too instead of painting the other band. */
+static void verify_wide_overlay_band(void) {
+ const int S=s_scale,W=426*S,H=512*S;
+ uint32_t *wide=(uint32_t*)malloc((size_t)W*H*sizeof(uint32_t));
+ int ow=0,oh=0;
+ check(wide!=NULL,"wide dump alloc");if(!wide)return;
+ glb_set_draw_area(0,0,1023,511);
+ glb_wide_configure(426,53);glb_wide_set_target(0);
+ glb_wide_clear(0,0,512,0x0421);
+ glb_set_draw_area(0,240,319,479);
+ glb_draw_flat_rect(0,158,320,322,0x001f);flush_flat_batch();
+ check(glb_wide_dump_full(wide,W*H,&ow,&oh,0)>0&&ow==W&&oh==H,"wide surface dump");
+ const uint32_t other=wide[(200*S)*W+5*S],edge=wide[(239*S+S-1)*W+420*S],drawn=wide[(240*S)*W+5*S];
+ check(((other>>16)&0xff)<0x20,"overlay rect leaves the other band's margin");
+ check(((edge>>16)&0xff)<0x20,"overlay rect stops at the draw-area top row");
+ check(((drawn>>16)&0xff)>=0xf0,"overlay rect covers its own band's margin");
+ free(wide);
+ glb_set_draw_area(0,0,1023,511);glb_wide_disable_target();glb_wide_configure(0,0);
 }
 int main(int argc,char **argv){
  int scale=argc>1?atoi(argv[1]):1;
@@ -177,6 +203,8 @@ int main(int argc,char **argv){
  glb_wide_set_view(0,0,0,0);
  check(wide_dx()==53,"disabled view preserves original origin");
  free(wide_pixels);
+ for(test_full_composite=0;test_full_composite<2;test_full_composite++)verify_wide_overlay_band();
+ test_full_composite=0;
  printf("checks=%d failures=%d\n",checks,failures);
  gl_renderer_shutdown();SDL_DestroyWindow(win);SDL_Quit();return failures?1:0;
 }

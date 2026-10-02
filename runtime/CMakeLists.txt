@@ -234,6 +234,7 @@ if(BUILD_TESTING)
             tests/psx_ram_runtime_map_stubs.c
             src/memory.c
             src/dma.c
+            src/gpu_timeline.c
             src/boot_state.c
             src/psx_ram_geometry.c)
         target_include_directories(psx_ram_runtime_map_test PRIVATE include src)
@@ -630,24 +631,37 @@ if(BUILD_TESTING)
     add_executable(mod_packages_test
         tests/test_mod_packages.cpp
         src/mod_packages.cpp
+        src/mod_media.cpp src/iso_reader.cpp src/cue_sheet.cpp
         src/crc32.c
         src/psx_sha256.c)
     target_include_directories(mod_packages_test PRIVATE
         include
+        ../recompiler/include
         ../recompiler/lib/toml11)
+    target_link_libraries(mod_packages_test PRIVATE chdr-static)
     add_test(NAME mod_packages_test COMMAND mod_packages_test)
 
     add_executable(builtin_mod_manifests_test
         tests/test_builtin_mod_manifests.cpp
         src/mod_packages.cpp
+        src/mod_media.cpp src/iso_reader.cpp src/cue_sheet.cpp
         src/crc32.c
         src/psx_sha256.c)
     target_include_directories(builtin_mod_manifests_test PRIVATE
         include
+        ../recompiler/include
         ../recompiler/lib/toml11)
+    target_link_libraries(builtin_mod_manifests_test PRIVATE chdr-static)
     add_test(NAME builtin_mod_manifests_test
              COMMAND builtin_mod_manifests_test
                      "${CMAKE_CURRENT_SOURCE_DIR}/../mods/builtin/packages")
+
+    add_executable(mod_media_test
+        tests/test_mod_media.cpp src/mod_media.cpp src/iso_reader.cpp
+        src/cue_sheet.cpp src/psx_sha256.c)
+    target_include_directories(mod_media_test PRIVATE include ../recompiler/include)
+    target_link_libraries(mod_media_test PRIVATE chdr-static)
+    add_test(NAME mod_media_test COMMAND mod_media_test)
 
     add_executable(text_xlate_fix_only_test
         tests/test_text_xlate_fix_only.cpp
@@ -660,8 +674,10 @@ if(BUILD_TESTING)
 
     add_executable(mod_runtime_test
         tests/test_mod_runtime.cpp
+        src/iso_reader_c.cpp
         src/mod_runtime.cpp
         src/mod_packages.cpp
+        src/mod_media.cpp
         src/disc_path.cpp
         src/cue_sheet.cpp
         src/iso_reader.cpp

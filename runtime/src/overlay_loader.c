@@ -2600,6 +2600,8 @@ static void init_callbacks(void) {
             extern int psx_mod_function_entry(CPUState *cpu, uint32_t address);
             s_callbacks.ws_screen_x_bound = psx_ws_screen_x_bound;
             s_callbacks.mod_function_entry = psx_mod_function_entry;
+            extern void psx_mod_instruction(CPUState*, uint32_t, uint32_t);
+            s_callbacks.mod_instruction = psx_mod_instruction;
         }
         /* ABI v14: GTE precision-store tracker — the emitter emits a direct
          * gte_precision_store_word() call for every swc2 (GTE store-word),
@@ -2636,6 +2638,14 @@ static void init_callbacks(void) {
         {
             extern uint32_t psx_ws_angle_widen(uint32_t vanilla);
             s_callbacks.ws_angle_widen = psx_ws_angle_widen;
+        }
+        {
+            extern int32_t psx_ws_cull_scale(int32_t bound, int32_t half_extent);
+            s_callbacks.ws_cull_scale = psx_ws_cull_scale;
+        }
+        {
+            extern int32_t gte_nclip_exact_sign(int32_t native_mac0, uint32_t pc);
+            s_callbacks.nclip_exact_sign = gte_nclip_exact_sign;
         }
         /* PGXP dataflow-shadowing hook table (pgxp_hooks.h, appended last).
          * Referenced only by pgxp-flavour shards; the flavor half of the ABI

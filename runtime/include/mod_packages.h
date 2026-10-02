@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -224,6 +225,8 @@ struct ModResource {
     std::string file_description;
     std::string format = "file";
     bool required = false;
+    uint64_t size = 0;
+    std::string sha256;
 };
 
 struct ModDerivedDisc {
@@ -352,6 +355,9 @@ struct ModResolution {
         std::string feature_id;
         std::string id;
         std::filesystem::path path;
+        std::string format;
+        std::string sha256;
+        std::shared_ptr<const std::vector<uint8_t>> bytes;
     };
     std::vector<Resource> resources;
     struct Diagnostic {
@@ -525,6 +531,8 @@ bool mod_register_function_entry_plugin(const std::string& id, uint32_t address,
                                         PSXModFunctionEntryCallback callback);
 bool mod_register_function_filter_plugin(const std::string& id, uint32_t address,
                                          PSXModFunctionFilterCallback callback);
+bool mod_register_guest_function_plugin(const std::string& id, uint32_t address,
+                                        PSXModFunctionEntryCallback callback);
 bool mod_plugin_registered(const std::string& id);
 void mod_invoke_activation_plugin(const std::string& id);
 void mod_invoke_vblank_plugin(const std::string& id);
@@ -536,6 +544,35 @@ struct ModFunctionEntryHook {
 /* Hooks one implementation registered, in registration order. mod_runtime
  * flattens these into an address table when the plan's plugins activate. */
 std::vector<ModFunctionEntryHook> mod_function_entry_hooks(const std::string& id);
+std::vector<ModFunctionEntryHook> mod_guest_functions(const std::string& id);
+struct ModInstructionHook {
+    uint32_t address, expected;
+    PSXModFunctionEntryCallback callback;
+};
+bool mod_register_instruction_plugin(const std::string& id, uint32_t address,
+                                      uint32_t expected, PSXModFunctionEntryCallback callback);
+std::vector<ModInstructionHook> mod_instruction_hooks(const std::string& id);
 void mod_clear_plugins_for_tests();
+
+/* Every id a trusted implementation registered (activation, vblank or
+ * function-entry), sorted. */
+std::vector<std::string> mod_registered_plugin_ids();
+
+/* Registered implementations that no manifest under `manifest_roots` declares
+ * as a [[plugin]] id. The resolved plan activates plugins by manifest id only,
+ * so such an implementation can never run: a hook registered under a sub-id
+ * ("x.widescreen.hud") is silently dead while its package ("x.widescreen")
+ * resolves cleanly. Roots are searched recursively for manifest.toml; pass the
+ * AUTHORED trees (title mods/preloaded, framework mods/builtin) so developer
+ * packages a release catalog strips still count as declarations. Manifests
+ * that fail to parse are reported through `errors`. */
+struct ModPluginAudit {
+    std::vector<std::string> undeclared;   /* registered, never declared */
+    std::vector<std::string> declared;     /* every manifest [[plugin]] id */
+    std::vector<std::string> errors;
+    size_t manifests = 0;
+};
+ModPluginAudit mod_audit_registered_plugins(
+    const std::vector<std::filesystem::path>& manifest_roots);
 
 } // namespace PSXRecompV4

@@ -247,6 +247,10 @@ int32_t psx_ws_player_x_bound(int32_t vanilla) {
 int32_t psx_ws_screen_x_bound(int32_t vanilla) {
     return g_cbs.ws_screen_x_bound ? g_cbs.ws_screen_x_bound(vanilla) : vanilla;
 }
+void psx_mod_instruction(CPUState *cpu, uint32_t address, uint32_t word) {
+    overlay_flush_cycles();
+    if (g_cbs.mod_instruction) g_cbs.mod_instruction(cpu, address, word);
+}
 int psx_mod_function_entry(CPUState *cpu, uint32_t address) {
     overlay_flush_cycles();
     return g_cbs.mod_function_entry ? g_cbs.mod_function_entry(cpu, address) : 0;
@@ -276,6 +280,16 @@ uint32_t psx_ws_angle_widen(uint32_t vanilla) {
     return g_cbs.ws_angle_widen
         ? g_cbs.ws_angle_widen(vanilla)
         : vanilla;
+}
+int32_t psx_ws_cull_scale(int32_t bound, int32_t half_extent) {
+    return g_cbs.ws_cull_scale
+        ? g_cbs.ws_cull_scale(bound, half_extent)
+        : bound;
+}
+int32_t gte_nclip_exact_sign(int32_t native_mac0, uint32_t pc) {
+    return g_cbs.nclip_exact_sign
+        ? g_cbs.nclip_exact_sign(native_mac0, pc)
+        : (native_mac0 < 0 ? -1 : (native_mac0 > 0 ? 1 : 0));
 }
 /* Sub-pixel GTE precision-store tracker (ABI v14). The emitter emits a direct
  * gte_precision_store_word() call for every swc2 (GTE store-word), including in

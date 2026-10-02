@@ -802,6 +802,20 @@ std::string CodeGenerator::generate_branch_condition(uint32_t instr, uint32_t ad
         return fmt::format("psx_ws_x_margin() > 0 ? 0 : ({}) /* ws branch keep */",
                            cond);
     };
+    // NCLIP/backface sign branches (bltz/bgez/blez/bgtz on a MAC0 copy).
+    // nclip_keep: reject forced not-taken while wide. nclip_exact: test the
+    // exact tracked sign while wide. Every sign-test shape is supported: the
+    // title's emitter decides which one its backface reject uses. Returns ""
+    // when addr is not a configured NCLIP site.
+    auto nclip_sign_branch = [&](const char *cmp) -> std::string {
+        if (config_.ws_cull_nclip_keep_sites.count(addr))
+            return fmt::format("psx_ws_x_margin() > 0 ? 0 : ((int32_t){} {} 0) /* ws nclip keep */",
+                               reg_name(rs), cmp);
+        if (config_.ws_cull_nclip_exact_sites.count(addr))
+            return fmt::format("psx_ws_x_margin() > 0 ? (gte_nclip_exact_sign((int32_t){}, 0x{:08X}u) {} 0) : ((int32_t){} {} 0) /* ws exact nclip */",
+                               reg_name(rs), addr, cmp, reg_name(rs), cmp);
+        return "";
+    };
 
     // REGIMM branches. R3000A hardware decodes EVERY rt value here, not just
     // the four assembler mnemonics: the branch sense is rt bit 0 (0 = bltz,
@@ -824,12 +838,10 @@ std::string CodeGenerator::generate_branch_condition(uint32_t instr, uint32_t ad
                 (ws_cull_bltz_pcs_.count(addr) || config_.ws_cull_bltz_sites.count(addr)))
                 return fmt::format("psx_ws_cull_bltz({}) /* ws cull (left edge) */",
                                    reg_name(rs));
-            if (regimm_op == 0x00 && config_.ws_cull_nclip_keep_sites.count(addr))
-                return fmt::format("psx_ws_x_margin() > 0 ? 0 : ((int32_t){} < 0) /* ws nclip keep */",
-                                   reg_name(rs));
-            if (regimm_op == 0x00 && config_.ws_cull_nclip_exact_sites.count(addr))
-                return fmt::format("psx_ws_x_margin() > 0 ? gte_nclip_precise_bltz((int32_t){}) : ((int32_t){} < 0) /* ws exact nclip */",
-                                   reg_name(rs), reg_name(rs));
+            if (regimm_op == 0x00) {
+                const std::string n = nclip_sign_branch("<");
+                if (!n.empty()) return n;
+            }
             return keep_branch_if_wide(
                 fmt::format("(int32_t){} < 0", reg_name(rs)));
         } else {                            // bgez family (incl. bgezal + undefined mirrors)
@@ -840,6 +852,10 @@ std::string CodeGenerator::generate_branch_condition(uint32_t instr, uint32_t ad
             if (regimm_op == 0x01 && config_.ws_cull_bgez_sites.count(addr))
                 return fmt::format("psx_ws_cull_bgez({}) /* ws cull (left keep) */",
                                    reg_name(rs));
+            if (regimm_op == 0x01) {
+                const std::string n = nclip_sign_branch(">=");
+                if (!n.empty()) return n;
+            }
             return keep_branch_if_wide(
                 fmt::format("(int32_t){} >= 0", reg_name(rs)));
         }
@@ -858,11 +874,15 @@ std::string CodeGenerator::generate_branch_condition(uint32_t instr, uint32_t ad
 
         case 0x06: // blez
         case 0x16: // blezl
+            if (const std::string n = nclip_sign_branch("<="); !n.empty())
+                return n;
             return keep_branch_if_wide(
                 fmt::format("(int32_t){} <= 0", reg_name(rs)));
 
         case 0x07: // bgtz
         case 0x17: // bgtzl
+            if (const std::string n = nclip_sign_branch(">"); !n.empty())
+                return n;
             return keep_branch_if_wide(
                 fmt::format("(int32_t){} > 0", reg_name(rs)));
     }
@@ -870,7 +890,17 @@ std::string CodeGenerator::generate_branch_condition(uint32_t instr, uint32_t ad
     return keep_branch_if_wide("0 /* unknown branch condition: defaults to not-taken */");
 }
 
+std::string CodeGenerator::mod_instruction_call(uint32_t addr, uint32_t instr) const {
+    const bool selected = std::any_of(config_.mod_instruction_sites.begin(),
+        config_.mod_instruction_sites.end(), [=](uint32_t site) {
+            return (site & 0x1FFFFFFFu) == (addr & 0x1FFFFFFFu);
+        });
+    return selected ? fmt::format("psx_mod_instruction(cpu, 0x{:08X}u, 0x{:08X}u);\n", addr, instr) : "";
+}
 std::string CodeGenerator::translate_instruction(uint32_t addr, uint32_t instr) {
+    return mod_instruction_call(addr, instr) + translate_instruction_body(addr, instr);
+}
+std::string CodeGenerator::translate_instruction_body(uint32_t addr, uint32_t instr) {
     uint32_t opcode = (instr >> 26) & 0x3F;
     uint32_t funct = instr & 0x3F;
 
@@ -1037,6 +1067,38 @@ std::string CodeGenerator::translate_instruction(uint32_t addr, uint32_t instr) 
             "{} = psx_ws_cull_keep_result(({}), {}u);"
             "  /* ws maximal object/model participation */{}",
             reg_name(dst), vanilla, site.result, comment);
+    }
+
+    // Register-register frustum-edge compares ([[widescreen.cull.scale]]):
+    // the configured operand is a +/-half_extent*z bound computed at runtime,
+    // so it is scaled by the live reveal instead of rewriting an immediate.
+    // psx_ws_cull_scale is identity at 4:3. Overlay variants with another
+    // instruction at the same VA are left untouched.
+    for (const auto& site : config_.ws_cull_scale_sites) {
+        if ((site.address & 0x1FFFFFFFu) != (addr & 0x1FFFFFFFu)) continue;
+        if (instr != site.expected) {
+            if (config_.overlay_mode) continue;
+            fmt::print(stderr,
+                       "ERROR: cull scale expected 0x{:08X} at 0x{:08X}, found 0x{:08X}\n",
+                       site.expected, addr, instr);
+            std::exit(1);
+        }
+        const uint32_t rs = get_rs(instr), rt = get_rt(instr), rd = get_rd(instr);
+        const std::string a = site.operand == 0
+            ? fmt::format("(uint32_t)psx_ws_cull_scale((int32_t){}, {})",
+                          reg_name(rs), site.half_extent)
+            : std::string(reg_name(rs));
+        const std::string b = site.operand == 1
+            ? fmt::format("(uint32_t)psx_ws_cull_scale((int32_t){}, {})",
+                          reg_name(rt), site.half_extent)
+            : std::string(reg_name(rt));
+        if (funct == 0x2A)
+            return fmt::format("{} = ((int32_t){} < (int32_t){}) ? 1u : 0u;"
+                               "  /* ws cull scale (bound x (half+margin)/half) */{}",
+                               reg_name(rd), a, b, comment);
+        return fmt::format("{} = ({} < {}) ? 1u : 0u;"
+                           "  /* ws cull scale (bound x (half+margin)/half) */{}",
+                           reg_name(rd), a, b, comment);
     }
 
     // Widescreen automatic far-backdrop column PRELOAD ([widescreen.cull]
@@ -2124,6 +2186,7 @@ std::string CodeGenerator::translate_basic_block(
                 // Jumps (j/jal/jr/jalr) and reserved words never reach
                 // generate_branch_condition; check them here.
                 check_explicit_branch_site(addr, block.exit_instr.instruction);
+                ss << config_.indent << mod_instruction_call(addr, instr);
                 std::string delay_saved_cond;    // branch condition captured before delay
                 std::string delay_saved_target;  // JR/JALR target captured before delay
 
@@ -3438,6 +3501,7 @@ void CodeGenerator::emit_runtime_externs(std::ostream& ss) const {
     ss << "#endif\n";
     ss << "extern int  psx_game_text_native_ok(uint32_t addr);  /* stale-static guard (dispatch shard) */\n";
     ss << "extern int  psx_datashard_enter(CPUState* cpu, uint32_t key);  /* data-shard replay/capture (data_shards.c) */\n";
+    ss << "extern void psx_mod_instruction(CPUState*, uint32_t, uint32_t);\n";
     ss << "extern int psx_mod_function_entry(CPUState* cpu, uint32_t address);  /* trusted opt-in game-mod hook */\n";
     ss << "extern void psx_datashard_ret(CPUState* cpu);                  /* data-shard capture finalize */\n";
     ss << "extern int  psx_vsync_query_hle_enter(CPUState* cpu, uint32_t func, uint32_t counter_addr, uint32_t gpustat_ptr_addr, uint32_t timer1_ptr_addr, uint32_t timer1_cache_addr);  /* load_accel.c */\n";
@@ -3457,6 +3521,7 @@ void CodeGenerator::emit_runtime_externs(std::ostream& ss) const {
     ss << "extern int32_t psx_ws_plane_nx(int32_t nx);                /* ws side-plane normal-X scale (gpu.c) */\n";
     ss << "extern uint32_t psx_ws_xclip_bound(uint32_t vanilla);      /* ws per-prim X reject bound load (gpu.c) */\n";
     ss << "extern uint32_t psx_ws_cull_keep_result(uint32_t vanilla, uint32_t forced); /* ws guarded keep compare (gpu.c) */\n";
+    ss << "extern int32_t psx_ws_cull_scale(int32_t bound, int32_t half_extent); /* ws frustum-edge bound scale (gpu.c) */\n";
     ss << "extern uint32_t psx_ws_aspect_cone_result(uint32_t site, uint32_t vanilla, uint32_t object, int32_t x, int32_t z, int32_t y); /* aspect-aware participation cone */\n";
     ss << "extern uint32_t psx_ws_angle_widen(uint32_t vanilla); /* aspect-scaled 12-bit terrain-frustum half-angle */\n";
     ss << "extern int  psx_ws_backdrop_x(int x);  /* widescreen backdrop screenX squash (gpu.c) */\n";

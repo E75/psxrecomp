@@ -194,6 +194,13 @@ int psx_mod_function_entry(CPUState *cpu, uint32_t address) {
 int psx_netplay_is_resimulating(void) { return 0; }
 int psx_game_text_native_ok(uint32_t address) { (void)address; return 1; }
 uint32_t psx_ws_angle_widen(uint32_t vanilla) { return vanilla; }
+int32_t psx_ws_cull_scale(int32_t bound, int32_t half_extent) {
+    (void)half_extent; return bound;
+}
+int32_t gte_nclip_exact_sign(int32_t native_mac0, uint32_t pc) {
+    (void)pc;
+    return native_mac0 < 0 ? -1 : (native_mac0 > 0 ? 1 : 0);
+}
 uint32_t psx_ws_cull_keep_result(uint32_t vanilla, uint32_t forced) {
     (void)forced; return vanilla;
 }

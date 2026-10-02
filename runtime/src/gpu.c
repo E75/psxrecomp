@@ -48,6 +48,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "gpu_timeline.h"
 
 /* Word-aligned main-RAM key for a primitive/OT address through the live
  * geometry (retail: the DMAC's 0x1FFFFC fold). */
@@ -190,6 +191,9 @@ static void ws_nw_sync_target(void);
 typedef struct { uint32_t key; uint32_t stamp; int32_t anchor_x; } WsTag;
 static WsTag    ws_tags[WS_TAG_BUCKETS];
 static WsHudAnchorTag ws_hud_anchor_tags[WS_HUD_ANCHOR_TABLE_SIZE];
+static WsHudAnchorTag ws_background_tags[WS_HUD_ANCHOR_TABLE_SIZE];
+static uint32_t ws_background_tag_frame;
+static int ws_background_tags_used;
 static WsHudAnchorTag ws_reveal_clear_tags[WS_HUD_ANCHOR_TABLE_SIZE];
 static WsHudAnchorTag ws_screen_mask_tags[WS_HUD_ANCHOR_TABLE_SIZE];
 static WsRepeatRectTag ws_repeat_rect_tags[WS_REPEAT_RECT_TAG_TABLE_SIZE];
@@ -274,7 +278,12 @@ void gpu_ws_set_precise_nclip(int on) {
      * PGXP correction is disabled. Re-derive the internal transport arm. */
     gpu_pgxp_rederive_enable();
 }
-int gpu_ws_precise_nclip_enabled(void) { return ws_precise_nclip_cfg && ws_active(); }
+/* Same "reveals extra world" test the exact-NCLIP branch consumers use
+ * (psx_ws_x_margin() > 0): squash AND native-wide. ws_active() alone is the
+ * squash factor, which native-wide never sets, so the producer was dead there. */
+int gpu_ws_precise_nclip_enabled(void) {
+    return ws_precise_nclip_cfg && psx_ws_x_margin() > 0;
+}
 void gpu_ws_set_gameplay_state_gate(uint32_t addr,
                                     const uint32_t *values, int nvalues) {
     if (nvalues < 0) nvalues = 0;
@@ -880,6 +889,59 @@ int psx_ws_cull_keep_site(uint32_t pc, uint32_t instr, uint32_t vanilla,
         const WsCullKeepSite *site = &ws_cull_keep_sites[i];
         if (site->address != phys || site->expected != instr) continue;
         if (out) *out = psx_ws_cull_keep_result(vanilla, site->result);
+        return 1;
+    }
+    return 0;
+}
+
+typedef struct {
+    uint32_t address;
+    uint32_t expected;
+    uint32_t operand;      /* 0 = rs, 1 = rt */
+    int32_t  half_extent;
+} WsCullScaleSite;
+static WsCullScaleSite ws_cull_scale_sites[WS_EXPLICIT_CULL_SITES_MAX];
+static int ws_cull_scale_n = 0;
+void gpu_ws_set_cull_scale_sites(const uint32_t *addresses,
+                                 const uint32_t *expected,
+                                 const uint32_t *operands,
+                                 const uint32_t *half_extents, int nsites) {
+    if (nsites < 0) nsites = 0;
+    if (nsites > WS_EXPLICIT_CULL_SITES_MAX) nsites = WS_EXPLICIT_CULL_SITES_MAX;
+    ws_cull_scale_n = nsites;
+    for (int i = 0; i < nsites; i++) {
+        ws_cull_scale_sites[i].address = addresses[i] & 0x1FFFFFFFu;
+        ws_cull_scale_sites[i].expected = expected[i];
+        ws_cull_scale_sites[i].operand = operands[i] ? 1u : 0u;
+        ws_cull_scale_sites[i].half_extent = (int32_t)half_extents[i];
+    }
+}
+/* A camera-space frustum edge authored for a half_extent-pixel half-screen
+ * (x < half*z/H) widens to the live view by scaling the bound by
+ * (half + margin) / half. 64-bit intermediate; saturates to int32. */
+int32_t psx_ws_cull_scale(int32_t bound, int32_t half_extent) {
+    const int32_t margin = psx_ws_x_margin();
+    if (margin <= 0 || half_extent <= 0) return bound;
+    int64_t v = (int64_t)bound * (int64_t)(half_extent + margin) / half_extent;
+    if (v > INT32_MAX) v = INT32_MAX;
+    if (v < INT32_MIN) v = INT32_MIN;
+    return (int32_t)v;
+}
+int psx_ws_cull_scale_site(uint32_t pc, uint32_t instr, uint32_t rs_value,
+                           uint32_t rt_value, uint32_t *out) {
+    const uint32_t phys = pc & 0x1FFFFFFFu;
+    for (int i = 0; i < ws_cull_scale_n; i++) {
+        const WsCullScaleSite *site = &ws_cull_scale_sites[i];
+        if (site->address != phys || site->expected != instr) continue;
+        if (site->operand == 0)
+            rs_value = (uint32_t)psx_ws_cull_scale((int32_t)rs_value, site->half_extent);
+        else
+            rt_value = (uint32_t)psx_ws_cull_scale((int32_t)rt_value, site->half_extent);
+        const uint32_t funct = instr & 0x3Fu;
+        if (out)
+            *out = funct == 0x2Au
+                ? (((int32_t)rs_value < (int32_t)rt_value) ? 1u : 0u)
+                : ((rs_value < rt_value) ? 1u : 0u);
         return 1;
     }
     return 0;
@@ -2199,20 +2261,96 @@ static int ws_hud_command_words(uint32_t command_addr, uint32_t *words,
     return 1;
 }
 
+static GpuWsTagStats ws_hud_tag_stats;
+static GpuWsTagStats ws_background_tag_stats;
+
+void gpu_ws_get_tag_stats(GpuWsTagStats *hud, GpuWsTagStats *background) {
+    if (hud) *hud = ws_hud_tag_stats;
+    if (background) *background = ws_background_tag_stats;
+}
+
+static void ws_tag_stats_note_lookup(GpuWsTagStats *stats, int result) {
+    switch (result) {
+    case WS_HUD_ANCHOR_HIT:
+        stats->hit++;
+        stats->last_hit_frame = (uint32_t)s_frame_count;
+        break;
+    case WS_HUD_ANCHOR_STALE:          stats->stale++; break;
+    case WS_HUD_ANCHOR_GUARD_MISMATCH: stats->guard_mismatch++; break;
+    default: break;
+    }
+}
+
 void gpu_ws_tag_hud_prim(uint32_t prim, int anchor) {
-    if (!ws_native_wide_configured()) return;
-    if ((prim & 3u) != 0 || prim > UINT32_MAX - 4u) return;
+    ws_hud_tag_stats.tag_calls++;
     uint32_t command_addr = prim + 4u;
     uint32_t words[12];
     uint32_t word_count = 0;
-    if (!ws_hud_command_words(command_addr, words, &word_count))
+    if (!ws_native_wide_configured() ||
+        (prim & 3u) != 0 || prim > UINT32_MAX - 4u ||
+        !ws_hud_command_words(command_addr, words, &word_count)) {
+        ws_hud_tag_stats.tag_rejected++;
         return;
+    }
 
     WsPrepassPacketGuard guard =
         ws_prepass_packet_guard(words, word_count);
     ws_hud_anchor_insert(ws_hud_anchor_tags, WS_HUD_ANCHOR_TABLE_SIZE,
                          GPU_RAM_KEY(command_addr), anchor, &guard,
                          (uint32_t)s_frame_count);
+    ws_hud_tag_stats.last_tag_frame = (uint32_t)s_frame_count;
+}
+
+void gpu_ws_tag_background_prim(uint32_t prim) {
+    ws_background_tag_stats.tag_calls++;
+    uint32_t words[12], count = 0;
+    if (!ws_native_wide_configured() || (prim & 3u) ||
+        prim > UINT32_MAX - 4u ||
+        !ws_hud_command_words(prim + 4u, words, &count)) {
+        ws_background_tag_stats.tag_rejected++;
+        return;
+    }
+    uint32_t op = words[0] >> 24;
+    if (op < 0x20u || op > 0x3Fu || (op & 2u)) {
+        ws_background_tag_stats.tag_rejected++;
+        return;
+    }
+    WsPrepassPacketGuard guard = ws_prepass_packet_guard(words, count);
+    ws_hud_anchor_insert(ws_background_tags, WS_HUD_ANCHOR_TABLE_SIZE,
+                         (prim + 4u) & 0x1FFFFCu, 0, &guard,
+                         (uint32_t)s_frame_count);
+    ws_background_tags_used = 1;
+    ws_background_tag_frame = (uint32_t)s_frame_count;
+    ws_background_tag_stats.last_tag_frame = (uint32_t)s_frame_count;
+}
+
+int gpu_ws_background_stretch_active(void) {
+    uint32_t frame = (uint32_t)s_frame_count;
+    return ws_background_tags_used && ws_native_wide_active() &&
+           frame >= ws_background_tag_frame &&
+           frame - ws_background_tag_frame <= WS_HUD_ANCHOR_FRESH_FRAMES;
+}
+
+int gpu_ws_background_requires_full_composite(void) {
+    /* Freshness governs reuse of a packet address, not the lifetime of the
+     * pixels it produced. A slow game frame or a held display buffer can keep
+     * those pixels on screen indefinitely. Conservatively keep full mirroring
+     * once a composite has been tagged; GPU reset/snapshot restore clears the
+     * latch together with the tags. Never modify the packet freshness guard. */
+    return ws_background_tags_used && ws_native_wide_configured();
+}
+
+static int ws_nw_explicit_background(void) {
+    if (!gpu_ws_background_stretch_active() ||
+        gp0_cmd_source_addr == 0xFFFFFFFFu ||
+        gp0_words_needed <= 0 || gp0_words_needed > 12) return 0;
+    uint32_t addr = gp0_cmd_source_addr & 0x1FFFFFFFu;
+    if (addr >= 0x00200000u || (addr & 3u)) return 0;
+    int result = ws_hud_anchor_lookup_result(
+        ws_background_tags, WS_HUD_ANCHOR_TABLE_SIZE, addr, gp0_cmd_buf,
+        (uint32_t)gp0_words_needed, (uint32_t)s_frame_count, NULL);
+    ws_tag_stats_note_lookup(&ws_background_tag_stats, result);
+    return result == WS_HUD_ANCHOR_HIT;
 }
 
 void gpu_ws_tag_black_reveal_rect(uint32_t prim) {
@@ -2264,10 +2402,12 @@ static int ws_nw_explicit_hud_delta(int32_t *out_delta) {
     uint32_t command_addr = gp0_cmd_source_addr & 0x1FFFFFFFu;
     if (command_addr >= psx_ram_live_bytes() || (command_addr & 3u)) return 0;
     int anchor = 0;
-    if (!ws_hud_anchor_lookup(ws_hud_anchor_tags, WS_HUD_ANCHOR_TABLE_SIZE,
-                              command_addr, gp0_cmd_buf,
-                              (uint32_t)gp0_words_needed,
-                              (uint32_t)s_frame_count, &anchor))
+    int result = ws_hud_anchor_lookup_result(
+        ws_hud_anchor_tags, WS_HUD_ANCHOR_TABLE_SIZE, command_addr,
+        gp0_cmd_buf, (uint32_t)gp0_words_needed, (uint32_t)s_frame_count,
+        &anchor);
+    ws_tag_stats_note_lookup(&ws_hud_tag_stats, result);
+    if (result != WS_HUD_ANCHOR_HIT)
         return 0;
     int32_t off = ws_nw_offset();
     if (out_delta)
@@ -2395,6 +2535,8 @@ static int ws_bg_phase_over(void) {
 
 static int ws_tagged_world_primitive(void);
 int psx_ws_prim_in_backdrop(void) {
+    /* Explicit title proof is independent of heuristic draw-order phases. */
+    if (ws_nw_explicit_background()) return 1;
     if (gp0_cmd_source_addr != 0xFFFFFFFFu) {
         uint32_t f = (uint32_t)s_frame_count;
         if (f != bdg_src_frame) { bdg_src_frame = f; g_bdg_src_lo = 0xFFFFFFFFu; g_bdg_src_hi = 0; }
@@ -3227,6 +3369,8 @@ static void gpu_reset_state(int clear_vram) {
     gp0_next_source_addr = 0xFFFFFFFFu;
     gp0_cmd_source_addr = 0xFFFFFFFFu;
     ws_hud_anchor_clear(ws_hud_anchor_tags, WS_HUD_ANCHOR_TABLE_SIZE);
+    ws_hud_anchor_clear(ws_background_tags, WS_HUD_ANCHOR_TABLE_SIZE);
+    ws_background_tags_used = 0;
     ws_hud_anchor_clear(ws_reveal_clear_tags, WS_HUD_ANCHOR_TABLE_SIZE);
     ws_hud_anchor_clear(ws_screen_mask_tags, WS_HUD_ANCHOR_TABLE_SIZE);
     ws_repeat_rect_tag_clear(ws_repeat_rect_tags);
@@ -3549,6 +3693,7 @@ void gpu_vblank_flush_present(void) {
 
 void gpu_vblank_tick(void) {
     lcf ^= 1;
+    gpu_timeline_note(GTL_VBLANK, lcf, 0);
     /* GPUSTAT.13 (interlace FIELD): on real hardware this alternates per
      * field while GP1(08h) vertical interlace is on, in antiphase with the
      * even/odd-lines bit 31 during active display. Modeled here at vblank
@@ -4979,6 +5124,7 @@ static void gp0_exec_fill_rect(void) {
      * VRAM. Routed through the renderer so it also fills the hi-res
      * supersampling mirror (no-op cost when supersampling is off). */
     gr_fill_rect((int)dst_x, (int)dst_y, (int)width, (int)height, color16);
+    gpu_timeline_note(GTL_FILL, dst_x | (dst_y << 16), width | (height << 16));
 
     /* Native-wide: when the game clears a display buffer, clear the full width
      * of that buffer's wide surface over the same rows — refreshing the centred
@@ -5033,6 +5179,7 @@ static void gp0_exec_draw_area_tl(void) {
     gr_set_draw_area((int)draw_area_left, (int)draw_area_top,
                      (int)draw_area_right, (int)draw_area_bottom);
     ws_nw_sync_target();  /* back buffer (draw_area_left) → wide mirror surface */
+    gpu_timeline_note(GTL_DRAW_AREA, draw_area_left, draw_area_top);
 }
 
 static void gp0_exec_draw_area_br(void) {
@@ -5772,7 +5919,13 @@ static GpuGp0RingEntry *gp0_ring = NULL;  /* lazy-alloc on first record */
 static uint64_t gp0_ring_seq    = 0;      /* total commands recorded */
 static uint32_t gp0_ring_head   = 0;      /* next write slot */
 
+/* Capture mark (debug_server_capture_mark): stop overwriting so the window
+ * that led up to an operator-reported glitch survives until it is read. */
+static int gp0_ring_frozen = 0;
+void gpu_gp0_ring_set_frozen(int frozen) { gp0_ring_frozen = frozen ? 1 : 0; }
+
 static void gp0_ring_record(const uint32_t *words, int n) {
+    if (gp0_ring_frozen) return;
     if (!gp0_ring) {
         gp0_ring = (GpuGp0RingEntry *)calloc(GP0_RING_CAP, sizeof(*gp0_ring));
         if (!gp0_ring) return;  /* OOM — capture disabled, no other effect */
@@ -6497,6 +6650,7 @@ static void gp1_display_area_start(uint32_t val) {
     display_area_x = val & 0x3FF;
     display_area_y = (val >> 10) & 0x1FF;
     ws_note_display_base(display_area_x);  /* learn the display buffer set (native-wide) */
+    gpu_timeline_note(GTL_DISP_START, display_area_x, display_area_y);
 }
 
 static void gp1_h_display_range(uint32_t val) {
@@ -6786,6 +6940,8 @@ int gpu_snapshot_read(const uint8_t *p, uint32_t len) {
     ws_reset_scene_history();
     ws_scene_hold_reset(&s_ws_scene_hold);
     ws_hud_anchor_clear(ws_hud_anchor_tags, WS_HUD_ANCHOR_TABLE_SIZE);
+    ws_hud_anchor_clear(ws_background_tags, WS_HUD_ANCHOR_TABLE_SIZE);
+    ws_background_tags_used = 0;
     ws_hud_anchor_clear(ws_reveal_clear_tags, WS_HUD_ANCHOR_TABLE_SIZE);
     ws_hud_anchor_clear(ws_screen_mask_tags, WS_HUD_ANCHOR_TABLE_SIZE);
     ws_repeat_rect_tag_clear(ws_repeat_rect_tags);

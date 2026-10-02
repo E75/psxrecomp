@@ -63,6 +63,7 @@ uint32_t overlay_codegen_config_hash(const GameConfig& c) {
 
     h.words("sprite_tag_funcs", c.ws_sprite_tag_funcs);
     h.words("mod_function_entry_funcs", c.mod_function_entry_funcs);
+    h.words("mod_instruction_sites", c.mod_instruction_sites);
     h.words("cull_bias", c.ws_cull_bias_sites);
     if (!c.ws_cull_bias_lower_sites.empty())
         h.words("cull_bias_lower", c.ws_cull_bias_lower_sites);
@@ -127,6 +128,18 @@ uint32_t overlay_codegen_config_hash(const GameConfig& c) {
         h.u32(site.address);
         h.u32(site.expected);
         h.u32(site.result);
+    }
+
+    std::vector<WidescreenCullScaleSite> scale_sites = c.ws_cull_scale_sites;
+    std::sort(scale_sites.begin(), scale_sites.end(),
+              [](const auto& a, const auto& b) { return a.address < b.address; });
+    h.tag("cull_scale");
+    h.u32((uint32_t)scale_sites.size());
+    for (const auto& site : scale_sites) {
+        h.u32(site.address);
+        h.u32(site.expected);
+        h.u32(site.operand);
+        h.u32(site.half_extent);
     }
 
     std::vector<WidescreenAngleSite> angle_sites = c.ws_cull_angle_sites;
@@ -1576,6 +1589,14 @@ GameConfig load_game_config(const fs::path& config_path_in) {
     }
     // Optional [recompiler] hot_funcs — __attribute__((hot)) on emitted C.
     // Optional trusted, statically linked game-mod entry hooks.
+    std::vector<uint32_t> mod_instruction_sites;
+    if (recomp.contains("mod_instruction_sites"))
+        for (const auto& a : toml::find<std::vector<std::string>>(recomp, "mod_instruction_sites")) {
+            const auto pc = parse_hex(a, "recompiler.mod_instruction_sites");
+            if ((pc & 3u) || pc >= 0xC0000000u || (pc & 0x1FFFFFFFu) >= 0x00800000u)
+                throw std::runtime_error("mod instruction site must be aligned main RAM");
+            mod_instruction_sites.push_back(pc);
+        }
     std::vector<uint32_t> mod_function_entry_funcs;
     if (recomp.contains("mod_function_entry_funcs")) {
         const auto& arr = toml::find<std::vector<std::string>>(
@@ -1827,6 +1848,7 @@ GameConfig load_game_config(const fs::path& config_path_in) {
     std::vector<uint32_t> ws_cull_clip_edge_x_load_sites;
     uint32_t ws_cull_clip_edge_width = 0;
     std::vector<WidescreenCullKeepSite> ws_cull_keep_sites;
+    std::vector<WidescreenCullScaleSite> ws_cull_scale_sites;
     std::vector<WidescreenAngleSite> ws_cull_angle_sites;
     WidescreenAspectConeConfig ws_aspect_cone;
     int ws_cull_guard_pixels = 0;
@@ -1902,6 +1924,38 @@ GameConfig load_game_config(const fs::path& config_path_in) {
                             config_path.string(), site.address));
                     }
                     ws_cull_keep_sites.push_back(site);
+                }
+            }
+            if (cull.contains("scale")) {
+                std::set<uint32_t> seen;
+                for (const auto& item : toml::find<toml::array>(cull, "scale")) {
+                    WidescreenCullScaleSite site;
+                    site.address = parse_hex(toml::find<std::string>(item, "address"),
+                                             "widescreen.cull.scale.address");
+                    site.expected = parse_hex(toml::find<std::string>(item, "expected"),
+                                              "widescreen.cull.scale.expected");
+                    const std::string operand = toml::find<std::string>(item, "operand");
+                    if (operand == "rs") site.operand = 0;
+                    else if (operand == "rt") site.operand = 1;
+                    else throw std::runtime_error(fmt::format(
+                        "{}: [[widescreen.cull.scale]] operand must be rs or rt",
+                        config_path.string()));
+                    const int half = toml::find<int>(item, "half_extent");
+                    if (half <= 0 || half > 1024) throw std::runtime_error(fmt::format(
+                        "{}: [[widescreen.cull.scale]] half_extent must be 1..1024",
+                        config_path.string()));
+                    site.half_extent = (uint32_t)half;
+                    const uint32_t op = site.expected >> 26;
+                    const uint32_t fn = site.expected & 0x3Fu;
+                    if (!(op == 0u && (fn == 0x2Au || fn == 0x2Bu)))
+                        throw std::runtime_error(fmt::format(
+                            "{}: [[widescreen.cull.scale]] expected must be SLT/SLTU",
+                            config_path.string()));
+                    if (!seen.insert(site.address & 0x1FFFFFFFu).second)
+                        throw std::runtime_error(fmt::format(
+                            "{}: duplicate [[widescreen.cull.scale]] address 0x{:08X}",
+                            config_path.string(), site.address));
+                    ws_cull_scale_sites.push_back(site);
                 }
             }
             if (cull.contains("angle")) {
@@ -2282,6 +2336,7 @@ GameConfig load_game_config(const fs::path& config_path_in) {
         /*ws_auto_ui_in_place*/    ws_auto_ui_in_place,
         /*data_shard_funcs*/      data_shard_funcs,
         /*mod_function_entry_funcs*/ mod_function_entry_funcs,
+        /*mod_instruction_sites*/ mod_instruction_sites,
         /*hot_funcs*/             hot_funcs,
         /*load_charge_batch*/     load_charge_batch,
         /*load_charge_batch_funcs*/ load_charge_batch_funcs,
@@ -2310,6 +2365,7 @@ GameConfig load_game_config(const fs::path& config_path_in) {
         /*ws_cull_nclip_exact_sites*/ ws_cull_nclip_exact_sites,
         /*ws_cull_branch_keep_sites*/ ws_cull_branch_keep_sites,
         /*ws_cull_keep_sites*/    ws_cull_keep_sites,
+        /*ws_cull_scale_sites*/   ws_cull_scale_sites,
         /*ws_cull_angle_sites*/   ws_cull_angle_sites,
         /*ws_aspect_cone*/         ws_aspect_cone,
         /*ws_cull_guard_pixels*/  ws_cull_guard_pixels,

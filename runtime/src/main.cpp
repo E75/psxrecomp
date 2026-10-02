@@ -93,6 +93,9 @@ extern "C" void psx_event_step_conservative_env_init(void);
 #include "mod_plugins.h"
 #include "mod_session_baseline.h"
 #include "mod_runtime.h"
+#include "mod_packages.h"
+#include "present_image_ring.h"
+#include "gpu_timeline.h"
 #include "crc32.h"
 #include "disc_identity.h"
 #include "sbi_setup.h"
@@ -1036,6 +1039,12 @@ extern "C" void psx_frontend_on_savestate_notify(int is_load, int slot, int ok) 
     host_osd_push(buf, 2000);
 }
 
+extern "C" void psx_frontend_on_savestate_refused(int is_load, int slot,
+                                                  const char *reason) {
+    (void)is_load; (void)slot;
+    host_osd_push(reason, 3000);
+}
+
 extern "C" void psx_frontend_on_savestate_loaded(void) {
     mod_runtime_on_savestate_loaded();
 #ifndef PSX_NO_DEBUG_TOOLS
@@ -1445,8 +1454,7 @@ extern "C" int psx_mod_set_fixed_display_aspect(
     uint32_t numerator, uint32_t denominator) {
     if (numerator == 0 || denominator == 0 ||
         numerator > 99 || denominator > 99 ||
-        3u * numerator < 4u * denominator ||
-        9u * numerator > 32u * denominator) {
+        3u * numerator < 4u * denominator) {
         std::fprintf(stderr,
             "psxrecomp: mod rejected invalid display aspect %u:%u\n",
             (unsigned)numerator, (unsigned)denominator);
@@ -1465,8 +1473,7 @@ extern "C" int psx_mod_set_adaptive_display_aspect(
     const bool uncapped = max_numerator == 0 && max_denominator == 0;
     if (!uncapped && (max_numerator == 0 || max_denominator == 0 ||
         max_numerator > 99 || max_denominator > 99 ||
-        3u * max_numerator < 4u * max_denominator ||
-        9u * max_numerator > 32u * max_denominator)) {
+        3u * max_numerator < 4u * max_denominator)) {
         std::fprintf(stderr,
             "psxrecomp: mod rejected invalid adaptive display aspect %u:%u\n",
             (unsigned)max_numerator, (unsigned)max_denominator);
@@ -6874,6 +6881,47 @@ struct NetplayVblankEpilogue {
 };
 
 /* Called from gpu_vblank_tick() at each simulated vblank. */
+#ifndef PSX_NO_DEBUG_TOOLS
+/* Headless has no present surface, but automated A/B runs still need the
+ * frame-indexed record of what a windowed build would show: the displayed
+ * band of the native-wide surface on a wide game frame, otherwise the 4:3
+ * display area. Same classification as the windowed present below. */
+static void headless_present_image_ring_capture(void) {
+    if (!present_image_ring_accepting()) return;
+    GpuDisplayInfo di;
+    gpu_get_display_info(&di);
+    if (di.disabled || di.width == 0 || di.height == 0 || di.depth24) return;
+    const bool fmv_frame = !g_ws_engaged || gpu_ws_present_native_43() != 0;
+    static std::vector<uint32_t> buf;
+    int w = 0, h = 0;
+    if (!fmv_frame && ws_native_wide_active() && gr_wide_supported()) {
+        buf.resize((size_t)1024 * 4 * 512 * 4);
+        if (gr_wide_dump_full(buf.data(), (int)buf.size(), &w, &h,
+                              (int)di.display_x) > 0 && h >= 512) {
+            const int s = h / 512;
+            const int y0 = (int)di.display_y * s, rows = (int)di.height * s;
+            if (y0 + rows <= h) {
+                present_image_ring_push_argb((uint32_t)s_frame_count,
+                                             buf.data() + (size_t)y0 * w,
+                                             w, rows, w);
+                return;
+            }
+        }
+    }
+    w = (int)di.width; h = (int)di.height;
+    buf.resize((size_t)w * h);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            const uint16_t p = gpu_vram_peek((int)(di.display_x + x),
+                                             (int)(di.display_y + y));
+            buf[(size_t)y * w + x] = 0xFF000000u | ((uint32_t)(p & 31) << 19) |
+                                     ((uint32_t)((p >> 5) & 31) << 11) |
+                                     ((uint32_t)((p >> 10) & 31) << 3);
+        }
+    present_image_ring_push_argb((uint32_t)s_frame_count, buf.data(), w, h, w);
+}
+#endif
+
 static NetplayVblankEpilogue sdl_vblank_present_body(void) {
     NetplayVblankEpilogue ep{};
     /* Guest quantum for this vblank is complete. Drop top-level-resume armed
@@ -7092,6 +7140,17 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                                                  (int)key, (int)scancode,
                                                  (int)mod)) {
                     fast_forward_toggle_flip();
+                }
+                else if (!key_repeat &&
+                         host_keymap_match_event(HOST_KEYMAP_CAPTURE_MARK,
+                                                 (int)key, (int)scancode,
+                                                 (int)mod)) {
+#ifndef PSX_NO_DEBUG_TOOLS
+                    debug_server_capture_mark();
+                    host_osd_push("Capture marked (debug rings frozen)", 2000);
+#else
+                    host_osd_push("Capture mark needs a debug-tools build", 2000);
+#endif
                 }
                 else if (!key_repeat &&
                          host_keymap_match_event(HOST_KEYMAP_DISPLAY_PERF,
@@ -7315,14 +7374,34 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
     s_presentation_fast_forward =
         (turbo_loads_active || fmv_skip_active) ? 1 : 0;
 
-    if (g_headless) {
-        /* Headless skips the presenter below, but still needs the same
-         * game-entry widescreen activation for its rendered frame dumps. */
-        if (!g_ws_engaged && fntrace_is_game_started()) {
+    /* Guest-affecting per-frame services run on EVERY guest frame, before any
+     * presentation early-out (headless, TCP turbo, load/FMV present skips).
+     * Widescreen engagement changes GTE projection and cull margins, and mod
+     * frame hooks may touch guest state, so neither may depend on whether this
+     * frame is presented — otherwise headless validation runs a different game
+     * than the windowed build. Hooks still run after all normal input sampling. */
+    mod_call_frame_hooks();
+
+    /* Resize-driven mode updates the pending aspect during BIOS boot too, but
+     * the actual wide compositor remains disengaged until game entry. No-op
+     * without a window. */
+    update_adaptive_widescreen();
+
+    /* Engage widescreen at game entry: BIOS boot stays authentic 4:3. */
+    if (!g_ws_engaged) {
+        if (fntrace_is_game_started()) {
             g_ws_engaged = true;
             g_ws_projection_mode = -1;
+            refresh_widescreen_projection();
         }
+    } else {
         refresh_widescreen_projection();
+    }
+
+    if (g_headless) {
+#ifndef PSX_NO_DEBUG_TOOLS
+        headless_present_image_ring_capture();
+#endif
         ep.skip_pace = 1;
         return ep;
     }
@@ -7493,13 +7572,6 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
         }
     }
 
-    /* Mod hooks. Run after all normal input sampling. */
-    mod_call_frame_hooks();
-
-    /* Resize-driven mode updates the pending aspect during BIOS boot too, but
-     * the actual wide compositor remains disengaged until game entry. */
-    update_adaptive_widescreen();
-
     /* Depth24 GP1(07h) retarget (MotK intro→crawl): keep the prior Swap for a
      * few vblanks so stale trailing VRAM never flashes on the right edge.
      * Must tick every present — gpu.c arms s_d24_present_hold and also
@@ -7507,16 +7579,6 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
      * sticks and depth24_fix_trailing_margin blanks the whole FMV forever. */
     if (gpu_depth24_present_hold_tick())
         return ep;
-    /* Engage widescreen at game entry: BIOS boot stays authentic 4:3. */
-    if (!g_ws_engaged) {
-        if (fntrace_is_game_started()) {
-            g_ws_engaged = true;
-            g_ws_projection_mode = -1;
-            refresh_widescreen_projection();
-        }
-    } else {
-        refresh_widescreen_projection();
-    }
 
     /* Rollback resim (§33/§47): short catch-up keeps hold-last; long catch-up
      * periodically presents live Replay VRAM so the display shows progress
@@ -7916,6 +7978,17 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
     SDL_Rect src = { 0, 0, src_w, src_h };
     SDL_UpdateTexture(sdl_texture, &src, sdl_pixel_buf,
                       (int)(src_w * sizeof(uint32_t)));
+#ifndef PSX_NO_DEBUG_TOOLS
+    /* Presented-image ring (software/CPU present): the frame being shown. */
+    present_image_ring_push_argb((uint32_t)s_frame_count, sdl_pixel_buf,
+                                 (int)src_w, (int)src_h, (int)src_w);
+#endif
+    {
+        GpuDisplayInfo tdi;
+        gpu_get_display_info(&tdi);
+        gpu_timeline_note(GTL_PRESENT, GTL_PATH_CPU,
+                          tdi.display_x | ((uint32_t)tdi.display_y << 16));
+    }
     /* Short FMV bands only update [0..src_h). Linear sampling at the bottom
      * edge blends with uninitialized texels below (X11 SDL backends often
      * show that as a thin white strip; Wayland may not). Pad one black row
@@ -13219,6 +13292,32 @@ int main(int argc, char** argv) {
     launcher_boot_timing_mark("host:main_enter");
 #endif
 
+    /* --audit-mod-plugins <manifest-root>...: build-time check, no emulation.
+     * Every trusted implementation this executable registered must be named
+     * by some authored manifest [[plugin]] id, or the plan can never activate
+     * it. Exit 0 when all are declared, 1 otherwise (ctest per title). */
+    for (int i = 1; i < argc; i++) {
+        if (std::strcmp(argv[i], "--audit-mod-plugins") != 0) continue;
+        std::vector<std::filesystem::path> roots;
+        for (int j = i + 1; j < argc && std::strncmp(argv[j], "--", 2) != 0; j++)
+            roots.emplace_back(argv[j]);
+        const PSXRecompV4::ModPluginAudit audit =
+            PSXRecompV4::mod_audit_registered_plugins(roots);
+        const std::vector<std::string> registered =
+            PSXRecompV4::mod_registered_plugin_ids();
+        std::fprintf(stdout, "mod plugin audit: %zu manifest(s), %zu declared id(s), "
+                     "%zu registered id(s)\n", audit.manifests,
+                     audit.declared.size(), registered.size());
+        for (const std::string& e : audit.errors)
+            std::fprintf(stdout, "  manifest error: %s\n", e.c_str());
+        for (const std::string& id : audit.undeclared)
+            std::fprintf(stdout, "  UNDECLARED (can never run): %s\n", id.c_str());
+        const bool ok = roots.size() > 0 && audit.errors.empty() &&
+                        audit.undeclared.empty();
+        std::fprintf(stdout, "mod plugin audit: %s\n", ok ? "PASS" : "FAIL");
+        return ok ? 0 : 1;
+    }
+
     /* Setup-host zip-root exe: after Generate & rebuild, hand off to the
      * product binary under build-release/ (bios/, mods/, assets/, settings). */
 #if defined(PSX_HAS_CODEGEN_SETUP_HOST)
@@ -13740,6 +13839,18 @@ int main(int argc, char** argv) {
                 gpu_ws_set_cull_keep_sites(
                     addresses.data(), expected.data(), results.data(),
                     (int)addresses.size());
+            }
+            {
+                std::vector<uint32_t> addresses, expected, operands, halves;
+                for (const auto& site : gc.ws_cull_scale_sites) {
+                    addresses.push_back(site.address);
+                    expected.push_back(site.expected);
+                    operands.push_back(site.operand);
+                    halves.push_back(site.half_extent);
+                }
+                gpu_ws_set_cull_scale_sites(
+                    addresses.data(), expected.data(), operands.data(),
+                    halves.data(), (int)addresses.size());
             }
             {
                 std::vector<uint32_t> addresses, expected;
@@ -15709,13 +15820,20 @@ session_reboot:
     } else {
         /* Select the renderer backend BEFORE gpu_init() (which runs gr_init ->
          * the backend's init on the VRAM buffer). Software is the default and
-         * the fallback; an unavailable OpenGL backend reverts to software. */
-        gr_set_backend(g_video_renderer == 2 ? GR_BACKEND_VULKAN :
-                       g_video_renderer == 1 ? GR_BACKEND_OPENGL :
-                                              GR_BACKEND_SOFTWARE);
-        std::fprintf(stdout, "psxrecomp: renderer backend requested: %s\n",
-                     g_video_renderer == 2 ? "vulkan" :
-                     g_video_renderer == 1 ? "opengl" : "software");
+         * the fallback; an unavailable OpenGL backend reverts to software.
+         * Headless never creates a window or GPU context, so a GPU backend
+         * would only rasterize through its software fallback while refusing
+         * the context-bound services (native-wide compositing, hi-res
+         * readback). Select the software backend it would really run, so
+         * headless validation exercises the same wide compositor as a window. */
+        const int backend_renderer = g_headless ? 0 : g_video_renderer;
+        gr_set_backend(backend_renderer == 2 ? GR_BACKEND_VULKAN :
+                       backend_renderer == 1 ? GR_BACKEND_OPENGL :
+                                               GR_BACKEND_SOFTWARE);
+        std::fprintf(stdout, "psxrecomp: renderer backend requested: %s%s\n",
+                     backend_renderer == 2 ? "vulkan" :
+                     backend_renderer == 1 ? "opengl" : "software",
+                     g_headless && g_video_renderer != 0 ? " (headless)" : "");
     }
     gpu_init();
     /* Internal-resolution supersampling (SSAA). Must follow gpu_init.

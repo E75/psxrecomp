@@ -311,6 +311,28 @@ result = 0
               keep_config.ws_cull_keep_sites[1].result == 0u,
           "parser preserves full-word-guarded maximal-participation sites");
 
+    const auto scale = write_config(root, "cull-scale", R"toml(
+[[widescreen.cull.scale]]
+address = "0x8002C734"
+expected = "0x0062182A"
+operand = "rt"
+half_extent = 160
+
+[[widescreen.cull.scale]]
+address = "0x8002C758"
+expected = "0x0043102A"
+operand = "rs"
+half_extent = 160
+)toml");
+    const auto scale_config = PSXRecompV4::load_game_config(scale);
+    check(scale_config.ws_cull_scale_sites.size() == 2 &&
+              scale_config.ws_cull_scale_sites[0].address == 0x8002C734u &&
+              scale_config.ws_cull_scale_sites[0].expected == 0x0062182Au &&
+              scale_config.ws_cull_scale_sites[0].operand == 1u &&
+              scale_config.ws_cull_scale_sites[0].half_extent == 160u &&
+              scale_config.ws_cull_scale_sites[1].operand == 0u,
+          "parser preserves register-register frustum-edge scale sites");
+
     const auto signed_bound = write_config(root, "signed-x-bound", R"toml(
 [[widescreen.signed_x_bound]]
 address = "0x8002D290"
@@ -818,10 +840,31 @@ void codegen_tests() {
     const std::string nclip_exact = generate_first_instruction(
         0x04400002u, {}, false, nclip_exact_config); // bltz v0,+2
     check(nclip_exact.find(
-              "gte_nclip_precise_bltz((int32_t)cpu->gpr[2])") !=
+              "gte_nclip_exact_sign((int32_t)cpu->gpr[2], 0x80010000u) < 0") !=
               std::string::npos &&
               nclip_exact.find("ws exact nclip") != std::string::npos,
           "codegen emits title-scoped exact NCLIP predicate");
+    // Every sign-branch shape a backface reject can use.
+    const struct { uint32_t word; const char *cmp; const char *name; } nclip_shapes[] = {
+        {0x18400002u, "<= 0", "blez"}, {0x1C400002u, "> 0", "bgtz"},
+        {0x04410002u, ">= 0", "bgez"},
+    };
+    for (const auto &shape : nclip_shapes) {
+        const std::string exact = generate_first_instruction(
+            shape.word, {}, false, nclip_exact_config);
+        check(exact.find(std::string("gte_nclip_exact_sign((int32_t)cpu->gpr[2], 0x80010000u) ") +
+                         shape.cmp) != std::string::npos &&
+                  exact.find(std::string("((int32_t)cpu->gpr[2] ") + shape.cmp + ")") !=
+                      std::string::npos,
+              (std::string("codegen exact NCLIP covers ") + shape.name).c_str());
+    }
+    PSXRecomp::CodeGenConfig nclip_keep_config;
+    nclip_keep_config.ws_cull_nclip_keep_sites.insert(0x80010000u);
+    const std::string nclip_keep_blez = generate_first_instruction(
+        0x18400002u, {}, false, nclip_keep_config);
+    check(nclip_keep_blez.find("psx_ws_x_margin() > 0 ? 0 : ((int32_t)cpu->gpr[2] <= 0)") !=
+              std::string::npos,
+          "codegen NCLIP keep covers blez");
 
     PSXRecomp::CodeGenConfig plane_nx_config;
     plane_nx_config.ws_cull_plane_nx_sites.insert(0x80010000u);
@@ -870,6 +913,27 @@ void codegen_tests() {
     check(keep_overlay_mismatch.find("maximal object/model participation") ==
               std::string::npos,
           "overlay full-word mismatch leaves keep site unchanged");
+
+    PSXRecomp::CodeGenConfig scale_config_gen;
+    scale_config_gen.ws_cull_scale_sites.push_back(
+        {0x80010000u, 0x0062182Au, 1u, 160u}); // slt v1,v1,v0: scale rt
+    const std::string scale_rt = generate_first_instruction(
+        0x0062182Au, {}, false, scale_config_gen);
+    check(scale_rt.find("psx_ws_cull_scale((int32_t)") != std::string::npos &&
+              scale_rt.find(", 160)") != std::string::npos &&
+              scale_rt.find("(int32_t)cpu->gpr[3] < (int32_t)(uint32_t)psx_ws_cull_scale") !=
+                  std::string::npos,
+          "codegen scales the configured rt bound of a signed frustum edge");
+    scale_config_gen.ws_cull_scale_sites[0] = {0x80010000u, 0x0043102Au, 0u, 160u};
+    const std::string scale_rs = generate_first_instruction(
+        0x0043102Au, {}, false, scale_config_gen);
+    check(scale_rs.find("(int32_t)(uint32_t)psx_ws_cull_scale((int32_t)cpu->gpr[2], 160) < (int32_t)cpu->gpr[3]") !=
+              std::string::npos,
+          "codegen scales the configured rs bound of the opposite edge");
+    const std::string scale_overlay_mismatch = generate_first_instruction(
+        0x0043102Bu, {}, true, scale_config_gen); // sltu at same overlay VA
+    check(scale_overlay_mismatch.find("psx_ws_cull_scale") == std::string::npos,
+          "overlay full-word mismatch leaves scale site unchanged");
 
     PSXRecomp::CodeGenConfig angle_config;
     angle_config.ws_cull_angle_sites.push_back(
@@ -1154,6 +1218,47 @@ void cfg_codegen_load_delay_test() {
           "CFG codegen preserves MIPS-I dependent load-delay value semantics");
 }
 
+void mod_function_completion_codegen_test() {
+    PSXRecomp::CodeGenConfig config{};
+    config.mod_function_entry_funcs.insert(0x80010000u);
+    for (bool overlay : {false, true}) {
+        const auto code = generate_first_instruction(0x2402002Au, {}, overlay, config);
+        check(code.find("if (psx_mod_function_entry(cpu, 0x80010000u)) return;") != std::string::npos,
+              overlay ? "overlay body honors trusted mod completion" : "main body honors trusted mod completion");
+    }
+    const auto stock = generate_first_instruction(0x2402002Au, {}, false);
+    check(stock.find("psx_mod_function_entry(cpu,") == std::string::npos,
+          "unconfigured functions retain the stock entry path");
+}
+
+void mod_instruction_codegen_test(const fs::path& root) {
+    const auto path = write_config(root, "instruction-hooks",
+        "mod_instruction_sites = [\"0x80010000\", \"0x80010004\"]\n");
+    const auto parsed = PSXRecompV4::load_game_config(path);
+    check(parsed.mod_instruction_sites.size() == 2, "instruction sites parse");
+    auto changed = parsed;
+    changed.mod_instruction_sites.clear();
+    check(PSXRecompV4::overlay_codegen_config_hash(parsed) !=
+          PSXRecompV4::overlay_codegen_config_hash(changed), "instruction sites invalidate cached code");
+    const auto invalid = write_config(root, "instruction-unaligned",
+        "mod_instruction_sites = [\"0x80010001\"]\n");
+    check_throws([&] { PSXRecompV4::load_game_config(invalid); }, "aligned main RAM",
+                 "instruction sites reject invalid addresses");
+    PSXRecomp::CodeGenConfig config{};
+    config.mod_instruction_sites = {0x80010000u, 0x80010004u};
+    for (bool overlay : {false, true}) {
+        for (uint32_t word : {0x2402002Au, 0x10400002u}) {
+            const auto code = generate_first_instruction(word, {}, overlay, config);
+            check(code.find(fmt::format("psx_mod_instruction(cpu, 0x80010000u, 0x{:08X}u);", word)) != std::string::npos,
+                  "native/overlay emits instruction guard for ALU and branch");
+            check(code.find("psx_mod_instruction(cpu, 0x80010004u, 0x00000000u);") != std::string::npos,
+                  "native/overlay includes sequential and branch delay-slot hooks");
+        }
+    }
+    check(generate_first_instruction(0x2402002Au, {}, false).find("psx_mod_instruction(cpu,") == std::string::npos,
+          "unconfigured code emits no instruction callbacks");
+}
+
 void cfg_fallthrough_reachability_test() {
     constexpr uint32_t base = 0x80010000u;
     PSXRecomp::PS1Executable exe{};
@@ -1203,6 +1308,8 @@ int main() {
         gte_codegen_classification_tests();
         jump_table_producer_codegen_test();
         cfg_codegen_load_delay_test();
+        mod_function_completion_codegen_test();
+        mod_instruction_codegen_test(root);
         cfg_fallthrough_reachability_test();
     } catch (const std::exception& e) {
         fmt::print(stderr, "FAIL  unexpected exception: {}\n", e.what());

@@ -103,6 +103,18 @@ struct WidescreenCullKeepSite {
 // constant with `addi[u] rt,zero,imm`; the runtime widens tan(angle) by the
 // live horizontal reveal factor. Full-word guards prevent overlay-address
 // aliases from changing unrelated immediates.
+// One register-register view-bound compare whose bound operand is widened
+// with the live reveal: `slt rd, rs, rt` where the configured operand holds
+// +/-half_extent*z (a camera-space frustum edge computed at runtime, so there
+// is no immediate to rewrite). The operand is scaled by
+// (half_extent + margin) / half_extent; identity at 4:3. Full-word guarded.
+struct WidescreenCullScaleSite {
+    uint32_t address = 0;
+    uint32_t expected = 0;     // guarded SLT/SLTU instruction
+    uint32_t operand = 1;      // 0 = scale rs, 1 = scale rt
+    uint32_t half_extent = 0;  // authored screen half-extent (e.g. 160)
+};
+
 struct WidescreenAngleSite {
     uint32_t address = 0;
     uint32_t expected = 0; // guarded ADDI/ADDIU with rs == zero
@@ -895,6 +907,8 @@ struct GameConfig {
     // entries that dispatch trusted, statically linked mod callbacks. Empty by
     // default, so projects that do not opt in emit no callback overhead.
     std::vector<uint32_t> mod_function_entry_funcs;
+    // Opt-in pre-instruction callbacks; plugins supply exact-word guards.
+    std::vector<uint32_t> mod_instruction_sites;
 
     // [recompiler] hot_funcs: guest addresses that get __attribute__((hot))
     // on their generated C bodies (profile/host locality; no guest semantics).
@@ -997,6 +1011,9 @@ struct GameConfig {
     // where maximal overdraw is preferable to range guessing. Each entry is
     // guarded by the complete MIPS word; 4:3 executes the vanilla comparison.
     std::vector<WidescreenCullKeepSite> ws_cull_keep_sites;
+    // Register-register frustum-edge compares whose bound operand scales
+    // with the live reveal ([[widescreen.cull.scale]]).
+    std::vector<WidescreenCullScaleSite> ws_cull_scale_sites;
     // Exact 12-bit angular half-extents used by terrain-cell frusta.
     std::vector<WidescreenAngleSite> ws_cull_angle_sites;
     // Full-word-guarded model-participation cosine compares widened only in
