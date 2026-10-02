@@ -1877,10 +1877,13 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
             cpu->gpr[0] = 0;
             return 0;
         }
-        case 0x24: /* AND */
-            cpu->gpr[rd] = cpu->gpr[rs] & cpu->gpr[rt];
+        case 0x24: { /* AND */
+            uint32_t a = cpu->gpr[rs], b = cpu->gpr[rt];
+            cpu->gpr[rd] = a & b;
+            psx_pgxp_alu(cpu, insn, cpu->gpr[rd], a, b);
             cpu->gpr[0] = 0;
             return 0;
+        }
         case 0x25: { /* OR */
             uint32_t a = cpu->gpr[rs], b = cpu->gpr[rt];
             cpu->gpr[rd] = a | b;
@@ -1888,14 +1891,20 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
             cpu->gpr[0] = 0;
             return 0;
         }
-        case 0x26: /* XOR */
-            cpu->gpr[rd] = cpu->gpr[rs] ^ cpu->gpr[rt];
+        case 0x26: { /* XOR */
+            uint32_t a = cpu->gpr[rs], b = cpu->gpr[rt];
+            cpu->gpr[rd] = a ^ b;
+            psx_pgxp_alu(cpu, insn, cpu->gpr[rd], a, b);
             cpu->gpr[0] = 0;
             return 0;
-        case 0x27: /* NOR */
-            cpu->gpr[rd] = ~(cpu->gpr[rs] | cpu->gpr[rt]);
+        }
+        case 0x27: { /* NOR */
+            uint32_t a = cpu->gpr[rs], b = cpu->gpr[rt];
+            cpu->gpr[rd] = ~(a | b);
+            psx_pgxp_alu(cpu, insn, cpu->gpr[rd], a, b);
             cpu->gpr[0] = 0;
             return 0;
+        }
         case 0x2A: /* SLT */
         {
             uint32_t vanilla =
@@ -1905,6 +1914,7 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
                 !psx_ws_aspect_cone_site(cpu, pc, insn, vanilla, &kept))
                 (void)psx_ws_cull_keep_site(pc, insn, vanilla, &kept);
             cpu->gpr[rd] = kept;
+            psx_pgxp_alu(cpu, insn, kept, 0, 0);
             cpu->gpr[0] = 0;
             return 0;
         }
@@ -1915,6 +1925,7 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
             if (!psx_ws_cull_scale_site(pc, insn, cpu->gpr[rs], cpu->gpr[rt], &kept))
                 (void)psx_ws_cull_keep_site(pc, insn, vanilla, &kept);
             cpu->gpr[rd] = kept;
+            psx_pgxp_alu(cpu, insn, kept, 0, 0);
             cpu->gpr[0] = 0;
             return 0;
         }
@@ -2106,6 +2117,7 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
             cpu->gpr[rt] = (uint32_t)psx_ws_cull_slti(cpu->gpr[rs], imm);
         else
             cpu->gpr[rt] = ((int32_t)cpu->gpr[rs] < simm) ? 1u : 0u;
+        psx_pgxp_alu(cpu, insn, cpu->gpr[rt], 0, 0);
         cpu->gpr[0] = 0;
         return 0;
     }
@@ -2135,13 +2147,17 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
             cpu->gpr[rt] = (uint32_t)psx_ws_cull_sltiu(cpu->gpr[rs], imm);
         else
             cpu->gpr[rt] = (cpu->gpr[rs] < (uint32_t)simm) ? 1u : 0u;
+        psx_pgxp_alu(cpu, insn, cpu->gpr[rt], 0, 0);
         cpu->gpr[0] = 0;
         return 0;
     }
-    case 0x0C: /* ANDI */
-        cpu->gpr[rt] = cpu->gpr[rs] & imm;
+    case 0x0C: { /* ANDI */
+        uint32_t a = cpu->gpr[rs];
+        cpu->gpr[rt] = a & imm;
+        psx_pgxp_alu(cpu, insn, cpu->gpr[rt], a, imm);
         cpu->gpr[0] = 0;
         return 0;
+    }
     case 0x0D: { /* ORI */
         uint32_t a = cpu->gpr[rs];
         if (rs == 0 && rt != 0 && psx_ws_is_signed_x_bound_site(pc, insn))
@@ -2152,10 +2168,13 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
         cpu->gpr[0] = 0;
         return 0;
     }
-    case 0x0E: /* XORI */
-        cpu->gpr[rt] = cpu->gpr[rs] ^ imm;
+    case 0x0E: { /* XORI */
+        uint32_t a = cpu->gpr[rs];
+        cpu->gpr[rt] = a ^ imm;
+        psx_pgxp_alu(cpu, insn, cpu->gpr[rt], a, imm);
         cpu->gpr[0] = 0;
         return 0;
+    }
     case 0x0F: /* LUI rt, imm */
         if (psx_ws_is_signed_x_bound_site(pc, insn))
             cpu->gpr[rt] = (uint32_t)psx_ws_player_x_bound((int32_t)(imm << 16));
