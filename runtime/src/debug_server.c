@@ -7799,6 +7799,45 @@ static void handle_input_route_status(int id, const char *json)
  *   {"cmd":"ws_hud_mode","tag_rects":0|1}
  * tag_rects=1 lets TAGGED rect-family prims re-anchor too (Tomba's AP
  * counter renders through the tagged sprite funnel). */
+/* Named plugin counters (psx_mod_counter_add), always on:
+ *   {"cmd":"mod_counters"}
+ * -> counters: [{name, count, last_frame}], overflow. */
+static void handle_mod_counters(int id, const char *json)
+{
+    extern int psx_mod_counters_snapshot(const char **names, uint64_t *counts,
+                                         uint64_t *last_frames, int cap,
+                                         uint64_t *overflow);
+    (void)json;
+    enum { CAP = 128 };
+    const char *names[CAP];
+    uint64_t counts[CAP], last[CAP], overflow = 0;
+    int n = psx_mod_counters_snapshot(names, counts, last, CAP, &overflow);
+    if (n > CAP) n = CAP;
+    size_t cap = 256u + (size_t)n * 160u;
+    char *buf = (char *)malloc(cap);
+    if (!buf) { send_err(id, "alloc failed"); return; }
+    size_t off = 0;
+    off += (size_t)snprintf(buf + off, cap - off,
+                            "{\"id\":%d,\"ok\":true,\"frame\":%llu,\"counters\":[",
+                            id, (unsigned long long)s_frame_count);
+    for (int i = 0; i < n && off < cap; i++) {
+        char esc[96];
+        size_t e = 0;
+        for (const char *p = names[i]; *p && e + 2 < sizeof esc; p++)
+            if (*p != '"' && *p != '\\' && (unsigned char)*p >= 0x20) esc[e++] = *p;
+        esc[e] = '\0';
+        off += (size_t)snprintf(buf + off, cap - off,
+                                "%s{\"name\":\"%s\",\"count\":%llu,\"last_frame\":%llu}",
+                                i ? "," : "", esc, (unsigned long long)counts[i],
+                                (unsigned long long)last[i]);
+    }
+    if (off < cap)
+        snprintf(buf + off, cap - off, "],\"overflow\":%llu}",
+                 (unsigned long long)overflow);
+    debug_server_send_line(buf);
+    free(buf);
+}
+
 static void handle_ws_hud_mode(int id, const char *json)
 {
     int v = json_get_int(json, "tag_rects", -1);
@@ -14108,6 +14147,7 @@ static const CmdEntry s_commands[] = {
     { "ws_aspect_cone_site", handle_ws_aspect_cone_site },
     { "ws_margin",         handle_ws_margin },
     { "ws_hud_mode",       handle_ws_hud_mode },
+    { "mod_counters",      handle_mod_counters },
     { "kernel_bless",      handle_kernel_bless },
     { "ws_aspect",         handle_ws_aspect },
     { "display_aspect",    handle_display_aspect },
