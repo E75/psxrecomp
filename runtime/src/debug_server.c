@@ -7802,14 +7802,6 @@ static void handle_input_route_status(int id, const char *json)
  *   {"cmd":"ws_hud_mode","tag_rects":0|1}
  * tag_rects=1 lets TAGGED rect-family prims re-anchor too (Tomba's AP
  * counter renders through the tagged sprite funnel). */
-static void handle_ws_hud_mode(int id, const char *json)
-{
-    int v = json_get_int(json, "tag_rects", -1);
-    if (v < 0) { send_err(id, "missing tag_rects (0|1)"); return; }
-    gpu_ws_set_nw_hud_tag_rects(v);
-    send_fmt("{\"id\":%d,\"ok\":true,\"tag_rects\":%d}", id, v ? 1 : 0);
-}
-
 /* Named plugin counters (psx_mod_counter_add), always on:
  *   {"cmd":"mod_counters"}
  * -> counters: [{name, count, last_frame}], overflow. */
@@ -7847,6 +7839,14 @@ static void handle_mod_counters(int id, const char *json)
                  (unsigned long long)overflow);
     debug_server_send_line(buf);
     free(buf);
+}
+
+static void handle_ws_hud_mode(int id, const char *json)
+{
+    int v = json_get_int(json, "tag_rects", -1);
+    if (v < 0) { send_err(id, "missing tag_rects (0|1)"); return; }
+    gpu_ws_set_nw_hud_tag_rects(v);
+    send_fmt("{\"id\":%d,\"ok\":true,\"tag_rects\":%d}", id, v ? 1 : 0);
 }
 
 /* Explicit HUD-anchor / background tag pipeline counters (always on):

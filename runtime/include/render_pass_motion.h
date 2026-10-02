@@ -45,7 +45,11 @@ enum {
     PSX_MOTION_SVECTOR = 4,      /* s16 x, y, z */
     /* s16 x, y, z angles, 4096 per turn: each blends along the shorter arc. */
     PSX_MOTION_ANGLES = 5,
-    PSX_MOTION_SCALAR = 6        /* s32 */
+    PSX_MOTION_SCALAR = 6,       /* s32 */
+    /* A bare 3x3 s16 rotation in 4.12 (18 bytes), blended like a MATRIX's;
+     * pair it with a VECTOR / SVECTOR kind wherever its translation lives
+     * (skeleton pose records, matrices stored apart from their position). */
+    PSX_MOTION_ROTATION = 7
 };
 
 typedef struct PSXMotionLimits {
@@ -92,7 +96,7 @@ uint32_t psx_motion_prepare(PSXMotionSet* set, const PSXMotionLimits* limits,
 /* Write every prepared value at t (0 = previous frame, 1 = this frame). */
 void psx_motion_apply(const PSXMotionSet* set, double t);
 /* Blend one prepared value at t into `out` without writing guest RAM:
- * a PSXMotionMatrix for the MATRIX kinds, int32_t[3] for VECTOR / SVECTOR /
+ * a PSXMotionMatrix for the MATRIX kinds and ROTATION (translation 0), int32_t[3] for VECTOR / SVECTOR /
  * ANGLES, int32_t for SCALAR. Returns 0 when that value does not blend this
  * frame (out then holds its current value) or was not tracked (out
  * untouched, returns -1). */
