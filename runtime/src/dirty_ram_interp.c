@@ -2420,6 +2420,17 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
 
 static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_addr);
 
+/* Guest span replay (dirty_ram_run_span, psx_mod_run_guest_span): while a span
+ * is open, every PC in [s_span_lo, s_span_hi) (CODE identity) is interpreted
+ * from the live RAM bytes, even where a compiled body or one of its resume
+ * points starts there. Calls the span makes leave the range and run on their
+ * normal backend. A span is a replay, not an entry: it stays out of capture,
+ * seeding and entry statistics. */
+static uint32_t s_span_lo, s_span_hi;
+static inline int span_forced(uint32_t phys) {
+    return phys >= s_span_lo && phys < s_span_hi;
+}
+
 /* Public entry point.  Caller (psx_dispatch) has translated `addr` to a
  * KSEG-stripped form already in some cases, so accept any address and
  * mask. Returns 1 if interpretation handled the basic block; 0 if the
@@ -2557,6 +2568,40 @@ int dirty_ram_dispatch(CPUState* cpu, uint32_t addr, uint32_t stop_addr) {
     g_dirty_interp_active = prev;
     g_exec_phase = prev_phase;
     return r;
+}
+
+void dirty_ram_span_get(uint32_t *lo, uint32_t *hi) {
+    if (lo) *lo = s_span_lo;
+    if (hi) *hi = s_span_hi;
+}
+
+void dirty_ram_span_set(uint32_t lo, uint32_t hi) {
+    s_span_lo = lo;
+    s_span_hi = hi;
+}
+
+int dirty_ram_run_span(CPUState* cpu, uint32_t start_pc, uint32_t stop_pc,
+                       uint64_t max_insns) {
+    const uint32_t lo = start_pc & 0x1FFFFFFFu, hi = stop_pc & 0x1FFFFFFFu;
+    if (!cpu || s_span_hi || ((start_pc | stop_pc) & 3u) || lo >= hi ||
+        (start_pc ^ stop_pc) & 0xE0000000u)
+        return 0;
+    const uint64_t first = g_dirty_ram_insns_run;
+    int reached = 0;
+    s_span_lo = lo;
+    s_span_hi = hi;
+    cpu->pc = start_pc;
+    for (;;) {
+        const uint32_t pc = cpu->pc;
+        if (pc == stop_pc) { reached = 1; break; }
+        if (!pc || !span_forced(pc & 0x1FFFFFFFu) || g_psx_call_bail ||
+            g_dirty_ram_insns_run - first > max_insns)
+            break;
+        if (!dirty_ram_dispatch(cpu, pc, stop_pc)) break;
+    }
+    s_span_lo = s_span_hi = 0;
+    dirty_ram_ld_delay_flush(cpu);
+    return reached;
 }
 
 /* ===== Cycle-budgeted precise event slicing (PRECISE_IRQ_SLICE.md) ===== */
@@ -2826,7 +2871,8 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
      * They differ only for a PC in a retail RAM mirror. */
     uint32_t phys = addr & 0x1FFFFFFFu;
     const uint32_t ram_phys = psx_ram_map_read(phys);
-    int clean_game_text_miss = 0;
+    const int forced = span_forced(phys);
+    int clean_game_text_miss = forced;
 
     if (addr == 0x80000048u) {
         g_sentinel_reach_dirty++;
@@ -2854,7 +2900,7 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
     /* Run the statically-compiled game function only while the target is still
      * native-safe. Dirty overlay pages and pages whose text bytes diverged from
      * the original EXE image fall through to interpret the live RAM bytes. */
-    if (psx_game_text_native_ok(addr)) {
+    if (!forced && psx_game_text_native_ok(addr)) {
         g_mixed_depth++;
         {
             ls_func_enter(addr, cpu);
@@ -2867,7 +2913,7 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
             if (_gc) return 1;
         }
         clean_game_text_miss = psx_game_address_in_text(addr) ? 1 : 0;
-    } else if (psx_game_address_in_text(addr)) {
+    } else if (!forced && psx_game_address_in_text(addr)) {
         /* RAM at a game-text address diverged from the static EXE image
          * (runtime-relocated / overlaid / self-modified code the compiled
          * static function no longer reflects). The live RAM is the truth:
@@ -2885,7 +2931,7 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
      * another segment misses above and is interpreted here like any clean
      * text miss, never run through the other segment's body. Record it with
      * the full PC; the fix is a segment-qualified seed and regeneration. */
-    if (clean_game_text_miss)
+    if (clean_game_text_miss && !forced)
         (void)psx_segment_miss_note(addr, psx_game_is_function_entry,
                                     cpu->gpr[31], cpu->gpr[29],
                                     (uint32_t)s_frame_count);
@@ -2898,7 +2944,7 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
         extern int psx_overlay_dispatch(CPUState *cpu, uint32_t addr);
         int previous_phase = g_exec_phase;
         g_exec_phase = 3;
-        int handled = psx_overlay_dispatch(cpu, addr);
+        int handled = !forced && psx_overlay_dispatch(cpu, addr);
         g_exec_phase = previous_phase;
         if (handled) return 1;
     }
@@ -2915,7 +2961,7 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
     extern void     overlay_regs_snap(uint32_t out[34], const CPUState *cpu);
     extern void     overlay_fp_log(uint32_t addr, const uint32_t *in_regs,
                                    const CPUState *cpu, int native);
-    int      _ovfp = overlay_fp_enabled() &&
+    int      _ovfp = !forced && overlay_fp_enabled() &&
                      overlay_cache_window_contains(phys) &&
                      overlay_loader_is_candidate(phys);
     uint32_t _in_regs[34];
@@ -2930,7 +2976,7 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
 
     {
         extern int overlay_loader_dispatch(CPUState *cpu, uint32_t addr);
-        if (overlay_loader_dispatch(cpu, addr)) {
+        if (!forced && overlay_loader_dispatch(cpu, addr)) {
             if (_ovfp) overlay_fp_log(addr, _in_regs, cpu, 1);
             return 1;
         }
@@ -2965,7 +3011,7 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
      * counts dispatches the interpreter actually handles inside a capture
      * window. The autocapture tick reads-and-resets this to decide whether
      * an unseen region variant is being interp-executed right now. */
-    if (overlay_cache_window_contains(phys)) g_dirty_window_dispatches++;
+    if (!forced && overlay_cache_window_contains(phys)) g_dirty_window_dispatches++;
 
     /* Reset soft-fail state at block entry. */
     g_unsupported_seen = 0;
@@ -2983,13 +3029,14 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
     {
         extern uint32_t g_psx_mod_function_entry_hooks;
         extern int psx_mod_function_entry(CPUState *cpu, uint32_t address);
-        if (g_psx_mod_function_entry_hooks && psx_mod_function_entry(cpu, addr)) return 1;
+        if (!forced && g_psx_mod_function_entry_hooks && psx_mod_function_entry(cpu, addr))
+            return 1;
     }
 
     /* Per-PC entry counter (visible via dirty_ram_stats). */
-    DirtyRamPcEntry *pc_entry = pc_table_get_or_insert(phys);
+    DirtyRamPcEntry *pc_entry = forced ? NULL : pc_table_get_or_insert(phys);
     if (pc_entry) pc_entry->hits++;
-    {
+    if (!forced) {
         uint32_t word = phys >> 2;
         g_dirty_ram_dispatch_pc_bitmap[word >> 5] |= 1u << (word & 31u);
         /* ...and the segment it entered through, from the full PC

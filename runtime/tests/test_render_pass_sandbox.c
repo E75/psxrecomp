@@ -176,6 +176,13 @@ static DirtyRamLoadDelay s_ld;
 void dirty_ram_ld_delay_discard(void) { memset(&s_ld, 0, sizeof s_ld); }
 void dirty_ram_ld_delay_save(DirtyRamLoadDelay *o) { *o = s_ld; }
 void dirty_ram_ld_delay_restore(const DirtyRamLoadDelay *i) { s_ld = *i; }
+static uint32_t s_span_lo, s_span_hi;
+void dirty_ram_span_get(uint32_t *lo, uint32_t *hi) { *lo = s_span_lo; *hi = s_span_hi; }
+void dirty_ram_span_set(uint32_t lo, uint32_t hi) { s_span_lo = lo; s_span_hi = hi; }
+int dirty_ram_run_span(CPUState *cpu, uint32_t start, uint32_t stop, uint64_t max) {
+    (void)cpu; (void)start; (void)stop; (void)max;
+    return 0;
+}
 void overlay_loader_native_nesting(int *d, uint32_t *ip) { *d = 0; *ip = 0; }
 void overlay_loader_set_native_nesting(int d, uint32_t ip) { (void)d; (void)ip; }
 

@@ -108,6 +108,7 @@ typedef struct RenderPassNesting {
     int      ov_active_depth;
     uint32_t ov_inprogress;
     void   (*ov_flush)(void);
+    uint32_t span_lo, span_hi;       /* open guest span (dirty_ram_run_span) */
 } RenderPassNesting;
 
 static void nesting_save(RenderPassNesting *n) {
@@ -125,6 +126,7 @@ static void nesting_save(RenderPassNesting *n) {
     dirty_ram_ld_delay_save(&n->ld_delay);
     overlay_loader_native_nesting(&n->ov_active_depth, &n->ov_inprogress);
     n->ov_flush = g_overlay_flush_pending_cycles;
+    dirty_ram_span_get(&n->span_lo, &n->span_hi);
 }
 
 static void nesting_restore(const RenderPassNesting *n) {
@@ -142,6 +144,7 @@ static void nesting_restore(const RenderPassNesting *n) {
     dirty_ram_ld_delay_restore(&n->ld_delay);
     overlay_loader_set_native_nesting(n->ov_active_depth, n->ov_inprogress);
     g_overlay_flush_pending_cycles = n->ov_flush;
+    dirty_ram_span_set(n->span_lo, n->span_hi);
 }
 
 /* PSX_RENDER_PASS_VERIFY: a pass that returned normally must leave the
@@ -158,7 +161,8 @@ static int nesting_balanced(const RenderPassNesting *n) {
            now.exec_phase == n->exec_phase &&
            now.precise_mode == n->precise_mode &&
            now.ov_active_depth == n->ov_active_depth &&
-           now.ov_flush == n->ov_flush;
+           now.ov_flush == n->ov_flush &&
+           now.span_lo == n->span_lo && now.span_hi == n->span_hi;
 }
 
 /* After a watchdog abort, before the restore: which exits the longjmp
@@ -193,6 +197,7 @@ static int nesting_describe(const RenderPassNesting *n, int bb_defer_ck,
     RP_NOTE(now.exec_phase != n->exec_phase, "exec phase %d->%d",
             now.exec_phase, n->exec_phase);
     RP_NOTE(now.ld_delay.armed != n->ld_delay.armed, "pending load");
+    RP_NOTE(now.span_hi != n->span_hi, "guest span");
 #undef RP_NOTE
     return count;
 }
@@ -296,6 +301,16 @@ static int passes_allowed(void) {
 
 uint32_t psx_mod_render_pass_status(void) {
     return pass_status();
+}
+
+int psx_mod_run_guest_span(CPUState *cpu, uint32_t start_pc, uint32_t stop_pc) {
+    if (!g_psx_render_pass_active || !cpu) return 0;
+    if (dirty_ram_run_span(cpu, start_pc, stop_pc, 1000000u)) {
+        s_stats.spans++;
+        return 1;
+    }
+    s_stats.span_failures++;
+    return 0;
 }
 
 uint32_t psx_mod_render_pass_plan(uint32_t period_vblanks,
