@@ -65,6 +65,18 @@ int render_pass_select(const uint32_t *phases, uint32_t n, double p,
 int render_pass_gen_select(const uint32_t *phases, uint32_t n, double p,
                            uint32_t *lo, uint32_t *hi, float *t);
 
+/* Is the flip the FLIP source just saw the one a pending generation waits
+ * for? A generation built for the next flip (`shown` 0, the canonical PsyQ
+ * VSync-then-PutDispEnv point) waits for the display to flip to its own rect.
+ * One built for a frame already on screen (`shown` 1: the game flips each
+ * frame as soon as it is drawn) waits for the next flip, to any other rect;
+ * its images then show one game frame late. Either way the presented
+ * geometry must still be the one the generation was captured at. */
+int render_pass_gen_flip_matches(int shown, int gen_x, int gen_y,
+                                 int gen_source, int gen_w, int gen_h,
+                                 int flip_x, int flip_y, int flip_source,
+                                 int flip_w, int flip_h);
+
 /* Exponential moving average used for the per-pass host cost. */
 double render_pass_ema(double current, double sample);
 
