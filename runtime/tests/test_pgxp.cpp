@@ -259,6 +259,38 @@ int main(void) {
     }
     pgxp_set_cpu_mode(0);
 
+    /* --- quad from a projected-vertex table (Spider-Man 0x8007C5D4):
+     *   lwc2 SXY0..2 <- table; NCLIP; lwc2 SXYP <- table; NCLIP;
+     *   swc2 SXY0..2 -> packet
+     * The SXYP write pushes the FIFO; the stored words are corners 1..3. --- */
+    {
+        const uint32_t TABLE = 0x80180100u, PKT = 0x80180200u;
+        uint32_t words[4];
+        for (uint32_t i = 0; i < 4; i++) {
+            words[i] = ((80u + i) << 16) | (160u + i);
+            pgxp_gte_push_sxy((int32_t)((160 + i) << 16) | 0x8000,
+                              (int32_t)((80 + i) << 16) | 0x4000,
+                              (uint16_t)(100 + i), words[i]);
+            psx_pgxp_cop2(nullptr, SWC2(14), words[i], TABLE + i * 4u);
+        }
+        for (uint32_t i = 0; i < 3; i++) {          /* lwc2 SXY0..2        */
+            pgxp_gte_reg_written((int)(12 + i), words[i]);
+            psx_pgxp_cop2(nullptr, enc_i(0x32, 1, 12 + i, 0), words[i],
+                          TABLE + i * 4u);
+        }
+        pgxp_gte_reg_written(15, words[3]);          /* lwc2 SXYP: push     */
+        psx_pgxp_cop2(nullptr, enc_i(0x32, 1, 15, 0), words[3], TABLE + 12u);
+        for (uint32_t i = 0; i < 3; i++)
+            psx_pgxp_cop2(nullptr, SWC2(12 + i), words[i + 1], PKT + i * 4u);
+        for (uint32_t i = 0; i < 3; i++) {
+            int32_t x, y; uint16_t z;
+            CHECK(lookup(PKT + i * 4u, words[i + 1], 161 + (int32_t)i,
+                         81 + (int32_t)i, &x, &y, &z) == PGXP_SRC_DATAFLOW);
+            CHECK(x == ((int32_t)((161 + i) << 16) | 0x8000));
+            CHECK(z == 101 + i);
+        }
+    }
+
     /* --- in-place ops read their source before the destination is reset --- */
     pgxp_set_cpu_mode(1);
     produce_at(ADDR_A);

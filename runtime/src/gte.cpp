@@ -2138,10 +2138,10 @@ extern "C" void gte_write_data(CPUState* cpu, uint8_t reg, uint32_t val) {
                 cpu->gte_data[29] = packed;
             }
             break;
-        /* Guest writes to the SXY FIFO drop the affected register shadows:
-         * we never model FIFO side effects on shadows — the shifted regs 12/13
-         * now describe words their shadows no longer match, and validation
-         * drops those on next use. */
+        /* Guest writes to the SXY FIFO: regs 12/13 overwrite their shadow, a
+         * reg 14 write overwrites SXY2 and its SXYP mirror, and a reg 15
+         * write is the FIFO push, which pgxp_gte_reg_written applies to the
+         * shadows exactly as the registers move. */
         case 12: case 13:
             cpu->gte_data[reg] = val;
             if (!PSXRecomp::GTE::s_gte_replay_sandbox)
@@ -2150,20 +2150,16 @@ extern "C" void gte_write_data(CPUState* cpu, uint8_t reg, uint32_t val) {
         case 14:
             cpu->gte_data[14] = val;
             cpu->gte_data[15] = val;
-            if (!PSXRecomp::GTE::s_gte_replay_sandbox) {
-                pgxp_gte_reg_written(14, val);
-                pgxp_gte_reg_written(15, val);
-            }
+            if (!PSXRecomp::GTE::s_gte_replay_sandbox)
+                pgxp_gte_reg_written(14, val);   /* resets the SXYP mirror too */
             break;
         case 15:
             cpu->gte_data[12] = cpu->gte_data[13];
             cpu->gte_data[13] = cpu->gte_data[14];
             cpu->gte_data[14] = val;
             cpu->gte_data[15] = val;
-            if (!PSXRecomp::GTE::s_gte_replay_sandbox) {
-                pgxp_gte_reg_written(14, val);
-                pgxp_gte_reg_written(15, val);
-            }
+            if (!PSXRecomp::GTE::s_gte_replay_sandbox)
+                pgxp_gte_reg_written(15, val);   /* FIFO push on the shadows */
             break;
         case 28: {
             cpu->gte_data[9] = (val & 0x1Fu) << 7;

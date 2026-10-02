@@ -206,6 +206,13 @@ static inline int32_t  f_simm(uint32_t i)  { return (int32_t)(int16_t)(i & 0xFFF
 /* Memory-mode hooks: loads / stores                                          */
 /* ------------------------------------------------------------------------- */
 
+/* SXY2 and SXYP are one register seen at two addresses: whichever the hook
+ * just filled, the other describes the same word. */
+static inline void gte_sxy2_mirror(uint32_t reg) {
+    if (reg == 14)      s_gte[15] = s_gte[14];
+    else if (reg == 15) s_gte[14] = s_gte[15];
+}
+
 extern "C" void psx_pgxp_load(struct CPUState *cpu, uint32_t instr,
                               uint32_t addr, uint32_t value) {
     (void)cpu;
@@ -323,6 +330,7 @@ extern "C" void psx_pgxp_cop2(struct CPUState *cpu, uint32_t instr,
         } else {
             pv_reset(dst, value);
         }
+        gte_sxy2_mirror(f_rt(instr));
         return;
     }
     case 0x3A: {                               /* SWC2: [addr] <- gte[rt]     */
@@ -360,9 +368,9 @@ extern "C" void psx_pgxp_cop2(struct CPUState *cpu, uint32_t instr,
             } else {
                 pv_reset(dst, value);
             }
-            /* An SXYP write (rd==15) shifts the hardware FIFO; we do not
-             * model it — regs 12..14 now describe words they no longer
-             * match, and validation drops them on next use. */
+            /* An SXYP write (rd==15) already shifted the FIFO shadows
+             * (pgxp_gte_reg_written, from the GTE register write). */
+            gte_sxy2_mirror(f_rd(instr));
             return;
         }
         case 0x02: {                           /* CFC2: control regs carry no
@@ -727,8 +735,20 @@ extern "C" void pgxp_gte_reg_written(int reg, uint32_t value) {
      * machine state back, so its writes must not stick to the shadows). */
     if (s_suppress != 0) return;
     if (reg < 0 || reg > 31) return;
+    if (reg == 15) {
+        /* SXYP is a FIFO push: SXY1 moves to SXY0, SXY2 to SXY1, the value
+         * lands in SXY2 (psx-spx GTE "SXYP"). Engines draw quads from a
+         * projected-vertex table this way - load three corners, NCLIP, push
+         * the fourth through SXYP, NCLIP, store SXY0..2 into the packet - so
+         * the shadows shift with the registers. The MTC2 / LWC2 hook then
+         * copies the source shadow into the pushed slot. */
+        s_gte[12] = s_gte[13];
+        s_gte[13] = s_gte[14];
+        reg = 14;
+    }
     pv_kill(&s_gte[reg]);
     pv_reset(&s_gte[reg], value);
+    gte_sxy2_mirror(reg);                      /* SXY2 and SXYP: one register */
 }
 
 /* ------------------------------------------------------------------------- */
