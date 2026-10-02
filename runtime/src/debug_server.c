@@ -7957,7 +7957,9 @@ static void handle_render_pass_stats(int id, const char *json)
     RenderPassStats st;
     uint64_t gd[10], image_bytes = 0;
     uint32_t image_textures;
+    DirtyRamSpanFailure sf;
     render_pass_get_stats(&st);
+    dirty_ram_span_last_failure(&sf);
     gl_renderer_pass_diag(gd);
     image_textures = gl_renderer_pass_image_textures(&image_bytes);
     send_fmt("{\"id\":%d,\"ok\":true,\"plans\":%llu,\"planned\":%llu,"
@@ -7977,7 +7979,10 @@ static void handle_render_pass_stats(int id, const char *json)
              "\"cost_us\":%llu,\"cost_rewarms\":%llu,\"frame_images\":%llu,"
              "\"journaled\":%llu,"
              "\"image_textures\":%u,\"image_bytes\":%llu,\"status\":%u,"
-             "\"backups_reused\":%llu,\"spans\":%llu,\"span_failures\":%llu}",
+             "\"backups_reused\":%llu,\"spans\":%llu,\"span_failures\":%llu,"
+             "\"span_fail\":{\"reason\":%u,\"pc\":\"0x%08X\",\"start\":\"0x%08X\","
+             "\"stop\":\"0x%08X\",\"ra\":\"0x%08X\",\"after\":\"0x%08X\","
+             "\"insns\":%llu}}",
              id, (unsigned long long)st.plans, (unsigned long long)st.planned,
              (unsigned long long)st.wanted, (unsigned long long)st.refused,
              (unsigned long long)st.passes, (unsigned long long)st.aborted,
@@ -8004,7 +8009,10 @@ static void handle_render_pass_stats(int id, const char *json)
              (unsigned)image_textures, (unsigned long long)image_bytes,
              (unsigned)psx_mod_render_pass_status(),
              (unsigned long long)gl_renderer_pass_backups_reused(),
-             (unsigned long long)st.spans, (unsigned long long)st.span_failures);
+             (unsigned long long)st.spans, (unsigned long long)st.span_failures,
+             (unsigned)sf.reason, (unsigned)sf.pc, (unsigned)sf.start_pc,
+             (unsigned)sf.stop_pc, (unsigned)sf.ra, (unsigned)sf.after,
+             (unsigned long long)sf.insns);
 }
 
 /* render_pass_refuse on=<0|1>: make the OpenGL backend decline render passes
