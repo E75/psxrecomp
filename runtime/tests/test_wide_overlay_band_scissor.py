@@ -21,13 +21,14 @@ def body(text, signature):
 
 
 gl = (src / "gpu_gl_renderer.c").read_text(encoding="utf-8")
-band = body(gl, "static void wide_band_scissor(void) {")
+band = body(gl, "static void wide_band_scissor_x(int x, int w) {")
+assert "static void wide_band_scissor(void) { wide_band_scissor_x(0, g_wide_w); }" in gl, "GL band scissor does not cover the full wide width"
 assert "s_area_y1" in band and "s_area_y2" in band, "GL band scissor ignores the draw area"
 flat = body(gl, "static void wide_flat_rect_direct(")
 assert "wide_band_scissor();" in flat, "GL overlay pass does not use the band scissor"
 assert "VRAM_H * s_scale);  /* full surface" not in flat, "GL overlay pass uses a full-height scissor"
 target = body(gl, "static void wide_target_begin(")
-assert "wide_band_scissor();" in target, "GL wide mirror does not use the band scissor"
+assert "wide_band_scissor_x(" in target, "GL wide mirror does not use the band scissor"
 
 vk = (src / "gpu_vk_renderer.c").read_text(encoding="utf-8")
 begin = body(vk, "static void wide_pass_begin(VkCommandBuffer cb) {")
