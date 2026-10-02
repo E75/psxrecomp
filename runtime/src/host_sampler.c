@@ -12,9 +12,8 @@
  * Windows: SuspendThread / GetThreadContext / ResumeThread from a sampler
  * thread. POSIX: the process CPU-time timer (SIGPROF) delivered to the
  * emulation thread, which reads its own interrupted PC from the ucontext.
- * Other hosts report the sampler as unsupported. */
-#ifndef PSX_NO_DEBUG_TOOLS
-
+ * Other hosts, and builds without debug tools, report the sampler as
+ * unsupported. */
 #if defined(__linux__) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE 1   /* REG_RIP, dladdr */
 #endif
@@ -31,6 +30,7 @@ static volatile uint64_t s_seq;
 static uintptr_t s_image_base;
 static int s_supported;
 
+#ifndef PSX_NO_DEBUG_TOOLS
 static void record(uintptr_t pc) {
     const uint64_t n = s_seq;
     HostSample *e = &s_ring[n % HOST_SAMPLER_CAP];
@@ -39,8 +39,13 @@ static void record(uintptr_t pc) {
     e->in_pass = g_psx_render_pass_active ? 1u : 0u;
     s_seq = n + 1;
 }
+#endif
 
-#if defined(_WIN32)
+#if defined(PSX_NO_DEBUG_TOOLS)
+/* Production builds carry no sampler: it reports unsupported. */
+void host_sampler_start(void) {}
+
+#elif defined(_WIN32)
 #include <windows.h>
 
 static HANDLE s_target;
@@ -161,5 +166,3 @@ int host_sampler_get(uint64_t seq, HostSample *out) {
     *out = s_ring[seq % HOST_SAMPLER_CAP];
     return 1;
 }
-
-#endif /* !PSX_NO_DEBUG_TOOLS */
