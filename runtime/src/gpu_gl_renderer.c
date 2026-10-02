@@ -7758,17 +7758,15 @@ static void gl_swap_with_osd(void) {
             present_shot_done(wrote);
         }
     }
+    /* Dynamic resolution's ledger: time blocked in the swap is the driver's
+     * vsync wait unless the frame was late (main.cpp). Keep one owned swap. */
+    uint64_t t0 = s_dyn_on ? SDL_GetPerformanceCounter() : 0;
+    SDL_GL_SwapWindow(s_win);
     if (s_dyn_on) {
-        /* Dynamic resolution's ledger: time blocked in the swap is the
-         * driver's vsync wait unless the frame was late (main.cpp). */
-        uint64_t t0 = SDL_GetPerformanceCounter();
-        SDL_GL_SwapWindow(s_win);
         s_dyn_last_swap_ticks = SDL_GetPerformanceCounter() - t0;
         s_dyn_ledger.swap_ticks += s_dyn_last_swap_ticks;
         s_dyn_ledger.swaps++;
-        return;
     }
-    SDL_GL_SwapWindow(s_win);
 }
 
 /* Output pixels per source texel below which a supersampled present switches
