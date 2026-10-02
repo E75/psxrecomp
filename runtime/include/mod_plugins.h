@@ -109,6 +109,11 @@ int psx_mod_set_main_ram_8mb(int enabled);
 /* Current per-side widescreen reveal in native game pixels (zero at 4:3). */
 int32_t psx_mod_widescreen_x_margin(void);
 
+/* Opt into render-only recovery of saturated horizontal GTE projections in
+ * native-wide gameplay. Requires exact packet-address/word provenance and
+ * depth; never changes guest SXY, vertical coordinates, or the 4:3 path. */
+void psx_mod_set_native_wide_projection_correction(int enabled);
+
 /* Mark a guest GPU packet (P_TAG address) as persistent screen-space HUD.
  * edge = -1 left, +1 right, 0 clears a reused packet's tag. The native-wide
  * compositor translates it by the live reveal, excluding culling guards.

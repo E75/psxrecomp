@@ -3943,6 +3943,8 @@ static void parse_vertex(uint32_t word, int32_t* x, int32_t* y) {
 
 extern int gte_geometry_correction_enabled(void);
 static int s_texture_correction_enabled = 0;
+static int s_native_wide_projection_correction = 0;
+static uint64_t s_native_wide_projection_vertices = 0;
 extern int gte_precision_load_word(uint32_t addr, uint32_t packed,
                                    int32_t *x16, int32_t *y16, uint16_t *z);
 
@@ -3951,7 +3953,44 @@ extern int gte_precision_load_word(uint32_t addr, uint32_t packed,
 void gpu_pgxp_rederive_enable(void) {
     pgxp_set_enabled(s_texture_correction_enabled ||
                      gte_geometry_correction_enabled() ||
-                     ws_precise_nclip_cfg);
+                     ws_precise_nclip_cfg ||
+                     s_native_wide_projection_correction);
+}
+
+void psx_mod_set_native_wide_projection_correction(int enabled) {
+    s_native_wide_projection_correction = enabled ? 1 : 0;
+    s_native_wide_projection_vertices = 0;
+    gpu_pgxp_rederive_enable();
+}
+
+int gpu_ws_native_wide_projection_correction(uint64_t *vertices) {
+    if (vertices) *vertices = s_native_wide_projection_vertices;
+    return s_native_wide_projection_correction;
+}
+
+/* The PS1 clamps each projected X independently. At a wider FOV that can
+ * bend an otherwise planar quad, even while both clamped vertices remain
+ * outside the viewport. Recover only a proven saturated projection. An
+ * ordinary CPU coordinate, a modified packet, and a missing depth stay stock.
+ * The +/-4096 transport endpoints themselves are clamped, so reject them. */
+static int native_wide_projection_x(uint32_t addr, uint32_t word,
+                                    int32_t raw_x, int32_t raw_y,
+                                    int32_t *x16) {
+    if (!s_native_wide_projection_correction || ws_nw_extra() <= 0 ||
+        (raw_x != -1024 && raw_x != 1023) || addr == UINT32_MAX)
+        return 0;
+    int32_t px, py;
+    uint16_t z;
+    if (!gte_precision_load_word(addr, word, &px, &py, &z) || !z ||
+        (py >> 16) != raw_y || px <= -4096 * 65536 ||
+        px >= 4096 * 65536 - 1)
+        return 0;
+    if ((raw_x == -1024 && (px >> 16) >= -1024) ||
+        (raw_x == 1023 && (px >> 16) <= 1023))
+        return 0;
+    *x16 = px;
+    s_native_wide_projection_vertices++;
+    return 1;
 }
 
 void gpu_texture_correction_set(int enabled) {
@@ -3979,7 +4018,8 @@ uint32_t gpu_texture_correction_hits(void) {
 static void prepare_precise_triangle(int i0, int i1, int i2,
                                      const int32_t vx[3], const int32_t vy[3]) {
     gr_set_perspective_triangle(0, 0.0f, 0.0f, 0.0f);
-    if (!gte_geometry_correction_enabled()) {
+    const int geometry = gte_geometry_correction_enabled();
+    if (!geometry && !s_native_wide_projection_correction) {
         gr_set_precise_triangle(0, 0,0, 0,0, 0,0);
         return;
     }
@@ -3995,8 +4035,12 @@ static void prepare_precise_triangle(int i0, int i1, int i2,
                             : gp0_cmd_source_addr + (uint32_t)idx[i] * 4u;
         int32_t px, py;
         uint16_t sz;
-        if (pgxp_get_precise_vertex(addr, word, raw_x, raw_y,
+        px = raw_x * 65536;
+        py = raw_y * 65536;
+        if (geometry && pgxp_get_precise_vertex(addr, word, raw_x, raw_y,
                                     &px, &py, &sz) != PGXP_SRC_NATIVE)
+            any_precise = 1;
+        if (native_wide_projection_x(addr, word, raw_x, raw_y, &px))
             any_precise = 1;
         fx[i] = (int32_t)((int64_t)px + (int64_t)(vx[i] - raw_x) * 65536);
         fy[i] = (int32_t)((int64_t)py + (int64_t)(vy[i] - raw_y) * 65536);
