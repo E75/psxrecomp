@@ -11,9 +11,10 @@
  * place (memory.c render_pass_store).
  *
  * Nothing here runs unless a trusted plugin calls the API, and the plan
- * refuses in netplay, rollback, rewind, fast-forward, self-check
+ * refuses during rollback resimulation, rewind, fast-forward, self-check
  * resimulation, or without the OpenGL presenter's flip-aware interpolation
- * (psx_mod_render_pass_status says which). */
+ * (psx_mod_render_pass_status says which). Live netplay frames may have
+ * passes: they leave both peers' simulation untouched. */
 
 #include "render_pass.h"
 
@@ -51,7 +52,6 @@ extern uint32_t interrupts_get_cycles_since_vblank(void);
 extern void     interrupts_set_cycles_since_vblank(uint32_t v);
 extern void     psx_irq_refresh_cause_ip2(void);
 extern int      psx_get_in_exception(void);
-extern int      psx_netplay_active(void);
 extern int      psx_netplay_is_resimulating(void);
 extern int      psx_selfcheck_resim_active(void);
 extern int      psx_rewind_is_open(void);
@@ -295,7 +295,12 @@ int psx_mod_set_render_pass_flip(uint32_t mode) {
 static uint32_t pass_status(void) {
     uint32_t gl;
     if (s_stats.disabled) return PSX_MOD_RENDER_PASS_DISABLED;
-    if (psx_netplay_active() || psx_netplay_is_resimulating() ||
+    /* Netplay itself is fine: a pass restores the whole guest machine, so
+     * neither peer's simulation sees it, and its plugin runs under the
+     * netplay presentation guards (mod_runtime.cpp). A rollback
+     * resimulation replays ticks the player has already seen, so it never
+     * draws. */
+    if (psx_netplay_is_resimulating() ||
         psx_selfcheck_resim_active() || psx_rewind_is_open() ||
         g_ls_mode || g_ls_replay_active)
         return PSX_MOD_RENDER_PASS_SESSION;

@@ -76,6 +76,10 @@ extern "C" uint32_t psx_mod_gpu_dma_memory_alloc(uint32_t, uint32_t) {
     return 0;
 }
 extern "C" void psx_ram_reset_size_request(void) {}
+static int ram_8mb_requests;
+extern "C" void psx_ram_request_8mb(int) { ram_8mb_requests++; }
+extern "C" { int g_psx_render_pass_active; uint64_t g_guest_store_count;
+             extern int g_psx_mod_netplay_presentation; }
 extern "C" int psx_ws_x_margin(void) { return 0; }
 
 /* Stand-in for the GPU's display geometry. psx_mod_display_width/height must
@@ -175,6 +179,32 @@ static void test_guest_function(CPUState* cpu, uint32_t) {
     if (!psx_mod_finish_function(cpu)) failures++;
     cpu->gpr[2] = cpu->gpr[4] + 7u;
     if (cpu->gpr[31] != ra) failures++;
+}
+
+/* Netplay presentation package: what its plugin may and may not do. */
+static int pres_activations, sim_activations, pres_entries, pres_ram_ok;
+static uint32_t pres_alloc;
+static int pres_mode;
+static void test_pres_activation(void) {
+    pres_activations++;
+    pres_ram_ok = psx_mod_set_main_ram_8mb(1);
+    pres_alloc = psx_mod_alloc_guest_memory(64, 4);
+}
+static void test_sim_activation(void) { sim_activations++; }
+static void test_pres_entry(CPUState* cpu, uint32_t) {
+    pres_entries++;
+    if (pres_mode == 0) {                  /* tries to change the simulation */
+        cpu->gpr[2] = 0xDEADBEEFu;
+        psx_mod_write_word(0x80001000u, 0x11111111u);
+        (void)psx_mod_finish_function(cpu);
+    } else if (pres_mode == 1) {           /* sandboxed pass: writes allowed */
+        g_psx_render_pass_active = 1;
+        psx_mod_write_word(0x80001004u, 0x22222222u);
+        g_psx_render_pass_active = 0;
+        psx_mod_write_word(0x80001004u, 0u);   /* the pass's restore */
+    } else {                               /* a guest store behind the API */
+        g_guest_store_count++;
+    }
 }
 
 static void test_activation_plugin(void) {
@@ -1027,6 +1057,91 @@ int main() {
     check(iso_sector_count(mounted)==24&&iso_track_count(mounted)==1&&
           !iso_read_raw_sector(mounted,24,sector.data(),sector.size()),"clearing plan removes all donor sectors and restores TOC");
     iso_close(mounted);
+
+    /* Netplay presentation packages survive the netplay clear; everything
+     * else stays vanilla, and the presentation plugin cannot touch the
+     * simulation. */
+    {
+        const fs::path pres_root = root / "pres";
+        write_text(pres_root / "packages/pres.test/1.0.0/manifest.toml",
+            "format_version = 5\nid = \"pres.test\"\nversion = \"1.0.0\"\n"
+            "name = \"Presentation\"\nnetplay = \"presentation\"\n"
+            "[[target]]\ngame_id = \"PRES\"\n"
+            "[[feature]]\nid = \"on\"\nname = \"On\"\ndefault_enabled = true\n"
+            "[[plugin]]\nfeature = \"on\"\nid = \"pres.test.plugin\"\n");
+        write_text(pres_root / "packages/sim.test/1.0.0/manifest.toml",
+            "format_version = 5\nid = \"sim.test\"\nversion = \"1.0.0\"\n"
+            "name = \"Simulation\"\n"
+            "[[target]]\ngame_id = \"PRES\"\n"
+            "[[feature]]\nid = \"on\"\nname = \"On\"\ndefault_enabled = true\n"
+            "[[plugin]]\nfeature = \"on\"\nid = \"sim.test.plugin\"\n");
+        write_text(pres_root / "state.toml", "format_version = 2\n");
+        check(psx_mod_register_activation_plugin("pres.test.plugin",
+                                                 test_pres_activation) &&
+              psx_mod_register_activation_plugin("sim.test.plugin",
+                                                 test_sim_activation) &&
+              psx_mod_register_function_entry_plugin("pres.test.plugin",
+                  0x80006000u, test_pres_entry) == 1,
+              "register presentation test plugins");
+        check(PSXRecompV4::mod_runtime_initialize(pres_root, "PRES", 0, {}, &error),
+              "presentation initialize");
+        check(PSXRecompV4::mod_runtime_clear_for_netplay(&error), error.c_str());
+        check(g_psx_mod_netplay_presentation == 1,
+              "a netplay session keeps an enabled presentation package");
+        ram_8mb_requests = 0;
+        mod_runtime_activate_plugins();
+        check(pres_activations == 1 && sim_activations == 0,
+              "netplay activates presentation plugins only");
+        check(!pres_ram_ok && ram_8mb_requests == 0 && pres_alloc == 0,
+              "netplay refuses simulation settings and guest allocation");
+        CPUState pc{};
+        pc.gpr[2] = 7; pc.gpr[31] = 0x80007000u; pc.pc = 0x80006000u;
+        g_psx_mod_netplay_presentation = 0;   /* the test's own setup write */
+        psx_mod_write_word(0x80001000u, 0u);
+        g_psx_mod_netplay_presentation = 1;
+        pres_mode = 0;
+        check(!psx_mod_function_entry(&pc, 0x80006000u) && pres_entries == 1,
+              "a presentation hook cannot skip guest code in netplay");
+        check(pc.gpr[2] == 7 && pc.pc == 0x80006000u,
+              "a presentation hook's CPU change is undone in netplay");
+        check(psx_read_word(0x80001000u) == 0u,
+              "a presentation hook's guest write is refused outside a pass");
+        pres_mode = 1;
+        check(!psx_mod_function_entry(&pc, 0x80006000u) && pres_entries == 2,
+              "a presentation hook may run a sandboxed pass");
+        pres_mode = 2;
+        psx_mod_function_entry(&pc, 0x80006000u);
+        psx_mod_function_entry(&pc, 0x80006000u);
+        check(pres_entries == 3,
+              "a plugin that stores to guest memory is disabled for the session");
+        check(PSXRecompV4::mod_runtime_commit({}, &error), error.c_str());
+        check(g_psx_mod_netplay_presentation == 0,
+              "an offline commit ends the presentation session");
+        mod_runtime_activate_plugins();
+        check(sim_activations == 1 && pres_activations == 2 && pres_ram_ok == 1,
+              "offline, every enabled package activates with its full API");
+        psx_mod_function_entry(&pc, 0x80006000u);
+        check(pres_entries == 4, "offline, the disabled-in-netplay plugin runs again");
+
+        PSXRecompV4::ModPackage bad;
+        write_text(pres_root / "bad/manifest.toml",
+            "format_version = 5\nid = \"bad.test\"\nversion = \"1.0.0\"\n"
+            "name = \"Bad\"\nnetplay = \"presentation\"\n"
+            "[[target]]\ngame_id = \"PRES\"\n"
+            "[[feature]]\nid = \"on\"\nname = \"On\"\n"
+            "[[patch]]\nfeature = \"on\"\ntarget = \"main_exe\"\naddress = 2147549184\n"
+            "expected = \"00 00 00 00\"\nreplace = \"01 00 00 00\"\n");
+        check(!PSXRecompV4::ModPackageManager::read_manifest(
+                  pres_root / "bad/manifest.toml", bad),
+              "a presentation package may not patch the game");
+        write_text(pres_root / "bad2/manifest.toml",
+            "format_version = 5\nid = \"bad.test\"\nversion = \"1.0.0\"\n"
+            "name = \"Bad\"\nnetplay = \"sometimes\"\n"
+            "[[target]]\ngame_id = \"PRES\"\n");
+        check(!PSXRecompV4::ModPackageManager::read_manifest(
+                  pres_root / "bad2/manifest.toml", bad),
+              "netplay must be off or presentation");
+    }
     fs::remove_all(root, ec);
     if (failures) return 1;
     std::cout << "mod runtime tests passed\n";

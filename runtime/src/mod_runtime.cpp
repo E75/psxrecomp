@@ -38,6 +38,12 @@
 #endif
 
 extern "C" uint8_t psx_read_byte(uint32_t addr);
+extern "C" uint64_t g_guest_store_count;
+extern "C" int g_psx_render_pass_active;
+extern "C" int psx_mod_netplay_refuse(const char* api, int outside_pass_only);
+/* 1 while the committed plan is a netplay presentation plan. */
+extern "C" int g_psx_mod_netplay_presentation;
+int g_psx_mod_netplay_presentation = 0;
 extern "C" void psx_write_byte(uint32_t addr, uint8_t value);
 extern "C" uint16_t psx_read_half(uint32_t addr);
 extern "C" void psx_write_half(uint32_t addr, uint16_t value);
@@ -89,6 +95,9 @@ struct RuntimeMods {
     const ModResolution::Plugin* current_plugin = nullptr;
     CPUState* current_function_cpu = nullptr;
     bool current_function_finished = false;
+    /* Plugins of netplay = "presentation" packages that broke the
+     * presentation contract this session (see NetplayPresentationGuard). */
+    std::vector<const ModResolution::Plugin*> netplay_disabled;
 };
 
 RuntimeMods& state() {
@@ -121,6 +130,60 @@ public:
     }
     PluginCallbackScope(const PluginCallbackScope&) = delete;
     PluginCallbackScope& operator=(const PluginCallbackScope&) = delete;
+};
+
+/* Netplay presentation sessions (mod_runtime_clear_for_netplay keeps the
+ * plugins of netplay = "presentation" packages). Each peer may run different
+ * presentation packages, so none of them may change what the peer simulates.
+ * The API refuses every simulation-affecting call (psx_mod_netplay_refuse),
+ * and this guard wraps every plugin callback: a callback that leaves the CPU
+ * changed is undone, and one that stored to guest memory (undoable only by
+ * the plugin itself) disables its plugin for the session. Render passes are
+ * sandboxed and restore both, so a callback that runs passes is unaffected. */
+bool plugin_netplay_disabled(const RuntimeMods& s,
+                             const ModResolution::Plugin* plugin) {
+    return std::find(s.netplay_disabled.begin(), s.netplay_disabled.end(),
+                     plugin) != s.netplay_disabled.end();
+}
+
+class NetplayPresentationGuard {
+    RuntimeMods& runtime;
+    const ModResolution::Plugin* plugin;
+    CPUState* cpu;
+    bool active;
+    CPUState before{};
+    uint64_t stores = 0;
+public:
+    NetplayPresentationGuard(RuntimeMods& s, const ModResolution::Plugin* p,
+                             CPUState* c)
+        : runtime(s), plugin(p), cpu(c),
+          active(g_psx_mod_netplay_presentation != 0) {
+        if (!active) return;
+        if (cpu) before = *cpu;
+        stores = g_guest_store_count;
+    }
+    ~NetplayPresentationGuard() {
+        if (!active) return;
+        if (cpu && std::memcmp(cpu, &before, sizeof before) != 0) {
+            *cpu = before;
+            psx_mod_counter_add("netplay.cpu_restored", 1);
+            std::fprintf(stderr,
+                         "psxrecomp: netplay: presentation plugin %s changed "
+                         "CPU state; undone\n",
+                         plugin ? plugin->id.c_str() : "?");
+        }
+        if (g_guest_store_count != stores && plugin &&
+            !plugin_netplay_disabled(runtime, plugin)) {
+            runtime.netplay_disabled.push_back(plugin);
+            psx_mod_counter_add("netplay.plugin_disabled", 1);
+            std::fprintf(stderr,
+                         "psxrecomp: netplay: presentation plugin %s wrote "
+                         "guest memory; disabled for this session\n",
+                         plugin->id.c_str());
+        }
+    }
+    NetplayPresentationGuard(const NetplayPresentationGuard&) = delete;
+    NetplayPresentationGuard& operator=(const NetplayPresentationGuard&) = delete;
 };
 
 /* Function-entry hooks of the ACTIVE plan, flattened at plugin activation into
@@ -1226,6 +1289,8 @@ bool mod_runtime_initialize(const std::filesystem::path& root,
     RuntimeMods& s = state();
     s.manager.set_root({});
     clear_function_entry_hooks();
+    s.netplay_disabled.clear();
+    g_psx_mod_netplay_presentation = 0;
     s.disc_extents.clear();
     s.extent_start = 0;
     s.plan = {};
@@ -1294,10 +1359,69 @@ bool mod_runtime_clear_for_netplay(std::string* error) {
     s.main_applied = false;
     s.disc_enabled = false;
     s.disc_guard_failed = false;
+    s.netplay_disabled.clear();
+    g_psx_mod_netplay_presentation = 0;
     s.error.clear();
     if (error) error->clear();
-    std::fprintf(stdout, "psxrecomp: mods cleared for netplay (vanilla session)\n");
+
+    /* The simulation stays vanilla on both peers. What survives is the
+     * plugins (and their resources) of enabled netplay = "presentation"
+     * packages: they change only what this player sees, so peers need not
+     * agree on them, and the presentation guards hold them to that. A plan
+     * that does not resolve keeps the session fully vanilla. */
+    ModResolution full =
+        s.manager.resolve(s.game_id, s.exe_sha256, s.disc_sha256);
+    ModResolution kept;
+    if (full.ok) {
+        auto presentation = [&](const std::string& package_id) {
+            const ModPackage* package = s.manager.selected_package(package_id);
+            return package && package->netplay == "presentation";
+        };
+        for (const ModResolution::Plugin& plugin : full.plugins)
+            if (presentation(plugin.package_id)) kept.plugins.push_back(plugin);
+        for (const ModResolution::Resource& resource : full.resources)
+            if (presentation(resource.package_id))
+                kept.resources.push_back(resource);
+        for (const auto& selection : full.selections)
+            if (presentation(selection.first)) kept.selections.insert(selection);
+    }
+    if (kept.plugins.empty()) {
+        std::fprintf(stdout,
+                     "psxrecomp: mods cleared for netplay (vanilla session)\n");
+        return true;
+    }
+    kept.ok = true;
+    kept.fingerprint = "netplay-presentation";
+    s.plan = std::move(kept);
+    g_psx_mod_netplay_presentation = 1;
+    for (const ModResolution::Plugin& plugin : s.plan.plugins)
+        std::fprintf(stdout,
+                     "psxrecomp: netplay keeps presentation plugin %s (%s/%s)\n",
+                     plugin.id.c_str(), plugin.package_id.c_str(),
+                     plugin.feature_id.c_str());
+    std::fprintf(stdout, "psxrecomp: mods cleared for netplay (vanilla "
+                         "simulation; presentation plugins kept)\n");
     return true;
+}
+
+/* A simulation-affecting mod API call in a netplay presentation session.
+ * `outside_pass_only`: guest memory access is sandboxed inside a render pass
+ * (restored afterwards), so it is refused only outside one; settings are
+ * never sandboxed and are always refused. */
+extern "C" int psx_mod_netplay_refuse(const char* api, int outside_pass_only) {
+    if (!g_psx_mod_netplay_presentation) return 0;
+    if (outside_pass_only && g_psx_render_pass_active) return 0;
+    psx_mod_counter_add("netplay.refused", 1);
+    static std::vector<std::string> named;
+    const std::string name = api ? api : "?";
+    if (std::find(named.begin(), named.end(), name) == named.end()) {
+        named.push_back(name);
+        std::fprintf(stderr,
+                     "psxrecomp: netplay: %s refused for a presentation "
+                     "plugin (it would change the simulation)\n",
+                     name.c_str());
+    }
+    return 1;
 }
 
 bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* error) {
@@ -1360,6 +1484,8 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* err
     s.disc_extents.clear();
     s.extent_start = 0;
     s.plan = std::move(plan);
+    s.netplay_disabled.clear();
+    g_psx_mod_netplay_presentation = 0;
     build_disc_index(s);
     s.effective_disc_path = std::move(effective_disc);
     s.main_applied = false;
@@ -1453,6 +1579,7 @@ extern "C" void mod_runtime_enable_disc_patches(void) {
 
 extern "C" int psx_mod_append_disc_extent(const char* resource_id,
         uint64_t byte_offset, uint32_t sector_count, uint32_t* first_lba) {
+    if (psx_mod_netplay_refuse("psx_mod_append_disc_extent", 0)) return 0;
     using namespace PSXRecompV4;
     if (first_lba) *first_lba = 0;
     auto& s = state();
@@ -1559,6 +1686,7 @@ extern "C" void mod_runtime_activate_plugins(void) {
     s.activating = true;
     for (const ModResolution::Plugin& plugin : s.plan.plugins) {
         PluginCallbackScope scope(s, &plugin);
+        NetplayPresentationGuard guard(s, &plugin, nullptr);
         mod_invoke_activation_plugin(plugin.id);
     }
     s.activating = false;
@@ -1571,7 +1699,9 @@ extern "C" void mod_runtime_on_vblank(void) {
     RuntimeMods& s = state();
     if (!s.initialized || !s.plan.ok) return;
     for (const ModResolution::Plugin& plugin : s.plan.plugins) {
+        if (plugin_netplay_disabled(s, &plugin)) continue;
         PluginCallbackScope scope(s, &plugin);
+        NetplayPresentationGuard guard(s, &plugin, nullptr);
         mod_invoke_vblank_plugin(plugin.id);
     }
 }
@@ -1651,6 +1781,7 @@ extern "C" int psx_mod_current_resource_bytes(const char* resource_id,
 }
 
 extern "C" void psx_mod_write_byte(uint32_t address, uint8_t value) {
+    if (psx_mod_netplay_refuse("psx_mod_write_byte", 1)) return;
     psx_host_write_byte(address, value);
 }
 
@@ -1659,6 +1790,7 @@ extern "C" uint16_t psx_mod_read_half(uint32_t address) {
 }
 
 extern "C" void psx_mod_write_half(uint32_t address, uint16_t value) {
+    if (psx_mod_netplay_refuse("psx_mod_write_half", 1)) return;
     psx_host_write_half(address, value);
 }
 
@@ -1667,21 +1799,31 @@ extern "C" uint32_t psx_mod_read_word(uint32_t address) {
 }
 
 extern "C" void psx_mod_write_word(uint32_t address, uint32_t value) {
+    if (psx_mod_netplay_refuse("psx_mod_write_word", 1)) return;
     psx_host_write_word(address, value);
 }
 
 extern "C" void psx_mod_write_code_word(uint32_t address, uint32_t value) {
+    if (psx_mod_netplay_refuse("psx_mod_write_code_word", 0)) return;
     psx_host_write_word(address, value);
     dirty_ram_mark_executable_range(address & 0x1FFFFFFFu, 4u);
 }
 
+extern "C" int psx_mod_set_main_ram_8mb(int enabled) {
+    if (psx_mod_netplay_refuse("psx_mod_set_main_ram_8mb", 0)) return 0;
+    psx_ram_request_8mb(enabled);
+    return 1;
+}
+
 extern "C" uint32_t psx_mod_alloc_guest_memory(uint32_t size,
                                                 uint32_t alignment) {
+    if (psx_mod_netplay_refuse("psx_mod_alloc_guest_memory", 0)) return 0;
     return psx_mod_memory_alloc(size, alignment);
 }
 
 extern "C" uint32_t psx_mod_alloc_gpu_dma_memory(uint32_t size,
                                                   uint32_t alignment) {
+    if (psx_mod_netplay_refuse("psx_mod_alloc_gpu_dma_memory", 0)) return 0;
     return psx_mod_gpu_dma_memory_alloc(size, alignment);
 }
 
@@ -1784,6 +1926,7 @@ extern "C" int psx_mod_register_function_filter_plugin(
 }
 
 extern "C" int psx_mod_finish_function(CPUState* cpu) {
+    if (psx_mod_netplay_refuse("psx_mod_finish_function", 0)) return 0;
     using namespace PSXRecompV4;
     RuntimeMods& s = state();
     if (!cpu || s.current_function_cpu != cpu || !s.current_plugin) return 0;
@@ -1797,6 +1940,7 @@ extern "C" int psx_mod_register_guest_function_plugin(
 }
 
 extern "C" int psx_mod_dispatch_guest_function(CPUState* cpu, uint32_t address) {
+    if (psx_mod_netplay_refuse("psx_mod_dispatch_guest_function", 1)) return 0;
     using namespace PSXRecompV4;
     if (!g_psx_mod_guest_functions || !cpu || address >= 0xC0000000u) return 0;
     const auto& functions = active_guest_functions();
@@ -1824,9 +1968,13 @@ extern "C" void psx_mod_instruction(CPUState* cpu, uint32_t address, uint32_t in
                               [](const auto& h, uint32_t k) { return h.key < k; });
     for (; it != hooks.end() && it->key == key; ++it) {
         if (it->expected != instruction || psx_mod_read_word(address) != instruction) continue;
+        if (plugin_netplay_disabled(state(), it->plugin)) continue;
         PluginCallbackScope scope(state(), it->plugin, nullptr);
         const uint32_t pc = cpu->pc;
-        it->callback(cpu, address);
+        {
+            NetplayPresentationGuard guard(state(), it->plugin, cpu);
+            it->callback(cpu, address);
+        }
         if (cpu->pc != pc) std::abort();
         cpu->gpr[0] = 0;
     }
@@ -1842,13 +1990,23 @@ extern "C" int psx_mod_function_entry(CPUState* cpu, uint32_t address) {
         table.begin(), table.end(), key,
         [](const ActiveFunctionEntryHook& hook, uint32_t k) { return hook.key < k; });
     for (; it != table.end() && it->key == key; ++it) {
+        if (plugin_netplay_disabled(s, it->plugin)) continue;
         PluginCallbackScope scope(s, it->plugin, cpu);
         ++function_entry_depth;
-        if (it->callback) it->callback(cpu, address);
-        /* Either completion form skips the body: an entry callback that
-         * called psx_mod_finish_function(), or a filter returning nonzero. */
-        const bool handled = s.current_function_finished ||
-            (it->filter && it->filter(cpu, address));
+        bool handled;
+        {
+            NetplayPresentationGuard guard(s, it->plugin, cpu);
+            if (it->callback) it->callback(cpu, address);
+            /* Either completion form skips the body: an entry callback that
+             * called psx_mod_finish_function(), or a filter returning
+             * nonzero. Neither may skip guest code in a netplay presentation
+             * session (psx_mod_finish_function refuses there). */
+            const bool filtered = it->filter && it->filter(cpu, address);
+            if (filtered && psx_mod_netplay_refuse("function filter", 0))
+                handled = false;
+            else
+                handled = s.current_function_finished || filtered;
+        }
         --function_entry_depth;
         if (handled) {
             cpu->pc = cpu->gpr[31];

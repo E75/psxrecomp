@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+/* Netplay presentation guard (mod_runtime.cpp): never in a netplay session here. */
+int psx_mod_netplay_refuse(const char *api, int outside_pass_only) { (void)api; (void)outside_pass_only; return 0; }
 static uint32_t memory[256], used, reads, resolves;
 uint32_t psx_mod_gpu_dma_memory_alloc(uint32_t n,uint32_t a) {
     (void)a; if(n>sizeof memory-used)return 0;

@@ -525,7 +525,8 @@ What a plugin sets up should last only for a session whose resolved plan
 activates it. Function-entry hooks follow that rule by construction: the commit
 and the netplay clear empty the hook table, and only activation rebuilds it, so
 a hook never runs in a session that did not activate its id (including a
-netplay session, which clears the plan). The host state a plugin changes
+netplay session, which clears the plan to its presentation packages; see
+*Netplay presentation packages*). The host state a plugin changes
 through the `psx_mod_*` setters is process-wide, so the runtime resets it at
 every session start instead.
 
@@ -626,6 +627,38 @@ alternative. Divisors 2 and 4 shorten emulated CD deadlines; zero selects the
 bounded instant scheduler. Because this changes interrupt timing, packages
 should label it experimental and make it mutually exclusive with host-only
 load acceleration (normally as choices in one default-off feature).
+
+### Netplay presentation packages
+
+Netplay runs the simulation vanilla on both peers: the netplay clear drops
+every patch, overlay, derived disc and plugin. A package that only changes what
+the local player sees (a frame-rate or presentation plugin) can declare that at
+package level and stay active:
+
+```toml
+netplay = "presentation"   # default "off"
+```
+
+Peers need not agree on these packages, so they can never change what either
+peer simulates. That is enforced, not trusted:
+
+- The manifest may carry plugins and resources, but no `[[patch]]`,
+  `[[overlay]]` or `[[derived_disc]]` (rejected at load).
+- In a netplay session (`g_psx_mod_netplay_presentation`) the API refuses every
+  call that would change the simulation: `psx_mod_write_*`,
+  `psx_mod_dispatch_guest_function` (outside a render pass, whose sandbox
+  restores the machine), `psx_mod_write_code_word`, guest and GPU-DMA
+  allocation, disc extents, `psx_mod_finish_function` and function filters
+  (no skipping guest code), Skip FMVs, controller overrides and policies, disc
+  speed, load acceleration, the 8 MB map and the native VBlank rate. Each
+  refusal returns failure and counts `netplay.refused` (TCP `mod_counters`).
+- Every plugin callback (activation, VBlank, function entry, instruction) runs
+  under a guard: a callback that leaves the CPU state changed is undone
+  (`netplay.cpu_restored`), and one that stored to guest memory anyway is
+  disabled for the rest of the session (`netplay.plugin_disabled`).
+
+Render passes ([RENDER_PASSES.md](RENDER_PASSES.md)) are allowed on live
+netplay frames, never during a rollback resimulation.
 
 ## Native operations
 

@@ -272,6 +272,15 @@ struct ModPackage {
     std::string source_url;
     std::string resolver = "declarative";
     std::string save_compatibility = "shared";
+    /* "off" (default): netplay runs vanilla without this package.
+     * "presentation": the package only changes what the local player sees
+     * (frame rate, presentation), never the simulation, so it stays active in
+     * netplay. It may carry plugins and resources but no patches, overlays or
+     * derived discs, and in a netplay session its plugins run under the
+     * presentation guards (mod_runtime.cpp): guest writes and simulation
+     * settings are refused, and a callback that changes guest state anyway is
+     * undone or its plugin disabled. Peers need not agree on these packages. */
+    std::string netplay = "off";
     /* Default channel for features that do not declare their own. */
     ModChannel channel = ModChannel::Stable;
     ModPackageOrigin origin = ModPackageOrigin::Installed;

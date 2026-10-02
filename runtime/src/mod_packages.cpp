@@ -1698,6 +1698,8 @@ bool ModPackageManager::read_manifest(const fs::path& path, ModPackage& out,
             cfg.contains("resolver") ? toml::find<std::string>(cfg, "resolver") : "declarative";
         out.save_compatibility = cfg.contains("save_compatibility")
             ? toml::find<std::string>(cfg, "save_compatibility") : "shared";
+        out.netplay = cfg.contains("netplay")
+            ? toml::find<std::string>(cfg, "netplay") : "off";
         /* Accepted at every format version: v5 manifests already carried a
          * package-level channel, enforced then only by a packaging grep over
          * the manifest text. Now it parses, and it seeds the per-feature
@@ -1719,6 +1721,8 @@ bool ModPackageManager::read_manifest(const fs::path& path, ModPackage& out,
             throw std::runtime_error("resolver must be declarative or builtin:<id>");
         if (out.save_compatibility != "shared" && out.save_compatibility != "isolated")
             throw std::runtime_error("save_compatibility must be shared or isolated");
+        if (out.netplay != "off" && out.netplay != "presentation")
+            throw std::runtime_error("netplay must be off or presentation");
 
         if (cfg.contains("target")) {
             for (const toml::value& v : toml::find(cfg, "target").as_array()) {
@@ -2564,6 +2568,14 @@ bool ModPackageManager::read_manifest(const fs::path& path, ModPackage& out,
                 out.derived_discs.push_back(std::move(derived));
             }
         }
+        /* A netplay presentation package must not be able to change what
+         * either peer simulates: code only, through the guarded plugin API. */
+        if (out.netplay == "presentation" &&
+            (!out.patches.empty() || !out.overlays.empty() ||
+             !out.derived_discs.empty()))
+            throw std::runtime_error(
+                "a netplay = \"presentation\" package may not carry patches, "
+                "overlays or derived discs");
         return true;
     } catch (const std::exception& ex) {
         set_error(error, path.string() + ": " + ex.what());

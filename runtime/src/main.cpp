@@ -1586,8 +1586,13 @@ static std::string session_disc_path(const std::filesystem::path& stock_disc) {
     return mod_disc.string();
 }
 
+/* mod_runtime.cpp: refuse a simulation-affecting call in a netplay
+ * presentation session. */
+extern "C" int psx_mod_netplay_refuse(const char* api, int outside_pass_only);
+
 extern "C" int psx_mod_set_native_vblank_rate(
     uint32_t frames_per_second) {
+    if (psx_mod_netplay_refuse("psx_mod_set_native_vblank_rate", 0)) return 0;
     if (frames_per_second != 0 &&
         (frames_per_second < 60 || frames_per_second > 1000)) {
         std::fprintf(stderr,
@@ -1693,6 +1698,7 @@ extern "C" int psx_mod_set_frame_interpolation_source(uint32_t source) {
 }
 
 extern "C" int psx_mod_set_auto_skip_fmv(int enabled) {
+    if (psx_mod_netplay_refuse("psx_mod_set_auto_skip_fmv", 0)) return 0;
     if (enabled != 0 && enabled != 1) {
         std::fprintf(stderr,
             "psxrecomp: mod rejected invalid auto-skip-FMV value %d\n",
@@ -1719,6 +1725,7 @@ extern "C" int psx_mod_set_bezel_artwork(const char* path) {
 
 extern "C" int psx_mod_set_load_acceleration(
     uint32_t wall_clock_multiplier, uint32_t release_frames) {
+    if (psx_mod_netplay_refuse("psx_mod_set_load_acceleration", 0)) return 0;
     /* Host pacing only changes how fast wall-clock time is fed to a load; every
      * guest frame, CD deadline, interrupt and callback still happens, so a high
      * multiplier cannot desync the guest -- it just approaches "as fast as the
@@ -1738,6 +1745,7 @@ extern "C" int psx_mod_set_load_acceleration(
 
 extern "C" int psx_mod_set_disc_speed(
     uint32_t divisor, uint32_t instant_max_per_frame) {
+    if (psx_mod_netplay_refuse("psx_mod_set_disc_speed", 0)) return 0;
     /* Any positive divisor is arithmetically safe: cdrom.c divides the sector
      * delay by it and floors the result at CDROM_MIN_DELAY, and XA streaming
      * keeps authentic timing regardless. The old 2-or-4 allowlist was policy,
@@ -1762,6 +1770,7 @@ extern "C" int psx_mod_set_disc_speed(
 
 extern "C" int psx_mod_set_controller_mode_override(
     uint32_t player, uint32_t controller_mode) {
+    if (psx_mod_netplay_refuse("psx_mod_set_controller_mode_override", 0)) return 0;
     if (player >= PSX_MAX_PLAYERS ||
         (controller_mode != (uint32_t)PSXRecompV4::PAD_MODE_ANALOG &&
          controller_mode != (uint32_t)PSXRecompV4::PAD_MODE_DIGITAL)) {
@@ -1780,6 +1789,7 @@ extern "C" int psx_mod_set_controller_presentation_policy(
     PSXModControllerPresentationCallback callback,
     uint32_t initial_mode,
     int config_capable) {
+    if (psx_mod_netplay_refuse("psx_mod_set_controller_presentation_policy", 0)) return 0;
     if (player >= PSX_MAX_PLAYERS || !callback ||
         (initial_mode != (uint32_t)PSXRecompV4::PAD_MODE_ANALOG &&
          initial_mode != (uint32_t)PSXRecompV4::PAD_MODE_DIGITAL)) {

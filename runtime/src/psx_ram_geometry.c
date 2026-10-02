@@ -29,9 +29,10 @@ void psx_ram_reset_size_request(void) {
     s_ram_8mb_requested = 0;
 }
 
-int psx_mod_set_main_ram_8mb(int enabled) {
+/* The request behind psx_mod_set_main_ram_8mb (mod_runtime.cpp owns the mod
+ * API and its netplay guard). */
+void psx_ram_request_8mb(int enabled) {
     s_ram_8mb_requested = enabled ? 1 : 0;
-    return 1;
 }
 
 void psx_ram_apply_size_request(void) {

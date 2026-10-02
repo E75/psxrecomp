@@ -52,7 +52,7 @@ static int check(int cond, const char *label) {
 
 static void set_geometry(int expanded) {
     psx_ram_reset_size_request();
-    if (expanded) psx_mod_set_main_ram_8mb(1);
+    if (expanded) psx_ram_request_8mb(1);
     psx_ram_apply_size_request();
 }
 
@@ -277,7 +277,7 @@ int main(void) {
     check_helpers_everywhere(0, "memory_init without the mod stays retail");
     /* The request is inert until memory_init() applies it. */
     psx_ram_reset_size_request();
-    check(psx_mod_set_main_ram_8mb(1) == 1, "8 MB request accepted");
+    psx_ram_request_8mb(1);
     check_helpers_everywhere(0, "8 MB request is inert before memory_init");
     psx_ram_apply_size_request();
     check_helpers_everywhere(1, "8 MB request applies unique 8 MiB decode");

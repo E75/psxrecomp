@@ -28,8 +28,10 @@ flip to frame n. For a PsyQ double-buffered loop that is the entry of the
 
 Register that hook with `psx_mod_register_function_entry_plugin()` under the
 plugin's manifest `[[plugin]]` id (see [MOD_PACKAGES.md](MOD_PACKAGES.md)):
-it then runs only while the resolved mod plan activates the plugin, so never
-while the package is disabled or in netplay. Register once, for example from
+it then runs only while the resolved mod plan activates the plugin: never
+while the package is disabled, and in netplay only for a package declared
+`netplay = "presentation"` ([MOD_PACKAGES.md](MOD_PACKAGES.md), *Netplay
+presentation packages*). Register once, for example from
 the plugin's constructor; a repeated id and address returns 0. Entry hooks
 also fire for the guest functions a pass itself calls, the plugin's own
 included, so a hook that plans passes must ignore entries made inside one.
@@ -61,7 +63,7 @@ budget aside (an empty plan while it says `READY` was shed for time):
 | `NO_PRESENTER` (1) | not OpenGL, interpolation off or suspended (FMV), or not the FLIP source | until the presenter changes |
 | `BACKEND` (2) | the renderer declines passes in its current mode | while that mode lasts |
 | `DISABLED` (3) | switched off after repeated faults | the session |
-| `SESSION` (4) | netplay, rollback, rewind, load/save replay, self-check resimulation | transient |
+| `SESSION` (4) | netplay rollback resimulation, rewind, load/save replay, self-check resimulation | transient |
 | `FAST_FORWARD` (5) | manual fast-forward, turbo-through-loads, FMV auto-skip, TCP turbo | transient |
 | `BUSY` (6) | inside an exception, a pass or a GPU DMA walk, or no frame captured since the presenter's history restarted (a display mode change) | transient |
 
@@ -223,8 +225,9 @@ After 8 faults (watchdog or refused writes) passes stay off for the session.
 
 ## Gates
 
-The plan returns 0 in netplay, rollback resimulation, self-check, rewind,
-lockstep, an exception, while a GPU DMA list is in flight, during manual
+The plan returns 0 during a netplay rollback resimulation (live netplay
+frames may have passes: a pass leaves both peers' simulation untouched),
+self-check, rewind, lockstep, an exception, while a GPU DMA list is in flight, during manual
 fast-forward, turbo-through-loads, FMV auto-skip and TCP turbo, on anything
 but the OpenGL renderer with FLIP-source interpolation, while the presenter
 is suspended (FMV), after repeated faults, and when no VBlank was presented

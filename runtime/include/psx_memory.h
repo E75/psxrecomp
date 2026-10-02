@@ -49,6 +49,9 @@ extern uint32_t g_psx_ram_mask;
 uint32_t memory_get_ram_bytes(void);
 int      psx_ram_8mb_active(void);
 void     psx_ram_reset_size_request(void);
+/* Request the 8 MB map for the next memory_init() (0 = retail 2 MB);
+ * plugins use psx_mod_set_main_ram_8mb (mod_runtime.cpp). */
+void     psx_ram_request_8mb(int enabled);
 /* memory_init(): latch the requested geometry for this boot. */
 void     psx_ram_apply_size_request(void);
 
