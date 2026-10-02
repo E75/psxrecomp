@@ -191,6 +191,9 @@ int psx_mod_function_entry(CPUState *cpu, uint32_t address) {
     (void)cpu; (void)address;
     return 0;
 }
+void psx_mod_instruction(CPUState *cpu, uint32_t address, uint32_t instruction) {
+    (void)cpu; (void)address; (void)instruction;
+}
 int psx_netplay_is_resimulating(void) { return 0; }
 int psx_game_text_native_ok(uint32_t address) { (void)address; return 1; }
 uint32_t psx_ws_angle_widen(uint32_t vanilla) { return vanilla; }
