@@ -136,6 +136,12 @@ void overlay_loader_set_native_nesting(int d, uint32_t ip) {
     s_ov_active_depth = d; s_ov_inprogress = ip;
 }
 
+/* Precision-tracking checkpoint (gte.cpp): every pass opens one and every
+ * restore - including the watchdog landing - closes it. */
+static int s_prec_open, s_prec_begins;
+void gte_precision_checkpoint_begin(void) { s_prec_open++; s_prec_begins++; }
+void gte_precision_checkpoint_rollback(void) { s_prec_open--; }
+
 /* GPU and presenter. */
 uint64_t gpu_pass_state_hash(void) { return 42; }
 int gpu_pass_checkpoint_save(void) { return 1; }
@@ -434,6 +440,8 @@ int main(void) {
     CHECK(st.watchdog == 2, "the watchdog cut the span off");
     CHECK(s_span_hi == 0 && s_span_lo == 0, "the abort closed the open span");
     check_live(&live, "after a span watchdog abort");
+    CHECK(s_prec_begins > 0 && s_prec_open == 0,
+          "precision shadows were checkpointed and rolled back on every pass, aborts included");
 
     printf(failures ? "FAILED (%d)\n" : "ALL PASS\n", failures);
     return failures ? 1 : 0;
