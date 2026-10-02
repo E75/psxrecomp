@@ -13749,6 +13749,9 @@ namespace {
         gi->num_internal_resolutions = g_ir_count;
         gi->internal_resolution_note = kIrNote;
 #endif
+#if defined(RECOMP_LAUNCHER_HAS_DYNAMIC_RESOLUTION)
+        gi->has_dynamic_resolution = 1;
+#endif
         if (language_labels && num_languages > 0) {
             gi->language_labels = language_labels;
             gi->num_languages = num_languages;
@@ -15339,6 +15342,12 @@ int main(int argc, char** argv) {
             seed.internal_resolution = internal_resolution_for_launcher();
             seed.has_internal_resolution = true;
 #endif
+#if defined(RECOMP_LAUNCHER_HAS_DYNAMIC_RESOLUTION)
+            seed.dynamic_resolution = dynres_requested() != 0;
+            seed.has_dynamic_resolution = true;
+            seed.dynamic_resolution_min = dynres_min_value();
+            seed.has_dynamic_resolution_min = true;
+#endif
             seed.antialiasing = g_video_aa;               seed.has_antialiasing = true;
             seed.texture_filter = g_video_texfilter;      seed.has_texture_filter = true;
             seed.fmv_filter = g_video_fmv_filter;         seed.has_fmv_filter = true;
@@ -15541,6 +15550,10 @@ int main(int argc, char** argv) {
             ls.supersampling      = seed.supersampling;
 #if defined(RECOMP_LAUNCHER_HAS_INTERNAL_RESOLUTION)
             ls.internal_resolution = seed.internal_resolution;
+#endif
+#if defined(RECOMP_LAUNCHER_HAS_DYNAMIC_RESOLUTION)
+            ls.dynamic_resolution = seed.dynamic_resolution ? 1 : 0;
+            ls.dynamic_resolution_min = seed.dynamic_resolution_min;
 #endif
             ls.antialiasing       = seed.antialiasing ? 1 : 0;
             ls.texture_filter     = seed.texture_filter;
@@ -15876,6 +15889,12 @@ int main(int argc, char** argv) {
 #if defined(RECOMP_LAUNCHER_HAS_INTERNAL_RESOLUTION)
                 ir_row_result = ls.internal_resolution;
 #endif
+#if defined(RECOMP_LAUNCHER_HAS_DYNAMIC_RESOLUTION)
+                seed.dynamic_resolution = ls.dynamic_resolution != 0;
+                seed.has_dynamic_resolution = true;
+                seed.dynamic_resolution_min = ls.dynamic_resolution_min;
+                seed.has_dynamic_resolution_min = true;
+#endif
                 seed.antialiasing          = ls.antialiasing != 0;     seed.has_antialiasing          = true;
                 seed.geometry_correction   = ls.geometry_correction != 0;
                 seed.has_geometry_correction = true;
@@ -16132,6 +16151,10 @@ int main(int argc, char** argv) {
                     seed.has_internal_resolution = ir.save_ir != PSX_IR_UNSET;
                     seed.internal_resolution     = ir.save_ir;
                 }
+#if defined(RECOMP_LAUNCHER_HAS_DYNAMIC_RESOLUTION)
+                g_video_dynres = seed.dynamic_resolution ? 1 : 0;
+                g_video_dynres_min = seed.dynamic_resolution_min;
+#endif
                 g_video_aa        = seed.antialiasing;
                 g_video_texfilter = seed.texture_filter;
                 g_video_fmv_filter = seed.fmv_filter;
@@ -17792,6 +17815,10 @@ soft_return_lobby:
 #if defined(RECOMP_LAUNCHER_HAS_INTERNAL_RESOLUTION)
         ls.internal_resolution = internal_resolution_for_launcher();
 #endif
+#if defined(RECOMP_LAUNCHER_HAS_DYNAMIC_RESOLUTION)
+        ls.dynamic_resolution = dynres_requested() != 0;
+        ls.dynamic_resolution_min = dynres_min_value();
+#endif
         ls.antialiasing = g_video_aa ? 1 : 0;
         ls.texture_filter = g_video_texfilter;
         ls.fmv_filter = cfg_fmv_filter_to_launcher(g_video_fmv_filter);
@@ -18165,6 +18192,14 @@ soft_return_lobby:
                 us.has_supersampling = true;
                 us.internal_resolution = ir.save_ir;
                 us.has_internal_resolution = ir.save_ir != PSX_IR_UNSET;
+#if defined(RECOMP_LAUNCHER_HAS_DYNAMIC_RESOLUTION)
+                us.dynamic_resolution = ls.dynamic_resolution != 0;
+                us.has_dynamic_resolution = true;
+                us.dynamic_resolution_min = ls.dynamic_resolution_min;
+                us.has_dynamic_resolution_min = true;
+                g_video_dynres = us.dynamic_resolution ? 1 : 0;
+                g_video_dynres_min = us.dynamic_resolution_min;
+#endif
                 us.antialiasing = ls.antialiasing != 0;
                 us.has_antialiasing = true;
                 us.texture_filter = ls.texture_filter;
