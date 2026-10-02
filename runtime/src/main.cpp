@@ -2472,18 +2472,21 @@ static void write_cached_path(const char* argv0, const char* filename,
     if (f.is_open()) f << path.string() << "\n";
 }
 
+/* Nobody is at the screen: never block on a modal dialog or a file picker. */
+static bool frontend_unattended() { return g_headless || g_hidden_window; }
+
 static void launcher_warning(const char* title, const std::string& msg) {
     std::fprintf(stderr, "%s: %s\n", title, msg.c_str());
-    // Headless (--headless / PSX_HEADLESS): NEVER pop a blocking modal — it would
+    // Unattended (--headless / PSX_HEADLESS / --hidden-window): NEVER pop a blocking modal — it would
     // hang an unattended/CI/scripted run forever waiting for a click.
     // SDL_ShowSimpleMessageBox is cross-platform; the Win32-only MessageBoxA left
     // macOS and Linux users with a silent exit (v0.4.0 macOS report, 2026-09-15).
-    if (!g_headless) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, title, msg.c_str(), NULL);
+    if (!frontend_unattended()) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, title, msg.c_str(), NULL);
 }
 
 static void launcher_info(const char* title, const std::string& msg) {
     std::fprintf(stderr, "%s: %s\n", title, msg.c_str());
-    if (!g_headless) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, title, msg.c_str(), NULL);
+    if (!frontend_unattended()) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, title, msg.c_str(), NULL);
 }
 
 /* Game display name for picker dialogs ("Tomba!"); set after the game
@@ -2494,7 +2497,8 @@ static bool pick_runtime_file(const char* title, const char* filter,
                               std::filesystem::path& out, const char* cli_flag) {
     // Headless: never open an interactive file dialog (it blocks). Fail the
     // resolve so boot aborts cleanly with the stderr message the caller printed.
-    if (g_headless) {
+    // Also when unattended in a hidden window (--hidden-window).
+    if (frontend_unattended()) {
         std::fprintf(stderr,
             "psxrecomp: headless — cannot prompt for '%s'.\n"
             "  Supply it on the command line:  %s <path>   (or set it in game.toml).\n",
