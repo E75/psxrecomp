@@ -851,6 +851,38 @@ uint32_t psx_ws_xclip_bound(uint32_t vanilla) {
     return psx_ws_x_margin() > 0 ? 0x7FFFFFFFu : vanilla;
 }
 
+#include "ws_masked_reject.h"
+typedef struct {
+    uint32_t address, expected, mask;
+} WsMaskedRejectSite;
+static WsMaskedRejectSite ws_masked_reject_sites[WS_EXPLICIT_CULL_SITES_MAX];
+static int ws_masked_reject_n;
+void gpu_ws_set_masked_reject_sites(const uint32_t *addresses,
+    const uint32_t *expected, const uint32_t *masks, int count) {
+    if (count < 0 || count > WS_EXPLICIT_CULL_SITES_MAX) {
+        fprintf(stderr, "psxrecomp: invalid masked reject site count %d\n", count);
+        abort();
+    }
+    ws_masked_reject_n = count;
+    for (int i = 0; i < count; ++i) {
+        ws_masked_reject_sites[i].address = addresses[i] & 0x1FFFFFFFu;
+        ws_masked_reject_sites[i].expected = expected[i];
+        ws_masked_reject_sites[i].mask = masks[i];
+    }
+}
+int psx_ws_masked_reject(uint32_t flags, uint32_t mask) {
+    return psx_ws_masked_reject_value(flags, mask, psx_ws_x_margin());
+}
+int psx_ws_masked_reject_site(uint32_t pc, uint32_t instr,
+    uint32_t flags, int vanilla) {
+    for (int i = 0; i < ws_masked_reject_n; ++i) {
+        const WsMaskedRejectSite *s = &ws_masked_reject_sites[i];
+        if (s->address == (pc & 0x1FFFFFFFu) && s->expected == instr)
+            return psx_ws_masked_reject(flags, s->mask);
+    }
+    return vanilla;
+}
+
 typedef struct {
     uint32_t address;
     uint32_t expected;

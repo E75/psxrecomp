@@ -114,7 +114,9 @@
  *      (cpu_state.h maps the name in PSX_OVERLAY_DLL_BUILD). */
 /* v25: function-entry callbacks may return an opt-in filter result while
  *      retaining the v24 last_store_pc pointer. */
-#define PSX_OVERLAY_ABI_VERSION 25
+/* v26: guarded packed-coordinate rejection callback, preserving the selected
+ * rejection axes while the native-wide renderer clips horizontal margins. */
+#define PSX_OVERLAY_ABI_VERSION 26
 
 /* Process-lifetime overlay candidate capacity.  Every accepted manifest F
  * record consumes one slot, even when another DLL carries an identical
@@ -357,6 +359,7 @@ typedef struct OverlayCallbacks {
      * above). Overlay stores write it exactly as static and interpreted stores
      * do. NULL leaves the DLL writing a private copy nothing reads. */
     uint32_t *last_store_pc;
+    int (*ws_masked_reject)(uint32_t flags, uint32_t mask);
 } OverlayCallbacks;
 
 #ifdef __cplusplus

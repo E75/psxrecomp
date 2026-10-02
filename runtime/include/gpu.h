@@ -334,6 +334,11 @@ uint32_t psx_ws_xclip_bound(uint32_t vanilla);
 int  psx_ws_is_cull_bltz_site(uint32_t pc);
 int  psx_ws_is_cull_bgez_site(uint32_t pc);
 int  psx_ws_is_cull_branch_keep_site(uint32_t pc);
+void gpu_ws_set_masked_reject_sites(const uint32_t *addresses,
+    const uint32_t *expected, const uint32_t *masks, int count);
+int psx_ws_masked_reject(uint32_t flags, uint32_t mask);
+int psx_ws_masked_reject_site(uint32_t pc, uint32_t instr,
+    uint32_t flags, int vanilla);
 int  psx_ws_is_cull_clip_edge_x_load_site(uint32_t pc);
 uint32_t psx_ws_clip_edge_width(void);
 uint32_t psx_ws_cull_keep_result(uint32_t vanilla, uint32_t forced);

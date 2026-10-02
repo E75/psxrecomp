@@ -265,6 +265,9 @@ uint32_t psx_ws_cull_keep_result(uint32_t vanilla, uint32_t forced) {
         ? g_cbs.ws_cull_keep_result(vanilla, forced)
         : vanilla;
 }
+int psx_ws_masked_reject(uint32_t flags, uint32_t mask) {
+    return g_cbs.ws_masked_reject ? g_cbs.ws_masked_reject(flags, mask) : flags != 0u;
+}
 uint32_t psx_ws_aspect_cone_result(uint32_t site, uint32_t vanilla,
                                    uint32_t object, int32_t x, int32_t z,
                                    int32_t y) {

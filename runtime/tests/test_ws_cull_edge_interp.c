@@ -389,11 +389,36 @@ static void test_interpreter(void) {
     gpu_ws_set_clip_edge_x_load_sites(NULL, 0, 0);
 }
 
+static void test_masked_reject(void) {
+    CPUState cpu = {0};
+    memset(test_ram, 0, sizeof test_ram);
+    const uint32_t site = CODE + 0x200;
+    const uint32_t word = i_type(5, A0, 0, 3);
+    const uint32_t mask = 0xFFFF0000u;
+    gpu_ws_set_masked_reject_sites(&site, &word, &mask, 1);
+    for (int margin = 0; margin <= 53; margin += 53) {
+        gpu_ws_set_margin_override(margin);
+        cpu.gpr[A0] = 0xFE00u;
+        CHECK(branch_taken(&cpu, site, word) == (margin == 0), "packed X reject at margin %d", margin);
+        CHECK(cpu.gpr[A0] == 0xFE00u, "packed cull preserves guest flags");
+        CHECK(branch_taken(&cpu, site + 0x40, word), "unlisted packed branch stays vanilla");
+        cpu.gpr[V0] = 0;
+        CHECK(branch_taken(&cpu, site, i_type(5, A0, V0, 3)), "mismatched word stays vanilla");
+        cpu.gpr[A0] = 0xFF00FE00u;
+        CHECK(branch_taken(&cpu, site, word), "packed Y reject retained at margin %d", margin);
+        cpu.gpr[A0] = 0;
+        CHECK(!branch_taken(&cpu, site, word), "zero flags stay visible");
+    }
+    gpu_ws_set_masked_reject_sites(NULL, NULL, NULL, 0);
+    gpu_ws_set_margin_override(-1);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) s_capture_path = argv[1];
     test_store();
     test_helpers();
     test_interpreter();
+    test_masked_reject();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

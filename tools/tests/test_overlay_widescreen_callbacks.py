@@ -21,6 +21,7 @@ static CPUState *seen_cpu;
 static uint32_t seen_address, cycles;
 static int32_t bound(int32_t x) { return x * 2; }
 static int margin120(void) { return 120; }
+static int packed_reject(uint32_t flags, uint32_t mask) { return (flags & mask) != 0; }
 static void advance(uint32_t n) { cycles += n; }
 static int entry(CPUState *cpu, uint32_t address) {
     assert(cycles == 17); seen_cpu = cpu; seen_address = address;
@@ -57,6 +58,14 @@ int main(void) {
     assert(psx_ws_clip_edge_x(0x140u, 0x140u) == 0x140u + 120u);
     assert(psx_ws_clip_edge_x(98u, 0x140u) == 98u);     /* interior viewport edge */
     assert(psx_ws_clip_edge_x(222u, 0x140u) == 222u);
+    /* Newly cached modules forward the guarded packed predicate. Missing
+     * callbacks retain the original reject, rather than widening unsafely. */
+    assert(psx_ws_masked_reject(0xFE00u, 0xFFFF0000u) == 1);
+    callbacks.ws_masked_reject = packed_reject;
+    overlay_init(&callbacks);
+    assert(psx_ws_masked_reject(0xFE00u, 0xFFFF0000u) == 0);
+    assert(psx_ws_masked_reject(0xFF00FE00u, 0xFFFF0000u) == 1);
+    assert(psx_ws_masked_reject(0u, 0xFFFF0000u) == 0);
     return 0;
 }
 '''
