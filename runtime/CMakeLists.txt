@@ -805,6 +805,18 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME render_pass_plan_test COMMAND render_pass_plan_test)
 
+    # Motion kit and per-frame driver for render-pass plugins: blending,
+    # identity matching, limits and the crossfade fallback, on mock RAM.
+    add_executable(render_pass_motion_test
+        tests/test_render_pass_motion.c
+        src/render_pass_motion.c
+        src/render_pass_frame.c)
+    target_include_directories(render_pass_motion_test PRIVATE include)
+    if(NOT MSVC)
+        target_link_libraries(render_pass_motion_test PRIVATE m)
+    endif()
+    add_test(NAME render_pass_motion_test COMMAND render_pass_motion_test)
+
     # Render-pass time freeze against mock devices (psx_cycles.c only).
     add_executable(render_pass_freeze_test
         tests/test_render_pass_freeze.c
