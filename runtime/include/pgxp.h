@@ -103,6 +103,16 @@ typedef struct PGXPStats {
     uint64_t w_valid;            /* lookups that also carried a usable depth */
     uint64_t produced;           /* RTPS/RTPT projections pushed into shadows */
     uint64_t swc2_stores;        /* GTE reg shadows copied to RAM shadows     */
+    /* pgxp_load_precise_word outcomes (perspective texturing, per vertex):
+     * which check refused the depth. untracked = no shadow for that address in
+     * this generation; mismatch = shadow describes a different word; partial =
+     * only one half carries a projection; no_z = projection without depth. */
+    uint64_t word_lookups;
+    uint64_t word_hit;
+    uint64_t word_untracked;
+    uint64_t word_mismatch;
+    uint64_t word_partial;
+    uint64_t word_no_z;
 } PGXPStats;
 
 void pgxp_get_stats(PGXPStats *out);

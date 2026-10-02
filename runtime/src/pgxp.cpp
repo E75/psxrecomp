@@ -809,12 +809,18 @@ extern "C" void pgxp_test_set_generation(uint32_t gen) { s_gen = gen; }
 extern "C" int pgxp_load_precise_word(uint32_t addr, uint32_t packed,
                                       int32_t *x16, int32_t *y16, uint16_t *z) {
     if (!s_enabled) return 0;
+    s_stats.word_lookups++;
     PGXPValue *pv = pgxp_ptr(addr);
-    if (!pv || pv->gen != s_gen || pv->value != packed ||
-        (pv->flags & PGXP_F_VXY) != PGXP_F_VXY)
+    if (!pv || pv->gen != s_gen) { s_stats.word_untracked++; return 0; }
+    if (pv->value != packed)     { s_stats.word_mismatch++;  return 0; }
+    if ((pv->flags & PGXP_F_VXY) != PGXP_F_VXY) {
+        s_stats.word_partial++;
         return 0;
+    }
     if (x16) *x16 = pv->x16;
     if (y16) *y16 = pv->y16;
     if (z) *z = (pv->flags & PGXP_F_VZ) ? pv->z : 0;
-    return (pv->flags & PGXP_F_VZ) && pv->z != 0;
+    if (!(pv->flags & PGXP_F_VZ) || pv->z == 0) { s_stats.word_no_z++; return 0; }
+    s_stats.word_hit++;
+    return 1;
 }

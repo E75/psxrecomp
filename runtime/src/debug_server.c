@@ -5289,7 +5289,9 @@ static void handle_geom_correction(int id, const char *json)
              "\"lookups\":%llu,\"dataflow_hit\":%llu,\"fallback_hit\":%llu,"
              "\"native\":%llu,\"value_mismatch\":%llu,\"trunc_reject\":%llu,"
              "\"tolerance_reject\":%llu,\"w_valid\":%llu,"
-             "\"produced\":%llu,\"swc2_stores\":%llu}}",
+             "\"produced\":%llu,\"swc2_stores\":%llu,"
+             "\"word\":{\"lookups\":%llu,\"hit\":%llu,\"untracked\":%llu,"
+             "\"mismatch\":%llu,\"partial\":%llu,\"no_z\":%llu}}}",
              id,
              gte_geometry_correction_enabled(),
              (unsigned)hits,
@@ -5308,7 +5310,13 @@ static void handle_geom_correction(int id, const char *json)
              (unsigned long long)ps.tolerance_reject,
              (unsigned long long)ps.w_valid,
              (unsigned long long)ps.produced,
-             (unsigned long long)ps.swc2_stores);
+             (unsigned long long)ps.swc2_stores,
+             (unsigned long long)ps.word_lookups,
+             (unsigned long long)ps.word_hit,
+             (unsigned long long)ps.word_untracked,
+             (unsigned long long)ps.word_mismatch,
+             (unsigned long long)ps.word_partial,
+             (unsigned long long)ps.word_no_z);
 }
 
 /* pgxp — live-tune the value-propagation engine for one-toggle isolation runs
