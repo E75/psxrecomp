@@ -17,6 +17,7 @@
 #endif
 #include <time.h>
 #include "debug_server.h"
+#include "host_sampler.h"
 #include "psx_video_timing.h"
 #include "psx_bss.h"
 #include "nd_intro_ot.h"
@@ -5321,6 +5322,68 @@ static void handle_geom_correction(int id, const char *json)
              (unsigned long long)ps.word_mismatch,
              (unsigned long long)ps.word_partial,
              (unsigned long long)ps.word_no_z);
+}
+
+/* host_profile — histogram of the always-on host CPU sampler (host_sampler.c)
+ * over a window of the ring: {"cmd":"host_profile","since":SEQ} or
+ * {"cmd":"host_profile","frames":N} (the last N guest frames), optional
+ * "pass":1 (only samples inside render passes) / "pass":0 (outside), "top":K.
+ * Addresses are executable-relative; tools/host_profile.py names them. Take
+ * "seq" from one reply as "since" of the next to profile what ran between. */
+static void handle_host_profile(int id, const char *json)
+{
+    enum { MAXB = 4096 };
+    static uint64_t rvas[MAXB];
+    static uint32_t counts[MAXB];
+    const uint64_t seq = host_sampler_seq();
+    const uint64_t oldest = seq > HOST_SAMPLER_CAP ? seq - HOST_SAMPLER_CAP : 0;
+    int since = json_get_int(json, "since", -1);
+    const int frames = json_get_int(json, "frames", -1);
+    const int pass = json_get_int(json, "pass", -1);
+    int top = json_get_int(json, "top", 60);
+    if (top < 1) top = 1;
+    if (top > 400) top = 400;
+    uint64_t from = since >= 0 ? (uint64_t)since : oldest;
+    if (from < oldest) from = oldest;
+    uint32_t frame_lo = 0;
+    if (frames > 0) frame_lo = (uint32_t)s_frame_count - (uint32_t)frames;
+    int nb = 0;
+    uint64_t total = 0, dropped = 0;
+    for (uint64_t i = from; i < seq; i++) {
+        HostSample smp;
+        if (!host_sampler_get(i, &smp)) continue;
+        if (frames > 0 && (int32_t)(smp.frame - frame_lo) < 0) continue;
+        if (pass >= 0 && (int)smp.in_pass != pass) continue;
+        total++;
+        int b = 0;
+        while (b < nb && rvas[b] != smp.rva) b++;
+        if (b == nb) {
+            if (nb == MAXB) { dropped++; continue; }
+            rvas[nb] = smp.rva; counts[nb] = 0; nb++;
+        }
+        counts[b]++;
+    }
+    size_t cap = 256 + (size_t)top * 48;
+    char *buf = (char *)malloc(cap);
+    if (!buf) { send_err(id, "oom"); return; }
+    size_t n = (size_t)snprintf(buf, cap,
+        "{\"id\":%d,\"ok\":true,\"supported\":%d,\"seq\":%llu,"
+        "\"image_base\":\"0x%llX\",\"samples\":%llu,\"unbinned\":%llu,\"top\":[",
+        id, host_sampler_supported(), (unsigned long long)seq,
+        (unsigned long long)host_sampler_image_base(),
+        (unsigned long long)total, (unsigned long long)dropped);
+    for (int k = 0; k < top; k++) {
+        int best = -1;
+        for (int b = 0; b < nb; b++)
+            if (counts[b] && (best < 0 || counts[b] > counts[best])) best = b;
+        if (best < 0) break;
+        n += (size_t)snprintf(buf + n, cap - n, "%s[\"0x%llX\",%u]", k ? "," : "",
+                              (unsigned long long)rvas[best], counts[best]);
+        counts[best] = 0;
+    }
+    snprintf(buf + n, cap - n, "]}");
+    send_fmt("%s", buf);
+    free(buf);
 }
 
 /* pgxp_shadow — read PGXP shadow slots: {"cmd":"pgxp_shadow","addr":A,
@@ -14459,6 +14522,7 @@ static const CmdEntry s_commands[] = {
     { "geom_correction",   handle_geom_correction },
     { "pgxp",              handle_pgxp },
     { "pgxp_shadow",       handle_pgxp_shadow },
+    { "host_profile",      handle_host_profile },
     { "pgxp_miss_ring",    handle_pgxp_miss_ring },
     { "ws_aspect_cone_site", handle_ws_aspect_cone_site },
     { "ws_margin",         handle_ws_margin },
