@@ -335,3 +335,6 @@ int gr_render_wide_display(uint32_t *out, int pitch, int base_x,
     (void)out; (void)pitch; (void)base_x; (void)disp_y; (void)disp_h;
     return 0;
 }
+int gte_nclip_native_wide_sign(int32_t mac0, int* sign) {
+    (void)mac0; (void)sign; return 0;
+}

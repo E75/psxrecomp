@@ -239,6 +239,8 @@ extern void     gte_nclip_precise_stats(uint64_t *hits, uint64_t *fallbacks,
  * only when it belongs to the supplied native MAC0; otherwise preserves the
  * native comparison. This does not change guest-visible GTE state. */
 extern int      gte_nclip_precise_bltz(int32_t native_mac0);
+extern int      gte_nclip_native_wide_sign(int32_t native_mac0, int* sign);
+extern int psx_ws_nclip_branch(uint32_t pc, uint32_t instr, int32_t mac0, int vanilla);
 
 /* PGXP dataflow-shadowing hook macros (PGXP_LOAD/STORE/ALU/MULDIV/COP2).
  * The emitter writes them unconditionally; they expand to real calls only

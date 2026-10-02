@@ -821,6 +821,13 @@ std::string CodeGenerator::generate_branch_condition(uint32_t instr, uint32_t ad
     // sweeps data-as-code into a function; emitting the hardware decode keeps
     // the regen alive AND matches the oracle if the word is ever executed.
     check_explicit_branch_site(addr, instr);
+    if (config_.ws_cull_nclip_exact_sites.count(addr) &&
+        (opcode == 0x06 || opcode == 0x07 ||
+         (opcode == 0x01 && ((instr >> 16) & 31) == 1))) {
+        const char* compare = opcode == 0x06 ? "<= 0" : opcode == 0x07 ? "> 0" : ">= 0";
+        return fmt::format("psx_ws_nclip_branch(0x{:08X}u, 0x{:08X}u, (int32_t){}, ((int32_t){} {})) /* guarded wide nclip */",
+                           addr, instr, reg_name(rs), reg_name(rs), compare);
+    }
     if (opcode == 0x01) {
         uint32_t regimm_op = (instr >> 16) & 0x1F;
         if ((regimm_op & 0x01u) == 0x00u) { // bltz family (incl. bltzal + undefined mirrors)
@@ -3450,6 +3457,7 @@ void CodeGenerator::emit_runtime_externs(std::ostream& ss) const {
     ss << "extern int  psx_datashard_enter(CPUState* cpu, uint32_t key);  /* data-shard replay/capture (data_shards.c) */\n";
     ss << "extern int psx_mod_function_entry(CPUState* cpu, uint32_t address);  /* trusted opt-in game-mod hook */\n";
     ss << "extern int psx_ws_masked_reject(uint32_t flags, uint32_t mask); /* guarded packed-coordinate reject */\n";
+    ss << "extern int psx_ws_nclip_branch(uint32_t pc, uint32_t instr, int32_t mac0, int vanilla);\n";
     ss << "extern void psx_datashard_ret(CPUState* cpu);                  /* data-shard capture finalize */\n";
     ss << "extern int  psx_vsync_query_hle_enter(CPUState* cpu, uint32_t func, uint32_t counter_addr, uint32_t gpustat_ptr_addr, uint32_t timer1_ptr_addr, uint32_t timer1_cache_addr);  /* load_accel.c */\n";
     ss << "extern void psx_ws_sprite_tag(CPUState* cpu);  /* widescreen prim tag (gpu.c) */\n";

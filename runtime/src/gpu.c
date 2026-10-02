@@ -274,7 +274,7 @@ void gpu_ws_set_precise_nclip(int on) {
      * PGXP correction is disabled. Re-derive the internal transport arm. */
     gpu_pgxp_rederive_enable();
 }
-int gpu_ws_precise_nclip_enabled(void) { return ws_precise_nclip_cfg && ws_active(); }
+int gpu_ws_precise_nclip_enabled(void) { return ws_precise_nclip_cfg && (ws_active() || ws_nw_extra() > 0); }
 void gpu_ws_set_gameplay_state_gate(uint32_t addr,
                                     const uint32_t *values, int nvalues) {
     if (nvalues < 0) nvalues = 0;
@@ -879,6 +879,39 @@ int psx_ws_masked_reject_site(uint32_t pc, uint32_t instr,
         const WsMaskedRejectSite *s = &ws_masked_reject_sites[i];
         if (s->address == (pc & 0x1FFFFFFFu) && s->expected == instr)
             return psx_ws_masked_reject(flags, s->mask);
+    }
+    return vanilla;
+}
+
+static WsMaskedRejectSite ws_nclip_sites[WS_EXPLICIT_CULL_SITES_MAX];
+static int ws_nclip_site_count;
+static uint64_t ws_nclip_rescues;
+uint64_t gpu_ws_native_wide_nclip_rescues(void) { return ws_nclip_rescues; }
+void psx_mod_set_native_wide_nclip_sites(const uint32_t* addresses,
+    const uint32_t* expected, int count) {
+    if (count < 0 || count > WS_EXPLICIT_CULL_SITES_MAX) abort();
+    for (int i = 0; i < count; ++i) {
+        const uint32_t op = expected[i] >> 26, rt = (expected[i] >> 16) & 31;
+        if (!((op == 1 && rt <= 1) || ((op == 6 || op == 7) && rt == 0))) abort();
+        ws_nclip_sites[i].address = addresses[i] & 0x1FFFFFFFu;
+        ws_nclip_sites[i].expected = expected[i];
+    }
+    ws_nclip_site_count = count;
+    ws_nclip_rescues = 0;
+}
+extern int gte_nclip_native_wide_sign(int32_t mac0, int* sign);
+int psx_ws_nclip_branch(uint32_t pc, uint32_t instr, int32_t mac0, int vanilla) {
+    if (psx_ws_x_margin() <= 0 || !gpu_ws_precise_nclip_enabled()) return vanilla;
+    for (int i = 0; i < ws_nclip_site_count; ++i) {
+        if (ws_nclip_sites[i].address != (pc & 0x1FFFFFFFu) ||
+            ws_nclip_sites[i].expected != instr) continue;
+        int sign;
+        if (!gte_nclip_native_wide_sign(mac0, &sign)) return vanilla;
+        const uint32_t op = instr >> 26;
+        const int result = op == 6 ? sign <= 0 : op == 7 ? sign > 0 :
+            ((instr >> 16) & 1) ? sign >= 0 : sign < 0;
+        if (result != vanilla) ++ws_nclip_rescues;
+        return result;
     }
     return vanilla;
 }

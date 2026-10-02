@@ -2629,6 +2629,8 @@ static void init_callbacks(void) {
         {
             extern int psx_ws_masked_reject(uint32_t flags, uint32_t mask);
             s_callbacks.ws_masked_reject = psx_ws_masked_reject;
+            extern int psx_ws_nclip_branch(uint32_t, uint32_t, int32_t, int);
+            s_callbacks.ws_nclip_branch = psx_ws_nclip_branch;
         }
         {
             extern uint32_t psx_ws_aspect_cone_result(

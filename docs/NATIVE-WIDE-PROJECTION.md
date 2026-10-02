@@ -33,3 +33,27 @@ ordinary conservative geometry consumer continues to reject it.
 This policy cannot recover a projection whose provenance has already been lost
 through unsupported CPU arithmetic, or repair a guest culling decision made
 before GPU submission. Those paths still need title-specific qualification.
+
+## Saturation-aware winding consumers
+
+A title can separately bind exact branch words with
+`psx_mod_set_native_wide_nclip_sites(addresses, expected, count)` and list its
+BLEZ, BGTZ or BGEZ consumers under `[widescreen.cull] nclip_exact_sites`.
+Enable `[widescreen] precise_nclip = true` to collect checked GTE projections.
+No sites are bound by default. Architectural NCLIP MAC0 and FLAG remain stock;
+only the selected rendering branch consumes the corrected winding.
+
+This narrower predicate requires a matching native MAC0, live projection
+generation, matching packed words and integer Y, positive depth outside the
+GTE near region, bounded precision coordinates, and an X projection that
+exceeds its corresponding saturation rail. It leaves ordinary subpixel winding
+unchanged. Zero reveal, stale/missing precision, altered branch words, other
+addresses, speculative execution and timeline invalidation retain the native
+decision. Both triangle rejection and the quad's winding keep branches need
+to be identified from the title's renderer.
+
+Generated functions, cached overlay callbacks and the interpreter use the same
+full-word-bound host predicate. Overlay callback ABI v27 and codegen version 14
+prevent older cached modules from hiding the new forwarding surface.
+The `ws_nw` diagnostic also reports `nclip_rescues`, the number of branch
+decisions corrected since the title last bound its sites.
