@@ -767,6 +767,23 @@ extern "C" void pgxp_store_gte_reg(uint32_t addr, uint8_t reg) {
     *dst = *src;
 }
 
+extern "C" int pgxp_debug_shadow(int space, uint32_t key, int *live,
+                                 uint32_t *value, uint32_t *flags,
+                                 int32_t *x16, int32_t *y16, uint16_t *z) {
+    const PGXPValue *pv = nullptr;
+    if (space == 0)                pv = pgxp_ptr(key);
+    else if (space == 1 && key < 34) pv = &s_gpr[key];
+    else if (space == 2 && key < 32) pv = &s_gte[key];
+    if (!pv) return 0;
+    *live = pv->gen == s_gen;
+    *value = pv->value;
+    *flags = pv->flags;
+    *x16 = pv->x16;
+    *y16 = pv->y16;
+    *z = pv->z;
+    return 1;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Test accessors                                                             */
 /* ------------------------------------------------------------------------- */

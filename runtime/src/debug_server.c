@@ -5319,6 +5319,40 @@ static void handle_geom_correction(int id, const char *json)
              (unsigned long long)ps.word_no_z);
 }
 
+/* pgxp_shadow — read PGXP shadow slots: {"cmd":"pgxp_shadow","addr":A,
+ * "count":N} walks N guest words from A (RAM / scratchpad); "space":"gpr" or
+ * "gte" with "index"/"count" reads register shadows instead. Each slot: the
+ * word it describes, whether it is live this generation, the per-half/depth
+ * flags (1 = X, 2 = Y, 4 = Z) and the 16.16 positions. Pair it with read_ram
+ * to see whether a packet word still matches its shadow. */
+static void handle_pgxp_shadow(int id, const char *json)
+{
+    char sp[16] = "";
+    json_get_str(json, "space", sp, sizeof sp);
+    int space = strcmp(sp, "gpr") == 0 ? 1 : strcmp(sp, "gte") == 0 ? 2 : 0;
+    char addr_str[32] = "";
+    uint32_t key = space ? (uint32_t)json_get_int(json, "index", 0)
+                         : (json_get_str(json, "addr", addr_str, sizeof addr_str)
+                                ? hex_to_u32(addr_str) : 0u);
+    int count = json_get_int(json, "count", 1);
+    if (count < 1) count = 1;
+    if (count > 256) count = 256;
+    static char buf[256 * 112 + 128];
+    size_t n = (size_t)snprintf(buf, sizeof buf, "{\"id\":%d,\"ok\":true,\"slots\":[", id);
+    for (int i = 0; i < count && n < sizeof buf - 128; i++) {
+        uint32_t k = space ? key + (uint32_t)i : key + (uint32_t)i * 4u;
+        int live = 0; uint32_t value = 0, flags = 0; int32_t x16 = 0, y16 = 0; uint16_t z = 0;
+        if (!pgxp_debug_shadow(space, k, &live, &value, &flags, &x16, &y16, &z))
+            break;
+        n += (size_t)snprintf(buf + n, sizeof buf - n,
+                              "%s{\"key\":\"0x%08X\",\"live\":%d,\"value\":\"0x%08X\","
+                              "\"flags\":%u,\"x16\":%d,\"y16\":%d,\"z\":%u}",
+                              i ? "," : "", k, live, value, flags, x16, y16, z);
+    }
+    snprintf(buf + n, sizeof buf - n, "]}");
+    send_fmt("%s", buf);
+}
+
 /* pgxp — live-tune the value-propagation engine for one-toggle isolation runs
  * without a rebuild: {"cmd":"pgxp","cpu_mode":0|1,"tolerance":F}. Fields are
  * optional; the reply echoes the resulting state (same shape as
@@ -14367,6 +14401,7 @@ static const CmdEntry s_commands[] = {
     { "gpu_state",         handle_gpu_state },
     { "geom_correction",   handle_geom_correction },
     { "pgxp",              handle_pgxp },
+    { "pgxp_shadow",       handle_pgxp_shadow },
     { "ws_aspect_cone_site", handle_ws_aspect_cone_site },
     { "ws_margin",         handle_ws_margin },
     { "ws_hud_mode",       handle_ws_hud_mode },
