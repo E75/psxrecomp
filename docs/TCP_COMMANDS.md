@@ -430,9 +430,9 @@ The TCP server is the canonical instrumentation surface. Rule 3 in `CLAUDE.md` i
 
 ## Complete command index (generated)
 
-**330 commands registered** — 317 on the native server (`runtime/src/debug_server.c`), 61 on the Beetle server (`runtime/src/beetle_debug_server.c`).
+**332 commands registered** — 319 on the native server (`runtime/src/debug_server.c`), 61 on the Beetle server (`runtime/src/beetle_debug_server.c`).
 
-62 of 330 have prose above; **268 are index-only**. An index-only command still works — it just has no description here yet. Send it `{"cmd":"<name>"}` and read the reply, or find its `handle_*` function in the server source.
+62 of 332 have prose above; **270 are index-only**. An index-only command still works — it just has no description here yet. Send it `{"cmd":"<name>"}` and read the reply, or find its `handle_*` function in the server source.
 
 Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this block has drifted from the code.
 
@@ -635,6 +635,8 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `pc_probe_clear` | ✓ |  |  |
 | `pc_probe_dump` | ✓ |  |  |
 | `pgxp` | ✓ |  |  |
+| `pgxp_miss_ring` | ✓ |  |  |
+| `pgxp_shadow` | ✓ |  |  |
 | `phase_hot` | ✓ |  |  |
 | `phase_profile` | ✓ |  |  |
 | `ping` | ✓ | ✓ | ✓ |

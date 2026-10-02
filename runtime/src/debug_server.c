@@ -277,6 +277,10 @@ static uint64_t s_dirty_break_hits = 0;
 /* ---- Input override ---- */
 static int s_input_override = -1;
 static int s_input_frames   = 0;
+/* Port 2 (set_input / press / clear_input "port":2): digital buttons only,
+ * for driving two-player modes headless. */
+static int s_input_override_p2 = -1;
+static int s_input_frames_p2   = 0;
 /* Optional analog-stick override (set_input lx/ly/rx/ry, 0..255, 0x80 =
  * centre). Lets injected input drive analog-mode movement; consumed by the
  * pad sampler alongside the button word. */
@@ -7732,6 +7736,12 @@ static void handle_set_input(int id, const char *json)
     if (!json_get_str(json, "buttons", val_str, sizeof(val_str))) {
         send_err(id, "missing buttons"); return;
     }
+    if (json_get_int(json, "port", 1) == 2) {
+        s_input_override_p2 = (int)(hex_to_u32(val_str) & 0xFFFFu);
+        s_input_frames_p2 = 0;
+        send_ok(id);
+        return;
+    }
     s_input_override = (int)hex_to_u32(val_str);
     s_input_frames = 0;
     /* Optional stick override: any of lx/ly/rx/ry (0..255) arms it; omitted
@@ -7751,6 +7761,12 @@ static void handle_press(int id, const char *json)
     int buttons = json_get_int(json, "buttons", -1);
     int frames  = json_get_int(json, "frames", 2);
     if (buttons < 0) { send_err(id, "missing buttons"); return; }
+    if (json_get_int(json, "port", 1) == 2) {
+        s_input_override_p2 = buttons & 0xFFFF;
+        s_input_frames_p2   = frames;
+        send_ok(id);
+        return;
+    }
     s_input_override = buttons;
     s_input_frames   = frames;
     int ax[4] = { json_get_int(json, "lx", -1), json_get_int(json, "ly", -1),
@@ -7782,6 +7798,7 @@ static void handle_pad_status(int id, const char *json)
              "\"slot0\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s,\"sticks\":[%u,%u,%u,%u]},"
              "\"slot1\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s,\"sticks\":[%u,%u,%u,%u]},"
              "\"override\":%d,\"override_frames\":%d,"
+             "\"override_p2\":%d,\"override_p2_frames\":%d,"
              "\"override_axes\":[%u,%u,%u,%u],\"override_axes_valid\":%s}\n",
              id, pad0,
              pad0, sio_get_pad_connected(0) ? "true" : "false", sio_get_pad_analog(0) ? "true" : "false",
@@ -7789,13 +7806,19 @@ static void handle_pad_status(int id, const char *json)
              pad1, sio_get_pad_connected(1) ? "true" : "false", sio_get_pad_analog(1) ? "true" : "false",
              sticks1[0], sticks1[1], sticks1[2], sticks1[3],
              s_input_override, s_input_frames,
+             s_input_override_p2, s_input_frames_p2,
              s_axis_st[0], s_axis_st[1], s_axis_st[2], s_axis_st[3],
              s_axis_override ? "true" : "false");
 }
 
 static void handle_clear_input(int id, const char *json)
 {
-    (void)json;
+    const int port = json_get_int(json, "port", 0);   /* 0 = both */
+    if (port == 0 || port == 2) {
+        s_input_override_p2 = -1;
+        s_input_frames_p2 = 0;
+    }
+    if (port == 2) { send_ok(id); return; }
     s_input_route_active = 0;
     s_input_route_index = 0;
     s_input_route_remaining = 0;
@@ -15585,6 +15608,16 @@ int debug_server_get_input_override(void)
     if (s_input_override >= 0 && s_input_frames > 0) {
         if (--s_input_frames == 0)
             s_input_override = -1;
+    }
+    return current;
+}
+
+int debug_server_get_input_override_port2(void)
+{
+    int current = s_input_override_p2;
+    if (s_input_override_p2 >= 0 && s_input_frames_p2 > 0) {
+        if (--s_input_frames_p2 == 0)
+            s_input_override_p2 = -1;
     }
     return current;
 }
