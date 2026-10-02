@@ -255,6 +255,7 @@ if(BUILD_TESTING)
             tests/psx_ram_runtime_map_stubs.c
             src/memory.c
             src/dma.c
+            src/gpu_timeline.c
             src/boot_state.c
             src/psx_icache.c
             src/psx_ram_geometry.c)

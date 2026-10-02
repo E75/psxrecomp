@@ -18,6 +18,7 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 GPU_C = ROOT / "runtime" / "src" / "gpu.c"
+GPU_TIMELINE_C = ROOT / "runtime" / "src" / "gpu_timeline.c"
 DEFAULT_GCC = pathlib.Path(r"C:\msys64\mingw64\bin\gcc.exe")
 
 DRIVER_C = r"""
@@ -201,6 +202,7 @@ STUBS_C = r"""
 #include <string.h>
 
 uint64_t s_frame_count = 0;
+uint64_t psx_cycle_count = 0;
 uint32_t g_debug_last_store_pc = 0x80012340u;
 uint32_t g_psx_ram_size = 0x00200000u;
 uint32_t g_psx_ram_mask = 0x001FFFFFu;
@@ -242,8 +244,8 @@ int ws_cull_should_keep(uint32_t addr) { (void)addr; return 1; }
 int ws_ui_group_should_keep(uint32_t addr) { (void)addr; return 1; }
 uint32_t psx_mod_gpu_dma_resolve_address(uint32_t address) { return address; }
 void ws_ui_group_assign(WsUiGroupItem *items, size_t count,
-                        int32_t display_width, int dense_menu)
-{ (void)items; (void)count; (void)display_width; (void)dense_menu; }
+                        int32_t display_width, int dense_menu, int in_place)
+{ (void)items; (void)count; (void)display_width; (void)dense_menu; (void)in_place; }
 int32_t ws_ui_anchor_for_bounds(int32_t x, int32_t width, int32_t display_width)
 { (void)x; (void)width; return display_width / 2; }
 int gte_geometry_correction_enabled(void) { return 0; }
@@ -436,6 +438,7 @@ def build(cc: str, work: pathlib.Path, name: str, prod: bool) -> pathlib.Path:
     cmd.extend([
         str(work / "driver.c"),
         str(GPU_C),
+        str(GPU_TIMELINE_C),
         str(work / "stubs.c"),
     ])
     if platform.system() == "Darwin":

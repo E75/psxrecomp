@@ -6081,6 +6081,7 @@ static void gp0_ring_record(const uint32_t *words, int n) {
     (void)n;
 }
 
+void gpu_gp0_ring_set_frozen(int frozen) { (void)frozen; }
 uint64_t gpu_gp0_ring_total(void) { return 0; }
 uint32_t gpu_gp0_ring_capacity(void) { return 0; }
 uint32_t gpu_gp0_ring_max_words(void) { return GPU_GP0_RING_MAX_WORDS; }
