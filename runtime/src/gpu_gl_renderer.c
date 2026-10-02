@@ -5782,8 +5782,10 @@ typedef struct PassGen {
     uint32_t n;                   /* images: [0] = the game's own */
     uint32_t phase[PASS_SLOTS];   /* Q16, ascending */
     uint32_t period;              /* guest VBlanks the frame stays on screen */
+    int      shown;               /* built for a frame already on screen */
     double   t_start, t_len;      /* host ticks, set on promotion */
 } PassGen;
+static int      s_pass_flip_shown = 0;
 static PassGen  s_pgen[2];
 /* Slot textures are made as slots fill: [0, s_pgen_alloc_n) exist, all at
  * s_pgen_alloc_w x h. A generation never fills past pass_slot_cap, so two
@@ -6196,6 +6198,7 @@ int gl_renderer_pass_begin(int x, int y, int w, int h, int open_gen,
         g->tex_w = tw; g->tex_h = th;
         g->source_path = wide ? GL_PRES_WIDE : GL_PRES_VRAM;
         g->period = period_vblanks ? period_vblanks : 1u;
+        g->shown = s_pass_flip_shown;
         pass_capture_into(s_pgen_tex[gi][0], g);   /* the game's own image */
         g->phase[0] = 0;
         g->n = 1;
@@ -6421,14 +6424,17 @@ static uint64_t s_present_ticks_accum_fwd(uint64_t add) {
     return s_present_ticks_accum;
 }
 
+void gl_renderer_pass_set_flip_shown(int shown) { s_pass_flip_shown = shown ? 1 : 0; }
+
 /* FLIP source saw a new frame: it is the flip a pending generation was built
- * for (same rect, same presented geometry) or a frame without passes. */
+ * for (render_pass_gen_flip_matches) or a frame without passes. */
 static void pass_note_new_frame(int origin_x, int origin_y, int source_path,
                                 int pw, int ph) {
     PassGen *pend = &s_pgen[1 - s_pgen_cur];
-    if (pend->valid && !pend->promoted && pend->x == origin_x &&
-        pend->y == origin_y && pend->source_path == source_path &&
-        pend->tex_w == pw && pend->tex_h == ph) {
+    if (pend->valid && !pend->promoted &&
+        render_pass_gen_flip_matches(pend->shown, pend->x, pend->y,
+                                     pend->source_path, pend->tex_w, pend->tex_h,
+                                     origin_x, origin_y, source_path, pw, ph)) {
         s_pgen_promote = 1;
     } else {
         s_pgen_promote = 0;

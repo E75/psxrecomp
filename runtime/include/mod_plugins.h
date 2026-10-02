@@ -425,6 +425,24 @@ enum {
 uint32_t psx_mod_render_pass_status(void);
 
 /*
+ * When the game flips relative to the pass point. PENDING (default, reset at
+ * every session start): the pass rect is the one the next flip will show --
+ * the PsyQ VSync(0)-then-PutDispEnv loop, whose frame N is drawn and waits.
+ * SHOWN: the game flips each frame as soon as it is drawn (for example
+ * PutDispEnv in a VBlank callback armed by the DrawSync callback), so by the
+ * time frame N+1's logic is done frame N is already on screen. The pass rect
+ * is then that on-screen rect, and frame N's own image and its in-between
+ * images are shown from the game's next flip on: one game frame later than
+ * the game shows them, as a host interpolator with one frame of history
+ * would. Set it from activation, before the first plan.
+ */
+enum {
+    PSX_MOD_RENDER_PASS_FLIP_PENDING = 0,
+    PSX_MOD_RENDER_PASS_FLIP_SHOWN = 1
+};
+int psx_mod_set_render_pass_flip(uint32_t mode);
+
+/*
  * Replay part of an already-loaded guest function inside a render pass:
  * run from start_pc with the CPU state given until control reaches stop_pc.
  * Every PC in [start_pc, stop_pc) is interpreted from its RAM bytes, so the

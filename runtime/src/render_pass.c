@@ -275,6 +275,15 @@ void render_pass_reset_session(void) {
     memset(g_render_pass_dropped_writes, 0, sizeof g_render_pass_dropped_writes);
     s_open_generation = 0;
     s_restored_valid = 0;
+    gl_renderer_pass_set_flip_shown(0);
+}
+
+int psx_mod_set_render_pass_flip(uint32_t mode) {
+    if (mode != PSX_MOD_RENDER_PASS_FLIP_PENDING &&
+        mode != PSX_MOD_RENDER_PASS_FLIP_SHOWN)
+        return 0;
+    gl_renderer_pass_set_flip_shown(mode == PSX_MOD_RENDER_PASS_FLIP_SHOWN);
+    return 1;
 }
 
 /* Everything that must hold before guest code may run frozen, as a
