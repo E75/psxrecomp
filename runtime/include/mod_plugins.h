@@ -423,6 +423,23 @@ enum {
     PSX_MOD_RENDER_PASS_BUSY = 6
 };
 uint32_t psx_mod_render_pass_status(void);
+
+/*
+ * Replay part of an already-loaded guest function inside a render pass:
+ * run from start_pc with the CPU state given until control reaches stop_pc.
+ * Every PC in [start_pc, stop_pc) is interpreted from its RAM bytes, so the
+ * span may start anywhere in a compiled function, including just after one
+ * of its calls; calls the span makes run normally and return into it.
+ * A plugin uses this to redraw with the game's own frame code, branches and
+ * all, from registers it captured at start_pc during the real frame (an
+ * instruction hook), instead of re-implementing that code's call sequence.
+ * Returns 1 when stop_pc is reached; 0 when control leaves the range another
+ * way (a return or jump out, a nested span), after 1M interpreted
+ * instructions, or outside a pass. The pass restores the machine either way.
+ * Both PCs are 4-aligned, in one segment, start_pc < stop_pc.
+ */
+int psx_mod_run_guest_span(struct CPUState* cpu, uint32_t start_pc,
+                           uint32_t stop_pc);
 int psx_mod_set_auto_skip_fmv(int enabled);
 /*
  * Draw still artwork behind the game image in OpenGL letterbox/pillarbox

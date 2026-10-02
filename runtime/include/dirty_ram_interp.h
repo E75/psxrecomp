@@ -42,6 +42,24 @@ extern "C" {
  * corruption, 2026-06-10). */
 int dirty_ram_dispatch(CPUState* cpu, uint32_t addr, uint32_t stop_addr);
 
+/* Replay [start_pc, stop_pc) of already-loaded guest code from the CPU state
+ * given: every PC in the range is interpreted from its live RAM bytes, even
+ * where a compiled body or a compiled resume point (the return address of a
+ * call) begins, so a span can start in the middle of a compiled function.
+ * Calls the span makes run on their normal backend and return into it.
+ * Returns 1 when control reaches stop_pc, 0 when it leaves the range any other
+ * way (a return, a jump out, a nested span) or runs past max_insns
+ * interpreted instructions. The range is half-open, CODE identity, one span
+ * at a time. A span is a replay, not a function entry: it fires no
+ * function-entry hooks at its own PCs and stays out of capture, alias seeding
+ * and per-PC entry statistics. Instruction hooks fire as in compiled code.
+ * Mods reach it through psx_mod_run_guest_span (render passes only). */
+int  dirty_ram_run_span(CPUState* cpu, uint32_t start_pc, uint32_t stop_pc,
+                        uint64_t max_insns);
+/* The open span (0,0 = none), for landings that longjmp past its exit. */
+void dirty_ram_span_get(uint32_t *lo, uint32_t *hi);
+void dirty_ram_span_set(uint32_t lo, uint32_t hi);
+
 /* Retire a deferred R3000A load-delay writeback (see dirty_ram_interp.c). The
  * interpreter defers a load's destination-register write past the delay-slot
  * instruction, as hardware does; call this anywhere control leaves the
