@@ -368,6 +368,32 @@ enum {
 int psx_mod_set_render_pass_flip(uint32_t mode);
 
 /*
+ * The per-frame plumbing every frame-rate plugin repeats (render_pass_frame.c).
+ * Blending the game state itself: render_pass_motion.h.
+ *
+ * Activation: read a choice option holding "display" (follow the measured
+ * display refresh) or a frame rate, and select the FLIP source, HOLD blend,
+ * `flip_mode` and that rate. Returns 0 if any setting was refused.
+ */
+int psx_mod_activate_render_pass_rate(const char* package, const char* feature,
+                                      const char* option, uint32_t flip_mode);
+typedef struct PSXModRenderPassFrame {
+    uint32_t struct_size;          /* sizeof(PSXModRenderPassFrame) */
+    uint32_t period_vblanks;       /* VBlanks this game frame stays on screen */
+    uint32_t shown_after_vblanks;  /* VBlank presents before it is shown */
+    uint16_t x, y, w, h;           /* VRAM rect the passes draw */
+} PSXModRenderPassFrame;
+/*
+ * Plan this game frame's passes and run `fn` at each phase. While passes are
+ * unavailable for a lasting reason (BACKEND, DISABLED) the presenter is
+ * switched to a motion-adaptive crossfade, and back to HOLD once they return.
+ * Returns how many passes produced an image.
+ */
+uint32_t psx_mod_render_pass_frame(struct CPUState* cpu,
+                                   const PSXModRenderPassFrame* frame,
+                                   PSXModRenderPassFn fn, void* user);
+
+/*
  * Replay part of an already-loaded guest function inside a render pass:
  * run from start_pc with the CPU state given until control reaches stop_pc.
  * Every PC in [start_pc, stop_pc) is interpreted from its RAM bytes, so the
