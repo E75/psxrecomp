@@ -291,6 +291,34 @@ int main(void) {
         }
     }
 
+    /* --- render-pass checkpoint: a sandboxed pass rewrites a packet word
+     * (raw-restored afterwards); the shadow must come back with it --- */
+    {
+        const uint32_t other = (90u << 16) | 170u;
+        produce_at(ADDR_A);
+        pgxp_checkpoint_begin();
+        pgxp_gte_push_sxy((170 << 16) | 0x1000, (90 << 16) | 0x2000, 7, other);
+        psx_pgxp_cop2(nullptr, SWC2(14), other, ADDR_A);
+        CHECK(lookup(ADDR_A, other, 170, 90, nullptr, nullptr, nullptr) ==
+              PGXP_SRC_DATAFLOW);                /* the pass sees its own word */
+        pgxp_invalidate_all();                   /* undone by the rollback     */
+        pgxp_suppress_begin();                   /* left open by an abort      */
+        pgxp_checkpoint_rollback();
+        CHECK(pgxp_test_suppress_depth() == 0);
+        CHECK(pgxp_test_active());
+        int32_t x, y; uint16_t z;
+        CHECK(lookup(ADDR_A, PACKED, 160, 80, &x, &y, &z) == PGXP_SRC_DATAFLOW);
+        CHECK(x == X16 && y == Y16 && z == SZ3);
+        /* a generation wrap inside the pass cannot be undone: fail closed */
+        produce_at(ADDR_A);
+        pgxp_checkpoint_begin();
+        pgxp_test_set_generation(0xFFFFFFFFu);
+        pgxp_invalidate_all();
+        pgxp_checkpoint_rollback();
+        CHECK(lookup(ADDR_A, PACKED, 160, 80, nullptr, nullptr, nullptr) ==
+              PGXP_SRC_NATIVE);
+    }
+
     /* --- in-place ops read their source before the destination is reset --- */
     pgxp_set_cpu_mode(1);
     produce_at(ADDR_A);

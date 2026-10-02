@@ -372,6 +372,76 @@ extern "C" int gte_geometry_correction_lookup(uint32_t packed,
     return 1;
 }
 
+/* Render-pass checkpoint for the gte.cpp side of precision tracking: the
+ * position cache entries a pass writes are journaled and put back, and the
+ * speculative bracket depth is restored (a watchdog abort can leave one open).
+ * The PGXP shadows roll back through pgxp_checkpoint_*. */
+struct GeomJournalEntry { GeomVertex *slot; GeomVertex old; };
+static uint32_t          s_gck_depth = 0;
+static GeomJournalEntry *s_gck_log = nullptr;
+static size_t            s_gck_n = 0, s_gck_cap = 0;
+static int               s_gck_lossy = 0;
+static uint32_t          s_gck_generation = 0;
+static GeomVertex       *s_gck_cache = nullptr;
+static uint32_t          s_gck_spec_depth = 0;
+static int               s_gck_spec_invalidated = 0;
+
+static uint8_t *s_gck_bits = nullptr;          /* one bit per cache slot */
+
+static inline void geom_ck_note(GeomVertex *slot) {
+    if (s_gck_depth == 0) return;
+    if (s_geom_cache != s_gck_cache || !s_gck_bits) { s_gck_lossy = 1; return; }
+    size_t i = (size_t)(slot - s_geom_cache);
+    uint8_t bit = (uint8_t)(1u << (i & 7u));
+    if (s_gck_bits[i >> 3] & bit) return;      /* journaled this pass        */
+    if (s_gck_n == s_gck_cap) {
+        size_t cap = s_gck_cap ? s_gck_cap * 2 : 16384;
+        GeomJournalEntry *p = (GeomJournalEntry *)std::realloc(
+            s_gck_log, cap * sizeof *p);
+        if (!p) { s_gck_lossy = 1; return; }
+        s_gck_log = p;
+        s_gck_cap = cap;
+    }
+    s_gck_bits[i >> 3] |= bit;
+    s_gck_log[s_gck_n].slot = slot;
+    s_gck_log[s_gck_n].old = *slot;
+    s_gck_n++;
+}
+
+extern "C" void gte_precision_checkpoint_begin(void) {
+    pgxp_checkpoint_begin();
+    if (s_gck_depth++ != 0) return;
+    if (s_geom_cache && !s_gck_bits)
+        s_gck_bits = (uint8_t *)std::calloc(GEOM_CACHE_SIZE / 8u, 1);
+    s_gck_n = 0;
+    s_gck_generation = s_geom_generation;
+    s_gck_cache = s_geom_cache;
+    s_gck_spec_depth = s_speculative_depth;
+    s_gck_spec_invalidated = s_speculative_timeline_invalidated;
+}
+
+extern "C" void gte_precision_checkpoint_rollback(void) {
+    if (s_gck_depth != 0 && --s_gck_depth == 0) {
+        for (size_t i = s_gck_n; i-- > 0;) {
+            GeomVertex *slot = s_gck_log[i].slot;
+            *slot = s_gck_log[i].old;
+            size_t k = (size_t)(slot - s_gck_cache);
+            s_gck_bits[k >> 3] &= (uint8_t)~(1u << (k & 7u));
+        }
+        s_gck_n = 0;
+        s_speculative_depth = s_gck_spec_depth;
+        s_speculative_timeline_invalidated = s_gck_spec_invalidated;
+        if (s_gck_lossy || s_geom_cache != s_gck_cache ||
+            s_geom_generation < s_gck_generation) {
+            s_gck_lossy = 0;
+            gte_geom_generation_advance();     /* fail closed                 */
+        } else {
+            s_geom_generation = s_gck_generation;
+        }
+    }
+    pgxp_checkpoint_rollback();
+}
+
 static inline void geom_note(uint32_t packed, int64_t x16, int64_t y16) {
     if (s_speculative_depth != 0 || s_gte_replay_sandbox || !s_geom_enabled ||
         !s_geom_cache) return;
@@ -382,6 +452,7 @@ static inline void geom_note(uint32_t packed, int64_t x16, int64_t y16) {
     int64_t slot = geom_slot(packed);
     if (slot < 0) return;
     GeomVertex &entry = s_geom_cache[slot];
+    geom_ck_note(&entry);
     if (entry.generation == s_geom_generation) {
         /* Already occupied this generation: only flag ambiguity if the stored
          * sub-pixel position actually DIFFERS — re-projecting the same vertex

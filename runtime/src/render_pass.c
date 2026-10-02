@@ -40,6 +40,10 @@ extern uint8_t *memory_get_scratchpad_ptr(void);
 extern uint32_t memory_get_ram_bytes(void);
 extern uint32_t i_stat;
 extern uint32_t i_mask;
+/* gte.cpp: precision-tracking shadows (PGXP + the position cache) roll back
+ * with the machine, or they describe the words a pass wrote. */
+extern void gte_precision_checkpoint_begin(void);
+extern void gte_precision_checkpoint_rollback(void);
 extern uint32_t dma_snapshot_bytes(void);
 extern void     dma_snapshot_write(uint8_t *p);
 extern int      dma_snapshot_read(const uint8_t *p, uint32_t len);
@@ -450,6 +454,7 @@ static int checkpoint_save(const CPUState *cpu) {
     s_ck.call_bail = g_psx_call_bail;
     memset(&s_ck.nest, 0, sizeof s_ck.nest);
     nesting_save(&s_ck.nest);
+    gte_precision_checkpoint_begin();
     return 1;
 }
 
@@ -473,6 +478,7 @@ static void checkpoint_restore(CPUState *cpu) {
     g_psx_dispatch_depth = s_ck.dispatch_depth;
     g_psx_call_bail = s_ck.call_bail;
     nesting_restore(&s_ck.nest);
+    gte_precision_checkpoint_rollback();
 }
 
 static double s_ms_per_tick = 0.0;

@@ -185,6 +185,9 @@ int dirty_ram_run_span(CPUState *cpu, uint32_t start, uint32_t stop, uint64_t ma
 }
 void overlay_loader_native_nesting(int *d, uint32_t *ip) { *d = 0; *ip = 0; }
 void overlay_loader_set_native_nesting(int d, uint32_t ip) { (void)d; (void)ip; }
+static int s_prec_open;
+void gte_precision_checkpoint_begin(void) { s_prec_open++; }
+void gte_precision_checkpoint_rollback(void) { s_prec_open--; }
 
 /* GPU and presenter. */
 uint64_t gpu_pass_state_hash(void) { return 42; }
@@ -571,6 +574,7 @@ int main(void) {
     test_pass();
     test_ram_8mb();
     test_journal();
+    CHECK(s_prec_open == 0, "precision checkpoints balanced");
     printf(failures ? "FAILED (%d)\n" : "ALL PASS\n", failures);
     return failures ? 1 : 0;
 }
