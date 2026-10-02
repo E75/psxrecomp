@@ -37,6 +37,13 @@ int psx_mod_function_entry(struct CPUState* cpu, uint32_t address);
 /* Active function-entry hook count (0 = none). Hot callers test it before the
  * call, so a run without an active hook pays one load per interpreted entry. */
 extern uint32_t g_psx_mod_function_entry_hooks;
+
+/* Always-on named event counters for trusted plugins (observability, not
+ * logging): e.g. how often each guard in a hook rejected. `name` should be a
+ * string literal of the form "<plugin>.<event>"; up to 128 distinct names are
+ * kept, further names are counted in an overflow bucket. Emulation-thread only.
+ * TCP: {"cmd":"mod_counters"} lists every counter with its last frame. */
+void psx_mod_counter_add(const char* name, uint32_t delta);
 /* Entry callbacks can make nested guest calls while retaining host registers.
  * Save/load and rewind must wait until that host context has returned. */
 int psx_mod_function_entry_active(void);
