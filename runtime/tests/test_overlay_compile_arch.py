@@ -210,6 +210,18 @@ class ToolTargetsRuntimeArch(unittest.TestCase):
             self.assertIn('PSX_OVERLAY_ARCH_ABI overrides --arch-abi', out)
             self.assertEqual(co.cache_arch_abi(), 'macos-x64')
 
+    def test_bios_module_env_pin_beats_flag(self):
+        with host('Darwin', 'x86_64', 'macos-x64'), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            with self.assertRaises(SystemExit):  # past arch guard: no dump
+                bmb.main(['--dump', '/nonexistent', '--stem', 'SCPH1001',
+                          '--out', '/nonexistent/m.so', '--arch-abi', 'macos-arm64'])
+            self.assertIn('PSX_OVERLAY_ARCH_ABI overrides --arch-abi: macos-x64',
+                          out.getvalue())
+            self.assertIn('not found', out.getvalue())
+            self.assertNotIn('cannot build a BIOS module', out.getvalue())
+            self.assertEqual(co.cache_arch_abi(), 'macos-x64')
+
     def test_python_that_cannot_load_the_runtimes_arch_refuses(self):
         # A universal runtime's arm64 slice spawning an x86_64-only Python:
         # the shards could never be validated here, so build none, loudly.
@@ -267,6 +279,8 @@ class ToolTargetsRuntimeArch(unittest.TestCase):
                                      ('AMD64', 'mingw_x86_64_ucrt_llvm', 'x64'),
                                      ('ARM64', 'mingw_aarch64_ucrt_llvm', 'arm64'),
                                      ('AMD64', 'mingw_i686_msvcrt_gnu', 'x86'),
+                                     ('AMD64', 'mingw', 'x64'),
+                                     ('ARM64', 'mingw', 'arm64'),
                                      ('ARM64', 'win-arm32', 'unknown')):
             with host('Windows', machine, build=build):
                 self.assertEqual(co.interpreter_arch(), want, (machine, build))

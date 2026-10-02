@@ -204,9 +204,12 @@ def main(argv=None) -> int:
     # compiler binary's default (an x86_64 runtime under Rosetta, arm64-only
     # Xcode clang). The self-check loads the module into this interpreter, so
     # the interpreter has to run as that architecture as well.
+    env_arch = os.environ.get("PSX_OVERLAY_ARCH_ABI")
+    if env_arch and args.arch_abi and env_arch != args.arch_abi:
+        print(f"PSX_OVERLAY_ARCH_ABI overrides --arch-abi: {env_arch}")
     arch_err = co.apply_runtime_arch_abi(
-        args.arch_abi or os.environ.get("PSX_OVERLAY_ARCH_ABI"),
-        "--arch-abi" if args.arch_abi else "PSX_OVERLAY_ARCH_ABI")
+        env_arch or args.arch_abi,
+        "PSX_OVERLAY_ARCH_ABI" if env_arch else "--arch-abi")
     if arch_err:
         die(arch_err)
     arch_mismatch = co.interpreter_arch_mismatch()

@@ -284,7 +284,11 @@ def interpreter_arch() -> str:
         if plat == 'win32':
             return 'x86'
         m = re.match(r'(?:win-|mingw_)(amd64|arm64|x86_64|aarch64|i686)(?:_|$)', plat)
-        return _arch_abi_arch(m.group(1)) if m else 'unknown'
+        if m:
+            return _arch_abi_arch(m.group(1))
+        # Older MSYS2 builds can report plain "mingw"; keep unpinned cache
+        # callers usable without guessing for an unrecognized python.org ABI.
+        return _arch_abi_arch(platform.machine()) if plat.startswith('mingw') else 'unknown'
     return _arch_abi_arch(platform.machine())
 
 
@@ -346,6 +350,7 @@ def target_arch_flags(compiler: str = 'gcc') -> list[str]:
     if compiler != 'gcc' or target_os_tag() != 'macos':
         return []
     name = _DARWIN_ARCH_NAMES.get(target_arch())
+    # Cross-arch macOS builds require Apple clang; Homebrew GCC may ignore -arch.
     return ['-arch', name] if name else []
 
 
