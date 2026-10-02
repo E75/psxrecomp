@@ -30,6 +30,7 @@ def main():
                 (root / "recomp_net").mkdir()
                 (root / "recomp_net/auth.h").write_text("RNET_AUTH_HEADER_INCLUDED\n")
                 (root / "recomp_net/chat_filter.h").write_text("RNET_CHAT_HEADER_INCLUDED\n")
+                (root / "recomp_net/host_relay.h").write_text("RNET_RELAY_HEADER_INCLUDED\n")
             flags = ["RECOMP_LAUNCHER=1", "RECOMP_LAUNCHER_HAS_ACCOUNT=1",
                      "SDL_VERSION_ATLEAST(x,y,z)=1", "DEFAULT_DEBUG_PORT=4370"]
             if enabled:
@@ -45,9 +46,13 @@ def main():
             assert p.returncode == 0, p.stderr
             if enabled:
                 for token in ("RNET_AUTH_HEADER_INCLUDED", "rnet_account_pump()",
-                              "ae_np_account_login_begin", "account_available = ae_np_account_available"):
+                              "ae_np_account_login_begin", "account_available = ae_np_account_available",
+                              "RNET_RELAY_HEADER_INCLUDED"):
                     assert token in p.stdout, f"enabled path lost {token}"
             else:
+                # netplay-off builds must not need any recomp_net header
+                # (none exist in this include path, so -E would have failed).
+                assert "RNET_RELAY_HEADER_INCLUDED" not in p.stdout
                 assert "rnet_account_" not in p.stdout, "offline launcher retained account linkage"
                 assert "RNET_ACCOUNT_" not in p.stdout, "offline launcher retained account state dependency"
         # Compile the REAL offline lobby TU too: its early chat-report include
