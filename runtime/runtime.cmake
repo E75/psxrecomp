@@ -2417,6 +2417,14 @@ function(psxrecomp_add_runtime_target target)
             "Also build the <exe>_pgxp PGXP precision-shadowing variant" OFF)
         if(PSX_PGXP_VARIANT)
             psxrecomp_add_runtime_target(${target}-pgxp PGXP PGXP_CLONE ${ARGN})
+            # Both executables sit in one directory and stage one
+            # mods/bundled: run the clone's staging (which wipes and rewrites
+            # it) after the base target's, never concurrently with it.
+            if(TARGET ${target}_mod_catalog_stage AND
+               TARGET ${target}-pgxp_mod_catalog_stage)
+                add_dependencies(${target}-pgxp_mod_catalog_stage
+                                 ${target}_mod_catalog_stage)
+            endif()
         endif()
     endif()
 endfunction()
