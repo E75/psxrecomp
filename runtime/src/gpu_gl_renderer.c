@@ -6866,6 +6866,18 @@ static int      s_pass_verify = -1;
 static uint8_t *s_pv_hr = NULL, *s_pv_raw = NULL;
 static size_t   s_pv_hr_cap = 0, s_pv_raw_cap = 0;
 static int      s_pv_ok = 1;
+static uint64_t s_pv_cpu_hash = 0;
+
+/* The whole CPU VRAM: the guest-visible VRAM (GPUREAD, savestates, netplay
+ * digests and, in dual raster, the authoritative surface). */
+static uint64_t pass_cpu_vram_hash(void) {
+    uint64_t h = 1469598103934665603ULL;
+    if (!s_vram) return 0;
+    const uint64_t *w = (const uint64_t *)(const void *)s_vram;
+    for (size_t i = 0; i < (size_t)VRAM_W * VRAM_H / 4u; i++)
+        h = (h ^ w[i]) * 1099511628211ULL;
+    return h;
+}
 
 uint64_t gl_renderer_perf_ticks(void) { return SDL_GetPerformanceCounter(); }
 uint64_t gl_renderer_perf_frequency(void) { return SDL_GetPerformanceFrequency(); }
@@ -6920,7 +6932,12 @@ uint32_t gl_renderer_pass_unavailable(void) {
     if (!s_ctx || !s_raster_ok || !s_interp_enabled || s_interp_suspended ||
         s_interp_source != 1 || !(s_interp_source_hz > 0.0))
         return PSX_MOD_RENDER_PASS_NO_PRESENTER;
-    /* Dual raster (netplay CPU-authoritative VRAM) or a debug refusal. */
+    /* Dual raster (netplay CPU-authoritative VRAM) hosts passes once netplay
+     * passes are opted in: its authoritative surface is the CPU VRAM the
+     * pass backs up and restores (rect rows, journaled out-of-rect writes),
+     * and the FBO it presents is the one passes capture.
+     * PSX_RENDER_PASS_VERIFY=1 checks the whole CPU VRAM after each pass.
+     * HD native authority and the debug refusal decline. */
     if (s_hd_native_authority || (s_cpu_auth_dual && !render_pass_netplay_enabled()) || s_pass_force_refuse)
         return PSX_MOD_RENDER_PASS_BACKEND;
     /* Windowed high-resolution mode: the presented surfaces are the window
@@ -7415,7 +7432,10 @@ backed_up:
         const char *e = getenv("PSX_RENDER_PASS_VERIFY");
         s_pass_verify = (e && e[0] && e[0] != '0') ? 1 : 0;
     }
-    if (s_pass_verify) pass_verify_read(&s_pv_hr, &s_pv_hr_cap, &s_pv_raw, &s_pv_raw_cap);
+    if (s_pass_verify) {
+        pass_verify_read(&s_pv_hr, &s_pv_hr_cap, &s_pv_raw, &s_pv_raw_cap);
+        s_pv_cpu_hash = pass_cpu_vram_hash();
+    }
     s_pj_cpu.n = 0;
     s_pass_active = 1;
     s_pass_local = local;
@@ -7476,7 +7496,8 @@ static void transaction_restore_ex(int keep_color) {
         pass_verify_read(&after_hr, &after_hr_cap, &after_raw, &after_raw_cap);
         s_pv_ok = s_pv_hr && after_hr && s_pv_raw && after_raw &&
                   memcmp(s_pv_hr, after_hr, hn) == 0 &&
-                  memcmp(s_pv_raw, after_raw, rn) == 0;
+                  memcmp(s_pv_raw, after_raw, rn) == 0 &&
+                  pass_cpu_vram_hash() == s_pv_cpu_hash;
     }
 }
 
