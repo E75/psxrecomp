@@ -8041,7 +8041,7 @@ static void handle_render_pass_stats(int id, const char *json)
              "\"backups_reused\":%llu,\"pass_attempts\":%llu,"
              "\"argument_refused\":%llu,\"status_refused\":%llu,"
              "\"begin_refused\":%llu,\"checkpoint_refused\":%llu,"
-             "\"last_failure\":%s}",
+             "\"last_failure\":%s,\"last_abort_detail\":\"%s\"}",
              id, (unsigned long long)st.plans, (unsigned long long)st.planned,
              (unsigned long long)st.wanted, (unsigned long long)st.refused,
              (unsigned long long)st.passes, (unsigned long long)st.aborted,
@@ -8071,7 +8071,7 @@ static void handle_render_pass_stats(int id, const char *json)
              (unsigned long long)st.pass_attempts,
              (unsigned long long)st.argument_refused, (unsigned long long)st.status_refused,
              (unsigned long long)st.begin_refused, (unsigned long long)st.checkpoint_refused,
-             failure_json);
+             failure_json, st.last_abort_detail);
 }
 
 /* render_pass_refuse on=<0|1>: make the OpenGL backend decline render passes

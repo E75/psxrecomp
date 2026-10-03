@@ -34,9 +34,17 @@
 #include "cpu_state.h"
 #include "dirty_ram_interp.h"
 #include "mod_plugins.h"
+#include "mod_runtime.h"
 #include "psx_cycles.h"
 #include "timers.h"
 
+static ModFunctionEntryContext s_mod_entry;
+void mod_runtime_function_entry_context_save(ModFunctionEntryContext *out) {
+    *out = s_mod_entry;
+}
+void mod_runtime_function_entry_context_restore(const ModFunctionEntryContext *in) {
+    s_mod_entry = *in;
+}
 static int failures;
 #define CHECK(c, m) do { if (!(c)) { fprintf(stderr, "FAIL: %s\n", m); failures++; } } while (0)
 
