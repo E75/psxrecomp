@@ -80,6 +80,15 @@ if(BUILD_TESTING)
         target_link_libraries(boot_state_handoff_test PRIVATE ZLIB::ZLIB)
         add_test(NAME boot_state_handoff_test COMMAND boot_state_handoff_test)
 
+        add_executable(static_match_cache_test tests/test_static_match_cache.c
+            src/overlay_loader.c src/crc32.c)
+        target_include_directories(static_match_cache_test PRIVATE include)
+        target_compile_definitions(static_match_cache_test PRIVATE
+            PSX_HAS_OVERLAY_DISPATCH PSX_NO_DEBUG_TOOLS)
+        target_compile_options(static_match_cache_test PRIVATE -O2 -flto -ffunction-sections -fdata-sections -UNDEBUG)
+        target_link_options(static_match_cache_test PRIVATE -flto -Wl,--gc-sections)
+        add_test(NAME static_match_cache_test COMMAND static_match_cache_test)
+
         add_executable(mod_memory_snapshot_test tests/test_mod_memory_snapshot.c
             src/psx_ram_geometry.c)
         target_include_directories(mod_memory_snapshot_test PRIVATE include src)
