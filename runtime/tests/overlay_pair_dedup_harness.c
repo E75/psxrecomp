@@ -186,6 +186,10 @@ uint32_t psx_ws_backdrop_value(uint32_t orig, int end, int cols) {
 }
 int32_t psx_ws_depth_bound(int32_t imm) { return imm; }
 int32_t psx_ws_player_x_bound(int32_t vanilla) { return vanilla; }
+int psx_ws_masked_reject(uint32_t flags, uint32_t mask) { return (flags & mask) != 0; }
+int psx_ws_nclip_branch(uint32_t pc, uint32_t instr, int32_t mac0, int vanilla) {
+    (void)pc; (void)instr; (void)mac0; return vanilla;
+}
 int32_t psx_ws_screen_x_bound(int32_t vanilla) { return vanilla; }
 int psx_mod_function_entry(CPUState *cpu, uint32_t address) {
     (void)cpu; (void)address;
