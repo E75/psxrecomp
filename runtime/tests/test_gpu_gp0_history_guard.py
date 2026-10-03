@@ -242,8 +242,9 @@ int ws_cull_should_keep(uint32_t addr) { (void)addr; return 1; }
 int ws_ui_group_should_keep(uint32_t addr) { (void)addr; return 1; }
 uint32_t psx_mod_gpu_dma_resolve_address(uint32_t address) { return address; }
 void ws_ui_group_assign(WsUiGroupItem *items, size_t count,
-                        int32_t display_width, int dense_menu)
-{ (void)items; (void)count; (void)display_width; (void)dense_menu; }
+                        int32_t display_width, int dense_menu, int in_place)
+{ (void)items; (void)count; (void)display_width; (void)dense_menu;
+  (void)in_place; }
 int32_t ws_ui_anchor_for_bounds(int32_t x, int32_t width, int32_t display_width)
 { (void)x; (void)width; return display_width / 2; }
 int gte_geometry_correction_enabled(void) { return 0; }
