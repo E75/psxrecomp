@@ -531,6 +531,35 @@ if(BUILD_TESTING)
     add_test(NAME ws_cull_edge_codegen_test
              COMMAND ws_cull_edge_codegen_test)
 
+    # [widescreen.cull] screen_x_sites on `lui` and `bltz` (a screen X kept in
+    # the high half of a register): emitted code for hand-written instruction
+    # words, the main-EXE guard, and the shared math in ws_cull_edge.h.
+    add_executable(ws_cull_screen_x_hi_codegen_test
+        tests/ws_cull_screen_x_hi_codegen_test.cpp
+        src/ps1_exe_parser.cpp
+        src/mips_decoder.cpp
+        src/control_flow.cpp
+        src/function_analysis.cpp
+        src/code_generator.cpp
+        src/pgxp_hook_emitter.cpp
+        src/annotations.cpp
+        src/bios_address_model.cpp
+        src/config_loader.cpp
+        src/recompiler_patch.cpp
+    )
+    target_include_directories(ws_cull_screen_x_hi_codegen_test PRIVATE
+        include
+        src
+        lib/rabbitizer/include
+        lib/rabbitizer/cplusplus/include
+        lib/fmt/include
+        lib/toml11
+        lib/ELFIO
+    )
+    target_link_libraries(ws_cull_screen_x_hi_codegen_test PRIVATE fmt rabbitizer)
+    add_test(NAME ws_cull_screen_x_hi_codegen_test
+             COMMAND ws_cull_screen_x_hi_codegen_test)
+
     # [[draw_distance.clamp]]: config rules, the emitted main-EXE clamp and
     # its guards, the shared declaration and the unchanged overlay identity.
     add_executable(draw_distance_codegen_test
