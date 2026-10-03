@@ -17,6 +17,32 @@ import audit_aot_cache as auditor
 import indexed_lzss_pack as lzss_pack
 
 
+class PgxpReleaseNamespaceTests(unittest.TestCase):
+    def test_pgxp_compile_and_audit_follow_runtime_flavor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            commands = []
+
+            def compile_fixture(command, **kwargs):
+                commands.append(command)
+                Path(command[command.index('--out-dir') + 1]).mkdir(parents=True)
+
+            with mock.patch.object(pipeline.subprocess, 'run', side_effect=compile_fixture):
+                pipeline.build(dict(jobs=[dict(input='invented.json', name='image')]),
+                               work / 'game.toml', work / 'emitter', work,
+                               'gcc', 1, flavor=2)
+            self.assertEqual(commands[0][commands[0].index('--flavor') + 1], '2')
+            receipt = work / 'audit.json'
+            receipt.write_text('{"flavor": 2}')
+            with mock.patch.object(pipeline.subprocess, 'run') as run:
+                result = pipeline.audit(work / 'game.toml', work / 'emitter',
+                                        work / 'cache', work / 'inventory.json',
+                                        receipt, flavor=2)
+            command = run.call_args.args[0]
+            self.assertEqual(command[command.index('--flavor') + 1], '2')
+            self.assertEqual(result['flavor'], 2)
+
+
 class FakeDisc:
     def __init__(self, files):
         self.data = files
