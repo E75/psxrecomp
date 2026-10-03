@@ -548,6 +548,7 @@ static int ws_nw_offset(void) {
     if (!ws_native_wide_active()) return 0;
     return ws_nw_configured_offset();
 }
+int gpu_ws_configured_x_reveal(void) { return ws_nw_configured_offset(); }
 int ws_nw_extra(void) { return 2 * ws_nw_offset(); }
 
 static uint32_t ws_view_camera_addr, ws_view_min_addr, ws_view_max_addr, ws_view_active_addr;

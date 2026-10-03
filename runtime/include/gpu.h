@@ -261,6 +261,9 @@ void psx_ws_sprite_tag(struct CPUState* cpu);
  * by this; 0 when native-wide is inactive). */
 int  ws_native_wide_active(void);
 int  ws_nw_extra(void);
+/* Configured per-side reveal, excluding the world-culling safety envelope.
+ * Available before scene classification so first-frame overlays can fit. */
+int gpu_ws_configured_x_reveal(void);
 int  ws_nw_present_width(void);
 /* Display width (native px) the native-wide margins are derived from. */
 int  gpu_ws_display_width(void);

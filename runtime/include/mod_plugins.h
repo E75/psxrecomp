@@ -106,8 +106,11 @@ uint32_t psx_mod_alloc_gpu_dma_memory(uint32_t size, uint32_t alignment);
  */
 int psx_mod_set_main_ram_8mb(int enabled);
 
-/* Current per-side widescreen reveal in native game pixels (zero at 4:3). */
+/* World-culling envelope in native game pixels, including safety guards. */
 int32_t psx_mod_widescreen_x_margin(void);
+/* Configured per-side visible reveal, excluding culling guards; zero at 4:3.
+ * Use for screen-space layout, including the first frame of a new scene. */
+int32_t psx_mod_widescreen_view_x_margin(void);
 
 /* Mark a guest GPU packet (P_TAG address) as persistent screen-space HUD.
  * edge = -1 left, +1 right, 0 clears a reused packet's tag. The native-wide
