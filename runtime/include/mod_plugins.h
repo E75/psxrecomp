@@ -114,6 +114,17 @@ int32_t psx_mod_widescreen_x_margin(void);
  * compositor translates it by the live reveal, excluding culling guards.
  * Guest coordinates, world sprites, and native 4:3 remain unchanged. */
 void psx_mod_tag_hud_primitive(uint32_t primitive, int edge);
+/* Packet-guarded screen-space anchor: -1 left, +1 right, 0 stays centred.
+ * Unlike the legacy role tag above, zero explicitly protects centred text
+ * from automatic layout transforms. Word immediately before the GP0 colour
+ * command; for a compound E1+SPRT packet this is its E1 word (P_TAG+4). */
+void psx_mod_anchor_hud_primitive(uint32_t primitive, int edge);
+/* Screen-space masks identified by their title's producer, P_TAG addresses.
+ * Flat panels extend only their exterior boundaries. Radial flat/Gouraud
+ * quads scale around the display centre for an aspect-aware iris transition.
+ * Both services are render-only, word guarded and inert at native 4:3. */
+void psx_mod_tag_screen_mask_quad(uint32_t primitive);
+void psx_mod_tag_radial_screen_mask_quad(uint32_t primitive, float scale);
 /* Exclude a known world packet from screen-space backdrop stretching, even
  * if it sorts before the first shaded polygon. Zero clears a recycled tag. */
 void psx_mod_tag_world_primitive(uint32_t primitive, int is_world);
