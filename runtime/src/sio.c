@@ -1438,6 +1438,25 @@ static void pad_process_byte(uint8_t tx_byte) {
                     pad_response[3] = pad_analog[lp] ? 0x01 : 0x00;
                 }
             }
+            /* JogCon config commands are not the DualShock's canned tables:
+             * 0x46/0x47/0x4C select values using their first data byte. The
+             * outgoing tail is adjusted later, when that byte arrives, just as
+             * the device does on the wire. */
+            if (pad_analog[lp] == SIO_PAD_JOGCON) {
+                if (tx_byte == 0x46) {
+                    static const uint8_t jogcon_46[8] =
+                        { 0xF3, 0x5A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+                    memcpy(pad_response, jogcon_46, sizeof(jogcon_46));
+                } else if (tx_byte == 0x47) {
+                    static const uint8_t jogcon_47[8] =
+                        { 0xF3, 0x5A, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00 };
+                    memcpy(pad_response, jogcon_47, sizeof(jogcon_47));
+                } else if (tx_byte == 0x4C) {
+                    static const uint8_t jogcon_4c[8] =
+                        { 0xF3, 0x5A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+                    memcpy(pad_response, jogcon_4c, sizeof(jogcon_4c));
+                }
+            }
             /* 0x4D returns the previous six-byte motor map while latching the
              * replacement bytes later in this same transaction. */
             if (tx_byte == 0x4D)
@@ -1471,6 +1490,24 @@ static void pad_process_byte(uint8_t tx_byte) {
                                ? pad_active_logical
                                : selected_slot;
             if (rs >= 0 && rs < PSX_MAX_PLAYERS) {
+                if (pad_analog[rs] == SIO_PAD_JOGCON &&
+                    pad_response_idx == 2) {
+                    if (pad_current_cmd == 0x46) {
+                        if (tx_byte == 0x00) {
+                            pad_response[4] = 0x01; pad_response[5] = 0x02;
+                            pad_response[6] = 0x00; pad_response[7] = 0x0A;
+                        } else if (tx_byte == 0x01) {
+                            pad_response[4] = 0x01; pad_response[5] = 0x01;
+                            pad_response[6] = 0x01; pad_response[7] = 0x14;
+                        }
+                    } else if (pad_current_cmd == 0x47 && tx_byte != 0x00) {
+                        pad_response[4] = pad_response[5] = 0x00;
+                        pad_response[6] = pad_response[7] = 0x00;
+                    } else if (pad_current_cmd == 0x4C) {
+                        if (tx_byte == 0x00) pad_response[5] = 0x04;
+                        else if (tx_byte == 0x01) pad_response[4] = 0x03;
+                    }
+                }
                 /* The six data bytes after 0x42's leading 0x00 occupy response
                  * indexes 2..7. Route each through the map negotiated by 0x4D. */
                 if (pad_current_cmd == 0x42 &&

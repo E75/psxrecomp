@@ -101,6 +101,14 @@ static void enter_config(int slot) {
     finish_six_data_bytes(slot, 1);
 }
 
+static void enter_jogcon_config(int slot) {
+    EXPECT("jogcon.enter.prefix", 0xFF, xchg(slot, 0x01));
+    EXPECT("jogcon.enter.id", 0xE3, xchg(slot, 0x43));
+    EXPECT("jogcon.enter.ack", 0x5A, xchg(slot, 0x00));
+    (void)xchg(slot, 0x01);
+    finish_six_data_bytes(slot, 1);
+}
+
 static void set_rumble_map(int slot, const uint8_t map[6],
                            const uint8_t expected_old[6]) {
     EXPECT("map.prefix", 0xFF, xchg(slot, 0x01));
@@ -116,6 +124,20 @@ static void exit_config(int slot) {
     EXPECT("exit.ack", 0x5A, xchg(slot, 0x00));
     (void)xchg(slot, 0x00);
     finish_six_data_bytes(slot, 1);
+}
+
+static void jogcon_config_command(int slot, uint8_t command, uint8_t selector,
+                                  const uint8_t expected_tail[4]) {
+    EXPECT("jogcon.config.prefix", 0xFF, xchg(slot, 0x01));
+    EXPECT("jogcon.config.id", 0xF3, xchg(slot, command));
+    EXPECT("jogcon.config.status", 0x5A, xchg(slot, 0x00));
+    EXPECT("jogcon.config.selector", 0x00, xchg(slot, selector));
+    EXPECT("jogcon.config.data1", 0x00, xchg(slot, 0x00));
+    for (int i = 0; i < 4; i++) {
+        char label[48];
+        snprintf(label, sizeof(label), "jogcon.config.tail%d", i);
+        EXPECT(label, expected_tail[i], xchg(slot, 0x00));
+    }
 }
 
 static void poll_with_motors(int slot, uint8_t small, uint8_t large) {
@@ -150,6 +172,25 @@ int main(void) {
     sio_set_pad_type(0, SIO_PAD_JOGCON, 0x80, 0x80, 0x80, 0x80);
     sio_set_pad_config_capable(0, 1);
     sio_set_pad_state_slot(0, 0xFFEFu);
+
+    /* R4 probes JogCon configuration with data-selected 0x46/0x47/0x4C
+     * replies. Both selector branches must match the device reference. */
+    enter_jogcon_config(0);
+    {
+        static const uint8_t c46_0[4] = { 0x01, 0x02, 0x00, 0x0A };
+        static const uint8_t c46_1[4] = { 0x01, 0x01, 0x01, 0x14 };
+        static const uint8_t c47_0[4] = { 0x02, 0x00, 0x01, 0x00 };
+        static const uint8_t c47_1[4] = { 0x00, 0x00, 0x00, 0x00 };
+        static const uint8_t c4c_0[4] = { 0x00, 0x04, 0x00, 0x00 };
+        static const uint8_t c4c_1[4] = { 0x03, 0x00, 0x00, 0x00 };
+        jogcon_config_command(0, 0x46, 0x00, c46_0);
+        jogcon_config_command(0, 0x46, 0x01, c46_1);
+        jogcon_config_command(0, 0x47, 0x00, c47_0);
+        jogcon_config_command(0, 0x47, 0x01, c47_1);
+        jogcon_config_command(0, 0x4C, 0x00, c4c_0);
+        jogcon_config_command(0, 0x4C, 0x01, c4c_1);
+    }
+    exit_config(0);
 
     EXPECT("poll.prefix", 0xFF, xchg(0, 0x01));
     EXPECT("poll.id", 0xE3, xchg(0, 0x42));
