@@ -107,6 +107,31 @@ int main(int argc,char **argv){
  glb_set_draw_area(0,0,1023,511);glb_draw_flat_rect(320,320,8,8,0x4444);
  for(int i=0;i<1024*512;i++)image[i]=(uint16_t)((i*23)&0x7fff);
  gl_renderer_restage_vram_after_savestate();verify("state restage with pending draw");
+ /* Consecutive RGB888 movies can stay in depth24. The second player's tile
+  * clear must reach the CPU scanout, without reading stale FBO words over the
+  * new packed movie. Also cover entry directly through an upload, not a test
+  * call to the mode policy before it. */
+ static uint16_t movie_first[480*16], movie_next[480*8];
+ for(int i=0;i<480*16;i++)movie_first[i]=0x2345;
+ for(int i=0;i<480*8;i++)movie_next[i]=0x4567;
+ glb_draw_flat_rect(900,400,2,2,0x4321);
+ glb_draw_flat_rect(32,32,480,16,0x7117);
+ test_depth24=1;
+ glb_vram_transfer_in(32,32,480,16,movie_first);
+ check(image[400*1024+900]==0x4321,"depth24 entry retains pending GPU pixels");
+ check(image[32*1024+32]==0x2345,"entry sync precedes first packed upload");
+ glb_draw_flat_rect(32,32,480,16,0);
+ glb_vram_transfer_in(32,36,480,8,movie_next);
+ check(image[33*1024+40]==0,"consecutive movie top bar cleared");
+ check(image[46*1024+40]==0,"consecutive movie bottom bar cleared");
+ gl_renderer_sync_cpu();
+ check(image[38*1024+40]==0x4567,"movie survives primitive readback debt");
+ glb_copy_rect(32,36,40,37,4,2);
+ check(image[37*1024+40]==0x4567,"depth24 copy reads packed CPU source");
+ glb_fill_rect(48,33,16,1,0);
+ check(glb_vram_read(48,33)==0,"depth24 fill and read stay coherent");
+ test_depth24=0;depth24_upload_policy();
+ verify("consecutive movie return to GPU authority");
  /* Existing depth24 policy clears the skipped movie band on return to15-bit.
   * That GPU write must become visible without waiting for another primitive. */
  static uint16_t movie[480*16], texture[4]={0x3210,0x3210,0x3210,0x3210};
