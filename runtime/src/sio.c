@@ -1108,6 +1108,11 @@ void sio_request_pad_type(int slot, int type) {
     if (sio_tap_force_digital(slot)) type = SIO_PAD_DIGITAL;
     if (type < SIO_PAD_DIGITAL || type > SIO_PAD_JOGCON)
         type = SIO_PAD_DIGITAL;
+    /* A JogCon is a config-capable controller even when its type is selected
+     * through this deferred per-frame path (debug injection / hot selection).
+     * Otherwise it reports ID 0xE3 to 0x42 but silently ignores R4's 0x43
+     * setup transaction, leaving the game with a half-initialized device. */
+    if (type == SIO_PAD_JOGCON) pad_supports_config[slot] = 1;
     int want = type;
     pad_type_req[slot] = (pad_analog[slot] == want) ? -1 : (int8_t)want;
 }

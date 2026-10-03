@@ -130,6 +130,23 @@ static void poll_with_motors(int slot, uint8_t small, uint8_t large) {
 int main(void) {
     sio_init();
     sio_connect_pad(0);
+
+    /* A hot-selected JogCon must be able to complete the setup command that
+     * games such as R4 issue through 0x43. It begins from an explicitly
+     * digital, config-inert slot to exercise the deferred host type change. */
+    sio_set_pad_type(0, SIO_PAD_DIGITAL, 0x80, 0x80, 0x80, 0x80);
+    sio_set_pad_config_capable(0, 0);
+    sio_request_pad_type(0, SIO_PAD_JOGCON);
+    EXPECT("hotplug.prefix", 0xFF, xchg(0, 0x01));
+    EXPECT("hotplug.enter.id", 0xE3, xchg(0, 0x43));
+    EXPECT("hotplug.enter.ack", 0x5A, xchg(0, 0x00));
+    (void)xchg(0, 0x01);
+    finish_six_data_bytes(0, 1);
+    EXPECT("hotplug.config.prefix", 0xFF, xchg(0, 0x01));
+    EXPECT("hotplug.config.poll", 0xF3, xchg(0, 0x42));
+    for (int i = 0; i < 7; i++) (void)xchg(0, 0x00);
+    exit_config(0);
+
     sio_set_pad_type(0, SIO_PAD_JOGCON, 0x80, 0x80, 0x80, 0x80);
     sio_set_pad_config_capable(0, 1);
     sio_set_pad_state_slot(0, 0xFFEFu);
