@@ -21,6 +21,7 @@ from .gitops import (
     push,
     push_modules,
     push_psxrecomp,
+    _git,
     repo_status,
     run_release_workflow,
     switch_branch,
@@ -234,6 +235,65 @@ def bulk_migrate_bundled(
             ),
         )
         return [CmdResult(r.ok, f"{label}: {r.message}", r.detail)]
+
+    return map_repos(repos, one, jobs=jobs, on_repo=on_repo)
+
+
+def _load_update_cmake():
+    """Import tools/update_cmake.py from the framework running this tool, so
+    projects pinned to an older psxrecomp still get the current blocks."""
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[2] / "update_cmake.py"
+    spec = importlib.util.spec_from_file_location("psx_update_cmake", path)
+    if spec is None or spec.loader is None or not path.is_file():
+        raise FileNotFoundError(f"update_cmake.py not found at {path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def bulk_update_cmake(
+    repos: list[tuple[str, Path]],
+    *,
+    commit: bool = True,
+    push_remote: bool = False,
+    dry_run: bool = False,
+    jobs: int = 1,
+    on_repo: OnRepoResults | None = None,
+) -> list[CmdResult]:
+    """Sync each repo's CMakeLists.txt with the scaffold template's managed
+    blocks (tools/update_cmake.py), committing only CMakeLists.txt."""
+    um = _load_update_cmake()
+
+    def one(label: str, root: Path) -> list[CmdResult]:
+        path = root / "CMakeLists.txt"
+        if not path.is_file():
+            return [CmdResult(False, f"{label}: no CMakeLists.txt")]
+        try:
+            old = path.read_text(encoding="utf-8")
+            new = um.sync(old)
+        except (OSError, SystemExit) as exc:
+            return [CmdResult(False, f"{label}: {exc}")]
+        if new == old:
+            return [CmdResult(True, f"{label}: CMakeLists.txt up to date")]
+        if dry_run:
+            return [CmdResult(True, f"{label}: would update CMakeLists.txt")]
+        path.write_text(new, encoding="utf-8", newline="")
+        if not commit:
+            return [CmdResult(True, f"{label}: updated CMakeLists.txt (uncommitted)")]
+        msg = "CMake: sync managed blocks (update_cmake)"
+        code, out, err = _git(root, "add", "--", "CMakeLists.txt")
+        if code == 0:
+            code, out, err = _git(root, "commit", "-m", msg, "--", "CMakeLists.txt")
+        if code != 0:
+            return [CmdResult(False, f"{label}: updated but commit failed", err or out)]
+        if push_remote:
+            r = push(root)
+            if not r.ok:
+                return [CmdResult(False, f"{label}: committed, push failed", r.detail)]
+            return [CmdResult(True, f"{label}: updated, committed, pushed")]
+        return [CmdResult(True, f"{label}: updated + committed")]
 
     return map_repos(repos, one, jobs=jobs, on_repo=on_repo)
 
