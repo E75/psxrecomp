@@ -54,9 +54,10 @@
 #include <string.h>
 #include "gpu_timeline.h"
 
-/* Word-aligned main-RAM key for a primitive/OT address through the live
- * geometry (retail: the DMAC's 0x1FFFFC fold). */
-#define GPU_RAM_KEY(a) (psx_ram_canonical_offset(a) & ~3u)
+/* Packet identity of a primitive/OT address: main RAM through the live
+ * geometry (retail: the DMAC's 0x1FFFFC fold), the enhancement aperture by its
+ * own address (mod_memory.h). */
+#define GPU_RAM_KEY(a) psx_gpu_packet_key(a)
 
 extern uint16_t psx_read_half(uint32_t addr);
 extern uint8_t  psx_read_byte(uint32_t addr);
@@ -2525,7 +2526,7 @@ void gpu_ws_tag_background_prim(uint32_t prim) {
     }
     WsPrepassPacketGuard guard = ws_prepass_packet_guard(words, count);
     ws_hud_anchor_insert(ws_background_tags, WS_HUD_ANCHOR_TABLE_SIZE,
-                         (prim + 4u) & 0x1FFFFCu, 0, &guard,
+                         GPU_RAM_KEY((prim + 4u)), 0, &guard,
                          (uint32_t)s_frame_count);
     ws_background_tags_used = 1;
     ws_background_tag_frame = (uint32_t)s_frame_count;
@@ -6697,8 +6698,8 @@ void gpu_ws_validate_linked_list_header(uint32_t addr, uint32_t header) {
 void gpu_ws_validate_linked_list_node(uint32_t addr, uint32_t num_words) {
     if (ws_ui_prepass_count == 0) return;
 
-    uint32_t resolved =
-        GPU_RAM_KEY(psx_mod_gpu_dma_resolve_address(addr));
+    const uint32_t node_addr = psx_mod_gpu_dma_resolve_address(addr);
+    const uint32_t resolved = GPU_RAM_KEY(node_addr);
     const WsUiPrepassNode *node = ws_ui_prepass_find_node(resolved);
     if (!node || node->payload_guard.word_count != num_words) {
         ws_ui_prepass_invalidate_stale_why(node ? 4 : 2, resolved);
@@ -6706,9 +6707,11 @@ void gpu_ws_validate_linked_list_node(uint32_t addr, uint32_t num_words) {
         return;
     }
 
+    /* Re-read the payload where the walk reads it (the node's own memory),
+     * never through the key. */
     uint32_t payload[255];
     uint32_t first_addr =
-        psx_mod_gpu_dma_resolve_address(resolved + 4u);
+        psx_mod_gpu_dma_resolve_address(node_addr + 4u);
     for (uint32_t i = 0; i < num_words; i++) {
         payload[i] = psx_read_word(psx_mod_gpu_dma_resolve_address(
             first_addr + i * 4u));
