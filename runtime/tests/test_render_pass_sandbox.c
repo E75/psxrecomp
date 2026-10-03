@@ -572,11 +572,33 @@ static void test_journal(void) {
 #undef POLICY
 }
 
+static void test_texture_stream_journal(void) {
+    RenderPassJournal j = {0};
+    memcpy(s_vram, s_vram0, sizeof s_vram);
+    /* The Jersey draw OT alternates animated texture strips and CLUT rows.
+     * All 32 destinations must be backed up before the replay writes them. */
+    for (int i = 0; i < 32; ++i) {
+        int x = (i / 2) * 16, y = (i & 1) ? 492 : 64;
+        int w = (i & 1) ? 16 : 4, h = (i & 1) ? 1 : 64;
+        CHECK(render_pass_vram_policy(&j, 512, 0, 512, 240, VW, VH,
+              1, &x, &y, &w, &h) == RENDER_PASS_VRAM_JOURNAL,
+              "texture stream fits the bounded journal");
+        CHECK(render_pass_journal_add(&j, s_vram, VW, x, y, w, h) == i,
+              "texture destination backed up");
+        paint(x, y, w, h, (uint16_t)(0x9000 + i));
+    }
+    render_pass_journal_rollback(&j, s_vram, VW);
+    CHECK(!memcmp(s_vram, s_vram0, sizeof s_vram),
+          "texture stream and palettes restored exactly");
+    render_pass_journal_free(&j);
+}
+
 int main(void) {
     test_store_policy();
     test_pass();
     test_ram_8mb();
     test_journal();
+    test_texture_stream_journal();
     CHECK(s_prec_open == 0, "precision checkpoints balanced");
     printf(failures ? "FAILED (%d)\n" : "ALL PASS\n", failures);
     return failures ? 1 : 0;

@@ -2,6 +2,7 @@
 #include "cpu_state.h"
 #include "nd_intro_ot.h"
 #include "pgxp.h"
+#include "render_pass_projection.h"
 #include <algorithm>
 #include <cstdlib>
 #include <cstdio>
@@ -9,6 +10,7 @@
 
 extern "C" uint32_t psx_read_word(uint32_t addr);
 extern "C" int gpu_ws_precise_nclip_enabled(void);
+extern "C" { int (*g_psx_projection_command)(CPUState*, uint32_t) = nullptr; }
 
 namespace PSXRecomp {
 namespace GTE {
@@ -1907,6 +1909,11 @@ static void gte_run_command(PSXRecomp::GTE::GTEState* gte, uint32_t cmd) {
 
 extern "C" void gte_execute(CPUState* cpu, uint32_t cmd) {
     using namespace PSXRecomp::GTE;
+    uint32_t original_transform[8];
+    const bool observe_projection = g_psx_projection_command &&
+        ((cmd & 63) == 1 || (cmd & 63) == 0x30);
+    if (observe_projection) std::memcpy(original_transform, cpu->gte_ctrl, sizeof original_transform);
+    const bool intermediate = observe_projection && g_psx_projection_command(cpu, cmd);
 #ifndef PSX_NO_DEBUG_TOOLS
     if (!s_gte_replay_sandbox) s_gte_exec_count++;
     s_gte_caller_ra = cpu->gpr[31];   /* dome-locate probe: game fn that issued this projection */
@@ -1940,6 +1947,7 @@ extern "C" void gte_execute(CPUState* cpu, uint32_t cmd) {
 #endif
 
     gte_export_cpu_state(cpu, &gte);
+    if (intermediate) std::memcpy(cpu->gte_ctrl, original_transform, sizeof original_transform);
 
 #ifndef PSX_NO_DEBUG_TOOLS
     /* ND digit-rain: NdIntroSiblingFaceLoop (jal 0x80069CC4; $ra stays 69C3C..

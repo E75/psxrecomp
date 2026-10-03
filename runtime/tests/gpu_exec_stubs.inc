@@ -247,6 +247,9 @@ void gr_draw_shaded_textured_triangle(int x0, int y0, int u0, int v0,
                                       uint32_t color2, uint16_t clut_x,
                                       uint16_t clut_y, uint16_t texpage,
                                       int raw_texture) {
+#ifdef GPU_EXEC_RECORD_SHADED_TEXTURED
+    gpu_exec_record_triangle(x0, y0, x1, y1, x2, y2);
+#endif
     (void)x0; (void)y0; (void)u0; (void)v0; (void)color0; (void)x1;
     (void)y1; (void)u1; (void)v1; (void)color1; (void)x2; (void)y2;
     (void)u2; (void)v2; (void)color2; (void)clut_x; (void)clut_y;

@@ -213,6 +213,13 @@ on a fixed region -> next.
 
 ## 5. Status / Log (update every session)
 
+- **2026-10-03 - Render replay validation and texture streaming.** Increased the bounded small-transfer VRAM journal from 16 to 64 entries; Jersey Devil streams 31 texture/CLUT uploads in a draw. The 32-transfer rollback regression compares all VRAM bytes. Jersey Devil configures the SDK draw environment before replay packet allocation, preventing its command storage from overwriting a world quad. Final live runs completed at least 1,040 Jersey Devil and 1,088 A Bug's Life extra passes with zero state-verification mismatches, VRAM leaks, watchdogs or span failures. Changes remain local beyond base 9c1e716a.
+
+- **2026-10-03 - Ape Escape wall-flicker regression.** Dense frame/VRAM capture isolated world GT4s incorrectly promoted to UI behind a front-layer fade. UI grouping now selects the actual populated drawing layer, retaining empty trailing OT behavior. Captured-packet tests fail on the prior core and pass on the fix; software and 4K OpenGL/PGXP captures show no gaps in the affected camera interval. No guest timing or draw replay changes.
+
+- **2026-10-02 - Native high-rate rendering for Jersey Devil, A Bug's Life, and Ape Escape.** Added final RTPS/RTPT transform capture and guarded replay through the original draw sections. Projection overrides restore rotation/translation registers after each command. Camera cuts, unmatched geometry, stale captures, overflow, and aborted spans retain current poses or skip extra frames. Authoritative CPU/RAM/VRAM and guest timing remain isolated; live verification found zero mismatches in the sampled Ape Escape and A Bug's Life routes. GTE register and projection replay regressions pass. Ape Escape's card-menu scene predicate now applies in squash projection mode as well as native-wide; session resets clear it. Keyboard routing preserves analog mode on analog-locked titles. Changes are local beyond base 9c1e716a.
+
+
 - **2026-10-01 — MMX6 adaptive framework integration.** The opt-in function
   filters from the MMX6 branch are being reconciled with the active-plan
   function-entry registry and master overlay store-PC forwarding. A handled
