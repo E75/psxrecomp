@@ -182,7 +182,8 @@ void freeze_heartbeat_set_paused(int paused) {
 /* Capture the main thread's call stack at the moment of a hard freeze.
  *
  * Called from the heartbeat thread when wedge_kind==1 (frame_count not
- * advancing). Suspends the main thread, walks its stack via StackWalk64,
+ * advancing). Suspends the main thread, walks its PE unwind tables (x86
+ * falls back to StackWalk64), then
  * resumes before symbol lookup and JSON output. Each frame becomes a JSON
  * object {addr, symbol?, displacement?, module?}.
  *
