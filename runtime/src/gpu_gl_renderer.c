@@ -84,6 +84,7 @@
 #include "latency_ring.h"
 #include "frame_pacing.h"
 #include "psx_rewind.h"
+#include "psx_openxr.h"
 
 #include "psx_sdl.h"
 #if defined(PSX_SDL3)
@@ -410,6 +411,10 @@ static GLuint        s_osd_tex = 0;
 static int           s_osd_tw = 0, s_osd_th = 0;
 static GLuint        s_present_prog = 0, s_present_vao = 0;
 static void          gl_swap_with_osd(void);
+static int s_native_surface_enabled, s_native_surface_pending;
+static int s_native_surface_rect[4]; /* Fresh native backbuffer content, GL coordinates. */
+static double s_native_surface_distance, s_native_surface_width, s_native_surface_units;
+static void openxr_present_native(void);
 static GLint         s_present_uTex = -1, s_present_uUvRect = -1;
 static GLint         s_present_uTexSize = -1, s_present_uSharpScale = -1;
 static GLint         s_present_uSharp = -1;
@@ -1015,6 +1020,10 @@ static uint64_t    s_pres_seq = 0;
 
 static void pres_record(int path, int dx, int dy, int w, int h,
                         int lx, int ly, int lw, int lh) {
+    s_native_surface_pending=s_native_surface_enabled &&
+        (path==GL_PRES_VRAM || path==GL_PRES_WIDE || path==GL_PRES_CPU || path==GL_PRES_BLANK);
+    s_native_surface_rect[0]=lx;s_native_surface_rect[1]=ly;
+    s_native_surface_rect[2]=lw;s_native_surface_rect[3]=lh;
     /* The ring metadata stays always-on, but pixel probing must not: each
      * glReadPixels synchronously drains queued GPU work. Two probes per frame
      * were enough to make Tomba 2 miss its frame budget. */
@@ -4626,10 +4635,20 @@ void gl_renderer_set_swap_interval(int interval) {
         }
     }
 }
+int gl_renderer_get_swap_interval(void) {
+    if(!s_ctx)return -2;
+#if defined(PSX_SDL3)
+    int interval=0;
+    return SDL_GL_GetSwapInterval(&interval)?interval:-2;
+#else
+    return SDL_GL_GetSwapInterval();
+#endif
+}
 
 static void pass_resources_release(void);
 
 void gl_renderer_shutdown(void) {
+    s_native_surface_enabled=s_native_surface_pending=0;
     pass_resources_release();
     if (s_ctx) {
         for (unsigned i = 1; i < 65536u; ++i)
@@ -6205,6 +6224,7 @@ static void pass_free_color_fbo(GLuint *tex, GLuint *rb, GLuint *fbo,
 /* Context teardown (gl_renderer_shutdown): free the pass images, backups
  * and journal, and forget their names so a new context makes fresh ones. */
 static void pass_resources_release(void) {
+    psx_openxr_shutdown();
     stereo_resources_release();
     pass_gen_release(0);
     pass_gen_release(1);
@@ -6584,6 +6604,119 @@ int gl_renderer_stereo_publish(uint64_t id, uint64_t cycle, const int32_t view[2
     if (s_stereo_dump_left > 0) stereo_dump(p);
     return 1;
 }
+
+static uint64_t s_xr_begin_pair;
+int psx_mod_openxr_enable(int enabled) {
+    PSXOpenXRStats s; psx_openxr_stats(&s);
+    if (s_pass_active || s.frame_open) return 0;
+    return psx_openxr_enable(enabled);
+}
+void psx_mod_openxr_recenter(void) { psx_openxr_recenter(); }
+int psx_mod_openxr_quad(double distance,double width,double height) {
+    if(s_pass_active)return 0;
+    return psx_openxr_quad(distance,width,height);
+}
+int psx_mod_openxr_native_surface(double distance,double width,double units) {
+    PSXOpenXRStats stats;psx_openxr_stats(&stats);
+    if(s_pass_active || stats.frame_open || !stats.compiled ||
+       !isfinite(distance) || !isfinite(width) || !isfinite(units))return 0;
+    if(distance && (distance<.25 || distance>20 || width<=0 || width>10 || units<1 || units>65536))return 0;
+    s_native_surface_enabled=distance!=0;s_native_surface_pending=0;
+    s_native_surface_distance=distance;s_native_surface_width=width;s_native_surface_units=units;
+    return 1;
+}
+int psx_mod_openxr_begin(uint32_t width, uint32_t height, double units) {
+    if (s_native_surface_enabled || s_pass_active || gl_renderer_stereo_unavailable() != PSX_MOD_RENDER_PASS_READY ||
+        !width || !height || width > VRAM_W || height > VRAM_H) return 0;
+    s_xr_begin_pair = s_stereo_valid ? s_stereo_pair[s_stereo_current].id : 0;
+    return psx_openxr_begin((int)width, (int)height, units);
+}
+int psx_mod_openxr_view(uint32_t eye, PSXModRenderView *view) {
+    return psx_openxr_view(eye, view);
+}
+int psx_mod_openxr_input(PSXModOpenXRInput *input) {
+    if (s_pass_active) return 0;
+    return psx_openxr_input(input);
+}
+int psx_mod_openxr_hands(PSXModOpenXRHands *hands) {
+    return psx_openxr_hands(hands); /* Snapshot only, also safe during replay. */
+}
+static int openxr_copy_eye(uint32_t eye, uint32_t texture, int w, int h) {
+    StereoPair *p = &s_stereo_pair[s_stereo_current];
+    GLint read_fbo, draw_fbo; GLuint target = 0;
+    GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+    glGetIntegerv(0x8CAA, &read_fbo);
+    glGetIntegerv(0x8CA6, &draw_fbo);
+    p_glGenFramebuffers(1, &target);
+    p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, target);
+    p_glFramebufferTexture2D(PSXGL_DRAW_FRAMEBUFFER, PSXGL_COLOR_ATTACHMENT0,GL_TEXTURE_2D, texture, 0);
+    int ok = p_glCheckFramebufferStatus(PSXGL_DRAW_FRAMEBUFFER) == PSXGL_FRAMEBUFFER_COMPLETE;
+    if (ok) {
+        glDisable(GL_SCISSOR_TEST);
+        p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, p->fbo[eye]);
+        /* Stereo capture texture row convention is opposite the XR layer.
+         * User confirmed inverted headset output with the original direct blit.
+         * Flip only submission; eye dumps and desktop presentation stay intact. */
+        p_glBlitFramebuffer(0, p->th[eye], p->tw[eye], 0, 0, 0, w, h,
+                            GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        glFlush();
+    }
+    p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, (GLuint)read_fbo);
+    p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, (GLuint)draw_fbo);
+    if (scissor) glEnable(GL_SCISSOR_TEST);
+    p_glDeleteFramebuffers(1, &target);return ok;
+}
+int psx_mod_openxr_end(int rendered) {
+    int fresh = rendered && s_stereo_valid && !s_pass_active &&
+                s_stereo_pair[s_stereo_current].id != s_xr_begin_pair;
+    if (fresh) psx_openxr_pair_metadata(s_stereo_pair[s_stereo_current].id,
+                                       s_stereo_pair[s_stereo_current].cycle);
+    return psx_openxr_end(fresh, openxr_copy_eye);
+}
+
+static int openxr_copy_native(uint32_t eye,uint32_t texture,int w,int h) {
+    GLint read_fbo,draw_fbo,read_buffer;GLuint target=0;
+    GLboolean scissor=glIsEnabled(GL_SCISSOR_TEST);
+    (void)eye;
+    glGetIntegerv(0x8CAA,&read_fbo);glGetIntegerv(0x8CA6,&draw_fbo);
+    glGetIntegerv(GL_READ_BUFFER,&read_buffer);
+    p_glGenFramebuffers(1,&target);p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER,target);
+    p_glFramebufferTexture2D(PSXGL_DRAW_FRAMEBUFFER,PSXGL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,texture,0);
+    int ok=p_glCheckFramebufferStatus(PSXGL_DRAW_FRAMEBUFFER)==PSXGL_FRAMEBUFFER_COMPLETE;
+    if(ok) {
+        int *r=s_native_surface_rect;
+        glDisable(GL_SCISSOR_TEST);p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER,0);glReadBuffer(GL_BACK);
+        /* Default framebuffer is already upright: unlike native VRAM/eye
+         * textures, its bottom GL row is the displayed bottom row. */
+        (void)pass_gl_errors();
+        p_glBlitFramebuffer(r[0],r[1],r[0]+r[2],r[1]+r[3],0,0,w,h,GL_COLOR_BUFFER_BIT,GL_LINEAR);
+        glFlush();ok=pass_gl_errors()==0;
+    }
+    p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER,(GLuint)read_fbo);glReadBuffer((GLenum)read_buffer);
+    p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER,(GLuint)draw_fbo);
+    if(scissor)glEnable(GL_SCISSOR_TEST);
+    p_glDeleteFramebuffers(1,&target);return ok;
+}
+static void openxr_present_native(void) {
+    int ww=0,wh=0,*r=s_native_surface_rect;
+    if(!s_native_surface_enabled || !s_native_surface_pending || s_pass_active)return;
+    s_native_surface_pending=0;
+    SDL_GL_GetDrawableSize(s_win,&ww,&wh);
+    if(r[0]<0 || r[1]<0 || r[2]<1 || r[3]<1 || r[0]+r[2]>ww || r[1]+r[3]>wh)return;
+    /* No replay or retained pair: this exact native present is the source.
+     * Direct lifecycle permits native 24-bit videos as well as 15-bit UI. */
+    /* The shared locator also builds PSX projection matrices, whose domain
+     * is native VRAM dimensions. Quad geometry does not use those matrices;
+     * keep that domain bounded while copying the full drawable rectangle. */
+    if(!psx_openxr_begin(512,240,s_native_surface_units))return;
+    if(!psx_openxr_quad(s_native_surface_distance,s_native_surface_width,
+                       s_native_surface_width*(double)r[3]/r[2])) {
+        (void)psx_openxr_end(0,NULL);return;
+    }
+    psx_openxr_native_metadata(s_frame_count);
+    (void)psx_openxr_end(1,openxr_copy_native);
+}
+
 static int stereo_present(int w, int h) {
     StereoPair *p = &s_stereo_pair[s_stereo_current];
     int ww, wh, lx, ly, lw, lh;
@@ -6828,6 +6961,8 @@ static void gl_draw_osd_image(const uint32_t *px, int ow, int oh,
 
 /* Composite host toast + volume bar into the default framebuffer, then swap. */
 static void gl_swap_with_osd(void) {
+    openxr_present_native(); /* Copy guest content before host-only overlays. */
+    s_native_surface_pending=0; /* Hold-last/resim cannot reuse a native source. */
     if (s_present_prog && s_ctx) {
         int ww = 0, wh = 0;
         SDL_GL_GetDrawableSize(s_win, &ww, &wh);
@@ -7097,7 +7232,7 @@ void gl_renderer_present_vram(int disp_x, int disp_y, int w, int h, int linear,
     flush_tex_batch();
     flush_cpu_upload();
     if (stereo_present(w, h)) return;
-    if (s_force_present_remaining <= 0 &&
+    if (!s_native_surface_enabled && s_force_present_remaining <= 0 &&
         s_last_present_path == GL_PRES_VRAM &&
         s_last_dx == disp_x && s_last_dy == disp_y &&
         s_last_dw == w && s_last_dh == h &&
@@ -7260,7 +7395,7 @@ int gl_renderer_present_wide_fbo(int disp_x, int disp_y, int disp_h, int linear)
     flush_tex_batch();
     flush_cpu_upload();
     hiw_flush_queue();   /* windowed: queued wide mirrors */
-    if (s_force_present_remaining <= 0 &&
+    if (!s_native_surface_enabled && s_force_present_remaining <= 0 &&
         s_last_present_path == GL_PRES_WIDE &&
         s_last_dx == disp_x && s_last_dy == disp_y &&
         s_last_dw == g_wide_w && s_last_dh == disp_h &&

@@ -28,6 +28,7 @@ int gl_renderer_texture_banks_supported(void);
 /* Set the GL swap interval / vsync mode (1=vsync, 0=immediate, -1=adaptive).
  * Safe before or after context creation; applies live when a context exists. */
 void gl_renderer_set_swap_interval(int interval);
+int gl_renderer_get_swap_interval(void); /* Actual driver interval, -2 if unavailable. */
 
 /* Presentation-only temporal blending. High-refresh sub-presents blend the two
  * most recent stable display images on the owning render thread/context; this

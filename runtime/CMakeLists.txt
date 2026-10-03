@@ -352,6 +352,13 @@ if(BUILD_TESTING)
     add_test(NAME sio_dualshock_rumble_test COMMAND sio_dualshock_rumble_test)
     set_tests_properties(sio_dualshock_rumble_test PROPERTIES DISABLED TRUE)
 
+    add_executable(openxr_input_test tests/test_openxr_input.c src/psx_openxr.c)
+    target_include_directories(openxr_input_test PRIVATE include)
+    if(NOT MSVC)
+        target_link_libraries(openxr_input_test PRIVATE m)
+    endif()
+    add_test(NAME openxr_input_test COMMAND openxr_input_test)
+
     add_executable(vr_pose_math_test tests/test_vr_pose_math.c src/vr_pose_math.c)
     target_include_directories(vr_pose_math_test PRIVATE include)
     if(NOT MSVC)
