@@ -46,6 +46,9 @@ if(BUILD_TESTING)
     add_executable(mod_session_baseline_test tests/test_mod_session_baseline.c)
     target_include_directories(mod_session_baseline_test PRIVATE include)
     add_test(NAME mod_session_baseline_test COMMAND mod_session_baseline_test)
+    add_executable(mod_pgxp_policy_test tests/test_mod_pgxp_policy.c)
+    target_include_directories(mod_pgxp_policy_test PRIVATE include)
+    add_test(NAME mod_pgxp_policy_test COMMAND mod_pgxp_policy_test)
     # Netplay: libjuice resolves from third_party/ with the network sealed,
     # and a recomp-net pinning another libjuice stops the configure.
     foreach(_psx_juice_case same other)

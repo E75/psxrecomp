@@ -94,6 +94,7 @@ extern "C" void psx_event_step_conservative_env_init(void);
 #include "game_options.h"
 #include "mod_plugins.h"
 #include "mod_session_baseline.h"
+#include "mod_pgxp_policy.h"
 #include "mod_runtime.h"
 #include "mod_packages.h"
 #include "present_image_ring.h"
@@ -1245,6 +1246,14 @@ static int           g_video_geometry_correction   = 0;
 static int           g_video_perspective_texturing = 0;
 static int           g_video_pgxp_cpu_mode         = 0;
 static float         g_video_pgxp_tolerance        = 0.5f;
+static PSXModPgxpPolicy g_mod_pgxp_policy = {-1, -1};
+
+extern "C" void psx_mod_set_pgxp_precision(int enabled, int cpu_mode) {
+    psx_mod_pgxp_select(&g_mod_pgxp_policy, enabled, cpu_mode);
+    gte_geometry_correction_set(enabled != 0);
+    gpu_texture_correction_set(enabled != 0);
+    pgxp_set_cpu_mode(cpu_mode != 0);
+}
 static int           g_video_renderer = PSXRecompV4::DEFAULT_VIDEO_RENDERER;
 
 /* Settings -> Display -> Internal resolution (internal_resolution.h). The
@@ -1533,6 +1542,10 @@ extern "C" int psx_mod_set_adaptive_display_aspect(
 static PSXModSessionBaseline g_mod_owned_baseline;
 
 static void reset_mod_owned_presentation(void) {
+    psx_mod_pgxp_reset(&g_mod_pgxp_policy);
+    gte_geometry_correction_set(g_video_geometry_correction);
+    gpu_texture_correction_set(g_video_perspective_texturing);
+    pgxp_set_cpu_mode(g_video_pgxp_cpu_mode);
     PSXModSessionScalars live;
     live.video_vsync = g_video_vsync;
     live.frame_interpolation = g_frame_interpolation;
@@ -15933,15 +15946,17 @@ session_reboot:
      * corrections from process start so free-running (headless) boots can be
      * measured from the first projected vertex — a TCP toggle always arrives
      * after the interesting window. '0' = off, anything else = on. */
+    PSXModPgxpConfig precision = psx_mod_pgxp_resolve(&g_mod_pgxp_policy,
+        {g_video_geometry_correction, g_video_perspective_texturing, g_video_pgxp_cpu_mode});
     if (const char* e = std::getenv("PSX_GEOMETRY_CORRECTION"))
-        g_video_geometry_correction = (*e && *e != '0') ? 1 : 0;
+        precision.geometry = (*e && *e != '0') ? 1 : 0;
     if (const char* e = std::getenv("PSX_PERSPECTIVE_TEXTURING"))
-        g_video_perspective_texturing = (*e && *e != '0') ? 1 : 0;
+        precision.textures = (*e && *e != '0') ? 1 : 0;
     if (const char* e = std::getenv("PSX_PGXP_CPU_MODE"))
-        g_video_pgxp_cpu_mode = (*e && *e != '0') ? 1 : 0;
-    gte_geometry_correction_set(g_video_geometry_correction);
-    gpu_texture_correction_set(g_video_perspective_texturing);
-    pgxp_set_cpu_mode(g_video_pgxp_cpu_mode);
+        precision.cpu = (*e && *e != '0') ? 1 : 0;
+    gte_geometry_correction_set(precision.geometry);
+    gpu_texture_correction_set(precision.textures);
+    pgxp_set_cpu_mode(precision.cpu);
     pgxp_set_tolerance(g_video_pgxp_tolerance);
     /* Scanlines: env override wins over config, same as the corrections above,
      * so a headless/free-run boot can be captured with the effect armed from the
@@ -15955,12 +15970,12 @@ session_reboot:
     }
     gl_renderer_set_scanlines(g_video_scanlines ? 1 : 0,
                               g_video_scanline_strength);
-    if (g_video_geometry_correction || g_video_perspective_texturing) {
+    if (precision.geometry || precision.textures) {
         std::fprintf(stdout,
                      "psxrecomp: geometry correction %s, perspective texturing %s%s\n",
-                     g_video_geometry_correction ? "on" : "off",
-                     g_video_perspective_texturing ? "on" : "off",
-                     (g_video_geometry_correction && requested_scale < 2)
+                     precision.geometry ? "on" : "off",
+                     precision.textures ? "on" : "off",
+                     (precision.geometry && requested_scale < 2)
                          ? " (needs [video] supersampling >= 2 to be visible)" : "");
     }
     /* Display aspect. Identity at the default 4:3. The present letterbox uses
