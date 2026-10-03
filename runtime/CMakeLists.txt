@@ -364,6 +364,9 @@ if(BUILD_TESTING)
     target_include_directories(projection_scale_config_test PRIVATE
         include ../recompiler/lib/toml11)
     add_test(NAME projection_scale_config_test COMMAND projection_scale_config_test)
+    add_executable(mod_controller_source_test tests/test_mod_controller_source.c src/mod_controller_source.c)
+    target_include_directories(mod_controller_source_test PRIVATE include)
+    add_test(NAME mod_controller_source_test COMMAND mod_controller_source_test)
 
     add_executable(gte_register_access_test
         tests/test_gte_register_access.cpp
