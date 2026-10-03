@@ -625,6 +625,39 @@ int test_precise_nclip_is_title_scoped() {
     return 0;
 }
 
+int test_saturated_nclip_keeps_architectural_result() {
+    CPUState cpu{};
+    gte_precision_tracking_set(1);
+    g_test_precise_nclip_enabled = 1;
+    cpu.gte_ctrl[26] = 300;
+    const int px[] = {1100, 1200, 1300}, py[] = {100, 200, 400};
+    for (unsigned i=0;i<3;i++) {
+        uint32_t packed = 1023u | ((uint32_t)py[i] << 16);
+        cpu.gte_data[12+i] = packed; cpu.gte_data[17+i] = 1000;
+        gte_test_seed_precise_projection(i, packed, px[i]*65536, py[i]*65536, 1000);
+    }
+    gte_execute(&cpu, 6);
+    int sign = 0;
+    if (cpu.gte_data[24] != 0 || !gte_nclip_native_wide_sign(0, &sign) || sign != 1 ||
+        gte_nclip_native_wide_sign(1, &sign))
+        return fail_value("saturated winding rescue preserves native zero MAC0",0,6,0,0,cpu.gte_data[24]);
+    cpu.gte_data[17] = 10;
+    gte_execute(&cpu, 6);
+    if (gte_nclip_native_wide_sign(0, &sign) || cpu.gte_data[24] != 0)
+        return fail_value("near depth retains native reject",0,6,0,0,cpu.gte_data[24]);
+    cpu.gte_data[17] = 1000;
+    gte_execute(&cpu, 6);
+    gte_precision_timeline_invalidate();
+    if (gte_nclip_native_wide_sign(0, &sign))
+        return fail_value("timeline invalidation clears winding rescue",0,6,0,0,1);
+    gte_test_seed_precise_projection(0, cpu.gte_data[12] ^ 1u, px[0]*65536, py[0]*65536, 1000);
+    gte_execute(&cpu, 6);
+    if (gte_nclip_native_wide_sign(0, &sign))
+        return fail_value("stale NCLIP projection refuses rescue",0,6,0,0,1);
+    g_test_precise_nclip_enabled = 0;
+    return 0;
+}
+
 int test_precision_speculative_transaction() {
     constexpr uint32_t address = 0x00123450u;
     constexpr uint32_t packed = 0x00420021u;
@@ -739,6 +772,7 @@ int main() {
     if (int rc = test_command_timing_hook()) return rc;
     if (int rc = test_precise_sxy_invalidation()) return rc;
     if (int rc = test_precise_nclip_is_title_scoped()) return rc;
+    if (int rc = test_saturated_nclip_keeps_architectural_result()) return rc;
     if (int rc = test_precision_speculative_transaction()) return rc;
     std::puts("PASS: canonical GTE register helpers match GTEState transfer oracle");
     return 0;

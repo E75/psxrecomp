@@ -211,6 +211,26 @@ Patches are build-time inputs, not runtime memory writes or live toggles.
 Regenerate the affected main executable or captured overlays after changing
 them.
 
+### Guarded packed-coordinate rejection
+
+Some polygon funnels combine packed SXY flags and reject on `BNE flags,zero`.
+The native-wide GPU can clip horizontal overflow while the game retains its
+vertical rejection bits. Declare only verified render rejection branches:
+
+```toml
+[[widescreen.cull.masked_reject]]
+address = "0x80021ECC"
+expected = "0x15E0FFC7"
+reject_mask = "0xFFFF0000"
+```
+
+The full instruction guards each site on static, cached-overlay and interpreter
+paths. At native 4:3, menus and FMV the original predicate is unchanged. During
+wide gameplay only the specified flag bits participate in the predicate; guest
+registers, the branch delay slot, vertical/depth/backface tests and timing remain
+intact. Adapters must provide sufficient bounded primitive/capture capacity.
+Changing a site, guard or mask changes the overlay configuration fingerprint.
+
 ### Guarded widescreen participation comparisons
 
 Games may disable a proven object/model cull verdict in widened world views

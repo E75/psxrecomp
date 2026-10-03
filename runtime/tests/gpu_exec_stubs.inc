@@ -94,7 +94,8 @@ void psx_fatal_halt(const char *reason) {
     assert(!"psx_fatal_halt called");
 }
 
-void pgxp_set_enabled(int enabled) { (void)enabled; }
+static int fixture_pgxp_enabled;
+void pgxp_set_enabled(int enabled) { fixture_pgxp_enabled = enabled; }
 int gte_geometry_correction_enabled(void) { return 0; }
 int pgxp_get_precise_vertex(uint32_t addr, uint32_t packet_word,
                             int32_t int_x, int32_t int_y,
@@ -103,9 +104,23 @@ int pgxp_get_precise_vertex(uint32_t addr, uint32_t packet_word,
     (void)x16; (void)y16; (void)sz;
     return PGXP_SRC_NATIVE;
 }
+static struct {
+    uint32_t addr, word;
+    int32_t x16, y16;
+    uint16_t z;
+    int valid;
+} fixture_projections[4];
 int gte_precision_load_word(uint32_t addr, uint32_t packed,
                             int32_t *x16, int32_t *y16, uint16_t *z) {
-    (void)addr; (void)packed; (void)x16; (void)y16; (void)z;
+    for (unsigned i = 0; i < 4; ++i) {
+        if (fixture_projections[i].valid && fixture_projections[i].addr == addr &&
+            fixture_projections[i].word == packed) {
+            if (x16) *x16 = fixture_projections[i].x16;
+            if (y16) *y16 = fixture_projections[i].y16;
+            if (z) *z = fixture_projections[i].z;
+            return fixture_projections[i].z != 0;
+        }
+    }
     return 0;
 }
 uint32_t sw_perspective_triangle_count(void) { return 0; }
@@ -189,9 +204,12 @@ void gr_set_texture_window(uint32_t raw) { (void)raw; }
 void gr_set_color_modulation(int r, int g, int b, int raw_texture) {
     (void)r; (void)g; (void)b; (void)raw_texture;
 }
+static struct { int enabled; int32_t xy[6]; } fixture_precise_triangle;
 void gr_set_precise_triangle(int enabled, int32_t x0, int32_t y0,
                              int32_t x1, int32_t y1, int32_t x2, int32_t y2) {
-    (void)enabled; (void)x0; (void)y0; (void)x1; (void)y1; (void)x2; (void)y2;
+    fixture_precise_triangle.enabled = enabled;
+    int32_t xy[6] = { x0, y0, x1, y1, x2, y2 };
+    memcpy(fixture_precise_triangle.xy, xy, sizeof xy);
 }
 void gr_set_perspective_triangle(int enabled, float q0, float q1, float q2) {
     (void)enabled; (void)q0; (void)q1; (void)q2;
@@ -316,4 +334,7 @@ int gr_render_wide_display(uint32_t *out, int pitch, int base_x,
                            int disp_y, int disp_h) {
     (void)out; (void)pitch; (void)base_x; (void)disp_y; (void)disp_h;
     return 0;
+}
+int gte_nclip_native_wide_sign(int32_t mac0, int* sign) {
+    (void)mac0; (void)sign; return 0;
 }

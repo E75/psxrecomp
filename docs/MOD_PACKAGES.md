@@ -733,6 +733,13 @@ some selections of one feature is a `[[requirement]]`, not a dependency.
 
 ## Implicit requirements across packages
 
+The shared PGXP plugin uses `psx_mod_set_pgxp_precision(enabled, cpu_mode)`.
+This stores a session selection as well as setting live correction flags, so
+later renderer initialization cannot erase mod activation with the base video
+settings. Session start clears the selection before activating the new plan;
+the player's persistent settings remain unchanged. Explicit validation
+environment overrides still take precedence at renderer initialization.
+
 Package format 7 lets a feature, while a condition on its own options holds,
 need a feature of **another** package:
 

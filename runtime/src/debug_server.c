@@ -8073,10 +8073,18 @@ static void handle_ws_nw(int id, const char *json)
 {
     int on = json_get_int(json, "on", -1);
     if (on >= 0) psx_ws_set_native_wide(on);
+    int correction = json_get_int(json, "projection_correction", -1);
+    if (correction >= 0)
+        psx_mod_set_native_wide_projection_correction(correction);
+    uint64_t corrected_vertices = 0;
+    correction = gpu_ws_native_wide_projection_correction(&corrected_vertices);
     GpuWsDebug ws;
     gpu_ws_get_debug(&ws);
-    send_fmt("{\"id\":%d,\"ok\":true,\"native_wide\":%d,\"mode\":%d,\"nw_extra\":%d}",
-             id, psx_ws_get_native_wide(), ws.mode, ws.nw_extra);
+    send_fmt("{\"id\":%d,\"ok\":true,\"native_wide\":%d,\"mode\":%d,\"nw_extra\":%d,"
+             "\"projection_correction\":%d,\"projection_vertices\":%llu,\"nclip_rescues\":%llu}",
+             id, psx_ws_get_native_wide(), ws.mode, ws.nw_extra,
+             correction, (unsigned long long)corrected_vertices,
+             (unsigned long long)gpu_ws_native_wide_nclip_rescues());
 }
 
 /* Live scanline post-process toggle (A/B): `scanline on=<0|1> pct=<0..100>`.

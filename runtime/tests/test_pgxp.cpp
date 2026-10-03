@@ -274,6 +274,21 @@ int main(void) {
         CHECK(!valid);
     }
 
+    /* Saturated SXY retains the original projection in exact transport. The
+     * ordinary precision consumer stays conservative; the opt-in native-wide
+     * renderer can query the address/word-validated projection separately. */
+    {
+        const uint32_t packed = (152u << 16) | 1023u;
+        pgxp_gte_push_sxy(1040 * 65536, 152 * 65536 + 17000, 994, packed);
+        psx_pgxp_cop2(nullptr, MFC2(9, 14), packed, 0);
+        psx_pgxp_store(nullptr, SW(1, 9), ADDR_B, packed);
+        int32_t x, y; uint16_t z;
+        CHECK(pgxp_load_precise_word(ADDR_B, packed, &x, &y, &z));
+        CHECK(x == 1040 * 65536 && y == 152 * 65536 + 17000 && z == 994);
+        CHECK(!pgxp_load_precise_word(ADDR_B, packed ^ 1, &x, &y, &z));
+        CHECK(lookup(ADDR_B, packed, 1023, 152, &x, &y, &z) == PGXP_SRC_NATIVE);
+    }
+
     /* --- stats sanity: dataflow hits were counted --- */
     {
         PGXPStats st;
