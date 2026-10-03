@@ -185,6 +185,9 @@ int dirty_ram_run_span(CPUState *cpu, uint32_t start, uint32_t stop, uint64_t ma
 }
 void overlay_loader_native_nesting(int *d, uint32_t *ip) { *d = 0; *ip = 0; }
 void overlay_loader_set_native_nesting(int d, uint32_t ip) { (void)d; (void)ip; }
+/* memory.c mod arenas (render_pass_mod_store): nothing journaled here. */
+void render_pass_mod_arenas_rollback(void) {}
+uint64_t render_pass_mod_arenas_hash(void) { return 0; }
 static int s_prec_open;
 void gte_precision_checkpoint_begin(void) { s_prec_open++; }
 void gte_precision_checkpoint_rollback(void) { s_prec_open--; }

@@ -250,8 +250,9 @@ int render_pass_store_to(const RenderPassStoreTarget *t, uint32_t addr,
         t->mmio_write(phys, val, width);
         return -1;
     }
-    /* Mod memory, expansion, ROM, unmapped: never written by a pass (mod
-     * arenas are not part of the pass restore). */
+    /* Expansion, ROM, unmapped: never written by a pass. (Mod arenas are
+     * written and journaled before this policy: memory.c
+     * render_pass_mod_store.) */
     return RENDER_PASS_DROP_OTHER;
 }
 

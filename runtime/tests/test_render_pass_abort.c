@@ -142,6 +142,9 @@ static int s_prec_open, s_prec_begins;
 void gte_precision_checkpoint_begin(void) { s_prec_open++; s_prec_begins++; }
 void gte_precision_checkpoint_rollback(void) { s_prec_open--; }
 
+/* memory.c mod arenas (render_pass_mod_store): nothing journaled here. */
+void render_pass_mod_arenas_rollback(void) {}
+uint64_t render_pass_mod_arenas_hash(void) { return 0; }
 /* GPU and presenter. */
 uint64_t gpu_pass_state_hash(void) { return 42; }
 int gpu_pass_checkpoint_save(void) { return 1; }
