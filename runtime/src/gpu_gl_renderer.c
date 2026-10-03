@@ -6786,7 +6786,8 @@ static void interp_present_source_interval(void) {
 typedef struct PassGen {
     int      valid;
     int      promoted;
-    int      x, y, w, h;          /* guest VRAM rect */
+    int      x, y, w, h;          /* captured VRAM rect (what is presented) */
+    int      rx, ry, rw, rh;      /* the plugin's pass rect (backed up)     */
     int      tex_w, tex_h;        /* slot size (hr pixels; wide band if wide) */
     int      source_path;         /* GL_PRES_VRAM or GL_PRES_WIDE */
     uint32_t n;                   /* images: [0] = the game's own */
@@ -6815,6 +6816,12 @@ static int s_stereo_dump_left;
 enum { STEREO_CAPTURE_MAX = 100 };
 static GLRenderStereoCapture s_stereo_captures[STEREO_CAPTURE_MAX];
 static uint32_t s_stereo_capture_count;
+/* The part of the displayed buffer the VRAM present captures, relative to the
+ * display origin: the whole display, or (netplay local viewport) this peer's
+ * half. A pass captures the same part of its own buffer, so its images are
+ * what the presenter would have shown. */
+static int      s_present_crop_dx = 0, s_present_crop_dy = 0;
+static int      s_present_crop_w = 0, s_present_crop_h = 0;
 /* Slot textures are made as slots fill: [0, s_pgen_alloc_n) exist, all at
  * s_pgen_alloc_w x h. A generation never fills past pass_slot_cap, so two
  * generations stay inside its budget whatever the internal scale. */
@@ -7339,8 +7346,18 @@ static int transaction_begin(int x, int y, int w, int h, int open_gen,
 
     wide = s_interp_source_path == GL_PRES_WIDE && g_wide_w > 0 &&
            pass_wide_fbo_for(x) != 0;
-    tw = (wide ? g_wide_w : w) * S;
-    th = h * S;
+    /* Capture what the presenter captures of a displayed buffer: its crop
+     * (the VRAM path) applied to the pass rect. Temporal passes only: a
+     * stereo pair and the netplay local view keep the plugin's rect. */
+    int cx = x, cy = y, cw = w, ch = h;
+    if (!local && !stereo && !wide && s_present_crop_w > 0 && s_present_crop_h > 0) {
+        cx = x + s_present_crop_dx; cy = y + s_present_crop_dy;
+        cw = s_present_crop_w;      ch = s_present_crop_h;
+        if (cx < x || cy < y || cx + cw > x + w || cy + ch > y + h)
+            return pass_begin_refuse("present_crop");
+    }
+    tw = (wide ? g_wide_w : cw) * S;
+    th = ch * S;
     s_pass_begin_diag.wide = wide;
     s_pass_begin_diag.requested_w = tw;
     s_pass_begin_diag.requested_h = th;
@@ -7357,7 +7374,8 @@ static int transaction_begin(int x, int y, int w, int h, int open_gen,
         if (!pass_gen_reserve(gi, 1u, tw, th))
             return pass_begin_refuse("generation_reserve");
         memset(g, 0, sizeof *g);
-        g->x = x; g->y = y; g->w = w; g->h = h;
+        g->x = cx; g->y = cy; g->w = cw; g->h = ch;
+        g->rx = x; g->ry = y; g->rw = w; g->rh = h;
         g->tex_w = tw; g->tex_h = th;
         g->source_path = wide ? GL_PRES_WIDE : GL_PRES_VRAM;
         g->period = period_vblanks ? period_vblanks : 1u;
@@ -7366,8 +7384,8 @@ static int transaction_begin(int x, int y, int w, int h, int open_gen,
         g->phase[0] = 0;
         g->n = 1;
         g->valid = 1;
-    } else if (!g->valid || g->promoted || g->x != x || g->y != y ||
-               g->w != w || g->h != h) {
+    } else if (!g->valid || g->promoted || g->rx != x || g->ry != y ||
+               g->rw != w || g->rh != h) {
         return pass_begin_refuse("generation_state");
     }
 
@@ -8867,6 +8885,16 @@ static float present_alloc_extent(int units, int scale) {
 
 static void present_vram_impl(int disp_x, int disp_y, int w, int h, int linear,
                               int force_4_3) {
+    /* The crop a pass applies (transaction_begin), taken on the emulation
+     * thread at the call: a render-thread replay of this present keeps it. */
+    if (!rt_on_render_thread()) {
+        GpuDisplayInfo di;
+        gpu_get_display_info(&di);
+        s_present_crop_dx = disp_x - (int)di.display_x;
+        s_present_crop_dy = disp_y - (int)di.display_y;
+        s_present_crop_w = w;
+        s_present_crop_h = h;
+    }
     if (rth_record_mode()) {
         const int32_t a[6] = { disp_x, disp_y, w, h, linear, force_4_3 };
         if (rth_record_present(RTH_PRESENT_VRAM, 6, a)) return;
