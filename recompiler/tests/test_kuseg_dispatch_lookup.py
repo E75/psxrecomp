@@ -571,7 +571,7 @@ def main():
 #include <stddef.h>
 #include <assert.h>
 #include "psx_memory.h"
-int psx_mod_set_main_ram_8mb(int enabled);   /* runtime psx_ram_geometry.c */
+void psx_ram_request_8mb(int enabled);   /* runtime psx_ram_geometry.c */
 typedef struct { uint32_t pc; } CPUState;
 static int allowed = 1, calls = 0, irqs = 0;
 static uint32_t resumed;
@@ -591,7 +591,7 @@ int psx_vsync_query_hle_try(CPUState* cpu, uint32_t a) { (void)cpu; (void)a; ret
     harness += r"""
 static void set_geometry(int expanded) {
     psx_ram_reset_size_request();
-    if (expanded) psx_mod_set_main_ram_8mb(1);
+    if (expanded) psx_ram_request_8mb(1);
     psx_ram_apply_size_request();
     assert(memory_get_ram_bytes() == (expanded ? 0x00800000u : 0x00200000u));
 }

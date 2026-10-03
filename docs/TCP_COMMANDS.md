@@ -60,7 +60,8 @@ Columns: **N** = native, **D** = DuckStation oracle.
 | `window_size` | ✓ |   | `w`, `h` | Resize the game window as a player would (Fit / adaptive widescreen follow it): window-shaped checks in `--hidden-window` runs. Pair with `present_shot` |
 | `render_pass_dump` | ✓ |   | `path`, `count` | Write the images (the game's own frame, then each pass in phase order) of the next `count` frames that get passes as `<path>/g<frame>_<index>_a<phase q16>.png` |
 | `render_pass_refuse` | ✓ |   | `on` | Make the OpenGL backend decline render passes (`status` 2, BACKEND), as a renderer mode without them would; tests a plugin's fallback. `PSX_RENDER_PASS_REFUSE=1` does the same from start |
-| `geom_correction` |   | ✓ | — | `[video] geometry_correction` / `perspective_texturing` engagement: enable flag plus free-running `geometry_vertex_hits` and `perspective_triangles` totals. Both enhancements silently fall back to the faithful path on anything they cannot prove is projected geometry, so a zero counter with the flag on means the title never qualifies — sample twice and diff for a rate |
+| `geom_correction` |   | ✓ | — | `[video] geometry_correction` / `perspective_texturing` engagement: enable flag plus free-running `geometry_vertex_hits` and `perspective_triangles` totals. Both enhancements silently fall back to the faithful path on anything they cannot prove is projected geometry, so a zero counter with the flag on means the title never qualifies — sample twice and diff for a rate. Also `texture_correction`. Its `pgxp` object adds the engine's per-lookup counters, the `position_fallback` / `preserve_projection` / `culling` switches, `ppp_produced` and `ppp_window_fallback` (exact projections outside the agreement window, shadowed with the IR path instead), geometry-corrected triangles split into `tri_precise` / `tri_mixed` / `tri_native` (the mixed share is the mesh-cracking exposure), `rect_bypass` / `rect_partial` (fully / partly precise textured quads that matched the 2D rectangle shortcut; only the former leave it) and `nclip_precise` / `nclip_disagree` / `nclip_corrected` (NCLIPs with an exact determinant, whose exact sign differs from the integer one, and that precise culling corrected); `ENHANCEMENTS.md` G1.11/G1.12 |
+| `pgxp` | ✓ |   | `geometry`, `texture`, `cpu_mode`, `tolerance`, `position_fallback`, `preserve_projection`, `culling` (all optional) | Live-tune PGXP for same-scene A/B: arm or disarm geometry / texture correction and set the engine knobs, without a restart. `culling` changes guest NCLIP results, so a toggle mid-run makes the run diverge from one without it. Replies with the resulting state (`enabled`, `cpu_mode`, `tolerance`, `position_fallback`, `preserve_projection`, `culling`, `suppress`, `active`). `ENHANCEMENTS.md` G1.10-G1.12 |
 | `sio_state` | ✓ | ✓ | — | SIO registers + (native only) pad/memcard protocol + TX/RX history |
 | `irq_state` | ✓ | ✓ | — | `I_STAT`, `I_MASK` (both), plus chain state on native |
 | `dma_state` | ✓ | ✓ | — | DPCR, DICR, all 7 channel states (madr/bcr/chcr) |
@@ -430,9 +431,9 @@ The TCP server is the canonical instrumentation surface. Rule 3 in `CLAUDE.md` i
 
 ## Complete command index (generated)
 
-**332 commands registered** — 319 on the native server (`runtime/src/debug_server.c`), 61 on the Beetle server (`runtime/src/beetle_debug_server.c`).
+**334 commands registered** — 321 on the native server (`runtime/src/debug_server.c`), 61 on the Beetle server (`runtime/src/beetle_debug_server.c`).
 
-62 of 332 have prose above; **270 are index-only**. An index-only command still works — it just has no description here yet. Send it `{"cmd":"<name>"}` and read the reply, or find its `handle_*` function in the server source.
+64 of 334 have prose above; **270 are index-only**. An index-only command still works — it just has no description here yet. Send it `{"cmd":"<name>"}` and read the reply, or find its `handle_*` function in the server source.
 
 Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this block has drifted from the code.
 
@@ -561,6 +562,7 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `gl_fbo_peek` | ✓ |  |  |
 | `gl_interp` | ✓ |  | ✓ |
 | `gl_present_ring` | ✓ |  |  |
+| `gl_texwin_batch` | ✓ |  |  |
 | `gl_vram_diff` | ✓ |  |  |
 | `gl_wide_fast` | ✓ |  |  |
 | `gl_ws_ablate` | ✓ |  |  |
@@ -578,6 +580,7 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `guest_tty_dump` | ✓ |  |  |
 | `history` | ✓ | ✓ | ✓ |
 | `hle_dump` | ✓ |  | ✓ |
+| `host_profile` | ✓ |  |  |
 | `idle_skip` | ✓ |  |  |
 | `imask_trace` | ✓ |  |  |
 | `input_route_append` | ✓ |  |  |
@@ -634,7 +637,7 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `pc_probe_arm` | ✓ |  |  |
 | `pc_probe_clear` | ✓ |  |  |
 | `pc_probe_dump` | ✓ |  |  |
-| `pgxp` | ✓ |  |  |
+| `pgxp` | ✓ |  | ✓ |
 | `pgxp_miss_ring` | ✓ |  |  |
 | `pgxp_shadow` | ✓ |  |  |
 | `phase_hot` | ✓ |  |  |
@@ -645,7 +648,7 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `present_ring` | ✓ |  |  |
 | `present_shot` | ✓ |  | ✓ |
 | `present_shot_seq` | ✓ |  | ✓ |
-| `press` | ✓ | ✓ |  |
+| `press` | ✓ | ✓ | ✓ |
 | `probe_clear` | ✓ |  |  |
 | `probe_trace` | ✓ |  |  |
 | `quit` | ✓ |  | ✓ |

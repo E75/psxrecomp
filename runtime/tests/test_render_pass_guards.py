@@ -158,7 +158,9 @@ for fn in ("void debug_server_trace_write_check(",
         "rolled-back pass writes must stay out of the frame fingerprints: " + fn)
 
 rp = (SRC / "render_pass.c").read_text(encoding="utf-8")
-for gate in ("psx_netplay_active()", "psx_rewind_is_open()",
+# Live netplay frames run passes (presentation only, both peers simulate the
+# same ticks); rollback resimulation replays ticks already seen and refuses.
+for gate in ("psx_netplay_is_resimulating()", "psx_rewind_is_open()",
              "psx_selfcheck_resim_active()", "psx_get_in_exception()",
              "dma_gpu_linked_list_active()",
              "psx_presentation_fast_forward()"):

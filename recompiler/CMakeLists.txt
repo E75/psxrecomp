@@ -531,6 +531,63 @@ if(BUILD_TESTING)
     add_test(NAME ws_cull_edge_codegen_test
              COMMAND ws_cull_edge_codegen_test)
 
+    # [widescreen.cull] screen_x_sites on `lui` and `bltz` (a screen X kept in
+    # the high half of a register): emitted code for hand-written instruction
+    # words, the main-EXE guard, and the shared math in ws_cull_edge.h.
+    add_executable(ws_cull_screen_x_hi_codegen_test
+        tests/ws_cull_screen_x_hi_codegen_test.cpp
+        src/ps1_exe_parser.cpp
+        src/mips_decoder.cpp
+        src/control_flow.cpp
+        src/function_analysis.cpp
+        src/code_generator.cpp
+        src/pgxp_hook_emitter.cpp
+        src/annotations.cpp
+        src/bios_address_model.cpp
+        src/config_loader.cpp
+        src/recompiler_patch.cpp
+    )
+    target_include_directories(ws_cull_screen_x_hi_codegen_test PRIVATE
+        include
+        src
+        lib/rabbitizer/include
+        lib/rabbitizer/cplusplus/include
+        lib/fmt/include
+        lib/toml11
+        lib/ELFIO
+    )
+    target_link_libraries(ws_cull_screen_x_hi_codegen_test PRIVATE fmt rabbitizer)
+    add_test(NAME ws_cull_screen_x_hi_codegen_test
+             COMMAND ws_cull_screen_x_hi_codegen_test)
+
+    # [[draw_distance.clamp]]: config rules, the emitted main-EXE clamp and
+    # its guards, the shared declaration and the unchanged overlay identity.
+    add_executable(draw_distance_codegen_test
+        tests/draw_distance_codegen_test.cpp
+        src/ps1_exe_parser.cpp
+        src/mips_decoder.cpp
+        src/control_flow.cpp
+        src/function_analysis.cpp
+        src/code_generator.cpp
+        src/pgxp_hook_emitter.cpp
+        src/annotations.cpp
+        src/bios_address_model.cpp
+        src/config_loader.cpp
+        src/recompiler_patch.cpp
+    )
+    target_include_directories(draw_distance_codegen_test PRIVATE
+        include
+        src
+        lib/rabbitizer/include
+        lib/rabbitizer/cplusplus/include
+        lib/fmt/include
+        lib/toml11
+        lib/ELFIO
+    )
+    target_link_libraries(draw_distance_codegen_test PRIVATE fmt rabbitizer)
+    add_test(NAME draw_distance_codegen_test
+             COMMAND draw_distance_codegen_test)
+
     # The same explicit cull kinds in the dirty-RAM interpreter: gpu.c's
     # sorted, capped site store and real interpreted bgez/bltz/branch-keep/
     # clip-edge instructions at margin 0 and at a forced margin. The test
@@ -558,6 +615,33 @@ if(BUILD_TESTING)
         add_test(NAME ws_cull_edge_interp_test
                  COMMAND ws_cull_edge_interp_test
                          ${CMAKE_CURRENT_BINARY_DIR}/ws_cull_edge_interp_stderr.txt)
+    endif()
+
+    # [[draw_distance.clamp]] in the dirty-RAM interpreter: draw_distance.c's
+    # store and switch and real interpreted guard instructions. The test
+    # #includes draw_distance.c and dirty_ram_interp.c (as above).
+    if(NOT MSVC)
+        add_executable(draw_distance_interp_test
+            ../runtime/tests/test_draw_distance_interp.c
+            ../runtime/src/ws_aspect_cone_math.c)
+        target_include_directories(draw_distance_interp_test PRIVATE
+            ../runtime/include
+            ../runtime/src)
+        target_compile_options(draw_distance_interp_test PRIVATE
+            -O2 -flto -ffunction-sections -fdata-sections)
+        if(APPLE)
+            target_link_options(draw_distance_interp_test PRIVATE
+                -flto -Wl,-dead_strip)
+        else()
+            target_link_options(draw_distance_interp_test PRIVATE
+                -flto -Wl,--gc-sections)
+        endif()
+        if(NOT WIN32)
+            target_link_libraries(draw_distance_interp_test PRIVATE m)
+        endif()
+        add_test(NAME draw_distance_interp_test
+                 COMMAND draw_distance_interp_test
+                         ${CMAKE_CURRENT_BINARY_DIR}/draw_distance_interp_stderr.txt)
     endif()
 
     # Uncached (KSEG1) code charges a fetch before every instruction; cached
@@ -698,6 +782,21 @@ if(BUILD_TESTING)
     target_link_libraries(rewind_settings_test PRIVATE fmt)
     add_test(NAME rewind_settings_test COMMAND rewind_settings_test)
 
+    # Launcher-saved paths stay relative inside a portable game folder.
+    add_executable(portable_settings_paths_test
+        tests/portable_settings_paths_test.cpp
+        src/config_loader.cpp
+        src/ps1_exe_parser.cpp
+    )
+    target_include_directories(portable_settings_paths_test PRIVATE
+        include
+        src
+        lib/fmt/include
+        lib/toml11
+    )
+    target_link_libraries(portable_settings_paths_test PRIVATE fmt)
+    add_test(NAME portable_settings_paths_test COMMAND portable_settings_paths_test)
+
     # Needs bios/SCPH1001.toml — run from the framework root.
     add_test(NAME bios_address_model_test
              COMMAND bios_address_model_test
@@ -716,11 +815,25 @@ if(BUILD_TESTING)
                 --cmake ${CMAKE_COMMAND} --cc ${CMAKE_C_COMPILER}
                 --cxx ${CMAKE_CXX_COMPILER} --ninja ${CMAKE_MAKE_PROGRAM})
     endif()
+    # MFC0/CFC0 read COP0 from before their own cycle charge: the production
+    # interpreter decoder with cycle charging on, a device event that raises
+    # CAUSE.IP2 on the read's own cycle, other seams stubbed to abort()
+    # (runtime/tests/fixture_link.py needs nm and GNU ld diagnostics).
+    if(Python3_Interpreter_FOUND AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
+        add_test(NAME interp_cop0_read_sample
+            COMMAND ${Python3_EXECUTABLE}
+                "${CMAKE_CURRENT_SOURCE_DIR}/../runtime/tests/test_interp_cop0_read_sample.py"
+                --cc ${CMAKE_C_COMPILER})
+    endif()
     if(Python3_Interpreter_FOUND)
         add_test(NAME optional_netplay_auth
             COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_optional_netplay_auth.py
                 --cxx ${CMAKE_CXX_COMPILER})
+        add_test(NAME bios_emitter_stamps
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_bios_emitter_stamps.py
+                --cmake ${CMAKE_COMMAND})
         add_test(NAME pgo_rebuild_flow
             COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_pgo_rebuild_flow.py)
@@ -1081,6 +1194,7 @@ if(BUILD_TESTING)
                 frame_interpolation_flip_source
                 hybrid_dev_any_input
                 launcher_pad_mode_wiring
+                netplay_start_failure_wiring
                 jalr_link_register_guards
                 gl_internal_scale_guards
                 launcher_vulkan_option
@@ -1160,6 +1274,17 @@ target_include_directories(reachable_discovery_test PRIVATE
 )
 target_link_libraries(reachable_discovery_test PRIVATE fmt)
 
+# Straight-line interpretation keeps going through game text that dispatch
+# refuses (live bytes differ from the boot EXE) instead of handing each
+# instruction back: the production interpreter linked into a fixture, other
+# seams stubbed to abort() (runtime/tests/fixture_link.py needs nm and GNU ld).
+if(BUILD_TESTING AND Python3_Interpreter_FOUND AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    add_test(NAME interp_refused_game_text
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/../runtime/tests/test_interp_refused_game_text.py"
+            --cc ${CMAKE_C_COMPILER})
+endif()
+
 # GTE deadline ownership includes pending CPU charges from both host sinks.
 if(BUILD_TESTING AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
     foreach(_mode IN ITEMS O0 O2)
@@ -1173,6 +1298,16 @@ if(BUILD_TESTING AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
         target_link_options(${_target} PRIVATE -Wl,--gc-sections)
         add_test(NAME ${_target} COMMAND ${_target})
     endforeach()
+endif()
+
+# The store that kicks a GPU linked-list DMA holds the CPU until the walk
+# ends: the production dma.c and dma_gpu_ll.c linked into a fixture, other
+# seams stubbed to abort() (runtime/tests/fixture_link.py needs nm and GNU ld).
+if(BUILD_TESTING AND Python3_Interpreter_FOUND AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    add_test(NAME dma_gpu_list_cpu_hold
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/../runtime/tests/test_dma_gpu_list_cpu_hold.py"
+            --cc ${CMAKE_C_COMPILER})
 endif()
 
 # Mult/div deadline ownership: the same rule for MULT/DIV and MFLO/MFHI.
