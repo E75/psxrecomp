@@ -44,6 +44,9 @@ extern uint32_t i_mask;
  * with the machine, or they describe the words a pass wrote. */
 extern void gte_precision_checkpoint_begin(void);
 extern void gte_precision_checkpoint_rollback(void);
+/* memory.c: mod arena pages a pass wrote, and their hash for verify mode. */
+extern void render_pass_mod_arenas_rollback(void);
+extern uint64_t render_pass_mod_arenas_hash(void);
 extern uint32_t dma_snapshot_bytes(void);
 extern void     dma_snapshot_write(uint8_t *p);
 extern int      dma_snapshot_read(const uint8_t *p, uint32_t len);
@@ -382,6 +385,10 @@ static uint64_t state_hash(const CPUState *cpu) {
     h = fnv(h, cpu->gte_ctrl, sizeof cpu->gte_ctrl);
     h = fnv(h, memory_get_ram_ptr(), memory_get_ram_bytes());
     h = fnv(h, memory_get_scratchpad_ptr(), RP_SPAD_SIZE);
+    {
+        const uint64_t mh = render_pass_mod_arenas_hash();
+        h = fnv(h, &mh, sizeof mh);
+    }
     h = fnv(h, g_psx_icache_tv, sizeof g_psx_icache_tv);
     h = fnv(h, &i_stat, sizeof i_stat);
     h = fnv(h, &i_mask, sizeof i_mask);
@@ -478,6 +485,7 @@ static void checkpoint_restore(CPUState *cpu) {
     g_psx_dispatch_depth = s_ck.dispatch_depth;
     g_psx_call_bail = s_ck.call_bail;
     nesting_restore(&s_ck.nest);
+    render_pass_mod_arenas_rollback();
     gte_precision_checkpoint_rollback();
 }
 
