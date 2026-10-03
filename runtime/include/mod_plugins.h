@@ -69,6 +69,11 @@ extern uint32_t g_psx_mod_function_entry_hooks;
  * kept, further names are counted in an overflow bucket. Emulation-thread only.
  * TCP: {"cmd":"mod_counters"} lists every counter with its last frame. */
 void psx_mod_counter_add(const char* name, uint32_t delta);
+/* Presentation-only filtering: 0 nearest, 1 bilinear, 2 stable minification.
+ * Mode 2 uses a bounded palette-aware footprint for proven 3D polygons on
+ * OpenGL; untracked UI stays nearest. Other backends use bilinear. A session
+ * reset restores the player's configured filter. */
+void psx_mod_set_texture_filter(int mode);
 /* Entry callbacks can make nested guest calls while retaining host registers.
  * Save/load and rewind must wait until that host context has returned. */
 int psx_mod_function_entry_active(void);
@@ -265,22 +270,6 @@ int psx_mod_option_value(const char* package_id, const char* feature_id,
  */
 int psx_mod_current_resource_path(const char* resource_id,
                                   char* out, uint32_t out_size);
-/* Read-only canonical media verified by the engine for this plugin's owning
- * package/feature. The pointer lives until the committed plan is replaced or
- * cleared. Available only during that plugin's callbacks; returns 0 for an
- * ordinary unverified resource, an inactive feature, or a different owner. */
-int psx_mod_current_resource_bytes(const char* resource_id,
-                                   const uint8_t** bytes, uint64_t* size);
-
-/* Append raw Mode-2 sectors (2336 bytes, starting with the XA subheader)
- * from a verified resource owned by this activation callback. Returns their
- * native CD LBA in first_lba. Registration is deterministic, append-only and
- * rejected outside activation, for invalid ranges or beyond 99:59:74.
- * The immutable committed snapshot remains mounted until the plan changes;
- * no host path or donor data is saved into guest RAM/savestates. */
-int psx_mod_append_disc_extent(const char* resource_id, uint64_t byte_offset,
-                               uint32_t sector_count, uint32_t* first_lba);
-
 /* Display aspects have no framework ceiling: the native-wide surfaces size
  * themselves from the live width, and each title caps its own view at what
  * it has validated (fixed ratio, or the adaptive maximum below). Requests

@@ -1544,47 +1544,6 @@ void mod_clear_plugins_for_tests() {
     registered_plugins().clear();
 }
 
-std::vector<std::string> mod_registered_plugin_ids() {
-    std::vector<std::string> ids;
-    for (const auto& entry : registered_plugins())
-        if (entry.second.activation || entry.second.vblank ||
-            !entry.second.function_entries.empty() || !entry.second.guest_functions.empty())
-            ids.push_back(entry.first);
-    return ids;  /* std::map keeps them sorted */
-}
-
-ModPluginAudit mod_audit_registered_plugins(
-    const std::vector<fs::path>& manifest_roots) {
-    ModPluginAudit audit;
-    std::set<std::string> declared;
-    for (const fs::path& root : manifest_roots) {
-        std::error_code ec;
-        if (!fs::is_directory(root, ec)) {
-            audit.errors.push_back(root.string() + ": not a directory");
-            continue;
-        }
-        for (fs::recursive_directory_iterator it(root, ec), end;
-             !ec && it != end; it.increment(ec)) {
-            if (!it->is_regular_file(ec) || it->path().filename() != "manifest.toml")
-                continue;
-            ModPackage package;
-            std::string error;
-            if (!ModPackageManager::read_manifest(it->path(), package, &error)) {
-                audit.errors.push_back(it->path().string() + ": " + error);
-                continue;
-            }
-            ++audit.manifests;
-            for (const ModPlugin& plugin : package.plugins)
-                declared.insert(plugin.id);
-        }
-        if (ec) audit.errors.push_back(root.string() + ": " + ec.message());
-    }
-    audit.declared.assign(declared.begin(), declared.end());
-    for (const std::string& id : mod_registered_plugin_ids())
-        if (!declared.count(id)) audit.undeclared.push_back(id);
-    return audit;
-}
-
 const char* mod_channel_name(ModChannel channel) {
     switch (channel) {
         case ModChannel::Experimental: return "experimental";

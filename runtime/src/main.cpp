@@ -14,6 +14,7 @@
 #include "psx_interpreter.h"
 #include "cdrom.h"
 #include "fntrace.h"
+#include "render_pass_projection.h"
 #include "text_xlate.h"
 #include "boot_state.h"
 #include "bios_hle.h"
@@ -1038,6 +1039,7 @@ extern "C" void psx_frontend_on_savestate_notify(int is_load, int slot, int ok) 
 }
 
 extern "C" void psx_frontend_on_savestate_loaded(void) {
+    psx_projection_reset_session();
     mod_runtime_on_savestate_loaded();
 #ifndef PSX_NO_DEBUG_TOOLS
     debug_server_note_savestate_loaded();
@@ -1228,6 +1230,12 @@ static inline int cfg_fmv_filter_to_launcher(int cfg_value) {
     return cfg_value + 1;
 }
 static int           g_video_texfilter = 0; /* 0=nearest, 1=bilinear */
+static int           g_mod_texfilter = -1;
+extern "C" void psx_mod_set_texture_filter(int mode) {
+    if(mode < 0 || mode > 2) return;
+    g_mod_texfilter = mode;
+    gr_set_texture_filter(mode);
+}
 /* Sub-pixel vertex precision + perspective-correct UVs (PGXP-style). Visual
  * only: the PS1-visible GTE SXY FIFO stays integer, so guest-side culling and
  * SXY readback are untouched. Default off = the faithful floor. */
@@ -1528,6 +1536,8 @@ extern "C" int psx_mod_set_adaptive_display_aspect(
 static PSXModSessionBaseline g_mod_owned_baseline;
 
 static void reset_mod_owned_presentation(void) {
+    g_mod_texfilter = -1;
+    gr_set_texture_filter(g_video_texfilter);
     psx_mod_pgxp_reset(&g_mod_pgxp_policy);
     gte_geometry_correction_set(g_video_geometry_correction);
     gpu_texture_correction_set(g_video_perspective_texturing);
@@ -1892,6 +1902,12 @@ static int g_ws_projection_num = 4;
 static int g_ws_projection_den = 3;
 static int g_ws_projection_mode = -1;
 static void refresh_widescreen_projection() {
+    if (g_ws_engaged && !fntrace_is_game_started()) {
+        g_ws_engaged = false;
+        g_ws_projection_mode = -1;
+        gte_set_display_aspect(4, 3);
+        gpu_ws_configure(4, 3, g_ws_anchor_addr, 0, 0);
+    }
     if (!g_ws_engaged) return;
 
     const bool wide = g_video_aspect_num * 3 != g_video_aspect_den * 4;
@@ -15801,7 +15817,7 @@ session_reboot:
                             (net_cfg.enabled && s_netplay_gl_present &&
                              gl_renderer_cpu_auth_dual());
     g_video_scale = gr_scale(); /* reflect any clamp / alloc fallback */
-    gr_set_texture_filter(g_video_texfilter);
+    gr_set_texture_filter(g_mod_texfilter < 0 ? g_video_texfilter : g_mod_texfilter);
     /* Sub-pixel vertex precision + perspective-correct UVs. Both default off;
      * with both off every setter below leaves the tracking caches disabled and
      * the draw path is the faithful integer one, unchanged. */

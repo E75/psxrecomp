@@ -1323,7 +1323,7 @@ static const char *TEX_FS =
     "uniform int u_semimode;  /* PS1 blend mode; drives dual-source factors */\n"
     "uniform ivec4 u_twin;    /* texture window: mask_x, mask_y, off_x, off_y */\n"
     "uniform int u_maskset;   /* GP0(E6h) set-mask: OR bit15 into output */\n"
-    "uniform int u_filter;    /* 1 = bilinear */\n"
+    "uniform int u_filter;    /* 0 nearest, 1 bilinear, 2 stable */\n"
     "uniform float u_shift;\n"
     "int vram_at(int x, int y){\n"
     "  ivec2 p = ivec2(x & 1023, y & 511);\n"
@@ -1356,17 +1356,46 @@ static const char *TEX_FS =
     "vec3 col5(int raw){\n"
     "  return vec3(float(raw & 31), float((raw >> 5) & 31), float((raw >> 10) & 31)) / 31.0;\n"
     "}\n"
+    "int stable_texel(ivec2 p){\n"
+    "  /* Clamp before wrap, so a footprint left of u=0 cannot pick up u=255. */\n"
+    "  if ((u_twin.x | u_twin.y) == 0) p=clamp(p,v_limits.xy,v_limits.zw);\n"
+    "  return fetch_texel(p.x,p.y);\n"
+    "}\n"
+    "vec4 stable_bilinear(vec2 uv,int stp){\n"
+    "  vec2 p=uv-vec2(0.5), f=fract(p); ivec2 b=ivec2(floor(p));\n"
+    "  vec4 sum=vec4(0.0);\n"
+    "  for(int y=0;y<2;++y) for(int x=0;x<2;++x){\n"
+    "    int raw=stable_texel(b+ivec2(x,y));\n"
+    "    float w=(x==0 ? 1.0-f.x : f.x)*(y==0 ? 1.0-f.y : f.y);\n"
+    "    if(raw!=0 && ((raw>>15)&1)==stp) sum+=vec4(col5(raw),1.0)*w;\n"
+    "  }\n"
+    "  return sum;\n"
+    "}\n"
     "void main(){\n"
     "  int stp; vec3 rgb;\n"
     "  /* v_persp is 0 for every prim unless [video] perspective_texturing is on\n"
     "   * AND this prim's packet carried full GTE projection provenance, so the\n"
     "   * default is the PS1's affine (noperspective) mapping. */\n"
     "  vec2 uv = (v_persp != 0) ? v_uv_p : v_uv;\n"
+    "  vec2 dx=dFdx(uv), dy=dFdy(uv);\n"
     "  if (u_filter == 0) {\n"
     "    int raw = fetch_texel(int(floor(uv.x)), int(floor(uv.y)));\n"
     "    if (raw == 0) discard;\n"
     "    rgb = col5(raw);\n"
     "    stp = (raw >> 15) & 1;\n"
+    "  } else if (u_filter == 2) {\n"
+    "    uv+=vec2(u_shift); int raw=stable_texel(ivec2(floor(uv)));\n"
+    "    if(raw==0) discard; stp=(raw>>15)&1;\n"
+    "    float lx=length(dx), ly=length(dy);\n"
+    "    dx*=min(1.0,8.0/max(lx,0.001)); dy*=min(1.0,8.0/max(ly,0.001));\n"
+    "    int nx=clamp(int(ceil(lx)),1,4), ny=clamp(int(ceil(ly)),1,4);\n"
+    "    vec4 sum=vec4(0.0);\n"
+    "    for(int y=0;y<ny;++y) for(int x=0;x<nx;++x){\n"
+    "      vec2 offset=dx*((float(x)+0.5)/float(nx)-0.5)\n"
+    "                 +dy*((float(y)+0.5)/float(ny)-0.5);\n"
+    "      sum+=stable_bilinear(uv+offset,stp);\n"
+    "    }\n"
+    "    rgb=sum.a>0.00001 ? sum.rgb/sum.a : col5(raw);\n"
     "  } else {\n"
     "    /* Bilinear, Beetle-PSX formulation: the NEAREST texel is the base\n"
     "     * (cutout + STP authority), the neighbours lie toward the sub-texel\n"
@@ -3233,6 +3262,9 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
                                   const float *col, uint16_t texpage,
                                   uint16_t clut_x, uint16_t clut_y, int rawtex,
                                   int semi, const int *lim) {
+    // Mode 2 needs proven world geometry. Sprites, HUD and untracked packets
+    // retain point sampling; their cutout pixels must stay sharp.
+    const int filter=s_tex_filter==2 && (lim || (!s_pc_valid && !s_pq_valid)) ? 0 : s_tex_filter;
     int lim_buf[4];
     int uv_buf[6];
     if (!lim) {
@@ -3299,7 +3331,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
             else if (isolate) reason = 0;
             else if (batch_semi != s_tb_semi) reason = 1;
             else if (s_mask_set != s_tb_mask) reason = 2;
-            else if (s_tex_filter != s_tb_filter) reason = 3;
+            else if (filter != s_tb_filter) reason = 3;
             else if (gate != s_tb_gate) reason = 4;
             else if (twx != s_tb_twin[0] || twy != s_tb_twin[1] ||
                      tox != s_tb_twin[2] || toy != s_tb_twin[3]) reason = 5;
@@ -3310,7 +3342,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
         }
         if (s_tb_n + 3 > TEXBATCH_MAXV) { s_batch_reason[6]++; flush_tex_batch(); }
         if (s_tb_n == 0) {            /* opening a batch: capture its keyed state */
-            s_tb_semi = batch_semi; s_tb_mask = s_mask_set; s_tb_filter = s_tex_filter; s_tb_gate = gate;
+            s_tb_semi = batch_semi; s_tb_mask = s_mask_set; s_tb_filter = filter; s_tb_gate = gate;
             s_tb_bank_tex = s_selected_bank_tex;
             s_tb_bank_live_clut = s_selected_bank_live_clut;
             s_tb_twin[0] = twx; s_tb_twin[1] = twy; s_tb_twin[2] = tox; s_tb_twin[3] = toy;
@@ -3567,7 +3599,7 @@ static int  glb_scale(void) { return s_out_scale; }   /* real internal SSAA scal
                                                       native-wide CPU present path + gr_scale() callers
                                                       need the true scale — the FBO-direct present is
                                                       unaffected since it never reads gr_scale()) */
-static void glb_set_texture_filter(int b) { s_tex_filter = b ? 1 : 0; sw_set_texture_filter(b); }
+static void glb_set_texture_filter(int b) { s_tex_filter = b >= 0 && b <= 2 ? b : 0; sw_set_texture_filter(b != 0); }
 static int  glb_texture_filter(void) { return s_tex_filter; }
 
 static void glb_set_semi_transparency(int e, int m) { s_semi_en = e; s_semi_mode = m & 3; sw_set_semi_transparency(e, m); }

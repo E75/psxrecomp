@@ -9133,7 +9133,7 @@ static void handle_video_info(int id, const char *json)
     gpu_get_display_info(&di);
     int eff = gr_scale();
     send_fmt("{\"id\":%d,\"ok\":true,\"backend\":\"%s\",\"preset\":%d,"
-             "\"reference_lines\":%d,\"requested_scale\":%d,\"effective_scale\":%d,"
+             "\"reference_lines\":%d,\"requested_scale\":%d,\"effective_scale\":%d,\"texture_filter\":%d,"
              "\"internal_lines\":%u,\"gl\":%d,\"gl_max_dim\":%d,\"gl_max_scale\":%d,"
              "\"gl_clamp_reason\":%d,\"gl_alloc_retries\":%d,\"gl_budget_mib\":%d,"
              "\"fbo_w\":%d,\"fbo_h\":%d,\"hidpi_window\":%d,\"window_w\":%d,"
@@ -9145,7 +9145,7 @@ static void handle_video_info(int id, const char *json)
              "\"hires_window_mib\":%d}",
              id, gr_backend() == GR_BACKEND_OPENGL ? "opengl"
                  : gr_backend() == GR_BACKEND_VULKAN ? "vulkan" : "software",
-             preset, ref, req, eff, di.height * (unsigned)(eff > 0 ? eff : 1), gl,
+             preset, ref, req, eff, gr_texture_filter(), di.height * (unsigned)(eff > 0 ? eff : 1), gl,
              si.max_dim, si.max_scale, si.clamp_reason, si.alloc_retries, si.budget_mib,
              si.fbo_w, si.fbo_h, hidpi, ww, wh, pw, ph, di.display_x, di.display_y,
              di.width, di.height,

@@ -1,4 +1,5 @@
 #include "boot_state.h"
+#include "fntrace.h"
 #include "mod_memory.h"
 #include "overlay_api.h"   /* PSX_OVERLAY_CODEGEN_HASH / _ABI_TAG / _CODEGEN_VER */
 #include "dirty_ram_interp.h"
@@ -383,14 +384,14 @@ static int boot_state_save_to(BsOut* o, const CPUState* cpu,
     int ok;
     memset(&h, 0, sizeof h);
     h.magic         = BOOT_STATE_MAGIC;
-    h.version       = psx_mod_memory_snapshot_bytes() ? BOOT_STATE_VERSION : 7u;
+    h.version       = BOOT_STATE_VERSION;
     h.reserved      = boot_state_layout_cookie();
     h.bios_checksum = bios_checksum;
     h.entry_pc      = entry_pc;
     h.codegen_hash  = (uint32_t)PSX_OVERLAY_CODEGEN_HASH;
     h.abi_tag       = (int32_t)PSX_OVERLAY_ABI_TAG;
     h.codegen_ver   = (uint32_t)PSX_OVERLAY_CODEGEN_VER;
-    h.section_count = 16 + (psx_mod_memory_snapshot_bytes() ? 1u : 0u);
+    h.section_count = 17 + (psx_mod_memory_snapshot_bytes() ? 1u : 0u);
 
     ok = write_header_le(o, &h);
 
@@ -480,6 +481,13 @@ static int boot_state_save_to(BsOut* o, const CPUState* cpu,
             if (ok) ok = write_section(o, BS_SEC_DIRTY, db, nbytes);
             free(db);
         }
+    }
+    if (ok) {
+        uint8_t handoff[4];
+        PstW w;
+        pst_w_init(&w, handoff, sizeof handoff);
+        ok = pst_w_u32(&w, fntrace_is_game_started() ? 1u : 0u) &&
+             write_section(o, BS_SEC_GAME_START, handoff, sizeof handoff);
     }
     return ok;
 }
@@ -693,6 +701,9 @@ static int apply_section(uint32_t tag, const uint8_t* p, uint32_t len,
     }
     case BS_SEC_MODMEM:
         return psx_mod_memory_snapshot_read(p, len);
+    case BS_SEC_GAME_START:
+        fntrace_restore_game_started(p[0]);
+        return 1;
     case BS_SEC_ICACHE: {
         PstR r;
         if (len != 1024u * 4u) return 0;
@@ -749,6 +760,8 @@ static int validate_section(uint32_t tag, const uint8_t* p, uint32_t len) {
     case BS_SEC_DIRTY:  return len % 4u == 0u &&
                                len / 4u <= dirty_ram_get_bitmap_word_count();
     case BS_SEC_MODMEM: return psx_mod_memory_snapshot_validate(p, len);
+    case BS_SEC_GAME_START:
+        return len == 4u && p[0] <= 1u && !p[1] && !p[2] && !p[3];
     case BS_SEC_ICACHE: return len == 1024u * 4u;
     default:            return 1;
     }
@@ -970,9 +983,14 @@ int boot_state_load_buffer(const uint8_t* file, size_t file_len,
         }
         s->tag = tag;
         if (!validate_section(tag, s->p, s->len)) { ok = 0; break; }
+        if (tag == BS_SEC_GAME_START && (seen & (1u << tag))) {
+            ok = 0; break;
+        }
         if (tag < 32) seen |= (1u << tag);
     }
     if (ok && (seen & required) != required)
+        ok = 0;
+    if (ok && h.version >= 9u && !(seen & (1u << BS_SEC_GAME_START)))
         ok = 0;
 
     /* PASS 2 -- apply. Every section passed validate_section, whose checks

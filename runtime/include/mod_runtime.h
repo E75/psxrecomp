@@ -53,10 +53,6 @@ void mod_runtime_on_vblank(void);
 void mod_runtime_patch_disc_sector(uint32_t lba, int raw_sector,
                                    uint8_t* bytes, uint32_t size);
 void mod_runtime_enable_disc_patches(void);
-int mod_runtime_read_disc_extent(uint32_t lba, int raw_sector,
-                                 uint8_t* bytes, uint32_t size);
-uint32_t mod_runtime_disc_extent_start(void);
-uint32_t mod_runtime_disc_sector_count(uint32_t base_count);
 
 #ifdef __cplusplus
 }

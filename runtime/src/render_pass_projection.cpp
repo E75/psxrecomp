@@ -64,6 +64,7 @@ bool same_matrix(const PSXMotionMatrix& a, const PSXMotionMatrix& b) {
 }
 
 struct PSXProjectionHistory {
+    PSXProjectionHistory* next = nullptr;
     uint32_t capacity;
     std::vector<Projection> current, previous;
     std::unordered_map<uint64_t, std::vector<uint32_t>> index;
@@ -73,15 +74,23 @@ struct PSXProjectionHistory {
     double alpha = 1;
 };
 static PSXProjectionHistory* active = nullptr;
+// Intrusive list has no global destructor: title replay objects may release
+// their histories from static destructors, in either link initialization order.
+static PSXProjectionHistory* histories = nullptr;
 extern "C" void psx_projection_reset_session(void) {
-    if (active) psx_projection_invalidate(active);
+    // A load normally arrives between frames, when active is null. Invalidate
+    // idle histories too so a new timeline cannot blend against the old one.
+    for (auto* h = histories; h; h = h->next) psx_projection_invalidate(h);
     g_psx_projection_command = nullptr;
 }
 
 extern "C" PSXProjectionHistory* psx_projection_create(uint32_t capacity) {
     if (!capacity || capacity > 262144) return nullptr;
     auto* h = new (std::nothrow) PSXProjectionHistory;
-    if (h) { h->capacity = capacity; h->current.reserve(capacity); h->previous.reserve(capacity); }
+    if (h) {
+        h->capacity = capacity; h->current.reserve(capacity); h->previous.reserve(capacity);
+        h->next = histories; histories = h;
+    }
     return h;
 }
 extern "C" void psx_projection_invalidate(PSXProjectionHistory* h) {
@@ -91,7 +100,11 @@ extern "C" void psx_projection_invalidate(PSXProjectionHistory* h) {
     h->stats = {}; h->capturing = h->replaying = h->history_valid = false;
 }
 extern "C" void psx_projection_destroy(PSXProjectionHistory* h) {
-    psx_projection_invalidate(h); delete h;
+    psx_projection_invalidate(h);
+    for (auto** link = &histories; *link; link = &(*link)->next) {
+        if (*link == h) { *link = h->next; break; }
+    }
+    delete h;
 }
 extern "C" void psx_projection_capture_begin(PSXProjectionHistory* h) {
     if (!h || g_psx_render_pass_active) return;

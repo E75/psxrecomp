@@ -232,6 +232,7 @@ static RenderPassCheckpoint s_ck;
 static PsxCycleFreeze s_freeze;
 static jmp_buf s_abort_jmp;
 static volatile int s_abort_armed;
+static const CPUState* s_pass_cpu;
 static int s_nesting;
 
 static RenderPassStats s_stats;
@@ -498,6 +499,11 @@ static double ema_ms(double cur, uint64_t ticks) {
 static void watchdog_overrun(void) {
     s_stats.watchdog++;
     s_stats.watchdog_flag = 1;
+    if (s_stats.watchdog <= 4 && s_pass_cpu)
+        fprintf(stderr, "psxrecomp: render pass watchdog pc=0x%08X "
+                "function=0x%08X ra=0x%08X last_store=0x%08X\n",
+                s_pass_cpu->pc, g_debug_current_func_addr,
+                s_pass_cpu->gpr[31], g_debug_last_store_pc);
     if (s_abort_armed) {
         s_abort_armed = 0;
         longjmp(s_abort_jmp, 1);
@@ -569,6 +575,7 @@ int psx_mod_render_pass(struct CPUState *cpu, const PSXModRenderPass *pass,
     (void)psx_cycle_freeze_begin(&s_freeze, watchdog_cycles(),
                                  watchdog_overrun);
     if (setjmp(s_abort_jmp) == 0) {
+        s_pass_cpu = cpu;
         s_abort_armed = 1;
         ok = fn(cpu, user, pass->alpha_q16) ? 1 : 0;
         s_abort_armed = 0;
@@ -592,6 +599,7 @@ int psx_mod_render_pass(struct CPUState *cpu, const PSXModRenderPass *pass,
     }
     s_stats.guest_cycles_last = psx_cycle_count - cycles_before;
     tg = gl_renderer_perf_ticks();
+    s_pass_cpu = NULL;
 
     leaks = gl_renderer_pass_leaks() - s_leaks_before;
     if (leaks) {
