@@ -7,6 +7,7 @@
 #define PSX_HAS_RECOMP_NET 1
 #include "netplay_input_hist.h"
 #include "recomp_net/input_contract.h"
+#include "sio.h"
 
 #include <stdio.h>
 #include <string.h>

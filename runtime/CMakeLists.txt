@@ -389,6 +389,10 @@ if(BUILD_TESTING)
     target_include_directories(sio_jogcon_protocol_test PRIVATE include)
     add_test(NAME sio_jogcon_protocol_test COMMAND sio_jogcon_protocol_test)
 
+    add_executable(controller_type_test tests/test_controller_type.cpp)
+    target_include_directories(controller_type_test PRIVATE include)
+    add_test(NAME controller_type_test COMMAND controller_type_test)
+
     add_executable(gte_register_access_test
         tests/test_gte_register_access.cpp
         src/gte.cpp

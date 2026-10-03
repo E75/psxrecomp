@@ -62,6 +62,7 @@ extern "C" void psx_event_step_conservative_env_init(void);
 #endif
 #include "psx_netplay.h"
 #include "psx_stick.h"       /* radial SDL-stick -> DualShock response transform */
+#include "psx_controller_type.h" /* mapped wheel-name classification */
 #include "psx_netplay_rb.h"
 #include "psx_selfcheck.h"
 #include "psx_lobby_client.h"
@@ -4890,22 +4891,6 @@ static void close_player(PlayerInput& p) {
     p.steering_wheel = false;
 }
 
-/* SDL's GameController mapping exposes many steering wheels as the left-X
- * axis. SDL2 does not consistently classify wheels, so use stable device-name
- * tokens and keep an ordinary DualShock on the native analog protocol. */
-static bool controller_name_is_wheel(const char* name) {
-    if (!name || !*name) return false;
-    const std::string n = lower_copy(name);
-    static const char* tokens[] = {
-        "wheel", "g29", "g920", "g923", "g27", "g25", "driving force",
-        "t150", "t300", "t500", "t248", "tx racing", "thrustmaster",
-        "fanatec", "moza"
-    };
-    for (const char* token : tokens)
-        if (n.find(token) != std::string::npos) return true;
-    return false;
-}
-
 static void close_controller(void) {
     for (int s = 0; s < PSX_MAX_PLAYERS; s++)
         close_player(g_players[s]);
@@ -4954,7 +4939,7 @@ static void open_player(PlayerInput& p, int self_slot) {
             SDL_JoystickGetGUIDString(g, p.guid, (int)sizeof(p.guid));
         }
         const char* name = SDL_GameControllerName(p.handle);
-        p.steering_wheel = controller_name_is_wheel(name);
+        p.steering_wheel = psx_controller_name_is_wheel(name);
         std::fprintf(stdout, "psxrecomp runtime: opened controller for slot: %s\n",
                      name ? name : "(unnamed)");
         if (p.steering_wheel)
@@ -5053,8 +5038,22 @@ static void refresh_player_devices(void) {
     const int netplay = psx_netplay_active();
     for (int s = 0; s < PSX_MAX_PLAYERS; s++) {
         PlayerInput& p = g_players[s];
-        if (p.kind != 2) close_player(p);           /* keyboard/none: no handle */
-        else open_player(p, s);
+        if (p.kind != 2 ||
+            (p.handle && !SDL_GameControllerGetAttached(p.handle)))
+            close_player(p);                         /* kind change or unplug */
+        else if (p.handle && p.guid[0]) {
+            /* The launcher may have assigned a different GUID while the old
+             * handle is still attached. Release it so open_player can honor
+             * the new selection and choose the matching emulated type. */
+            SDL_Joystick* joy = SDL_GameControllerGetJoystick(p.handle);
+            SDL_JoystickGUID active_guid = joy ? SDL_JoystickGetGUID(joy)
+                                               : SDL_JoystickGUID{};
+            char active[40] = {0};
+            if (joy) SDL_JoystickGetGUIDString(active_guid, active,
+                                               (int)sizeof(active));
+            if (joy && std::strcmp(active, p.guid) != 0) close_player(p);
+        }
+        if (p.kind == 2) open_player(p, s);
         if (netplay) continue;
         const int mode = effective_player_mode_for_sio(p, s);
         const ModControllerPresentationPolicy& policy =
