@@ -211,6 +211,7 @@ While `fn` runs (`g_psx_render_pass_active`):
 | Interrupts | never delivered | `interrupts.c` |
 | GPU DMA | linked lists and delayed completions finish synchronously | `dma.c` |
 | RAM / scratchpad stores | written directly, bypassing code-page tracking, overlay watch, write traces and fingerprints; RAM addresses fold through the live geometry (2 MiB mirrored, or 8 MiB with the 8 MB RAM mod), as outside a pass | `memory.c` `render_pass_store` |
+| Mod arena stores (Expansion-1 mod memory, GPU-DMA aperture) | written; each page is backed up on its first write in the pass and put back at the end, so a title may keep its primitive buffers there (extended draw distance) | `memory.c` `render_pass_mod_store` |
 | MMIO stores | allowed: GP0, GP1 DMA mode / info, GPU and OTC DMA channels, DPCR/DICR, I_STAT/I_MASK. Dropped and counted: SPU (key-ons), CD, timers, SIO, MDEC, other DMA channels, memory control | `memory.c` |
 | VRAM | only the declared rect; writes that bypass the scissor elsewhere (fills, copies, uploads, pokes: never a native-wide surface) are journaled and rolled back | `gpu_gl_renderer.c` |
 | Runaway code | an 8 M guest-cycle watchdog rolls the pass back | `render_pass.c` |
