@@ -87,8 +87,19 @@ int main(void)
         netplay_ih_pad_to_frame(&pad, 9, 0, &dig);
         CHECK(dig.analog == 0u, "digital frame");
         netplay_ih_frame_to_pad(&dig, &pad2);
-        CHECK(pad2.analog == 0u, "digital roundtrip");
+    CHECK(pad2.analog == 0u, "digital roundtrip");
     }
+
+    /* Restore the original DualShock sample for the ring-buffer assertions
+     * below; the preceding type/steering checks intentionally used later
+     * ticks and different pad modes. */
+    memset(&pad, 0, sizeof(pad));
+    pad.buttons = 0xFDFFu;
+    pad.lx = (uint8_t)(0x80 + 40);
+    pad.ly = pad.rx = pad.ry = 0x80;
+    pad.analog = SIO_PAD_DUALSHOCK;
+    pad.connected = 1;
+    netplay_ih_pad_to_frame(&pad, 10, 0, &f);
 
     CHECK(netplay_ih_put(&h, 0, &f), "put local");
     CHECK(netplay_ih_get(&h, 0, 10, &got), "get local");

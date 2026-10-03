@@ -177,6 +177,16 @@ int main(void) {
     EXPECT("right.direction", 0x01, xchg(0, 0x00));
     (void)xchg(0, 0x00);
 
+    /* Partial position stays proportional and reports movement toward center. */
+    sio_set_pad_sticks(0, 0xC0, 0x80, 0x80, 0x80);
+    EXPECT("partial.prefix", 0xFF, xchg(0, 0x01));
+    EXPECT("partial.id", 0xE3, xchg(0, 0x42));
+    (void)xchg(0, 0x00); (void)xchg(0, 0x00); (void)xchg(0, 0x00);
+    EXPECT("partial.position", 0x40, xchg(0, 0x00));
+    EXPECT("partial.sign", 0x00, xchg(0, 0x00));
+    EXPECT("partial.direction", 0x02, xchg(0, 0x00));
+    (void)xchg(0, 0x00);
+
     EXPECT("rollback.restore", 1, sio_snapshot_read(snapshot, snapshot_len));
     EXPECT("rollback.type", SIO_PAD_JOGCON, sio_get_pad_analog(0));
     {

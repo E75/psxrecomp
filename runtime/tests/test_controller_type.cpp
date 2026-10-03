@@ -22,6 +22,26 @@ int main() {
             return 1;
         }
     }
+    struct HotplugCase {
+        bool selected, open, attached;
+        const char* selected_guid;
+        const char* active_guid;
+        bool close;
+    } hotplug[] = {
+        {true, false, false, "wheel-a", nullptr, false},
+        {true, true, true, "wheel-a", "wheel-a", false},
+        {true, true, false, "wheel-a", "wheel-a", true},
+        {true, true, true, "wheel-b", "wheel-a", true},
+        {false, true, true, "wheel-a", "wheel-a", true},
+        {true, true, true, nullptr, "wheel-a", false},
+    };
+    for (const auto& test : hotplug) {
+        if (psx_controller_handle_needs_close(test.selected, test.open,
+                test.attached, test.selected_guid, test.active_guid) != test.close) {
+            std::fprintf(stderr, "hotplug policy failed\n");
+            return 1;
+        }
+    }
     std::puts("controller type classification: passed");
     return 0;
 }

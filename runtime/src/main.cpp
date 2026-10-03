@@ -5038,21 +5038,21 @@ static void refresh_player_devices(void) {
     const int netplay = psx_netplay_active();
     for (int s = 0; s < PSX_MAX_PLAYERS; s++) {
         PlayerInput& p = g_players[s];
-        if (p.kind != 2 ||
-            (p.handle && !SDL_GameControllerGetAttached(p.handle)))
-            close_player(p);                         /* kind change or unplug */
-        else if (p.handle && p.guid[0]) {
-            /* The launcher may have assigned a different GUID while the old
-             * handle is still attached. Release it so open_player can honor
-             * the new selection and choose the matching emulated type. */
+        char active_guid[40] = {0};
+        const bool attached = p.handle &&
+                              SDL_GameControllerGetAttached(p.handle);
+        if (p.handle) {
             SDL_Joystick* joy = SDL_GameControllerGetJoystick(p.handle);
-            SDL_JoystickGUID active_guid = joy ? SDL_JoystickGetGUID(joy)
-                                               : SDL_JoystickGUID{};
-            char active[40] = {0};
-            if (joy) SDL_JoystickGetGUIDString(active_guid, active,
-                                               (int)sizeof(active));
-            if (joy && std::strcmp(active, p.guid) != 0) close_player(p);
+            if (joy) SDL_JoystickGetGUIDString(SDL_JoystickGetGUID(joy),
+                                              active_guid,
+                                              (int)sizeof(active_guid));
         }
+        /* The launcher may change GUID while the old handle remains attached;
+         * pure policy covers that and unplug paths with mockable inputs. */
+        if (psx_controller_handle_needs_close(
+                p.kind == 2, p.handle != nullptr, attached,
+                p.guid, active_guid))
+            close_player(p);
         if (p.kind == 2) open_player(p, s);
         if (netplay) continue;
         const int mode = effective_player_mode_for_sio(p, s);
@@ -5648,8 +5648,13 @@ static void apply_input_override_to_sio(int override_word) {
 
     const int effective_mode = controller_policy_resolve_override_mode(
         0, 1, mode, w, st, stick_live, dpad_live);
-    const int eff_analog =
+    int eff_analog =
         effective_mode == (int)PSXRecompV4::PAD_MODE_ANALOG ? 1 : 0;
+#ifndef PSX_NO_DEBUG_TOOLS
+    const int debug_type = debug_server_get_pad_type_override();
+    if (debug_type == SIO_PAD_DUALSHOCK || debug_type == SIO_PAD_JOGCON)
+        eff_analog = 1;
+#endif
     /* Injected input only (set_input / dev routing): fold the injected D-pad
      * word onto the left stick so stick-only menu/move paths respond to a
      * button-bit injection that has no physical stick behind it.
@@ -5669,9 +5674,13 @@ static void apply_input_override_to_sio(int override_word) {
     }
     if (!eff_analog) { st[0] = st[1] = st[2] = st[3] = 0x80; }
     sio_set_pad_sticks(0, st[0], st[1], st[2], st[3]);
-    const int injected_type = p.steering_wheel ? SIO_PAD_JOGCON
-                                               : (eff_analog ? SIO_PAD_DUALSHOCK
-                                                             : SIO_PAD_DIGITAL);
+    int injected_type = p.steering_wheel ? SIO_PAD_JOGCON
+                                         : (eff_analog ? SIO_PAD_DUALSHOCK
+                                                       : SIO_PAD_DIGITAL);
+#ifndef PSX_NO_DEBUG_TOOLS
+    if (debug_type >= SIO_PAD_DIGITAL && debug_type <= SIO_PAD_JOGCON)
+        injected_type = debug_type;
+#endif
     sio_request_pad_type(0, injected_type);
     psx_selfcheck_note_pad(0, w, st[0], st[1], st[2], st[3],
                            (uint8_t)injected_type);
@@ -5716,8 +5725,13 @@ static int capture_pad_slot(int s, PsxNetPad* out) {
         s, player, mode, src, p, policy_buttons, st);
     const int eff_analog =
         effective_mode == PSXRecompV4::PAD_MODE_ANALOG ? 1 : 0;
-    const int frame_type = p.steering_wheel ? SIO_PAD_JOGCON
-                         : (eff_analog ? SIO_PAD_DUALSHOCK : SIO_PAD_DIGITAL);
+    int frame_type = p.steering_wheel ? SIO_PAD_JOGCON
+                   : (eff_analog ? SIO_PAD_DUALSHOCK : SIO_PAD_DIGITAL);
+#ifndef PSX_NO_DEBUG_TOOLS
+    const int debug_type = debug_server_get_pad_type_override();
+    if (debug_type >= SIO_PAD_DIGITAL && debug_type <= SIO_PAD_JOGCON)
+        frame_type = debug_type;
+#endif
     if (savestate_input_guard_active()) {
         out->buttons = 0xFFFFu;
         out->lx = out->ly = out->rx = out->ry = 0x80u;
@@ -5937,10 +5951,19 @@ static void capture_override_pad(int override_word, PsxNetPad* out) {
 
     const int effective_mode = controller_policy_resolve_override_mode(
         0, 1, mode, w, st, stick_live, dpad_live);
-    const int eff_analog =
+    int eff_analog =
         effective_mode == (int)PSXRecompV4::PAD_MODE_ANALOG ? 1 : 0;
-    const int frame_type = p.steering_wheel ? SIO_PAD_JOGCON
-                         : (eff_analog ? SIO_PAD_DUALSHOCK : SIO_PAD_DIGITAL);
+#ifndef PSX_NO_DEBUG_TOOLS
+    const int debug_type = debug_server_get_pad_type_override();
+    if (debug_type == SIO_PAD_DUALSHOCK || debug_type == SIO_PAD_JOGCON)
+        eff_analog = 1;
+#endif
+    int frame_type = p.steering_wheel ? SIO_PAD_JOGCON
+                   : (eff_analog ? SIO_PAD_DUALSHOCK : SIO_PAD_DIGITAL);
+#ifndef PSX_NO_DEBUG_TOOLS
+    if (debug_type >= SIO_PAD_DIGITAL && debug_type <= SIO_PAD_JOGCON)
+        frame_type = debug_type;
+#endif
     /* Injected input only; see the note on the sibling fold above. Not
      * hardware behaviour, retained solely so injection can steer stick-only
      * games. */

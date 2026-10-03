@@ -282,6 +282,9 @@ static int s_input_frames   = 0;
  * pad sampler alongside the button word. */
 static int     s_axis_override = 0;
 static uint8_t s_axis_st[4]    = { 0x80, 0x80, 0x80, 0x80 };
+/* Test-only controller identity override for set_input/press. -1 follows the
+ * selected host device/config; 0/1/2 force digital/DualShock/JogCon. */
+static int s_pad_type_override = -1;
 
 /*
  * Exact guest-VBlank input route. A client queues run-length encoded digital
@@ -7763,9 +7766,14 @@ static void handle_unwatch(int id, const char *json)
 static void handle_set_input(int id, const char *json)
 {
     char val_str[32];
+    const int pad_type = json_get_int(json, "pad_type", -1);
     if (!json_get_str(json, "buttons", val_str, sizeof(val_str))) {
         send_err(id, "missing buttons"); return;
     }
+    if (pad_type < -1 || pad_type > 2) {
+        send_err(id, "pad_type must be -1 (automatic), 0, 1, or 2"); return;
+    }
+    s_pad_type_override = pad_type;
     s_input_override = (int)hex_to_u32(val_str);
     s_input_frames = 0;
     /* Optional stick override: any of lx/ly/rx/ry (0..255) arms it; omitted
@@ -7784,7 +7792,12 @@ static void handle_press(int id, const char *json)
 {
     int buttons = json_get_int(json, "buttons", -1);
     int frames  = json_get_int(json, "frames", 2);
+    const int pad_type = json_get_int(json, "pad_type", -1);
     if (buttons < 0) { send_err(id, "missing buttons"); return; }
+    if (pad_type < -1 || pad_type > 2) {
+        send_err(id, "pad_type must be -1 (automatic), 0, 1, or 2"); return;
+    }
+    s_pad_type_override = pad_type;
     s_input_override = buttons;
     s_input_frames   = frames;
     int ax[4] = { json_get_int(json, "lx", -1), json_get_int(json, "ly", -1),
@@ -7813,16 +7826,18 @@ static void handle_pad_status(int id, const char *json)
     sio_get_pad_sticks(0, sticks0);
     sio_get_pad_sticks(1, sticks1);
     send_fmt("{\"id\":%d,\"ok\":true,\"pad\":\"0x%04X\","
-             "\"slot0\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s,\"sticks\":[%u,%u,%u,%u]},"
-             "\"slot1\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s,\"sticks\":[%u,%u,%u,%u]},"
-             "\"override\":%d,\"override_frames\":%d,"
+             "\"slot0\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s,\"type\":%d,\"sticks\":[%u,%u,%u,%u]},"
+             "\"slot1\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s,\"type\":%d,\"sticks\":[%u,%u,%u,%u]},"
+             "\"override\":%d,\"override_frames\":%d,\"override_pad_type\":%d,"
              "\"override_axes\":[%u,%u,%u,%u],\"override_axes_valid\":%s}\n",
              id, pad0,
              pad0, sio_get_pad_connected(0) ? "true" : "false", sio_get_pad_analog(0) ? "true" : "false",
+             sio_get_pad_analog(0),
              sticks0[0], sticks0[1], sticks0[2], sticks0[3],
              pad1, sio_get_pad_connected(1) ? "true" : "false", sio_get_pad_analog(1) ? "true" : "false",
+             sio_get_pad_analog(1),
              sticks1[0], sticks1[1], sticks1[2], sticks1[3],
-             s_input_override, s_input_frames,
+             s_input_override, s_input_frames, s_pad_type_override,
              s_axis_st[0], s_axis_st[1], s_axis_st[2], s_axis_st[3],
              s_axis_override ? "true" : "false");
 }
@@ -7836,6 +7851,7 @@ static void handle_clear_input(int id, const char *json)
     s_input_override = -1;
     s_input_frames   = 0;
     s_axis_override  = 0;
+    s_pad_type_override = -1;
     s_axis_st[0] = s_axis_st[1] = s_axis_st[2] = s_axis_st[3] = 0x80;
     send_ok(id);
 }
@@ -7882,6 +7898,7 @@ static void handle_input_route_start(int id, const char *json)
     s_input_override = -1;
     s_input_frames = 0;
     s_axis_override = 0;
+    s_pad_type_override = -1;
     s_input_route_index = 0;
     s_input_route_remaining = s_input_route[0].frames;
     s_input_route_active = 1;
@@ -15682,6 +15699,11 @@ int debug_server_get_axis_override(unsigned char st[4])
     st[0] = s_axis_st[0]; st[1] = s_axis_st[1];
     st[2] = s_axis_st[2]; st[3] = s_axis_st[3];
     return 1;
+}
+
+int debug_server_get_pad_type_override(void)
+{
+    return s_pad_type_override;
 }
 
 int debug_server_turbo_enabled(void)

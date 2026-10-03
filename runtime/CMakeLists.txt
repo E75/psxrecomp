@@ -392,6 +392,9 @@ if(BUILD_TESTING)
     add_executable(controller_type_test tests/test_controller_type.cpp)
     target_include_directories(controller_type_test PRIVATE include)
     add_test(NAME controller_type_test COMMAND controller_type_test)
+    add_executable(psx_stick_test tests/test_psx_stick.cpp src/psx_stick.c)
+    target_include_directories(psx_stick_test PRIVATE include)
+    add_test(NAME psx_stick_test COMMAND psx_stick_test)
 
     add_executable(gte_register_access_test
         tests/test_gte_register_access.cpp

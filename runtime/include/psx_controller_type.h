@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <string>
 
 /* SDL2/3 does not expose a consistently useful wheel class for every mapping.
@@ -21,6 +22,20 @@ inline bool psx_controller_name_is_wheel(const char* name) {
     for (const char* token : tokens)
         if (normalized.find(token) != std::string::npos) return true;
     return false;
+}
+
+/* Pure reopen policy so unplug and launcher-selected device changes can be
+ * regression-tested without a physical SDL controller. */
+inline bool psx_controller_handle_needs_close(bool controller_selected,
+                                               bool handle_open,
+                                               bool handle_attached,
+                                               const char* selected_guid,
+                                               const char* active_guid) {
+    if (!controller_selected) return true;
+    if (!handle_open) return false;
+    if (!handle_attached) return true;
+    return selected_guid && selected_guid[0] && active_guid && active_guid[0] &&
+           std::strcmp(selected_guid, active_guid) != 0;
 }
 
 #endif
