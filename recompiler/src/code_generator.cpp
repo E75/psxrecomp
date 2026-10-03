@@ -841,6 +841,14 @@ std::string CodeGenerator::generate_branch_condition(uint32_t instr, uint32_t ad
                 (ws_cull_bltz_pcs_.count(addr) || config_.ws_cull_bltz_sites.count(addr)))
                 return fmt::format("psx_ws_cull_bltz({}) /* ws cull (left edge) */",
                                    reg_name(rs));
+            // [widescreen.cull] screen_x_sites on a bltz: the tested register
+            // holds a screen X in its high half (`SX << 16`). bltz_sites
+            // compares the whole register with -margin and so never widens
+            // this form; take the branch only while SX < -margin. Identity at
+            // 4:3.
+            if (regimm_op == 0x00 && config_.ws_cull_screen_x_sites.count(addr))
+                return fmt::format("psx_ws_cull_bltz_hi({}) /* ws cull (left edge, X in the high half) */",
+                                   reg_name(rs));
             if (regimm_op == 0x00 && config_.ws_cull_nclip_keep_sites.count(addr))
                 return fmt::format("psx_ws_x_margin() > 0 ? 0 : ((int32_t){} < 0) /* ws nclip keep */",
                                    reg_name(rs));
@@ -887,7 +895,52 @@ std::string CodeGenerator::generate_branch_condition(uint32_t instr, uint32_t ad
     return keep_branch_if_wide("0 /* unknown branch condition: defaults to not-taken */");
 }
 
+// [[draw_distance.clamp]]: a main-EXE ordering-table range guard. While a
+// mod has the clamps on, the site's register is clamped to `max` before the
+// instruction runs, so the guard keeps a far primitive in the last OT slot
+// instead of dropping it. Identity while off. Captured overlays may hold
+// unrelated code at a listed address and keep their own code.
+std::string CodeGenerator::draw_distance_clamp_prefix(uint32_t addr,
+                                                      uint32_t instr) const {
+    if (config_.overlay_mode || config_.draw_distance_clamp_sites.empty())
+        return {};
+    for (const auto& site : config_.draw_distance_clamp_sites) {
+        if ((site.address & 0x1FFFFFFFu) != (addr & 0x1FFFFFFFu)) continue;
+        if (instr != site.expected) {
+            fmt::print(stderr,
+                       "ERROR: [[draw_distance.clamp]] expected 0x{:08X} at "
+                       "0x{:08X}, found 0x{:08X}\n",
+                       site.expected, addr, instr);
+            std::exit(1);
+        }
+        // A load into the register in the previous slot is still in flight
+        // (MIPS-I load delay): the clamp would act on the stale value.
+        if (const auto prev = exe_.read_word(addr - 4u)) {
+            const uint32_t pop = *prev >> 26;
+            if (pop >= 0x20u && pop <= 0x26u && get_rt(*prev) == site.reg) {
+                fmt::print(stderr,
+                           "ERROR: [[draw_distance.clamp]] site 0x{:08X} is "
+                           "the load-delay slot of a load into reg {}\n",
+                           addr, site.reg);
+                std::exit(1);
+            }
+        }
+        return fmt::format(
+            "if (g_psx_draw_distance_clamp && (int32_t){0} > {1}) {0} = "
+            "(uint32_t)({1});  /* draw-distance clamp: keep far geometry */",
+            reg_name((int)site.reg), site.max);
+    }
+    return {};
+}
+
 std::string CodeGenerator::translate_instruction(uint32_t addr, uint32_t instr) {
+    std::string clamp = draw_distance_clamp_prefix(addr, instr);
+    if (clamp.empty()) return translate_instruction_core(addr, instr);
+    // The core translation carries its own indent; give the clamp the same.
+    return config_.indent + clamp + "\n" + translate_instruction_core(addr, instr);
+}
+
+std::string CodeGenerator::translate_instruction_core(uint32_t addr, uint32_t instr) {
     uint32_t opcode = (instr >> 26) & 0x3F;
     uint32_t funct = instr & 0x3F;
 
@@ -1309,12 +1362,22 @@ std::string CodeGenerator::translate_instruction(uint32_t addr, uint32_t instr) 
             return fmt::format("{} = psx_ws_cull_sltiu({}, {});"
                                " /* ws explicit screen-x cull */{}",
                                reg_name(rt), reg_name(rs), imm, comment);
+        } else if (opcode == 0x0F && get_rt(instr) != 0) {
+            // lui rt,W: a screen edge kept in the high half of a register
+            // (compared with `SX << 16`). Move it out by the live margin.
+            uint32_t rt = get_rt(instr);
+            uint16_t imm = get_imm16_u(instr);
+            return fmt::format("{} = psx_ws_cull_lui_hi(0x{:04X}u);"
+                               " /* ws explicit screen-x edge (high half) */{}",
+                               reg_name(rt), imm, comment);
         } else if (!config_.overlay_mode) {
             fmt::print(stderr, "ERROR: [widescreen.cull] screen_x site 0x{:08X} "
-                       "is not sltiu (opcode 0x{:02X})\n", addr, opcode);
+                       "is not sltiu, lui or bltz (0x{:08X})\n", addr, instr);
             std::exit(1);
         }
         // Overlay variant: the configured main-EXE PC holds different code.
+        // (A `bltz` at a listed address is a branch and never comes here; it
+        // is widened in generate_branch_condition.)
     }
     // Widescreen automatic horizontal-FOV cull widening ([widescreen.cull]
     // auto_screen_x). ws_auto_cull_func_ is set when this function carries the
@@ -3471,6 +3534,12 @@ void CodeGenerator::emit_runtime_externs(std::ostream& ss) const {
     ss << "extern int  psx_ws_cull_bltz(uint32_t v);                  /* ws cull signed left edge (gpu.c) */\n";
     ss << "extern int  psx_ws_cull_bgez(uint32_t v);                  /* ws cull signed left keep (gpu.c) */\n";
     ss << "extern uint32_t psx_ws_clip_edge_x(uint32_t v, uint32_t w); /* ws cull clip-edge bound load (gpu.c) */\n";
+    // Only for a config that lists screen_x_sites, so the declarations of
+    // every other title stay byte-identical.
+    if (!config_.ws_cull_screen_x_sites.empty()) {
+        ss << "extern uint32_t psx_ws_cull_lui_hi(uint32_t imm);          /* ws screen-x edge in the high half (gpu.c) */\n";
+        ss << "extern int  psx_ws_cull_bltz_hi(uint32_t v);               /* ws cull left edge, X in the high half (gpu.c) */\n";
+    }
     ss << "extern int  psx_ws_cull_vxrange(uint32_t x, uint32_t imm); /* ws masked-u16 X window */\n";
     ss << "extern int32_t psx_ws_depth_bound(int32_t imm);            /* ws aspect-scaled far bound */\n";
     ss << "extern int32_t psx_ws_plane_nx(int32_t nx);                /* ws side-plane normal-X scale (gpu.c) */\n";
@@ -3490,6 +3559,8 @@ void CodeGenerator::emit_runtime_externs(std::ostream& ss) const {
     ss << "extern int  psx_game_option_store(uint32_t addr, int val);  /* persisted OPTION restore-at-init (game_options.c) */\n";
     ss << "extern uint32_t psx_ws_backdrop_value(uint32_t orig, int is_end, int window_cols);  /* ws backdrop preload (gpu.c) */\n";
     ss << "extern void gte_ws_set_suppress(int on);  /* widescreen far-backdrop un-squash (gte.cpp) */\n";
+    if (!config_.overlay_mode && !config_.draw_distance_clamp_sites.empty())
+        ss << "extern uint32_t g_psx_draw_distance_clamp;  /* [[draw_distance.clamp]] switch (draw_distance.c) */\n";
     ss << "extern uint32_t g_debug_last_store_pc;  /* exact PC of the executing SW/SH/SB — wtrace/readtrace producer attribution (debug_server.c) */\n\n";
 }
 
