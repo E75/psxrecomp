@@ -1530,6 +1530,15 @@ extern "C" int32_t psx_mod_widescreen_x_margin(void) {
 extern "C" void psx_mod_tag_hud_primitive(uint32_t primitive, int edge) {
     gpu_ws_tag_hud_primitive(primitive, edge);
 }
+extern "C" void psx_mod_anchor_hud_primitive(uint32_t primitive, int edge) {
+    gpu_ws_tag_hud_prim(primitive, edge);
+}
+extern "C" void psx_mod_tag_screen_mask_quad(uint32_t primitive) {
+    gpu_ws_tag_screen_mask_quad(primitive);
+}
+extern "C" void psx_mod_tag_radial_screen_mask_quad(uint32_t primitive, float scale) {
+    gpu_ws_tag_radial_screen_mask_quad(primitive, scale);
+}
 
 extern "C" void psx_mod_tag_world_primitive(uint32_t primitive, int is_world) {
     gpu_ws_tag_world_primitive(primitive, is_world);
