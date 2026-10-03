@@ -1930,7 +1930,9 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
             return 0;
         }
         default:
-            return abort_unsupported(pc, insn, "SPECIAL funct");
+            /* R3000A ignores undefined SPECIAL encodings; psx_interpreter.c
+             * already models this, so the dirty interpreter must agree. */
+            return 0;
         }
         break;
 

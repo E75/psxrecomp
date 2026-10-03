@@ -7,6 +7,7 @@
 #include "mod_plugins.h"
 #include "gpu.h"
 #include "psx_memory.h"
+#include "render_pass_projection.h"
 #include "psx_sha256.h"
 #include "cpu_state.h"
 
@@ -1552,6 +1553,8 @@ extern "C" int psx_mod_read_disc_file(const char* path, void* buffer,
 extern "C" void mod_runtime_activate_plugins(void) {
     using namespace PSXRecompV4;
     RuntimeMods& s = state();
+    psx_projection_reset_session();
+    gpu_ws_set_native_scene_predicate(nullptr);
     psx_ram_reset_size_request();
     if (!s.initialized || !s.plan.ok) return;
     s.disc_extents.clear();

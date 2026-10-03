@@ -455,7 +455,7 @@ void gpu_ws_set_native_scene_predicate(int (*predicate)(void)) {
 
 int gpu_ws_present_native_43(void) {
     if (!ws_engaged()) return 0;
-    if (ws_mode == 2 && s_ws_native_scene_predicate && s_ws_native_scene_predicate())
+    if (s_ws_native_scene_predicate && s_ws_native_scene_predicate())
         return 1;
     int game_mode = ws_game_mode();
     if (!game_mode) ws_scene_latch.confirmed = 0;
@@ -5672,6 +5672,7 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
     uint32_t addr = psx_mod_gpu_dma_resolve_address(start_addr);
     uint32_t safety = 0;
     uint16_t rank = 0xFFFFu;
+    uint16_t max_rank = 0xFFFFu;
     const uint32_t max_nodes = 0x40000u;
     int area_left = (int)draw_area_left, area_right = (int)draw_area_right;
     GpuDisplayInfo di;
@@ -5720,6 +5721,13 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
                 /* CPU->VRAM data follows its 3-word header and is not a command
                  * stream. Such transfers are not UI draws; stop this node. */
                 if (op >= 0xA0u && op <= 0xBFu) break;
+                /* Select the frontmost populated drawing layer, including
+                 * full-screen fades and non-rectangular world primitives.
+                 * Choosing only among UI-shaped candidates promotes a deeper
+                 * wall quad to HUD when the real front layer has no widgets. */
+                if (op >= 0x20u && op <= 0x7Fu && rank != 0xFFFFu &&
+                    (max_rank == 0xFFFFu || rank > max_rank))
+                    max_rank = rank;
                 uint32_t words[12] = {0};
                 for (int i = 0; i < count && i < 12; i++) {
                     words[i] = psx_read_word(
@@ -5745,18 +5753,9 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
         return;
     }
 
-    /* Empty ordering-table buckets can trail the actual frontmost layer.
-     * Selecting the last empty bucket made the memory-card glyph layer (rank
-     * 4095 followed by an empty rank 4096) disappear from the correction
-     * pass. Pick the highest rank that contains an eligible UI primitive. */
-    /* Candidates (triangles, rotated quads) never pick the rank: a world
-     * triangle sorted to the front would otherwise make itself the HUD. */
-    uint16_t max_rank = 0xFFFFu;
-    for (uint32_t i = 0; i < ws_ui_prepass_count; i++) {
-        if (ws_ui_prepass[i].enclosed_only) continue;
-        if (max_rank == 0xFFFFu || ws_ui_prepass[i].ot_rank > max_rank)
-            max_rank = ws_ui_prepass[i].ot_rank;
-    }
+    /* Empty trailing OT buckets do not pick the layer. A populated front
+     * layer without eligible widgets also must not fall back to a deeper
+     * UI-shaped world surface (Ape Escape's intro walls). */
     if (max_rank == 0xFFFFu) {
         ws_ui_reject.rank = ws_ui_prepass_count;
         ws_ui_prepass_count = 0;

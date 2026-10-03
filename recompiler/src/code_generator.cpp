@@ -1655,7 +1655,7 @@ std::string CodeGenerator::translate_instruction_body(uint32_t addr, uint32_t in
             case 0x2A: code = translate_slt(instr); break;     // slt
             case 0x2B: code = translate_sltu(instr); break;    // sltu
             default:
-                code = fmt::format("/* TODO: SPECIAL funct=0x{:02X} */", funct);
+                code = fmt::format("/* undefined SPECIAL funct=0x{:02X}: R3000A-compatible no-op */", funct);
         }
     }
     // Immediate and load/store instructions
