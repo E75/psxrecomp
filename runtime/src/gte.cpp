@@ -970,6 +970,8 @@ static uint64_t s_nclip_disagreements = 0;
 static int32_t s_nclip_last_native = 0;
 static int8_t s_nclip_last_precise_sign = 0;
 static bool s_nclip_last_precise_valid = false;
+static bool s_nclip_last_horizontal_saturated = false;
+static uint32_t s_nclip_last_generation;
 extern "C" void gte_nclip_precise_stats(uint64_t *hits, uint64_t *fallbacks,
                                         uint64_t *disagreements) {
     if (hits) *hits = s_nclip_precise_hits;
@@ -980,6 +982,13 @@ extern "C" int gte_nclip_precise_bltz(int32_t native_mac0) {
     if (!s_nclip_last_precise_valid || native_mac0 != s_nclip_last_native)
         return native_mac0 < 0;
     return s_nclip_last_precise_sign < 0;
+}
+extern "C" int gte_nclip_native_wide_sign(int32_t native_mac0, int* sign) {
+    if (!s_nclip_last_precise_valid || !s_nclip_last_horizontal_saturated ||
+        native_mac0 != s_nclip_last_native || s_nclip_last_generation != s_geom_generation ||
+        s_gte_replay_sandbox || s_speculative_depth != 0) return 0;
+    *sign = s_nclip_last_precise_sign;
+    return 1;
 }
 
 void gte_nclip(GTEState* gte, uint32_t instr) {
@@ -1028,6 +1037,7 @@ void gte_nclip(GTEState* gte, uint32_t instr) {
     }
     s_nclip_last_native = out;
     s_nclip_last_precise_valid = false;
+    s_nclip_last_horizontal_saturated = false;
     /* Compute an exact 16.16 determinant for configured branch consumers, but
      * preserve native guest-visible MAC0 for every architectural reader. */
     int32_t px0, py0, px1, py1, px2, py2;
@@ -1044,6 +1054,22 @@ void gte_nclip(GTEState* gte, uint32_t instr) {
         const int64_t cross = dx10 * dy20 - dy10 * dx20;
         s_nclip_last_precise_sign = cross < 0 ? -1 : (cross > 0 ? 1 : 0);
         s_nclip_last_precise_valid = true;
+        s_nclip_last_generation = s_geom_generation;
+        /* Narrow rescue: exact Y still agrees with the architectural FIFO,
+         * depth is outside the GTE near region, and at least one X exceeded
+         * the matching saturation rail. Ordinary subpixel winding stays stock. */
+        const int raw_x[3] = {sx0, sx1, sx2}, raw_y[3] = {sy0, sy1, sy2};
+        const int32_t exact_x[3] = {px0, px1, px2}, exact_y[3] = {py0, py1, py2};
+        bool checked = true, saturated = false;
+        for (int i = 0; i < 3; ++i) {
+            const int x = exact_x[i] >> 16;
+            checked &= (exact_y[i] >> 16) == raw_y[i] && x > -4096 && x < 4096;
+            checked &= gte->SZ[i + 1] >= gte->H / 2 && gte->SZ[i + 1] != 0;
+            if (raw_x[i] == 1023 && x > 1023) saturated = true;
+            else if (raw_x[i] == -1024 && x < -1024) saturated = true;
+            else checked &= x == raw_x[i];
+        }
+        s_nclip_last_horizontal_saturated = checked && saturated;
         if ((cross > 0 && out <= 0) || (cross < 0 && out >= 0))
             s_nclip_disagreements++;
     } else if (gpu_ws_precise_nclip_enabled() &&

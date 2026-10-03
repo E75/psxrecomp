@@ -388,6 +388,33 @@ void shared_decls_include_new_helpers() {
           "shared declarations include psx_ws_clip_edge_x");
 }
 
+void masked_reject_sites() {
+    const std::string plain = base_config();
+    const std::string body = plain + R"toml(
+[[widescreen.cull.masked_reject]]
+address = "0x80010000"
+expected = "0x14800002"
+reject_mask = "0xFFFF0000"
+)toml";
+    const auto loaded = load(body);
+    check(loaded.ws_cull_masked_reject_sites.size() == 1, "load guarded masked reject");
+    check(PSXRecompV4::overlay_codegen_config_hash(load(plain)) !=
+          PSXRecompV4::overlay_codegen_config_hash(loaded), "masked reject affects cache identity");
+    auto changed = loaded;
+    changed.ws_cull_masked_reject_sites[0].reject_mask = 0xFF000000u;
+    check(PSXRecompV4::overlay_codegen_config_hash(changed) !=
+          PSXRecompV4::overlay_codegen_config_hash(loaded), "reject mask affects cache identity");
+    PSXRecomp::CodeGenConfig config{};
+    config.ws_cull_masked_reject_sites = loaded.ws_cull_masked_reject_sites;
+    const auto code = generate_first_instruction(0x14800002u, config).full_code;
+    check(code.find("psx_ws_masked_reject(cpu->gpr[4], 0xFFFF0000u)") != std::string::npos,
+          "native branch emits guarded masked predicate");
+    config.overlay_mode = true;
+    const auto other = generate_first_instruction(0x14800003u, config).full_code;
+    check(other.find("psx_ws_masked_reject(") == std::string::npos,
+          "overlay with another instruction stays vanilla");
+}
+
 void runtime_math() {
     // Identity at 4:3 (margin 0) for every input.
     for (int32_t v : {-1000, -54, -53, -1, 0, 1, 98, 222, 319, 320, 321, 1000}) {
@@ -432,6 +459,7 @@ int main(int argc, char** argv) {
     overlay_matching_sites_emit_helpers();
     shared_decls_include_new_helpers();
     runtime_math();
+    masked_reject_sites();
 
     if (g_exit_probe >= 0) return 3;  // no call had that probe index
     if (failures != 0) {

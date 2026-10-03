@@ -63,6 +63,19 @@ uint32_t overlay_codegen_config_hash(const GameConfig& c) {
 
     h.words("sprite_tag_funcs", c.ws_sprite_tag_funcs);
     h.words("mod_function_entry_funcs", c.mod_function_entry_funcs);
+    if (!c.ws_cull_masked_reject_sites.empty()) {
+        h.tag("cull_masked_reject");
+        auto sites = c.ws_cull_masked_reject_sites;
+        std::sort(sites.begin(), sites.end(), [](const auto& a, const auto& b) {
+            return (a.address & 0x1FFFFFFFu) < (b.address & 0x1FFFFFFFu);
+        });
+        h.u32((uint32_t)sites.size());
+        for (const auto& site : sites) {
+            h.u32(site.address & 0x1FFFFFFFu);
+            h.u32(site.expected);
+            h.u32(site.reject_mask);
+        }
+    }
     h.words("cull_bias", c.ws_cull_bias_sites);
     if (!c.ws_cull_bias_lower_sites.empty())
         h.words("cull_bias_lower", c.ws_cull_bias_lower_sites);
@@ -1906,6 +1919,7 @@ GameConfig load_game_config(const fs::path& config_path_in) {
     std::vector<uint32_t> ws_cull_clip_edge_x_load_sites;
     uint32_t ws_cull_clip_edge_width = 0;
     std::vector<WidescreenCullKeepSite> ws_cull_keep_sites;
+    std::vector<WidescreenMaskedRejectSite> ws_cull_masked_reject_sites;
     std::vector<WidescreenAngleSite> ws_cull_angle_sites;
     WidescreenAspectConeConfig ws_aspect_cone;
     int ws_cull_guard_pixels = 0;
@@ -1951,6 +1965,27 @@ GameConfig load_game_config(const fs::path& config_path_in) {
                         "{}: [widescreen.cull] clip_edge_width must be 1..1024",
                         config_path.string()));
                 ws_cull_clip_edge_width = (uint32_t)width;
+            }
+            if (cull.contains("masked_reject")) {
+                std::set<uint32_t> seen;
+                for (const auto& item : toml::find<toml::array>(cull, "masked_reject")) {
+                    WidescreenMaskedRejectSite site;
+                    site.address = parse_hex(toml::find<std::string>(item, "address"),
+                                             "widescreen.cull.masked_reject.address");
+                    site.expected = parse_hex(toml::find<std::string>(item, "expected"),
+                                              "widescreen.cull.masked_reject.expected");
+                    site.reject_mask = parse_hex(toml::find<std::string>(item, "reject_mask"),
+                                                 "widescreen.cull.masked_reject.reject_mask");
+                    if ((site.address & 3u) || (site.expected >> 26) != 5u ||
+                        ((site.expected >> 16) & 31u) != 0u ||
+                        ((site.expected >> 21) & 31u) == 0u || !site.reject_mask)
+                        throw std::runtime_error("masked_reject needs aligned BNE reg,zero and nonzero reject_mask");
+                    if (!seen.insert(site.address & 0x1FFFFFFFu).second)
+                        throw std::runtime_error("duplicate masked_reject address");
+                    ws_cull_masked_reject_sites.push_back(site);
+                    if (ws_cull_masked_reject_sites.size() > 256)
+                        throw std::runtime_error("masked_reject supports at most 256 sites");
+                }
             }
             if (cull.contains("keep")) {
                 std::set<uint32_t> seen;
@@ -2442,6 +2477,7 @@ GameConfig load_game_config(const fs::path& config_path_in) {
     loaded.ws_cull_clip_edge_x_load_sites =
         std::move(ws_cull_clip_edge_x_load_sites);
     loaded.ws_cull_clip_edge_width = ws_cull_clip_edge_width;
+    loaded.ws_cull_masked_reject_sites = std::move(ws_cull_masked_reject_sites);
     loaded.draw_distance_clamp_sites =
         parse_draw_distance_clamps(cfg, config_path);
     return loaded;

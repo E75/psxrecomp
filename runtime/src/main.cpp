@@ -1811,6 +1811,7 @@ extern "C" int gpu_ws_netplay_local_viewport_base_x(void);
 extern "C" int gpu_ws_netplay_local_viewport_width(void);
 extern "C" void gpu_ws_set_nw_textured_edges(int on, int scale_pct);
 extern "C" void gpu_ws_set_signed_x_bound_sites(const uint32_t*, const uint32_t*, int);
+extern "C" void gpu_ws_set_masked_reject_sites(const uint32_t*, const uint32_t*, const uint32_t*, int);
 /* Widescreen engages at game entry (fntrace_is_game_started): the BIOS boot
  * — Sony logo, PS logo, shell — presents authentic 4:3 with no GTE squash.
  * Starts true when the configured aspect is already 4:3 (nothing to engage). */
@@ -13944,6 +13945,16 @@ int main(int argc, char** argv) {
                 gpu_ws_set_cull_keep_sites(
                     addresses.data(), expected.data(), results.data(),
                     (int)addresses.size());
+            }
+            {
+                std::vector<uint32_t> addresses, expected, masks;
+                for (const auto& site : gc.ws_cull_masked_reject_sites) {
+                    addresses.push_back(site.address);
+                    expected.push_back(site.expected);
+                    masks.push_back(site.reject_mask);
+                }
+                gpu_ws_set_masked_reject_sites(addresses.data(), expected.data(),
+                    masks.data(), (int)addresses.size());
             }
             {
                 std::vector<uint32_t> addresses, expected;

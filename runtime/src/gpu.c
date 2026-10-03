@@ -274,7 +274,7 @@ void gpu_ws_set_precise_nclip(int on) {
      * PGXP correction is disabled. Re-derive the internal transport arm. */
     gpu_pgxp_rederive_enable();
 }
-int gpu_ws_precise_nclip_enabled(void) { return ws_precise_nclip_cfg && ws_active(); }
+int gpu_ws_precise_nclip_enabled(void) { return ws_precise_nclip_cfg && (ws_active() || ws_nw_extra() > 0); }
 void gpu_ws_set_gameplay_state_gate(uint32_t addr,
                                     const uint32_t *values, int nvalues) {
     if (nvalues < 0) nvalues = 0;
@@ -858,6 +858,71 @@ int psx_ws_cull_bltz_hi(uint32_t v) {
  * wide-surface scissor clips the overflow. Vanilla loaded value at 4:3. */
 uint32_t psx_ws_xclip_bound(uint32_t vanilla) {
     return psx_ws_x_margin() > 0 ? 0x7FFFFFFFu : vanilla;
+}
+
+#include "ws_masked_reject.h"
+typedef struct {
+    uint32_t address, expected, mask;
+} WsMaskedRejectSite;
+static WsMaskedRejectSite ws_masked_reject_sites[WS_EXPLICIT_CULL_SITES_MAX];
+static int ws_masked_reject_n;
+void gpu_ws_set_masked_reject_sites(const uint32_t *addresses,
+    const uint32_t *expected, const uint32_t *masks, int count) {
+    if (count < 0 || count > WS_EXPLICIT_CULL_SITES_MAX) {
+        fprintf(stderr, "psxrecomp: invalid masked reject site count %d\n", count);
+        abort();
+    }
+    ws_masked_reject_n = count;
+    for (int i = 0; i < count; ++i) {
+        ws_masked_reject_sites[i].address = addresses[i] & 0x1FFFFFFFu;
+        ws_masked_reject_sites[i].expected = expected[i];
+        ws_masked_reject_sites[i].mask = masks[i];
+    }
+}
+int psx_ws_masked_reject(uint32_t flags, uint32_t mask) {
+    return psx_ws_masked_reject_value(flags, mask, psx_ws_x_margin());
+}
+int psx_ws_masked_reject_site(uint32_t pc, uint32_t instr,
+    uint32_t flags, int vanilla) {
+    for (int i = 0; i < ws_masked_reject_n; ++i) {
+        const WsMaskedRejectSite *s = &ws_masked_reject_sites[i];
+        if (s->address == (pc & 0x1FFFFFFFu) && s->expected == instr)
+            return psx_ws_masked_reject(flags, s->mask);
+    }
+    return vanilla;
+}
+
+static WsMaskedRejectSite ws_nclip_sites[WS_EXPLICIT_CULL_SITES_MAX];
+static int ws_nclip_site_count;
+static uint64_t ws_nclip_rescues;
+uint64_t gpu_ws_native_wide_nclip_rescues(void) { return ws_nclip_rescues; }
+void psx_mod_set_native_wide_nclip_sites(const uint32_t* addresses,
+    const uint32_t* expected, int count) {
+    if (count < 0 || count > WS_EXPLICIT_CULL_SITES_MAX) abort();
+    for (int i = 0; i < count; ++i) {
+        const uint32_t op = expected[i] >> 26, rt = (expected[i] >> 16) & 31;
+        if (!((op == 1 && rt <= 1) || ((op == 6 || op == 7) && rt == 0))) abort();
+        ws_nclip_sites[i].address = addresses[i] & 0x1FFFFFFFu;
+        ws_nclip_sites[i].expected = expected[i];
+    }
+    ws_nclip_site_count = count;
+    ws_nclip_rescues = 0;
+}
+extern int gte_nclip_native_wide_sign(int32_t mac0, int* sign);
+int psx_ws_nclip_branch(uint32_t pc, uint32_t instr, int32_t mac0, int vanilla) {
+    if (psx_ws_x_margin() <= 0 || !gpu_ws_precise_nclip_enabled()) return vanilla;
+    for (int i = 0; i < ws_nclip_site_count; ++i) {
+        if (ws_nclip_sites[i].address != (pc & 0x1FFFFFFFu) ||
+            ws_nclip_sites[i].expected != instr) continue;
+        int sign;
+        if (!gte_nclip_native_wide_sign(mac0, &sign)) return vanilla;
+        const uint32_t op = instr >> 26;
+        const int result = op == 6 ? sign <= 0 : op == 7 ? sign > 0 :
+            ((instr >> 16) & 1) ? sign >= 0 : sign < 0;
+        if (result != vanilla) ++ws_nclip_rescues;
+        return result;
+    }
+    return vanilla;
 }
 
 typedef struct {
@@ -3920,6 +3985,8 @@ static void parse_vertex(uint32_t word, int32_t* x, int32_t* y) {
 
 extern int gte_geometry_correction_enabled(void);
 static int s_texture_correction_enabled = 0;
+static int s_native_wide_projection_correction = 0;
+static uint64_t s_native_wide_projection_vertices = 0;
 extern int gte_precision_load_word(uint32_t addr, uint32_t packed,
                                    int32_t *x16, int32_t *y16, uint16_t *z);
 
@@ -3928,7 +3995,44 @@ extern int gte_precision_load_word(uint32_t addr, uint32_t packed,
 void gpu_pgxp_rederive_enable(void) {
     pgxp_set_enabled(s_texture_correction_enabled ||
                      gte_geometry_correction_enabled() ||
-                     ws_precise_nclip_cfg);
+                     ws_precise_nclip_cfg ||
+                     s_native_wide_projection_correction);
+}
+
+void psx_mod_set_native_wide_projection_correction(int enabled) {
+    s_native_wide_projection_correction = enabled ? 1 : 0;
+    s_native_wide_projection_vertices = 0;
+    gpu_pgxp_rederive_enable();
+}
+
+int gpu_ws_native_wide_projection_correction(uint64_t *vertices) {
+    if (vertices) *vertices = s_native_wide_projection_vertices;
+    return s_native_wide_projection_correction;
+}
+
+/* The PS1 clamps each projected X independently. At a wider FOV that can
+ * bend an otherwise planar quad, even while both clamped vertices remain
+ * outside the viewport. Recover only a proven saturated projection. An
+ * ordinary CPU coordinate, a modified packet, and a missing depth stay stock.
+ * The +/-4096 transport endpoints themselves are clamped, so reject them. */
+static int native_wide_projection_x(uint32_t addr, uint32_t word,
+                                    int32_t raw_x, int32_t raw_y,
+                                    int32_t *x16) {
+    if (!s_native_wide_projection_correction || ws_nw_extra() <= 0 ||
+        (raw_x != -1024 && raw_x != 1023) || addr == UINT32_MAX)
+        return 0;
+    int32_t px, py;
+    uint16_t z;
+    if (!gte_precision_load_word(addr, word, &px, &py, &z) || !z ||
+        (py >> 16) != raw_y || px <= -4096 * 65536 ||
+        px >= 4096 * 65536 - 1)
+        return 0;
+    if ((raw_x == -1024 && (px >> 16) >= -1024) ||
+        (raw_x == 1023 && (px >> 16) <= 1023))
+        return 0;
+    *x16 = px;
+    s_native_wide_projection_vertices++;
+    return 1;
 }
 
 void gpu_texture_correction_set(int enabled) {
@@ -3959,7 +4063,8 @@ uint32_t gpu_texture_correction_hits(void) {
 static void prepare_precise_triangle(int i0, int i1, int i2,
                                      const int32_t vx[3], const int32_t vy[3]) {
     gr_set_perspective_triangle(0, 0.0f, 0.0f, 0.0f);
-    if (!gte_geometry_correction_enabled()) {
+    const int geometry = gte_geometry_correction_enabled();
+    if (!geometry && !s_native_wide_projection_correction) {
         gr_set_precise_triangle(0, 0,0, 0,0, 0,0);
         return;
     }
@@ -3975,15 +4080,21 @@ static void prepare_precise_triangle(int i0, int i1, int i2,
                             : gp0_cmd_source_addr + (uint32_t)idx[i] * 4u;
         int32_t px, py;
         uint16_t sz;
-        if (pgxp_get_precise_vertex(addr, word, raw_x, raw_y,
+        px = raw_x * 65536;
+        py = raw_y * 65536;
+        if (geometry && pgxp_get_precise_vertex(addr, word, raw_x, raw_y,
                                     &px, &py, &sz) != PGXP_SRC_NATIVE) {
             any_precise = 1;
             n_precise++;
         }
+        /* Native-wide edge recovery is not PGXP: it does not count in n_precise. */
+        if (native_wide_projection_x(addr, word, raw_x, raw_y, &px))
+            any_precise = 1;
         fx[i] = (int32_t)((int64_t)px + (int64_t)(vx[i] - raw_x) * 65536);
         fy[i] = (int32_t)((int64_t)py + (int64_t)(vy[i] - raw_y) * 65536);
     }
-    pgxp_note_triangle(n_precise);   /* G1.1 crack exposure: mixed share */
+    if (geometry)
+        pgxp_note_triangle(n_precise);   /* G1.1 crack exposure: mixed share */
     if (!any_precise) {
         gr_set_precise_triangle(0, 0,0, 0,0, 0,0);
         return;

@@ -21,6 +21,11 @@ static CPUState *seen_cpu;
 static uint32_t seen_address, cycles;
 static int32_t bound(int32_t x) { return x * 2; }
 static int margin120(void) { return 120; }
+static int packed_reject(uint32_t flags, uint32_t mask) { return (flags & mask) != 0; }
+static int nclip_branch(uint32_t pc, uint32_t word, int32_t mac0, int vanilla) {
+    assert(pc == 0x80021EAC && word == 0x1900FFCF && mac0 == 0 && vanilla == 1);
+    return 0;
+}
 static void advance(uint32_t n) { cycles += n; }
 static int entry(CPUState *cpu, uint32_t address) {
     assert(cycles == 17); seen_cpu = cpu; seen_address = address;
@@ -63,6 +68,18 @@ int main(void) {
     assert(psx_ws_cull_lui_hi(0x0200u) == ((0x0200u + 120u) << 16));
     assert(psx_ws_cull_bltz_hi((uint32_t)-120 << 16) == 0);
     assert(psx_ws_cull_bltz_hi((uint32_t)-121 << 16) == 1);
+    /* Newly cached modules forward the guarded packed predicate. Missing
+     * callbacks retain the original reject, rather than widening unsafely. */
+    assert(psx_ws_masked_reject(0xFE00u, 0xFFFF0000u) == 1);
+    callbacks.ws_masked_reject = packed_reject;
+    overlay_init(&callbacks);
+    assert(psx_ws_masked_reject(0xFE00u, 0xFFFF0000u) == 0);
+    assert(psx_ws_masked_reject(0xFF00FE00u, 0xFFFF0000u) == 1);
+    assert(psx_ws_masked_reject(0u, 0xFFFF0000u) == 0);
+    assert(psx_ws_nclip_branch(0x80021EAC, 0x1900FFCF, 0, 1) == 1);
+    callbacks.ws_nclip_branch = nclip_branch;
+    overlay_init(&callbacks);
+    assert(psx_ws_nclip_branch(0x80021EAC, 0x1900FFCF, 0, 1) == 0);
     return 0;
 }
 '''

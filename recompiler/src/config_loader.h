@@ -806,6 +806,12 @@ struct BiosConfig {
     // now REJECTS a [runtime] block rather than silently ignoring it.
 };
 
+struct WidescreenMaskedRejectSite {
+    uint32_t address = 0;
+    uint32_t expected = 0;
+    uint32_t reject_mask = 0;
+};
+
 struct GameConfig {
     std::filesystem::path config_path;
     std::filesystem::path project_root;
@@ -1291,6 +1297,10 @@ struct GameConfig {
     // [widescreen.cull] clip_edge_width -- the screen width a right-edge clip
     // bound equals. 0 = the first screen_w_imms entry (0x140 by default).
     uint32_t ws_cull_clip_edge_width = 0;
+    // Full-word-guarded BNE reg,zero rejects of packed-coordinate flags.
+    // While wide, retain only the specified rejection axes; GPU scissoring
+    // clips the expanded horizontal view. Identity at 4:3/menus/FMV.
+    std::vector<WidescreenMaskedRejectSite> ws_cull_masked_reject_sites;
     // [[draw_distance.clamp]] -- opt-in "keep far geometry" clamps. Empty by
     // default; inert until a mod switches them on; regen required.
     std::vector<DrawDistanceClampSite> draw_distance_clamp_sites;

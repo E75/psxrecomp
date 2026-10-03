@@ -68,6 +68,10 @@ uint32_t psx_cyc_lwc2_read(CPUState *cpu, uint32_t a) { (void)cpu; return psx_re
 int dirty_ram_is_dirty(uint32_t phys) { (void)phys; return 1; }
 int mdec_recently_active(uint32_t f) { (void)f; return 0; }
 void gte_execute(CPUState *cpu, uint32_t cmd) { (void)cpu; (void)cmd; }
+static int precise_sign_valid, precise_sign;
+int gte_nclip_native_wide_sign(int32_t mac0, int* sign) {
+    (void)mac0; *sign = precise_sign; return precise_sign_valid;
+}
 void gte_precision_store_word(uint32_t a, uint8_t r) { (void)a; (void)r; }
 uint32_t gte_read_ctrl(CPUState *cpu, uint8_t r) { (void)cpu; (void)r; return 0; }
 uint32_t gte_read_data(CPUState *cpu, uint8_t r) { (void)cpu; (void)r; return 0; }
@@ -389,11 +393,64 @@ static void test_interpreter(void) {
     gpu_ws_set_clip_edge_x_load_sites(NULL, 0, 0);
 }
 
+static void test_masked_reject(void) {
+    CPUState cpu = {0};
+    memset(test_ram, 0, sizeof test_ram);
+    const uint32_t site = CODE + 0x200;
+    const uint32_t word = i_type(5, A0, 0, 3);
+    const uint32_t mask = 0xFFFF0000u;
+    gpu_ws_set_masked_reject_sites(&site, &word, &mask, 1);
+    for (int margin = 0; margin <= 53; margin += 53) {
+        gpu_ws_set_margin_override(margin);
+        cpu.gpr[A0] = 0xFE00u;
+        CHECK(branch_taken(&cpu, site, word) == (margin == 0), "packed X reject at margin %d", margin);
+        CHECK(cpu.gpr[A0] == 0xFE00u, "packed cull preserves guest flags");
+        CHECK(branch_taken(&cpu, site + 0x40, word), "unlisted packed branch stays vanilla");
+        cpu.gpr[V0] = 0;
+        CHECK(branch_taken(&cpu, site, i_type(5, A0, V0, 3)), "mismatched word stays vanilla");
+        cpu.gpr[A0] = 0xFF00FE00u;
+        CHECK(branch_taken(&cpu, site, word), "packed Y reject retained at margin %d", margin);
+        cpu.gpr[A0] = 0;
+        CHECK(!branch_taken(&cpu, site, word), "zero flags stay visible");
+    }
+    gpu_ws_set_masked_reject_sites(NULL, NULL, NULL, 0);
+    gpu_ws_set_margin_override(-1);
+}
+
+static void test_wide_nclip_branches(void) {
+    CPUState cpu = {0};
+    ws_xnum = 3; ws_xden = 4; ws_mode = 0;
+    ws_precise_nclip_cfg = 1;
+    precise_sign_valid = 1; precise_sign = 1;
+    const uint32_t sites[] = {CODE+0x300,CODE+0x340,CODE+0x380};
+    const uint32_t words[] = {i_type(6,A0,0,3),i_type(7,A0,0,3),i_type(1,A0,1,3)};
+    psx_mod_set_native_wide_nclip_sites(sites,words,3);
+    for (int margin=0;margin<=53;margin+=53) {
+        gpu_ws_set_margin_override(margin);
+        cpu.gpr[A0]=0;
+        CHECK(branch_taken(&cpu,sites[0],words[0]) == (margin==0), "BLEZ native zero vs precise positive");
+        CHECK(branch_taken(&cpu,sites[1],words[1]) == (margin!=0), "BGTZ native zero vs precise positive");
+        CHECK(cpu.gpr[A0]==0, "winding helper leaves guest MAC0 register alone");
+        cpu.gpr[A0]=(uint32_t)-1;
+        CHECK(branch_taken(&cpu,sites[2],words[2]) == (margin!=0), "BGEZ exact keep predicate");
+        CHECK(branch_taken(&cpu,sites[0]+4,words[0]), "unlisted twin stays native");
+        cpu.gpr[V0]=(uint32_t)-1;
+        CHECK(branch_taken(&cpu,sites[0],i_type(6,V0,0,3)), "wrong full word stays native");
+    }
+    precise_sign_valid=0; gpu_ws_set_margin_override(53); cpu.gpr[A0]=0;
+    CHECK(branch_taken(&cpu,sites[0],words[0]), "missing precision stays native");
+    psx_mod_set_native_wide_nclip_sites(NULL,NULL,0);
+    ws_precise_nclip_cfg=0; ws_xnum=ws_xden=1;
+    gpu_ws_set_margin_override(-1);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) s_capture_path = argv[1];
     test_store();
     test_helpers();
     test_interpreter();
+    test_masked_reject();
+    test_wide_nclip_branches();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

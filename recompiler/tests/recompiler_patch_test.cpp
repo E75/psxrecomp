@@ -822,6 +822,12 @@ void codegen_tests() {
               std::string::npos &&
               nclip_exact.find("ws exact nclip") != std::string::npos,
           "codegen emits title-scoped exact NCLIP predicate");
+    for (uint32_t word : {0x18400002u, 0x1C400002u, 0x04410002u}) {
+        const std::string guarded = generate_first_instruction(word, {}, false, nclip_exact_config);
+        check(guarded.find("psx_ws_nclip_branch(0x80010000u,") != std::string::npos &&
+              guarded.find("guarded wide nclip") != std::string::npos,
+              "inclusive/keep NCLIP branches carry full-word identity to the host");
+    }
 
     PSXRecomp::CodeGenConfig plane_nx_config;
     plane_nx_config.ws_cull_plane_nx_sites.insert(0x80010000u);
