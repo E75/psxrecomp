@@ -160,6 +160,8 @@ uint32_t gl_renderer_pass_plan(uint32_t p, uint32_t s, uint32_t *a,
     return 0;
 }
 static int s_open_passes, s_kept;
+static uint32_t s_stereo_mask;
+static uint64_t s_stereo_published;
 void gl_renderer_pass_begin_diag(GLRenderPassBeginDiag *out) {
     memset(out, 0, sizeof *out);
 }
@@ -179,6 +181,31 @@ uint32_t gl_renderer_pass_leaks(void) { return 0; }
 int gl_renderer_pass_verify_vram(void) { return 1; }
 void gl_renderer_pass_note_cost(uint64_t t) { (void)t; }
 void gl_renderer_pass_service_presents(void) {}
+uint32_t g_psx_vblank_cycles = 564480u;
+uint32_t gl_renderer_stereo_unavailable(void) { return 0; }
+int gl_renderer_stereo_begin(int x, int y, int w, int h, int reuse) {
+    return gl_renderer_pass_begin(x, y, w, h, 0, 0, reuse);
+}
+int gl_renderer_stereo_end(uint32_t eye, int keep) {
+    gl_renderer_pass_end(0, keep);
+    if (keep) s_stereo_mask |= 1u << eye;
+    return 1;
+}
+void gl_renderer_stereo_stage_reset(void) { s_stereo_mask = 0; }
+void gl_renderer_stereo_reset(void) { s_stereo_mask = 0; s_stereo_published = 0; }
+int gl_renderer_stereo_set_presentation(uint32_t mode) { return mode <= 1; }
+static int32_t s_view[3];
+void gte_render_view_get(int32_t xyz[3]) { memcpy(xyz, s_view, sizeof s_view); }
+void gte_render_view_set(const int32_t xyz[3]) { memcpy(s_view, xyz, sizeof s_view); }
+static PSXModRenderView s_pose;
+void gte_render_pose_get(PSXModRenderView *v) { *v = s_pose; memcpy(v->translation, s_view, sizeof s_view); }
+void gte_render_pose_set(const PSXModRenderView *v) { s_pose = *v; memcpy(s_view, v->translation, sizeof s_view); }
+int gl_renderer_stereo_publish(uint64_t id, uint64_t cycle, const int32_t view[2][3]) {
+    (void)cycle; (void)view;
+    if (s_stereo_mask != 3u) return 0;
+    s_stereo_published = id;
+    return 1;
+}
 
 /* ---- an overlay shard's cycle shim (overlay_dispatch_preamble.c.inc) --- */
 static uint32_t s_shard_pending;
@@ -267,6 +294,19 @@ static int mod_leaky_pass_fn(struct CPUState *cpu, void *user, uint32_t alpha_q1
     (void)cpu; (void)user; (void)alpha_q16;
     s_mod_entry.depth++;
     s_mod_entry.plugin = user;
+    return 1;
+}
+
+static int stereo_draw(struct CPUState *cpu, void *user, uint32_t eye) {
+    Frames frames = {5, user && eye == PSX_MOD_EYE_RIGHT};
+    CHECK(psx_mod_render_view_offset(eye ? -24 : 24, 0, 0), "view setter inside eye");
+    PSXModRenderView v = {0}; v.struct_size = sizeof v;
+    v.rotation_q12[2] = 4096; v.rotation_q12[4] = 4096; v.rotation_q12[6] = -4096;
+    v.projection = 1; v.fx_q16 = 200 << 16; v.fy_q16 = 100 << 16;
+    v.translation[0] = eye ? -24 : 24;
+    CHECK(psx_mod_render_view(&v), "full scoped pose accepted");
+
+    guest_frame(cpu, &frames, 0);
     return 1;
 }
 
@@ -404,6 +444,34 @@ int main(void) {
     CHECK(st.nesting_repairs == 1, "a normal return needs no repair");
     check_live(&live, "after a normal pass");
     CHECK(st.verify_mismatch == 0, "a balanced pass verifies clean");
+
+    /* One complete pair, then a right eye that aborts five guest frames deep.
+     * The left staging eye never replaces the previous published pair. */
+    {
+        PSXModStereoFrame frame = {sizeof frame, 2, 0, 0, 320, 240};
+        RenderStereoStats stereo;
+        uint64_t kept;
+        snap(&live);
+        CHECK(psx_mod_render_stereo(&cpu, &frame, stereo_draw, NULL) == 1,
+              "complete stereo pair publishes");
+        kept = s_stereo_published;
+        CHECK(psx_mod_render_stereo(&cpu, &frame, stereo_draw, &runaway) == 0,
+              "right-eye watchdog discards the entire pair");
+        render_stereo_get_stats(&stereo);
+        render_pass_get_stats(&st);
+        CHECK(s_stereo_published == kept && s_stereo_mask == 0,
+              "right-eye abort retains previous pair and clears staging");
+        CHECK(stereo.last_failed_eye == 1 && stereo.retained_pair_id == kept,
+              "failure producer records retained pair and right eye");
+        CHECK(s_view[0] == 0 && s_view[1] == 0 && s_view[2] == 0,
+              "watchdog restores render-view ambient");
+        CHECK(!s_pose.struct_size && !s_pose.projection, "watchdog restores rotation/projection");
+        CHECK(st.verify_mismatch == 0 && !g_psx_render_pass_active,
+              "aborted eye restores machine state and time");
+        check_live(&live, "after right-eye watchdog");
+        CHECK(psx_mod_render_stereo(&cpu, &frame, stereo_draw, NULL) == 1,
+              "a later pair recovers after the watchdog");
+    }
 
     /* 3. Verify mode flags a pass that leaves the nesting unbalanced (the
      * restore would otherwise hide it), and still restores it. */

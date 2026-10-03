@@ -98,6 +98,28 @@ uint64_t gl_renderer_pass_backups_reused(void);
 uint32_t gl_renderer_pass_image_textures(uint64_t *bytes);
 /* Debug: dump the images of the next `generations` shown frames as PNGs. */
 void     gl_renderer_pass_dump_arm(const char *dir, int generations);
+/* Stereo shares the VRAM transaction, not the temporal generation/schedule. */
+uint32_t gl_renderer_stereo_unavailable(void);
+int gl_renderer_stereo_begin(int x, int y, int w, int h, int reuse_backup);
+int gl_renderer_stereo_end(uint32_t eye, int keep);
+void gl_renderer_stereo_stage_reset(void);
+int gl_renderer_stereo_publish(uint64_t pair_id, uint64_t guest_cycle,
+                                const int32_t eye_view[2][3]);
+void gl_renderer_stereo_reset(void);
+int gl_renderer_stereo_set_presentation(uint32_t mode);
+void gl_renderer_stereo_dump_arm(const char *dir, int pairs);
+/* Bounded metadata for explicitly requested PNG evidence, queried over TCP. */
+typedef struct GLRenderStereoCapture {
+    uint64_t pair_id, guest_cycle;
+    uint32_t width, height;
+    int32_t view_offset[2][3];
+} GLRenderStereoCapture;
+uint32_t gl_renderer_stereo_capture_records(GLRenderStereoCapture *out, uint32_t capacity);
+typedef struct GLRenderStereoDiag {
+    uint64_t pair_id, guest_cycle, presents;
+    uint32_t valid, staged_mask, mode, width, height;
+} GLRenderStereoDiag;
+void gl_renderer_stereo_diag(GLRenderStereoDiag *out);
 uint64_t gl_renderer_perf_ticks(void);
 uint64_t gl_renderer_perf_frequency(void);
 int gl_renderer_interpolation_owns_cadence(void);
@@ -300,6 +322,7 @@ enum {
     GL_PRES_CPU   = 2,   /* CPU-readout quad present (24-bit FMV / forced)     */
     GL_PRES_BLANK = 3,   /* display-disabled black present                     */
     GL_PRES_INTERP = 4,  /* host-refresh interpolation sub-present              */
+    GL_PRES_STEREO = 5,  /* simultaneous left/right side-by-side pair           */
 };
 
 typedef struct {
