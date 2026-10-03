@@ -35,6 +35,12 @@ if(BUILD_TESTING)
         src/netplay_exit_reason.c)
     target_include_directories(netplay_exit_reason_test PRIVATE include)
     add_test(NAME netplay_exit_reason_test COMMAND netplay_exit_reason_test)
+    # Host relay over ICE: transport choice + lobby seat -> session slot map.
+    add_executable(netplay_ice_hub_test
+        tests/test_netplay_ice_hub.c
+        src/netplay_ice_hub.c)
+    target_include_directories(netplay_ice_hub_test PRIVATE include)
+    add_test(NAME netplay_ice_hub_test COMMAND netplay_ice_hub_test)
     add_executable(ws_scene_hold_test tests/test_ws_scene_hold.c)
     target_include_directories(ws_scene_hold_test PRIVATE include)
     add_test(NAME ws_scene_hold_test COMMAND ws_scene_hold_test)
