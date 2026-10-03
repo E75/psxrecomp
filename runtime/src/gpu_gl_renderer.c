@@ -5798,7 +5798,8 @@ static void interp_present_source_interval(void) {
 typedef struct PassGen {
     int      valid;
     int      promoted;
-    int      x, y, w, h;          /* guest VRAM rect */
+    int      x, y, w, h;          /* captured VRAM rect (what is presented) */
+    int      rx, ry, rw, rh;      /* the plugin's pass rect (backed up)     */
     int      tex_w, tex_h;        /* slot size (hr pixels; wide band if wide) */
     int      source_path;         /* GL_PRES_VRAM or GL_PRES_WIDE */
     uint32_t n;                   /* images: [0] = the game's own */
@@ -5809,6 +5810,12 @@ typedef struct PassGen {
 } PassGen;
 static int      s_pass_flip_shown = 0;
 static PassGen  s_pgen[2];
+/* The part of the displayed buffer the VRAM present captures, relative to the
+ * display origin: the whole display, or (netplay local viewport) this peer's
+ * half. A pass captures the same part of its own buffer, so its images are
+ * what the presenter would have shown. */
+static int      s_present_crop_dx = 0, s_present_crop_dy = 0;
+static int      s_present_crop_w = 0, s_present_crop_h = 0;
 /* Slot textures are made as slots fill: [0, s_pgen_alloc_n) exist, all at
  * s_pgen_alloc_w x h. A generation never fills past pass_slot_cap, so two
  * generations stay inside its budget whatever the internal scale. */
@@ -6223,15 +6230,24 @@ int gl_renderer_pass_begin(int x, int y, int w, int h, int open_gen,
 
     wide = s_interp_source_path == GL_PRES_WIDE && g_wide_w > 0 &&
            pass_wide_fbo_for(x) != 0;
-    tw = (wide ? g_wide_w : w) * S;
-    th = h * S;
+    /* Capture what the presenter captures of a displayed buffer: its crop
+     * (the VRAM path) applied to the pass rect. */
+    int cx = x, cy = y, cw = w, ch = h;
+    if (!wide && s_present_crop_w > 0 && s_present_crop_h > 0) {
+        cx = x + s_present_crop_dx; cy = y + s_present_crop_dy;
+        cw = s_present_crop_w;      ch = s_present_crop_h;
+        if (cx < x || cy < y || cx + cw > x + w || cy + ch > y + h) return 0;
+    }
+    tw = (wide ? g_wide_w : cw) * S;
+    th = ch * S;
     gi = 1 - s_pgen_cur;
     g = &s_pgen[gi];
     if (open_gen) {
         if (tw != s_interp_w || th != s_interp_h) return 0;  /* not what is presented */
         if (!pass_gen_reserve(gi, 1u, tw, th)) return 0;
         memset(g, 0, sizeof *g);
-        g->x = x; g->y = y; g->w = w; g->h = h;
+        g->x = cx; g->y = cy; g->w = cw; g->h = ch;
+        g->rx = x; g->ry = y; g->rw = w; g->rh = h;
         g->tex_w = tw; g->tex_h = th;
         g->source_path = wide ? GL_PRES_WIDE : GL_PRES_VRAM;
         g->period = period_vblanks ? period_vblanks : 1u;
@@ -6240,8 +6256,8 @@ int gl_renderer_pass_begin(int x, int y, int w, int h, int open_gen,
         g->phase[0] = 0;
         g->n = 1;
         g->valid = 1;
-    } else if (!g->valid || g->promoted || g->x != x || g->y != y ||
-               g->w != w || g->h != h) {
+    } else if (!g->valid || g->promoted || g->rx != x || g->ry != y ||
+               g->rw != w || g->rh != h) {
         return 0;
     }
 
@@ -6960,6 +6976,14 @@ int gl_renderer_present_hold_last(void) {
 void gl_renderer_present_vram(int disp_x, int disp_y, int w, int h, int linear,
                               int force_4_3) {
     if (!s_ctx || !s_raster_ok) return;
+    {
+        GpuDisplayInfo di;
+        gpu_get_display_info(&di);
+        s_present_crop_dx = disp_x - (int)di.display_x;
+        s_present_crop_dy = disp_y - (int)di.display_y;
+        s_present_crop_w = w;
+        s_present_crop_h = h;
+    }
     flush_flat_batch();
     flush_tex_batch();
     flush_cpu_upload();
