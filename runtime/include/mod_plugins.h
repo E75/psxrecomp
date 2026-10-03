@@ -106,6 +106,12 @@ uint32_t psx_mod_alloc_gpu_dma_memory(uint32_t size, uint32_t alignment);
  */
 int psx_mod_set_main_ram_8mb(int enabled);
 
+/* Session-owned precision selection, applied immediately and retained across
+ * renderer initialization. Disabling a mod restores the player's base config
+ * at the next session; explicit debug environment overrides still take priority.
+ * Does not modify persistent settings or architectural GTE state. */
+void psx_mod_set_pgxp_precision(int enabled, int cpu_mode);
+
 /* Current per-side widescreen reveal in native game pixels (zero at 4:3). */
 int32_t psx_mod_widescreen_x_margin(void);
 
