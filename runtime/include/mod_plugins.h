@@ -112,8 +112,11 @@ int psx_mod_set_main_ram_8mb(int enabled);
  * Does not modify persistent settings or architectural GTE state. */
 void psx_mod_set_pgxp_precision(int enabled, int cpu_mode);
 
-/* Current per-side widescreen reveal in native game pixels (zero at 4:3). */
+/* World-culling envelope in native game pixels, including safety guards. */
 int32_t psx_mod_widescreen_x_margin(void);
+/* Configured per-side visible reveal, excluding culling guards; zero at 4:3.
+ * Use for screen-space layout, including the first frame of a new scene. */
+int32_t psx_mod_widescreen_view_x_margin(void);
 
 /* Opt into render-only recovery of saturated horizontal GTE projections in
  * native-wide gameplay. Requires exact packet-address/word provenance and
