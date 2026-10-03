@@ -30,7 +30,7 @@ extern "C" {
  * Pad blob (8 bytes):
  *   [0..1] buttons LE u16 (PSX active-low)
  *   [2] lx  [3] ly  [4] rx  [5] ry
- *   [6] analog (0/1)
+ *   [6] controller type (0 digital, 1 DualShock, 2 JogCon)
  *   [7] connected (always 1)
  */
 
@@ -39,7 +39,7 @@ extern "C" {
 typedef struct PsxNetPad {
     uint16_t buttons;
     uint8_t  lx, ly, rx, ry;
-    uint8_t  analog;
+    uint8_t  analog; /* SIO_PAD_*; legacy field name retained on the wire */
     uint8_t  connected;
 } PsxNetPad;
 

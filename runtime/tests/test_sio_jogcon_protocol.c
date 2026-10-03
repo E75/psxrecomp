@@ -1,5 +1,5 @@
-/* DualShock rumble protocol regression: 0x4D map negotiation must feed the
- * small/large motor bytes from later 0x42 polls to the frontend-facing state. */
+/* JogCon wire protocol regression: ID, buttons, signed steering, direction,
+ * command response, and rollback state. */
 
 #include "sio.h"
 #include <stdint.h>
@@ -128,73 +128,103 @@ static void poll_with_motors(int slot, uint8_t small, uint8_t large) {
 }
 
 int main(void) {
-    static const uint8_t unassigned[6] = {
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
-    };
-    static const uint8_t standard[6] = {
-        0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF
-    };
-    uint8_t small = 0, large = 0;
-
     sio_init();
     sio_connect_pad(0);
-    sio_set_pad_analog(0, 1, 0x80, 0x80, 0x80, 0x80);
+    sio_set_pad_type(0, SIO_PAD_JOGCON, 0x80, 0x80, 0x80, 0x80);
     sio_set_pad_config_capable(0, 1);
+    sio_set_pad_state_slot(0, 0xFFEFu);
 
-    enter_config(0);
-    set_rumble_map(0, standard, unassigned);
-    set_rumble_map(0, standard, standard);
-    exit_config(0);
+    EXPECT("poll.prefix", 0xFF, xchg(0, 0x01));
+    EXPECT("poll.id", 0xE3, xchg(0, 0x42));
+    EXPECT("poll.status", 0x5A, xchg(0, 0x00));
+    EXPECT("poll.buttons.low", 0xEF, xchg(0, 0x00));
+    EXPECT("poll.buttons.high", 0xFF, xchg(0, 0x00));
+    EXPECT("poll.center", 0x00, xchg(0, 0x00));
+    EXPECT("poll.center.sign", 0x00, xchg(0, 0x00));
+    EXPECT("poll.center.direction", 0x00, xchg(0, 0x00));
+    EXPECT("poll.reserved", 0x00, xchg(0, 0x00));
 
-    poll_with_motors(0, 0x01, 0x80);
-    sio_get_pad_rumble(0, &small, &large);
-    EXPECT("rumble.small.on", 0x01, small);
-    EXPECT("rumble.large.strength", 0x80, large);
+    sio_set_pad_type(0, SIO_PAD_DUALSHOCK, 0x80, 0x80, 0x80, 0x80);
+    EXPECT("switch.dualshock.prefix", 0xFF, xchg(0, 0x01));
+    EXPECT("switch.dualshock.id", 0x73, xchg(0, 0x42));
+    for (int i = 0; i < 7; i++) (void)xchg(0, 0x00);
+    sio_set_pad_type(0, SIO_PAD_JOGCON, 0x80, 0x80, 0x80, 0x80);
+    EXPECT("switch.jogcon.prefix", 0xFF, xchg(0, 0x01));
+    EXPECT("switch.jogcon.id", 0xE3, xchg(0, 0x42));
+    for (int i = 0; i < 7; i++) (void)xchg(0, 0x00);
+
+    sio_set_pad_sticks(0, 0x00, 0x80, 0x80, 0x80);
+    EXPECT("left.prefix", 0xFF, xchg(0, 0x01));
+    EXPECT("left.id", 0xE3, xchg(0, 0x42));
+    (void)xchg(0, 0x00); (void)xchg(0, 0x00); (void)xchg(0, 0x00);
+    EXPECT("left.position", 0x80, xchg(0, 0x00));
+    EXPECT("left.sign", 0xFF, xchg(0, 0x00));
+    EXPECT("left.direction", 0x02, xchg(0, 0x00));
+    (void)xchg(0, 0x00);
 
     const uint32_t snapshot_len = sio_snapshot_bytes();
     uint8_t *snapshot = (uint8_t *)malloc(snapshot_len);
-    if (!snapshot) {
-        fprintf(stderr, "FAIL snapshot allocation\n");
-        return 1;
-    }
+    if (!snapshot) return 1;
     sio_snapshot_write(snapshot);
+    EXPECT("snapshot.steering.field", 0x80, snapshot[snapshot_len - 4]);
 
-    poll_with_motors(0, 0x00, 0x00);
-    sio_get_pad_rumble(0, &small, &large);
-    EXPECT("rumble.small.off", 0x00, small);
-    EXPECT("rumble.large.off", 0x00, large);
+    sio_set_pad_sticks(0, 0xFF, 0x80, 0x80, 0x80);
+    EXPECT("right.prefix", 0xFF, xchg(0, 0x01));
+    EXPECT("right.id", 0xE3, xchg(0, 0x42));
+    (void)xchg(0, 0x00); (void)xchg(0, 0x00); (void)xchg(0, 0x00);
+    EXPECT("right.position", 0x7F, xchg(0, 0x00));
+    EXPECT("right.sign", 0x00, xchg(0, 0x00));
+    EXPECT("right.direction", 0x01, xchg(0, 0x00));
+    (void)xchg(0, 0x00);
 
-    EXPECT("snapshot.current.read", 1,
-           sio_snapshot_read(snapshot, snapshot_len));
-    sio_get_pad_rumble(0, &small, &large);
-    EXPECT("snapshot.current.small", 0x01, small);
-    EXPECT("snapshot.current.large", 0x80, large);
-
-    /* JogCon rollback fields add four bytes for a two-seat build. Removing
-     * those restores the preceding rumble-era format; removing all twenty
-     * trailing bytes models a pre-rumble state. */
-    EXPECT("snapshot.pre-jogcon.read", 1,
-           sio_snapshot_read(snapshot, snapshot_len - 4));
-    EXPECT("snapshot.pre-jogcon.small", 0x01,
-           (sio_get_pad_rumble(0, &small, &large), small));
-    EXPECT("snapshot.pre-jogcon.large", 0x80, large);
-    EXPECT("snapshot.legacy.read", 1,
-           sio_snapshot_read(snapshot, snapshot_len - 20));
-    sio_get_pad_rumble(0, &small, &large);
-    EXPECT("snapshot.legacy.small", 0x00, small);
-    EXPECT("snapshot.legacy.large", 0x00, large);
+    EXPECT("rollback.restore", 1, sio_snapshot_read(snapshot, snapshot_len));
+    EXPECT("rollback.type", SIO_PAD_JOGCON, sio_get_pad_analog(0));
+    {
+        uint8_t *roundtrip = (uint8_t *)malloc(snapshot_len);
+        if (roundtrip) {
+            sio_snapshot_write(roundtrip);
+            EXPECT("rollback.steering.field", snapshot[snapshot_len - 4],
+                   roundtrip[snapshot_len - 4]);
+            free(roundtrip);
+        }
+    }
+    sio_set_pad_sticks(0, 0xFF, 0x80, 0x80, 0x80);
+    EXPECT("rollback.prefix", 0xFF, xchg(0, 0x01));
+    EXPECT("rollback.id", 0xE3, xchg(0, 0x42));
+    (void)xchg(0, 0x00); (void)xchg(0, 0x00); (void)xchg(0, 0x00);
+    EXPECT("rollback.position", 0x7F, xchg(0, 0x00));
+    (void)xchg(0, 0x00);
+    EXPECT("rollback.direction", 0x01, xchg(0, 0x00));
+    (void)xchg(0, 0x00); (void)xchg(0, 0x00);
     free(snapshot);
 
-    poll_with_motors(0, 0x01, 0xFF);
-    sio_set_pad_connected(0, 0);
-    sio_get_pad_rumble(0, &small, &large);
-    EXPECT("rumble.disconnect.small", 0x00, small);
-    EXPECT("rumble.disconnect.large", 0x00, large);
+    /* Set config mode, bind the game command into the first input byte, and
+     * check that the following response reports command 2 in the upper nibble. */
+    EXPECT("config.prefix", 0xFF, xchg(0, 0x01));
+    EXPECT("config.enter.id", 0xE3, xchg(0, 0x43));
+    EXPECT("config.enter.status", 0x5A, xchg(0, 0x00));
+    (void)xchg(0, 0x01);
+    finish_six_data_bytes(0, 1);
+    EXPECT("map.prefix", 0xFF, xchg(0, 0x01));
+    EXPECT("map.id", 0xF3, xchg(0, 0x4D));
+    (void)xchg(0, 0x00);
+    for (int i = 0; i < 6; i++) (void)xchg(0, i == 0 ? 0x00 : 0xFF);
+    EXPECT("motor.poll.prefix", 0xFF, xchg(0, 0x01));
+    EXPECT("motor.poll.id", 0xF3, xchg(0, 0x42));
+    (void)xchg(0, 0x00);
+    (void)xchg(0, 0x21);
+    for (int i = 0; i < 5; i++) (void)xchg(0, 0x00);
+    EXPECT("motor.status.prefix", 0xFF, xchg(0, 0x01));
+    EXPECT("motor.status.id", 0xF3, xchg(0, 0x42));
+    for (int i = 0; i < 5; i++) (void)xchg(0, 0x00);
+    EXPECT("motor.command", 0x20, xchg(0, 0x00));
+    (void)xchg(0, 0x00);
 
+    sio_set_pad_connected(0, 0);
     if (failures) {
-        fprintf(stderr, "DualShock rumble protocol: %d failure(s)\n", failures);
+        fprintf(stderr, "JogCon SIO protocol: %d failure(s)\n", failures);
         return 1;
     }
-    fprintf(stderr, "DualShock rumble protocol: passed\n");
+    fprintf(stderr, "JogCon SIO protocol: passed\n");
     return 0;
 }

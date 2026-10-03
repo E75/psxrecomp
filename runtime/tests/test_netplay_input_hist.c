@@ -69,6 +69,15 @@ int main(void)
     CHECK(pad2.lx == (uint8_t)(0x80 + 40), "roundtrip lx");
     CHECK(pad2.analog == 1u, "roundtrip analog");
 
+    pad.analog = SIO_PAD_JOGCON;
+    pad.lx = 0xFF;
+    netplay_ih_pad_to_frame(&pad, 13, 0, &f);
+    CHECK(f.analog == SIO_PAD_JOGCON, "JogCon type from pad");
+    netplay_ih_frame_to_pad(&f, &pad2);
+    CHECK(pad2.analog == SIO_PAD_JOGCON && pad2.lx == 0xFF,
+          "JogCon type/steering roundtrip");
+    pad = pad2;
+
     /* Digital MotK path must not become DualShock through hist. */
     {
         RNetRbFrame dig;

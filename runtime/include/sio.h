@@ -54,6 +54,9 @@ extern "C" {
 /* SIO0 register base: 0x1F801040 */
 #define SIO_BASE 0x1F801040
 
+/* Emulated controller identity used by the game's SIO poll. */
+enum { SIO_PAD_DIGITAL = 0, SIO_PAD_DUALSHOCK = 1, SIO_PAD_JOGCON = 2 };
+
 /* Phase 1.0c-v2: cycle-paced SIO model. Default 1 enables the dispatch-
  * loop quantum tick (gated by g_sio_timing_active). Set to 0 to revert
  * to legacy access-paced behavior across all callers. */
@@ -141,6 +144,10 @@ void sio_set_pad_state_slot(int slot, uint16_t buttons);
  * 0x73, with the four 0..255 stick axes appended; 0x80 = centred). */
 void sio_set_pad_analog(int slot, int enabled,
                         uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry);
+/* Set one of SIO_PAD_* explicitly. JogCon consumes left-X as a signed
+ * steering position, centered at 0x80; the remaining axes are ignored. */
+void sio_set_pad_type(int slot, int type,
+                      uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry);
 
 /* Per-frame input plumbing for the coherent-DualShock model. Update the sticks
  * every frame with sio_set_pad_sticks; change the reported pad type with
@@ -149,7 +156,8 @@ void sio_set_pad_analog(int slot, int enabled,
  * flip can never split a poll or a config handshake. Do NOT call
  * sio_set_pad_analog every frame for the type — that is for boot/hotplug only. */
 void sio_set_pad_sticks(int slot, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry);
-void sio_request_pad_type(int slot, int analog);
+/* Request SIO_PAD_* at the next idle, non-config bus boundary. */
+void sio_request_pad_type(int slot, int type);
 
 /* Connect / disconnect a logical pad (0 .. PSX_MAX_PLAYERS-1). By default no
  * pads are connected during initial BIOS boot. */

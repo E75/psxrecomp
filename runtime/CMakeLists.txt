@@ -376,22 +376,18 @@ if(BUILD_TESTING)
     target_link_libraries(hd_texture_pack_test PRIVATE Threads::Threads)
     add_test(NAME hd_texture_pack_test COMMAND hd_texture_pack_test)
 
-    # Registered since before this change, but it did NOT LINK on origin/master:
-    # sio.c had grown psx_read_word / psx_get_cycle_count / i_mask /
-    # g_debug_last_store_pc references that this test's stub block never gained,
-    # so `ctest` in a runtime tree could not even build. The stubs are added now
-    # (a registered test that cannot compile is worse than an unregistered one —
-    # it breaks the whole suite's build), which exposes a real disagreement:
-    # 27 checks fail, starting with enter.id expected=0x73 (DualShock analog ID)
-    # actual=0xFF (no device). Constant-clock and monotonic-clock stubs give
-    # byte-identical results, so the cycle stub is not the discriminator — this
-    # is the SIO/peripheral axis, not the harness. DISABLED until owned.
+    # Standalone serial-pad protocol tests use explicit SIO/device stubs; they
+    # cover both DualShock rumble and JogCon wire/state behavior.
     add_executable(sio_dualshock_rumble_test
         tests/test_sio_dualshock_rumble.c
         src/sio.c)
     target_include_directories(sio_dualshock_rumble_test PRIVATE include)
     add_test(NAME sio_dualshock_rumble_test COMMAND sio_dualshock_rumble_test)
-    set_tests_properties(sio_dualshock_rumble_test PROPERTIES DISABLED TRUE)
+    add_executable(sio_jogcon_protocol_test
+        tests/test_sio_jogcon_protocol.c
+        src/sio.c)
+    target_include_directories(sio_jogcon_protocol_test PRIVATE include)
+    add_test(NAME sio_jogcon_protocol_test COMMAND sio_jogcon_protocol_test)
 
     add_executable(gte_register_access_test
         tests/test_gte_register_access.cpp

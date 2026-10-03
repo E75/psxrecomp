@@ -210,7 +210,7 @@ static void sc_apply_rows(const ScBoundary *b)
             sio_set_pad_config_capable(i, 0);
         sio_set_pad_state_slot(i, r->buttons);
         sio_set_pad_sticks(i, r->lx, r->ly, r->rx, r->ry);
-        sio_request_pad_type(i, r->analog ? 1 : 0);
+        sio_request_pad_type(i, r->analog <= SIO_PAD_JOGCON ? r->analog : 0);
     }
 }
 
