@@ -19,6 +19,7 @@ static void check(unsigned word, unsigned pc, const char* expected) {
     CHECK(n == (int)std::strlen(expected));
 }
 int main() {
+    check(0,0,"NOP");
     check(0x012A4020,0,"ADD      $t0, $t1, $t2");
     check(0x012A0018,0,"MULT     $t1, $t2");
     check(0x012A001B,0,"DIVU     $t1, $t2");

@@ -65,6 +65,8 @@ extern "C" int psx_disasm_one(uint32_t word, uint32_t addr, char* out, int cap) 
     int n;
     if (d.format == InstrFormat::UNKNOWN) {
         n = std::snprintf(out, (size_t)cap, ".word 0x%08X", word);
+    } else if (word == 0u) {
+        n = std::snprintf(out, (size_t)cap, "NOP");
     } else if (std::strcmp(m, "JR") == 0) {
         n = std::snprintf(out, (size_t)cap, "%-8s %s", m, rn(d.rs));
     } else if (std::strcmp(m, "JALR") == 0) {
