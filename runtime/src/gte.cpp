@@ -3,16 +3,19 @@
 #include "cpu_state.h"
 #include "nd_intro_ot.h"
 #include "pgxp.h"
+#include "render_pass_projection.h"
 #include <algorithm>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+extern "C" int psx_netplay_active(void);
 
 extern "C" uint32_t psx_read_word(uint32_t addr);
 extern "C" int gpu_ws_precise_nclip_enabled(void);
 /* overlay_loader.c: nonzero while an overlay shadow diff (interpreter record
  * plus native replay of one candidate) is running. */
 extern "C" int psx_overlay_shadow_diff_active(void);
+extern "C" { int (*g_psx_projection_command)(CPUState*, uint32_t) = nullptr; }
 
 namespace PSXRecomp {
 namespace GTE {
@@ -239,7 +242,9 @@ static uint32_t s_geom_miss_ambig = 0;   /* recorded, but not unambiguously    *
 static uint32_t s_speculative_depth = 0;
 static int s_speculative_timeline_invalidated = 0;
 
+static void gte_nclip_precision_invalidate();
 static void gte_geom_generation_advance(void) {
+    gte_nclip_precision_invalidate();
     if (++s_geom_generation == 0) {
         if (s_geom_cache)
             std::memset(s_geom_cache, 0, GEOM_CACHE_SIZE * sizeof(GeomVertex));
@@ -373,6 +378,76 @@ extern "C" int gte_geometry_correction_lookup(uint32_t packed,
     return 1;
 }
 
+/* Render-pass checkpoint for the gte.cpp side of precision tracking: the
+ * position cache entries a pass writes are journaled and put back, and the
+ * speculative bracket depth is restored (a watchdog abort can leave one open).
+ * The PGXP shadows roll back through pgxp_checkpoint_*. */
+struct GeomJournalEntry { GeomVertex *slot; GeomVertex old; };
+static uint32_t          s_gck_depth = 0;
+static GeomJournalEntry *s_gck_log = nullptr;
+static size_t            s_gck_n = 0, s_gck_cap = 0;
+static int               s_gck_lossy = 0;
+static uint32_t          s_gck_generation = 0;
+static GeomVertex       *s_gck_cache = nullptr;
+static uint32_t          s_gck_spec_depth = 0;
+static int               s_gck_spec_invalidated = 0;
+
+static uint8_t *s_gck_bits = nullptr;          /* one bit per cache slot */
+
+static inline void geom_ck_note(GeomVertex *slot) {
+    if (s_gck_depth == 0) return;
+    if (s_geom_cache != s_gck_cache || !s_gck_bits) { s_gck_lossy = 1; return; }
+    size_t i = (size_t)(slot - s_geom_cache);
+    uint8_t bit = (uint8_t)(1u << (i & 7u));
+    if (s_gck_bits[i >> 3] & bit) return;      /* journaled this pass        */
+    if (s_gck_n == s_gck_cap) {
+        size_t cap = s_gck_cap ? s_gck_cap * 2 : 16384;
+        GeomJournalEntry *p = (GeomJournalEntry *)std::realloc(
+            s_gck_log, cap * sizeof *p);
+        if (!p) { s_gck_lossy = 1; return; }
+        s_gck_log = p;
+        s_gck_cap = cap;
+    }
+    s_gck_bits[i >> 3] |= bit;
+    s_gck_log[s_gck_n].slot = slot;
+    s_gck_log[s_gck_n].old = *slot;
+    s_gck_n++;
+}
+
+extern "C" void gte_precision_checkpoint_begin(void) {
+    pgxp_checkpoint_begin();
+    if (s_gck_depth++ != 0) return;
+    if (s_geom_cache && !s_gck_bits)
+        s_gck_bits = (uint8_t *)std::calloc(GEOM_CACHE_SIZE / 8u, 1);
+    s_gck_n = 0;
+    s_gck_generation = s_geom_generation;
+    s_gck_cache = s_geom_cache;
+    s_gck_spec_depth = s_speculative_depth;
+    s_gck_spec_invalidated = s_speculative_timeline_invalidated;
+}
+
+extern "C" void gte_precision_checkpoint_rollback(void) {
+    if (s_gck_depth != 0 && --s_gck_depth == 0) {
+        for (size_t i = s_gck_n; i-- > 0;) {
+            GeomVertex *slot = s_gck_log[i].slot;
+            *slot = s_gck_log[i].old;
+            size_t k = (size_t)(slot - s_gck_cache);
+            s_gck_bits[k >> 3] &= (uint8_t)~(1u << (k & 7u));
+        }
+        s_gck_n = 0;
+        s_speculative_depth = s_gck_spec_depth;
+        s_speculative_timeline_invalidated = s_gck_spec_invalidated;
+        if (s_gck_lossy || s_geom_cache != s_gck_cache ||
+            s_geom_generation < s_gck_generation) {
+            s_gck_lossy = 0;
+            gte_geom_generation_advance();     /* fail closed                 */
+        } else {
+            s_geom_generation = s_gck_generation;
+        }
+    }
+    pgxp_checkpoint_rollback();
+}
+
 static inline void geom_note(uint32_t packed, int64_t x16, int64_t y16) {
     if (s_speculative_depth != 0 || s_gte_replay_sandbox || !s_geom_enabled ||
         !s_geom_cache) return;
@@ -385,6 +460,7 @@ static inline void geom_note(uint32_t packed, int64_t x16, int64_t y16) {
     int64_t slot = geom_slot(packed);
     if (slot < 0) return;
     GeomVertex &entry = s_geom_cache[slot];
+    geom_ck_note(&entry);
     if (entry.generation == s_geom_generation) {
         /* Already occupied this generation: only flag ambiguity if the stored
          * sub-pixel position actually DIFFERS — re-projecting the same vertex
@@ -522,6 +598,7 @@ struct GteRtpRec {
     int16_t  RT[9];
     int32_t  TR[3];
     uint16_t H;  int32_t OFX, OFY;
+    uint16_t Hs;   /* H after fov_scale (== H when identity); SXY0..2 used Hs */
     int32_t  SXY0, SXY1, SXY2;
     uint16_t SZ1, SZ2, SZ3;
     uint32_t FLAG;
@@ -587,7 +664,7 @@ static void gte_rtp_record(const GTEState* g, uint32_t cmd) {
     for (int i = 0; i < 3; i++) { e->V0[i]=g->V0[i]; e->V1[i]=g->V1[i]; e->V2[i]=g->V2[i]; }
     for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) e->RT[r*3+c]=g->RT[r][c];
     for (int i = 0; i < 3; i++) e->TR[i]=g->TR[i];
-    e->H=(uint16_t)gte_h_scaled(g); e->OFX=g->OFX; e->OFY=g->OFY;
+    e->H=g->H; e->Hs=(uint16_t)gte_h_scaled(g); e->OFX=g->OFX; e->OFY=g->OFY;
     e->SXY0=g->SXY[0]; e->SXY1=g->SXY[1]; e->SXY2=g->SXY[2];
     e->SZ1=g->SZ[1]; e->SZ2=g->SZ[2]; e->SZ3=g->SZ[3];
     e->FLAG=g->FLAG;
@@ -761,12 +838,12 @@ extern "C" int gte_latch_dump_json(char* out, int outsz, int max_count) {
         if (pos>outsz-700) break;
         pos+=snprintf(out+pos,outsz-pos,
             "%s{\"frame\":%u,\"ra\":\"0x%08X\",\"cmd\":\"0x%08X\","
-            "\"RT\":[%d,%d,%d,%d,%d,%d,%d,%d,%d],\"TR\":[%d,%d,%d],\"H\":%u,"
+            "\"RT\":[%d,%d,%d,%d,%d,%d,%d,%d,%d],\"TR\":[%d,%d,%d],\"H\":%u,\"Hs\":%u,"
             "\"V0\":[%d,%d,%d],\"V1\":[%d,%d,%d],\"V2\":[%d,%d,%d],"
             "\"S0\":[%d,%d],\"S1\":[%d,%d],\"S2\":[%d,%d],\"SZ\":[%u,%u,%u],\"FLAG\":\"0x%08X\"}",
             emitted?",":"", e->frame, e->caller_ra, e->cmd,
             e->RT[0],e->RT[1],e->RT[2],e->RT[3],e->RT[4],e->RT[5],e->RT[6],e->RT[7],e->RT[8],
-            e->TR[0],e->TR[1],e->TR[2],(unsigned)e->H,
+            e->TR[0],e->TR[1],e->TR[2],(unsigned)e->H,(unsigned)e->Hs,
             e->V0[0],e->V0[1],e->V0[2], e->V1[0],e->V1[1],e->V1[2], e->V2[0],e->V2[1],e->V2[2],
             gte_sxx(e->SXY0),gte_syy(e->SXY0),gte_sxx(e->SXY1),gte_syy(e->SXY1),
             gte_sxx(e->SXY2),gte_syy(e->SXY2),(unsigned)e->SZ1,(unsigned)e->SZ2,(unsigned)e->SZ3,e->FLAG);
@@ -798,13 +875,13 @@ extern "C" int gte_rtp_ring_dump_json(char* out, int outsz, int max_count,
             "%s{\"seq\":%u,\"frame\":%u,\"ra\":\"0x%08X\",\"cmd\":\"0x%08X\","
             "\"V0\":[%d,%d,%d],\"V1\":[%d,%d,%d],\"V2\":[%d,%d,%d],"
             "\"RT\":[%d,%d,%d,%d,%d,%d,%d,%d,%d],\"TR\":[%d,%d,%d],"
-            "\"H\":%u,\"OFX\":%d,\"OFY\":%d,\"render_view\":%u,"
+            "\"H\":%u,\"Hs\":%u,\"OFX\":%d,\"OFY\":%d,\"render_view\":%u,"
             "\"S0\":[%d,%d],\"S1\":[%d,%d],\"S2\":[%d,%d],"
             "\"SZ\":[%u,%u,%u],\"FLAG\":\"0x%08X\"}",
             emitted?",":"", e->seq, e->frame, e->caller_ra, e->cmd,
             e->V0[0],e->V0[1],e->V0[2], e->V1[0],e->V1[1],e->V1[2], e->V2[0],e->V2[1],e->V2[2],
             e->RT[0],e->RT[1],e->RT[2],e->RT[3],e->RT[4],e->RT[5],e->RT[6],e->RT[7],e->RT[8],
-            e->TR[0],e->TR[1],e->TR[2], (unsigned)e->H, e->OFX, e->OFY, e->render_view,
+            e->TR[0],e->TR[1],e->TR[2], (unsigned)e->H, (unsigned)e->Hs, e->OFX, e->OFY, e->render_view,
             sxx(e->SXY0),syy(e->SXY0), sxx(e->SXY1),syy(e->SXY1), sxx(e->SXY2),syy(e->SXY2),
             (unsigned)e->SZ1,(unsigned)e->SZ2,(unsigned)e->SZ3, e->FLAG);
         emitted++;
@@ -845,6 +922,17 @@ extern "C" void gte_set_fov_scale(int num, int den) {
 
 static int32_t gte_h_scaled(const GTEState* gte) {
     if (s_h_scale_num == s_h_scale_den) return gte->H;
+    if (gte->H == 0) return 0;   // a guest H of 0 is a real (degenerate) projection
+    // Both peers must compute identical SXY/MAC/FLAG: the scale is a local
+    // display option, so it is forced to identity for the whole netplay session.
+    if (psx_netplay_active()) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            fprintf(stderr, "psxrecomp: fov_scale ignored while netplay is active\n");
+        }
+        return gte->H;
+    }
     int64_t h = (int64_t)gte->H * s_h_scale_num / s_h_scale_den;
     if (h < 1) h = 1;
     if (h > 0xFFFF) h = 0xFFFF;
@@ -966,7 +1054,20 @@ void gte_rtps_internal(GTEState* gte, int16_t* V, bool setMac0, uint32_t instr) 
     dome_probe_note(gte->SZ[3]);   /* locate the dome draw fn (far-vertex tally) */
     int64_t sx16 = gte->OFX + xterm;
     int64_t sy16 = gte->OFY + (int64_t)gte->IR2 * h_div_sz;
-    if (s_render_pose.projection && gte->SZ[3]) {
+    /* Render-view projection override (psx_mod_render_view, projection=1).
+     * Only reachable inside a render-pass sandbox (set/restored by render_pass.c,
+     * rolled back with the GTE state), so no guest-visible state outside the
+     * pass sees it. It is an explicit per-eye projection and REPLACES the guest
+     * X/Y projection above entirely: the [video] fov_scale scaled-H, the
+     * widescreen/dome squash and guest H do not feed it, except through
+     * projection_h_ref, which deliberately multiplies the focal lengths by
+     * (fov-scaled guest H) / projection_h_ref so a plugin can follow the game's
+     * own per-draw H changes (and fov_scale) when it asks to. The guest-formula
+     * PGXP shadows below (precise projection, projection tracking) describe the
+     * guest projection and are skipped under the override. SZ, MAC0/IR0 depth
+     * cue and the divide flags still come from the guest division above. */
+    const bool proj_override = s_render_pose.projection && gte->SZ[3];
+    if (proj_override) {
         sx16 = (int64_t)gte->OFX + s_render_pose.cx_delta_q16 +
                (int64_t)gte->IR1 * s_render_pose.fx_q16 / gte->SZ[3];
         sy16 = (int64_t)gte->OFY + s_render_pose.cy_delta_q16 +
@@ -1000,7 +1101,7 @@ void gte_rtps_internal(GTEState* gte, int16_t* V, bool setMac0, uint32_t instr) 
          * to native. Shadow only; the guest SXY, MAC and FLAG above are
          * already final. Skipped while the hooks record nothing (speculative
          * passes), where the shadow would be dropped anyway. */
-        if (pgxp_preserve_projection() && pgxp_active()) {
+        if (!proj_override && pgxp_preserve_projection() && pgxp_active()) {
             int32_t ex16, ey16;
             if (pgxp_project_precise(mac1, mac2, mac3, shift, gte->IR1, gte->IR2,
                                      gte->SZ[3], gte_h_scaled(gte), gte->OFX, gte->OFY,
@@ -1011,6 +1112,20 @@ void gte_rtps_internal(GTEState* gte, int16_t* V, bool setMac0, uint32_t instr) 
             }
         }
         pgxp_gte_push_sxy(px16, py16, gte->SZ[3], (uint32_t)gte->SXY[2]);
+        if (!proj_override && pgxp_projection_tracking() && shift == 12 && !lm) {
+            const double z = (double)(mac3 >> 12);
+            const double h_proj = (double)gte_h_scaled(gte);
+            double hx = (double)gte->MAC1 * h_proj;
+            if (do_squash) hx = hx * s_ws_xnum / s_ws_xden;
+            else if (s_ws_dome_on && s_ws_dome_num != s_ws_dome_den &&
+                     !gpu_ws_present_native_43() && gte->SZ[3] >= s_ws_far_threshold)
+                hx = hx * s_ws_dome_num / s_ws_dome_den;
+            PGXPProjection projection = {
+                (float)(gte->OFX / 65536.0 * z + hx),
+                (float)(gte->OFY / 65536.0 * z + (double)gte->MAC2 * h_proj),
+                (float)z, (float)h_proj / 2.0f};
+            pgxp_gte_set_projection(&projection);
+        }
     }
     geom_note((uint32_t)gte->SXY[2], sx16, sy16);
 
@@ -1050,6 +1165,15 @@ static int8_t s_nclip_last_precise_sign = 0;
 static bool s_nclip_last_precise_valid = false;
 static bool s_nclip_last_horizontal_saturated = false;
 static uint32_t s_nclip_last_generation;
+static int32_t s_nclip_previous_native;
+static int8_t s_nclip_previous_precise_sign;
+static bool s_nclip_previous_precise_valid;
+static bool s_nclip_previous_horizontal_saturated;
+static uint32_t s_nclip_previous_generation;
+static void gte_nclip_precision_invalidate() {
+    s_nclip_last_precise_valid = false;
+    s_nclip_previous_precise_valid = false;
+}
 extern "C" void gte_nclip_precise_stats(uint64_t *hits, uint64_t *fallbacks,
                                         uint64_t *disagreements) {
     if (hits) *hits = s_nclip_precise_hits;
@@ -1066,6 +1190,17 @@ extern "C" int gte_nclip_native_wide_sign(int32_t native_mac0, int* sign) {
         native_mac0 != s_nclip_last_native || s_nclip_last_generation != s_geom_generation ||
         s_gte_replay_sandbox || s_speculative_depth != 0) return 0;
     *sign = s_nclip_last_precise_sign;
+    return 1;
+}
+/* Some guarded quad consumers save two MAC0 values before branching. Their
+ * first branch must use the first command's provenance, even when both native
+ * results are equal. This is explicitly selected by the title, never searched
+ * as a fallback for arbitrary architectural MAC0 readers. */
+extern "C" int gte_nclip_native_wide_previous_sign(int32_t native_mac0, int* sign) {
+    if (!s_nclip_previous_precise_valid || !s_nclip_previous_horizontal_saturated ||
+        native_mac0 != s_nclip_previous_native || s_nclip_previous_generation != s_geom_generation ||
+        s_gte_replay_sandbox || s_speculative_depth != 0) return 0;
+    *sign = s_nclip_previous_precise_sign;
     return 1;
 }
 
@@ -1113,6 +1248,12 @@ void gte_nclip(GTEState* gte, uint32_t instr) {
             }
         }
     }
+    s_nclip_previous_native = s_nclip_last_native;
+    s_nclip_previous_precise_sign = s_nclip_last_precise_sign;
+    s_nclip_previous_precise_valid = s_nclip_last_precise_valid &&
+        !s_gte_replay_sandbox && s_speculative_depth == 0;
+    s_nclip_previous_horizontal_saturated = s_nclip_last_horizontal_saturated;
+    s_nclip_previous_generation = s_nclip_last_generation;
     s_nclip_last_native = out;
     s_nclip_last_precise_valid = false;
     s_nclip_last_horizontal_saturated = false;
@@ -1975,6 +2116,11 @@ static void gte_run_command(PSXRecomp::GTE::GTEState* gte, uint32_t cmd) {
 
 extern "C" void gte_execute(CPUState* cpu, uint32_t cmd) {
     using namespace PSXRecomp::GTE;
+    uint32_t original_transform[8];
+    const bool observe_projection = g_psx_projection_command &&
+        ((cmd & 63) == 1 || (cmd & 63) == 0x30);
+    if (observe_projection) std::memcpy(original_transform, cpu->gte_ctrl, sizeof original_transform);
+    const bool intermediate = observe_projection && g_psx_projection_command(cpu, cmd);
 #ifndef PSX_NO_DEBUG_TOOLS
     if (!s_gte_replay_sandbox) s_gte_exec_count++;
     s_gte_caller_ra = cpu->gpr[31];   /* dome-locate probe: game fn that issued this projection */
@@ -2008,6 +2154,7 @@ extern "C" void gte_execute(CPUState* cpu, uint32_t cmd) {
 #endif
 
     gte_export_cpu_state(cpu, &gte);
+    if (intermediate) std::memcpy(cpu->gte_ctrl, original_transform, sizeof original_transform);
 
 #ifndef PSX_NO_DEBUG_TOOLS
     /* ND digit-rain: NdIntroSiblingFaceLoop (jal 0x80069CC4; $ra stays 69C3C..

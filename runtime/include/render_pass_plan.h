@@ -65,6 +65,18 @@ int render_pass_select(const uint32_t *phases, uint32_t n, double p,
 int render_pass_gen_select(const uint32_t *phases, uint32_t n, double p,
                            uint32_t *lo, uint32_t *hi, float *t);
 
+/* Is the flip the FLIP source just saw the one a pending generation waits
+ * for? A generation built for the next flip (`shown` 0, the canonical PsyQ
+ * VSync-then-PutDispEnv point) waits for the display to flip to its own rect.
+ * One built for a frame already on screen (`shown` 1: the game flips each
+ * frame as soon as it is drawn) waits for the next flip, to any other rect;
+ * its images then show one game frame late. Either way the presented
+ * geometry must still be the one the generation was captured at. */
+int render_pass_gen_flip_matches(int shown, int gen_x, int gen_y,
+                                 int gen_source, int gen_w, int gen_h,
+                                 int flip_x, int flip_y, int flip_source,
+                                 int flip_w, int flip_h);
+
 /* Exponential moving average used for the per-pass host cost. */
 double render_pass_ema(double current, double sample);
 
@@ -149,7 +161,9 @@ int render_pass_store_to(const RenderPassStoreTarget *t, uint32_t addr,
 /* VRAM journal for a pass's writes outside its display rect
  * (gpu_gl_renderer.c pass_refuse_write): the CPU-side policy and the CPU VRAM
  * rows. The renderer keeps the matching GPU copies per entry. */
-#define RENDER_PASS_JOURNAL_MAX 16
+/* Jersey Devil streams more than 16 small texture/CLUT rectangles in a draw.
+ * Keep the transaction bounded, but allow the complete set to roll back. */
+#define RENDER_PASS_JOURNAL_MAX 64
 enum {
     RENDER_PASS_VRAM_ALLOW = 0,    /* inside the rect, empty, or already journaled */
     RENDER_PASS_VRAM_JOURNAL = 1,  /* outside: back up, then allow */
@@ -177,6 +191,15 @@ int  render_pass_journal_add(RenderPassJournal *j, const uint16_t *vram,
 void render_pass_journal_rollback(RenderPassJournal *j, uint16_t *vram,
                                   int vram_w);
 void render_pass_journal_free(RenderPassJournal *j);
+
+/* A published stereo pair may stay on screen only while the plugin keeps
+ * submitting. The pair is fresh while the guest clock is within
+ * RENDER_PASS_STEREO_MAX_AGE_VBLANKS vblanks after the pair's capture cycle
+ * (3x the 8-vblank maximum draw cadence). A clock behind the pair (savestate
+ * or rollback load) is stale. */
+#define RENDER_PASS_STEREO_MAX_AGE_VBLANKS 24u
+int render_pass_stereo_pair_fresh(uint64_t pair_cycle, uint64_t now_cycle,
+                                  uint32_t vblank_cycles);
 
 #ifdef __cplusplus
 }

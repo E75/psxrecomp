@@ -20,6 +20,9 @@
 #include <string.h>
 #include "cpu_state.h"
 
+/* No mod hooks are active in this interpreter fixture. */
+uint32_t g_psx_mod_instruction_hooks = 0;
+
 int interp_test_step(CPUState *cpu, uint32_t pc, uint32_t insn, uint32_t *next);
 
 /* Clock, cache and device seams read on the charged path. */

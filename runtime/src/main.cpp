@@ -17,6 +17,7 @@
 #include "psx_interpreter.h"
 #include "cdrom.h"
 #include "fntrace.h"
+#include "render_pass_projection.h"
 #include "text_xlate.h"
 #include "boot_state.h"
 #include "bios_hle.h"
@@ -67,12 +68,12 @@ extern "C" void psx_event_step_conservative_env_init(void);
 #include "psx_netplay_rb.h"
 #include "psx_selfcheck.h"
 #include "psx_lobby_client.h"
-#include "recomp_net/host_relay.h" /* RNetHostRelayStatus for the launcher relay line */
 #include "netplay_bios_settle.h"
 #include "netplay_exit_reason.h"
 #include "host_time.h"
 #if defined(PSX_HAS_RECOMP_NET)
 #include "recomp_net/auth.h"
+#include "recomp_net/host_relay.h" /* RNetHostRelayStatus for the launcher relay line */
 #include "recomp_net/chat_filter.h" /* chat profanity mask, LAN rooms too */
 #endif
 #include "spu.h"
@@ -1043,6 +1044,7 @@ extern "C" void psx_frontend_on_savestate_notify(int is_load, int slot, int ok) 
 }
 
 extern "C" void psx_frontend_on_savestate_loaded(void) {
+    psx_projection_reset_session();
     mod_runtime_on_savestate_loaded();
 #ifndef PSX_NO_DEBUG_TOOLS
     debug_server_note_savestate_loaded();
@@ -1233,6 +1235,12 @@ static inline int cfg_fmv_filter_to_launcher(int cfg_value) {
     return cfg_value + 1;
 }
 static int           g_video_texfilter = 0; /* 0=nearest, 1=bilinear */
+static int           g_mod_texfilter = -1;
+extern "C" void psx_mod_set_texture_filter(int mode) {
+    if(mode < 0 || mode > 2) return;
+    g_mod_texfilter = mode;
+    gr_set_texture_filter(mode);
+}
 /* Sub-pixel vertex precision + perspective-correct UVs (PGXP-style). Visual
  * only: the PS1-visible GTE SXY FIFO stays integer, so guest-side culling and
  * SXY readback are untouched. Default off = the faithful floor. */
@@ -1537,6 +1545,8 @@ extern "C" int psx_mod_set_adaptive_display_aspect(
 static PSXModSessionBaseline g_mod_owned_baseline;
 
 static void reset_mod_owned_presentation(void) {
+    g_mod_texfilter = -1;
+    gr_set_texture_filter(g_video_texfilter);
     PSXModSessionScalars live;
     live.video_vsync = g_video_vsync;
     live.frame_interpolation = g_frame_interpolation;
@@ -1567,6 +1577,7 @@ static void reset_mod_owned_presentation(void) {
     g_ws_adaptive_max_num = 16;
     g_ws_adaptive_max_den = 9;
     psx_mod_set_world_scene_predicate(nullptr);
+    gpu_ws_set_native_scene_predicate(nullptr);
     psx_mod_set_retained_scene_predicate(nullptr);
     psx_mod_set_adaptive_backdrop_preload(0);
     (void)psx_mod_set_draw_distance_clamp(0);
@@ -1903,13 +1914,18 @@ static int g_ws_projection_mode = -1;
 extern "C" void gte_set_fov_scale(int num, int den);
 
 static void refresh_widescreen_projection() {
+    if (g_ws_engaged && !fntrace_is_game_started()) {
+        g_ws_engaged = false;
+        g_ws_projection_mode = -1;
+        gte_set_display_aspect(4, 3);
+        gpu_ws_configure(4, 3, g_ws_anchor_addr, 0, 0);
+    }
     /* VR FOV: scale the GTE projection distance H (fov = 2*atan(w/(2H))).
      * Independent of the widescreen squash; identity by default. */
     if (g_fov_scale > 0.0 && g_fov_scale != 1.0)
         gte_set_fov_scale(1000, psx_projection_scale_denominator(g_fov_scale));
     else
         gte_set_fov_scale(1, 1);
-
     if (!g_ws_engaged) return;
 
     const bool wide = g_video_aspect_num * 3 != g_video_aspect_den * 4;
@@ -11172,6 +11188,7 @@ namespace {
     int ae_np_relay_status(void*, char* out, size_t out_cap) {
         if (!out || !out_cap) return 0;
         out[0] = '\0';
+#if defined(PSX_HAS_RECOMP_NET)
         if (g_lnch_hosting_lan || g_lnch_joined_lan || !psx_lobby_in_lobby()) return 0;
         RNetHostRelayStatus st;
         if (!psx_lobby_host_relay_status(&st)) return 0;
@@ -11215,6 +11232,9 @@ namespace {
             return 1;
         }
         return 0;
+#else
+        return 0; /* offline build: no lobby host relay */
+#endif
     }
     int ae_np_force_turn_set(void*, int force) {
         if (g_lnch_hosting_lan || g_lnch_joined_lan)
@@ -13869,10 +13889,6 @@ int main(int argc, char** argv) {
             g_video_aspect_num = gc.runtime.video_aspect_num;
             g_video_aspect_den = gc.runtime.video_aspect_den;
             g_fov_scale = psx_projection_scale_load_config(game_config_path);
-            if (const char* fov_env = std::getenv("PSX_GTE_FOV_SCALE")) {
-                double value;
-                if (psx_projection_scale_parse(fov_env, &value)) g_fov_scale = value;
-            }
             g_low_latency_input = gc.runtime.video_low_latency_input ? 1 : 0;
             gl_renderer_set_texture_window_batching(
                 gc.runtime.video_texture_window_batching ? 1 : 0);
@@ -14308,6 +14324,19 @@ int main(int argc, char** argv) {
         if (us.has_scanlines)      g_video_scanlines = us.scanlines;
         if (us.has_scanline_strength)
             g_video_scanline_strength = (float)us.scanline_strength;
+        /* fov_scale precedence: game.toml < settings.toml < PSX_GTE_FOV_SCALE.
+         * Bad values warn and leave the lower layer's value in place. */
+        if (us.has_fov_scale) {
+            if (psx_projection_scale_valid(us.fov_scale)) g_fov_scale = us.fov_scale;
+            else std::fprintf(stderr, "psxrecomp: settings.toml [video] fov_scale %g ignored "
+                                      "(must be > 0 and <= 8)\n", us.fov_scale);
+        }
+        if (const char* fov_env = std::getenv("PSX_GTE_FOV_SCALE")) {
+            double value;
+            if (psx_projection_scale_parse(fov_env, &value)) g_fov_scale = value;
+            else std::fprintf(stderr, "psxrecomp: PSX_GTE_FOV_SCALE=\"%s\" ignored "
+                                      "(must be a number > 0 and <= 8)\n", fov_env);
+        }
         if (us.has_auto_skip_fmv)  g_auto_skip_fmv   = us.auto_skip_fmv ? 1 : 0;
         /* turbo_loads is deliberately NOT restored from settings.toml. It is a
          * write-only latch: the launcher stopped drawing a Turbo loads row when
@@ -16057,7 +16086,7 @@ session_reboot:
                             (net_cfg.enabled && s_netplay_gl_present &&
                              gl_renderer_cpu_auth_dual());
     g_video_scale = gr_scale(); /* reflect any clamp / alloc fallback */
-    gr_set_texture_filter(g_video_texfilter);
+    gr_set_texture_filter(g_mod_texfilter < 0 ? g_video_texfilter : g_mod_texfilter);
     /* Sub-pixel vertex precision + perspective-correct UVs. Both default off;
      * with both off every setter below leaves the tracking caches disabled and
      * the draw path is the faithful integer one, unchanged. */

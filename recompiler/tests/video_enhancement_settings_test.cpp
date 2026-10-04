@@ -187,6 +187,30 @@ static void test_user_settings_round_trip() {
     fs::remove(p);
 }
 
+/* settings.toml [video] fov_scale: int and float TOML values read, absent stays
+ * absent, and a launcher save round-trips it (range checking is the runtime's). */
+static void test_user_settings_fov_scale() {
+    fs::path p = write_temp("psxrecomp_fov_settings.toml", "[video]\nfov_scale = 2\n");
+    auto us = PSXRecompV4::load_user_settings(p);
+    check(us.has_fov_scale && us.fov_scale == 2.0, "settings.toml integer fov_scale read");
+    fs::remove(p);
+    p = write_temp("psxrecomp_fov_settings_f.toml", "[video]\nfov_scale = 1.5\n");
+    us = PSXRecompV4::load_user_settings(p);
+    check(us.has_fov_scale && us.fov_scale == 1.5, "settings.toml float fov_scale read");
+    fs::remove(p);
+    p = write_temp("psxrecomp_fov_settings_s.toml", "[video]\nfov_scale = \"wide\"\n");
+    us = PSXRecompV4::load_user_settings(p);
+    check(!us.has_fov_scale, "non-numeric fov_scale leaves has_fov_scale false");
+    fs::remove(p);
+    PSXRecompV4::UserSettings out;
+    out.fov_scale = 1.25; out.has_fov_scale = true;
+    p = fs::temp_directory_path() / "psxrecomp_fov_roundtrip.toml";
+    check(PSXRecompV4::save_user_settings(p, out), "save_user_settings writes fov_scale");
+    auto back = PSXRecompV4::load_user_settings(p);
+    check(back.has_fov_scale && back.fov_scale == 1.25, "fov_scale survives a save/load round trip");
+    fs::remove(p);
+}
+
 /* Internal resolution (Settings -> Display): game.toml shipped default,
  * settings.toml precedence over the legacy factor, stable-id round trip,
  * and the legacy supersampling range widened to the runtime's 1..32. */
@@ -358,6 +382,7 @@ int main() {
     test_user_settings_read();
     test_user_settings_absent_key();
     test_user_settings_round_trip();
+    test_user_settings_fov_scale();
     test_texture_window_batching();
     test_pgxp_title_keys();
 

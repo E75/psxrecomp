@@ -2241,13 +2241,6 @@ class ProjectStudioApp:
             height=34,
             command=self._bulk_install_ci,
         ).pack(side="left", padx=8)
-        ctk.CTkButton(
-            relb,
-            text="Update CMake",
-            width=120,
-            height=34,
-            command=self._bulk_update_cmake,
-        ).pack(side="left")
         ctk.CTkLabel(
             relb,
             text="Dispatches release.yml per selected game repo (gh). "
@@ -4545,36 +4538,6 @@ class ProjectStudioApp:
             run,
             done_info="Release workflows dispatched — see activity log.",
             done_warn_prefix="Release dispatch finished with failures.",
-        )
-
-    def _bulk_update_cmake(self) -> None:
-        from .bulkops import bulk_update_cmake
-
-        repos = self._bulk_require_selection()
-        if repos is None:
-            return
-        dry = self._git_dry()
-        if not dry:
-            names = "\n".join(f"* {lab}" for lab, _ in repos)
-            if not messagebox.askyesno(
-                "Project Studio",
-                f"Sync CMakeLists.txt with the psxrecomp template and commit it "
-                f"(CMakeLists.txt only, not pushed) for {len(repos)} repo(s)?\n\n{names}",
-                parent=self.root,
-            ):
-                return
-
-        def run(*, jobs: int, on_repo) -> list:
-            return bulk_update_cmake(
-                repos, commit=True, push_remote=False, dry_run=dry, jobs=jobs, on_repo=on_repo
-            )
-
-        self._bulk_run_bg(
-            f"Bulk update CMake ({len(repos)} repos)",
-            run,
-            refresh_git=True,
-            done_info="Update CMake finished — see activity log.",
-            done_warn_prefix="Update CMake finished with failures.",
         )
 
     def _bulk_install_ci(self) -> None:

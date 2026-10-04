@@ -162,6 +162,16 @@ void pgxp_suppress_end(void);
  * sees. Shifts the shadow FIFO exactly like push_sxy (regs 12..15). */
 void pgxp_gte_push_sxy(int32_t x16, int32_t y16, uint16_t sz3, uint32_t packed);
 
+/* Host-only homogeneous screen projection, before SZ/SXY/divider saturation.
+ * x/z and y/z are screen pixels; signed z retains camera-plane crossings.
+ * Exact full-word copies carry it. Arithmetic/partial writes invalidate it. */
+typedef struct PGXPProjection { float x, y, z, near_z; } PGXPProjection;
+void pgxp_set_projection_tracking(int enabled);
+int pgxp_projection_tracking(void);
+void pgxp_gte_set_projection(const PGXPProjection *projection);
+int pgxp_load_projection(uint32_t addr, uint32_t packed, PGXPProjection *out);
+int pgxp_get_gte_projection(uint32_t index, uint32_t packed, PGXPProjection *out);
+
 /* Current SXY FIFO shadow (index 0..3 selects GTE data regs 12..15).
  * Returns nonzero when the shadow is live and carries X/Y precision. */
 int pgxp_get_gte_sxy(uint32_t index, int32_t *x16, int32_t *y16);
@@ -265,6 +275,12 @@ void pgxp_store_gte_reg(uint32_t addr, uint8_t reg);
  * nonzero when the tracked word matches `packed` AND carries a depth. */
 int pgxp_load_precise_word(uint32_t addr, uint32_t packed,
                            int32_t *x16, int32_t *y16, uint16_t *z);
+
+/* Render-pass checkpoint: journal every shadow a sandboxed pass mutates and
+ * put the shadows back when the sandbox restores the machine. Use through
+ * gte_precision_checkpoint_begin / _rollback (which also cover gte.cpp). */
+void pgxp_checkpoint_begin(void);
+void pgxp_checkpoint_rollback(void);
 
 /* --- test accessors (always compiled; trivial) ---------------------------- */
 

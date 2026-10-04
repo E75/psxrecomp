@@ -184,8 +184,21 @@ static DirtyRamLoadDelay s_ld;
 void dirty_ram_ld_delay_discard(void) { memset(&s_ld, 0, sizeof s_ld); }
 void dirty_ram_ld_delay_save(DirtyRamLoadDelay *o) { *o = s_ld; }
 void dirty_ram_ld_delay_restore(const DirtyRamLoadDelay *i) { s_ld = *i; }
+static uint32_t s_span_lo, s_span_hi;
+void dirty_ram_span_get(uint32_t *lo, uint32_t *hi) { *lo = s_span_lo; *hi = s_span_hi; }
+void dirty_ram_span_set(uint32_t lo, uint32_t hi) { s_span_lo = lo; s_span_hi = hi; }
+int dirty_ram_run_span(CPUState *cpu, uint32_t start, uint32_t stop, uint64_t max) {
+    (void)cpu; (void)start; (void)stop; (void)max;
+    return 0;
+}
 void overlay_loader_native_nesting(int *d, uint32_t *ip) { *d = 0; *ip = 0; }
 void overlay_loader_set_native_nesting(int d, uint32_t ip) { (void)d; (void)ip; }
+/* memory.c mod arenas (render_pass_mod_store): nothing journaled here. */
+void render_pass_mod_arenas_rollback(void) {}
+uint64_t render_pass_mod_arenas_hash(void) { return 0; }
+static int s_prec_open;
+void gte_precision_checkpoint_begin(void) { s_prec_open++; }
+void gte_precision_checkpoint_rollback(void) { s_prec_open--; }
 
 /* GPU and presenter. */
 uint64_t gpu_pass_state_hash(void) { return 42; }
@@ -203,13 +216,15 @@ uint32_t gl_renderer_pass_plan(uint32_t p, uint32_t s, uint32_t *a,
     if (wanted) *wanted = 0;
     return 0;
 }
-static int s_open_passes, s_kept, s_begin_ok = 1;
+static int s_open_passes, s_kept, s_begin_ok = 1, s_diag_null;
 void gl_renderer_pass_begin_diag(GLRenderPassBeginDiag *out) {
     memset(out, 0, sizeof *out);
+    if (s_diag_null) return;
     out->reason = "capture_size";
     out->requested_w = 320; out->requested_h = 240;
     out->capture_w = 512; out->capture_h = 240;
 }
+void gl_renderer_pass_set_flip_shown(int shown) { (void)shown; }
 int gl_renderer_pass_begin(int x, int y, int w, int h, int open_gen,
                            uint32_t period, int reuse_backup) {
     (void)x; (void)y; (void)w; (void)h; (void)open_gen; (void)period;
@@ -465,9 +480,20 @@ static void test_pass(void) {
           "checkpoint failure closes transaction without calling guest code");
     failed_attempt = st.last_failure.attempt;
     s_checkpoint_ok = 1;
+    /* A refusal whose producer named no reason still reads as a failure. */
+    s_begin_ok = 0;
+    s_diag_null = 1;
+    CHECK(psx_mod_render_pass(&cpu, &pass, never_fn, NULL) == 0, "anonymous begin refusal");
+    render_pass_get_stats(&st);
+    CHECK(st.last_failure.reason && st.last_failure.reason[0] &&
+          st.last_failure.attempt > failed_attempt,
+          "refusal without a producer reason records a fallback reason");
+    failed_attempt = st.last_failure.attempt;
+    s_diag_null = 0;
+    s_begin_ok = 1;
     CHECK(psx_mod_render_pass(&cpu, &pass, pass_fn, NULL) == 1, "success after refusals");
     render_pass_get_stats(&st);
-    CHECK(st.last_failure.attempt == failed_attempt && st.pass_attempts == 6,
+    CHECK(st.last_failure.attempt == failed_attempt && st.pass_attempts == 7,
           "success does not erase last failure");
     render_pass_reset_session();
     render_pass_get_stats(&st);
@@ -691,12 +717,35 @@ static void test_stereo(void) {
     CHECK(!psx_mod_render_stereo(&cpu, &f, pair_draw, NULL), "invalid cadence refused");
 }
 
+static void test_texture_stream_journal(void) {
+    RenderPassJournal j = {0};
+    memcpy(s_vram, s_vram0, sizeof s_vram);
+    /* The Jersey draw OT alternates animated texture strips and CLUT rows.
+     * All 32 destinations must be backed up before the replay writes them. */
+    for (int i = 0; i < 32; ++i) {
+        int x = (i / 2) * 16, y = (i & 1) ? 492 : 64;
+        int w = (i & 1) ? 16 : 4, h = (i & 1) ? 1 : 64;
+        CHECK(render_pass_vram_policy(&j, 512, 0, 512, 240, VW, VH,
+              1, &x, &y, &w, &h) == RENDER_PASS_VRAM_JOURNAL,
+              "texture stream fits the bounded journal");
+        CHECK(render_pass_journal_add(&j, s_vram, VW, x, y, w, h) == i,
+              "texture destination backed up");
+        paint(x, y, w, h, (uint16_t)(0x9000 + i));
+    }
+    render_pass_journal_rollback(&j, s_vram, VW);
+    CHECK(!memcmp(s_vram, s_vram0, sizeof s_vram),
+          "texture stream and palettes restored exactly");
+    render_pass_journal_free(&j);
+}
+
 int main(void) {
     test_store_policy();
     test_pass();
     test_ram_8mb();
     test_journal();
     test_stereo();
+    test_texture_stream_journal();
+    CHECK(s_prec_open == 0, "precision checkpoints balanced");
     printf(failures ? "FAILED (%d)\n" : "ALL PASS\n", failures);
     return failures ? 1 : 0;
 }

@@ -149,6 +149,26 @@ static void test_gen_select_late(void) {
     CHECK(!render_pass_gen_select(ph, 0, 0.5, &lo, &hi, &t), "no items, no pick");
 }
 
+/* Promotion: a generation for the next flip waits for its own rect; one for
+ * a frame already on screen waits for the flip after it, to another rect. */
+static void test_gen_flip_matches(void) {
+    /* PsyQ VSync-then-PutDispEnv: built for the rect the flip shows. */
+    CHECK(render_pass_gen_flip_matches(0, 0, 240, 1, 320, 240, 0, 240, 1, 320, 240),
+          "pending: the flip to the generation's rect promotes it");
+    CHECK(!render_pass_gen_flip_matches(0, 0, 240, 1, 320, 240, 0, 0, 1, 320, 240),
+          "pending: a flip to the other buffer does not");
+    /* Flip-when-drawn (V8:2): built for the rect already on screen. */
+    CHECK(render_pass_gen_flip_matches(1, 0, 240, 1, 320, 240, 0, 0, 1, 320, 240),
+          "shown: the next flip, to the other buffer, promotes it");
+    CHECK(!render_pass_gen_flip_matches(1, 0, 240, 1, 320, 240, 0, 240, 1, 320, 240),
+          "shown: a redraw of the rect on screen is not the next flip");
+    /* Geometry the images were captured at must still be presented. */
+    CHECK(!render_pass_gen_flip_matches(1, 0, 240, 1, 320, 240, 0, 0, 0, 320, 240),
+          "a different presented source never promotes");
+    CHECK(!render_pass_gen_flip_matches(0, 0, 0, 1, 320, 240, 0, 0, 1, 640, 480),
+          "a different presented size never promotes");
+}
+
 static void test_budget_and_ema(void) {
     CHECK(fabs(render_pass_budget(0, 0, 100.0, 0.5) - 50.0) < 1e-9,
           "no history spends the share of the frame");
@@ -295,12 +315,25 @@ static void test_store_policy(void) {
     CHECK(render_pass_mmio_class(0x1F801820u, 0, 4) == RENDER_PASS_DROP_OTHER, "MDEC dropped");
 }
 
+static void test_stereo_pair_fresh(void) {
+    const uint32_t vb = 564480u;
+    const uint64_t c = 100000000ull;
+    CHECK(render_pass_stereo_pair_fresh(c, c, vb), "pair fresh on its own cycle");
+    CHECK(render_pass_stereo_pair_fresh(c, c + 8ull * vb, vb), "pair fresh across the slowest cadence");
+    CHECK(render_pass_stereo_pair_fresh(c, c + 24ull * vb, vb), "pair fresh at the age limit");
+    CHECK(!render_pass_stereo_pair_fresh(c, c + 24ull * vb + 1, vb),
+          "pair stale once the plugin stops submitting");
+    CHECK(!render_pass_stereo_pair_fresh(c, c - 1, vb), "clock behind pair (state load) is stale");
+}
+
 int main(void) {
+    test_stereo_pair_fresh();
     test_store_policy();
     test_counts_per_rate();
     test_shedding();
     test_select();
     test_gen_select_late();
+    test_gen_flip_matches();
     test_budget_and_ema();
     printf(failures ? "FAILED (%d)\n" : "ALL PASS\n", failures);
     return failures ? 1 : 0;

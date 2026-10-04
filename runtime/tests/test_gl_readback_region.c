@@ -5,6 +5,7 @@ uint32_t psx_mod_gpu_dma_memory_alloc(uint32_t n,uint32_t a){(void)n;(void)a;ret
 uint32_t psx_mod_read_word(uint32_t a){(void)a;return 0;}
 static uint16_t image[1024*512], oracle[1024*512];
 int g_psx_vram_dirty_tracking=0;
+uint64_t psx_cycle_count=0;uint32_t g_psx_vblank_cycles=564480u;
 uint64_t s_frame_count=0;
 void gpu_vram_dirty_mark_row_impl(uint32_t y){}
 void gpu_vram_dirty_mark_rect(int x,int y,int w,int h){}
@@ -136,6 +137,99 @@ static void verify_stereo_transactions(void) {
  check(gl_renderer_stereo_capture_records(&record,1)==0,"session reset clears capture metadata");
  check(glGetError()==GL_NO_ERROR,"stereo transaction GL error");
 }
+
+static void verify_oversize_wide_geometry(int scale) {
+ /* Captured hallway triangles exceed the PS1 height limit. Proven geometry
+  * must use identical canonical/wide passes, including the center-copy edge. */
+ glb_set_draw_area(0,0,511,239);glb_set_precise_triangle(0,0,0,0,0,0,0);
+ glb_wide_configure(848,168);glb_wide_set_target(0);
+ glb_wide_set_view(0,0,0,0);s_wide_fast=1;
+ glb_wide_clear(0,0,240,0);
+ glb_draw_flat_rect(-168,0,848,240,0x7c00);
+ gl_renderer_note_wide_triangle_recovery(1);
+ glb_draw_flat_triangle(-300,-200,300,100,-100,500,0x001f);
+ check(glb_vram_read(100,100)==0x001f,"recovered flat updates canonical pixels coherently");
+ /* A line queued immediately after a recovered flat triangle must use
+  * the ordinary batch at both native and supersampled resolutions. */
+ gl_renderer_note_wide_triangle_recovery(1);
+ glb_draw_flat_triangle(-300,-200,300,100,-100,500,0x001f);
+ glb_draw_line(203,40,219,40,0x03e0);
+ check(glb_vram_read(210,40)==0x03e0,"ordinary line after oversize flat");
+ glb_vram_write(512,0,0x03e0);
+ gl_renderer_note_wide_triangle_recovery(1);
+ glb_draw_shaded_textured_triangle(561,184,0,0,0x808080,
+   1023,-724,0,0,0x808080,1023,334,0,0,0x808080,0,0,0x108,1);
+ gl_renderer_note_wide_triangle_recovery(1);
+ glb_draw_shaded_textured_triangle(-300,-200,0,0,0x808080,
+   300,100,0,0,0x808080,-100,500,0,0,0x808080,0,0,0x108,1);
+ check(glb_vram_read(100,100)==0x03e0,"recovered textured updates canonical pixels coherently");
+ gl_renderer_note_wide_triangle_recovery(1);
+ glb_draw_shaded_textured_triangle(400,-200,0,0,0x808080,
+   900,100,0,0,0x808080,400,500,0,0,0x808080,0,0,0x108,1);
+ gl_renderer_note_wide_triangle_recovery(1);
+ glb_draw_shaded_textured_triangle(561,184,0,0,0x808080,
+   1023,-724,0,0,0x808080,1023,334,0,0,0x808080,0,0,0x108,1);
+ glb_draw_shaded_textured_triangle(40,100,0,0,0x808080,
+   70,100,0,0,0x808080,40,130,0,0,0x808080,0,0,0x108,1);
+ check(glb_vram_read(45,105)==0x03e0,"ordinary textured after oversize textured");
+ verify("recovered geometry keeps CPU/GPU readback coherent");
+ uint32_t *pixels=calloc((size_t)848*240*scale*scale,sizeof(uint32_t));
+ check(pixels!=NULL,"oversize wide pixels allocation");
+ if(pixels) {
+  check(glb_render_wide_display(pixels,848*scale*4,0,0,240)>0,"oversize wide readback");
+  check(pixels[(100*scale)*(848*scale)+68*scale]==0xff00ff00u,"left oversize margin drawn in painter order");
+  check(pixels[(100*scale)*(848*scale)+818*scale]==0xff00ff00u,"captured right hallway wall drawn");
+  check(pixels[(100*scale)*(848*scale)+268*scale]==0xff00ff00u,"canonical center retains recovered faces");
+  check(pixels[(100*scale)*(848*scale)+678*scale]==0xff00ff00u,"recovered wall before center-copy boundary");
+  check(pixels[(100*scale)*(848*scale)+680*scale]==0xff00ff00u,"same recovered wall after center-copy boundary");
+  free(pixels);
+ }
+ glb_wide_disable_target();
+ gl_renderer_note_wide_triangle_recovery(1);
+ glb_draw_flat_triangle(-300,-200,300,100,-100,500,0x001f);
+ check(glb_vram_read(100,100)==0x001f,"admitted backend geometry remains coherent without mirror");
+ glb_wide_set_target(0);
+}
+static void verify_camera_plane_clip(int scale) {
+ glb_set_draw_area(0,0,511,239);glb_wide_configure(848,168);
+ glb_wide_set_target(0);glb_wide_set_view(0,0,0,0);
+ glb_wide_clear(0,0,240,0);glb_draw_flat_rect(-168,0,848,240,0x7c00);
+ glb_vram_write(512,0,0x03e0);
+ /* One corner is behind the camera, with two at z=2 in front. The
+  * visible trapezoid contains (100,100), and extends into the left margin. */
+ const PSXProjectedVertex crossing[3]={
+   {-1600,0,-1,0,0,1,1,1},{600,0,2,0,0,1,1,1},{600,480,2,0,0,1,1,1}};
+ check(gl_renderer_projective_supported(),"projective GPU path ready");
+ gl_renderer_draw_projected_triangle(crossing,0x108,0,0,1,-1,1);
+ check(glb_vram_read(100,100)==0x03e0,"crossing wall retained in front of camera");
+ check(glb_vram_read(400,100)==0x7c00,"outside crossing wall remains untouched");
+ const PSXProjectedVertex hidden[3]={
+   {-400,0,-2,0,0,1,1,1},{600,0,-1,0,0,1,1,1},{600,480,-2,0,0,1,1,1}};
+ gl_renderer_draw_projected_triangle(hidden,0x108,0,0,1,-1,1);
+ check(glb_vram_read(400,100)==0x7c00,"entirely behind-camera triangle rejected");
+ glb_draw_flat_rect(120,100,4,4,0x001f);
+ check(glb_vram_read(121,101)==0x001f,"ordinary draw after clipped wall keeps painter order");
+ check(!s_pc_valid && !s_pq_valid && !s_projected_uv_valid,"clipped overrides consumed");
+ verify("camera-plane clipping preserves GPU and CPU authority");
+ uint32_t *pixels=calloc((size_t)848*240*scale*scale,sizeof(uint32_t));
+ check(pixels!=NULL,"camera-plane wide allocation");
+ if(pixels) {
+  check(glb_render_wide_display(pixels,848*scale*4,0,0,240)>0,"camera-plane wide readback");
+  check(pixels[100*scale*(848*scale)+68*scale]==0xff00ff00u,"crossing wall retained in wide margin");
+  check(pixels[100*scale*(848*scale)+268*scale]==0xff00ff00u,"same crossing wall across center copy");
+  free(pixels);
+ }
+ /* Perspective UVs must survive intersections without integer rounding.
+  * Analytic barycentric values at the two samples are (15.789,5.702)
+  * and (17.5,6.771), independent of the clipped polygon's triangulation. */
+ for(int v=0;v<32;++v) for(int u=0;u<32;++u)
+  glb_vram_write(512+u,v,(uint16_t)((u+1)|((v+1)<<5)));
+ PSXProjectedVertex mapped[3]={crossing[0],crossing[1],crossing[2]};
+ mapped[1].u=mapped[2].u=20;mapped[2].v=20;
+ gl_renderer_draw_projected_triangle(mapped,0x108,0,0,1,-1,1);
+ check(glb_vram_read(100,100)==(16|(6<<5)),"fractional clipped UV sample one");
+ check(glb_vram_read(200,100)==(18|(7<<5)),"fractional clipped UV sample two");
+}
 int main(int argc,char **argv){
  int scale=argc>1?atoi(argv[1]):1;
  if(SDL_Init(SDL_INIT_VIDEO)!=0)return 2;
@@ -182,6 +276,31 @@ int main(int argc,char **argv){
  glb_set_draw_area(0,0,1023,511);glb_draw_flat_rect(320,320,8,8,0x4444);
  for(int i=0;i<1024*512;i++)image[i]=(uint16_t)((i*23)&0x7fff);
  gl_renderer_restage_vram_after_savestate();verify("state restage with pending draw");
+ /* Consecutive RGB888 movies can stay in depth24. The second player's tile
+  * clear must reach the CPU scanout, without reading stale FBO words over the
+  * new packed movie. Also cover entry directly through an upload, not a test
+  * call to the mode policy before it. */
+ static uint16_t movie_first[480*16], movie_next[480*8];
+ for(int i=0;i<480*16;i++)movie_first[i]=0x2345;
+ for(int i=0;i<480*8;i++)movie_next[i]=0x4567;
+ glb_draw_flat_rect(900,400,2,2,0x4321);
+ glb_draw_flat_rect(32,32,480,16,0x7117);
+ test_depth24=1;
+ glb_vram_transfer_in(32,32,480,16,movie_first);
+ check(image[400*1024+900]==0x4321,"depth24 entry retains pending GPU pixels");
+ check(image[32*1024+32]==0x2345,"entry sync precedes first packed upload");
+ glb_draw_flat_rect(32,32,480,16,0);
+ glb_vram_transfer_in(32,36,480,8,movie_next);
+ check(image[33*1024+40]==0,"consecutive movie top bar cleared");
+ check(image[46*1024+40]==0,"consecutive movie bottom bar cleared");
+ gl_renderer_sync_cpu();
+ check(image[38*1024+40]==0x4567,"movie survives primitive readback debt");
+ glb_copy_rect(32,36,40,37,4,2);
+ check(image[37*1024+40]==0x4567,"depth24 copy reads packed CPU source");
+ glb_fill_rect(48,33,16,1,0);
+ check(glb_vram_read(48,33)==0,"depth24 fill and read stay coherent");
+ test_depth24=0;depth24_upload_policy();
+ verify("consecutive movie return to GPU authority");
  /* Existing depth24 policy clears the skipped movie band on return to15-bit.
   * That GPU write must become visible without waiting for another primitive. */
  static uint16_t movie[480*16], texture[4]={0x3210,0x3210,0x3210,0x3210};
@@ -229,6 +348,8 @@ int main(int argc,char **argv){
  verify("retained indices with animated guest CLUT");
  verify_bank_batching();
  verify_stereo_transactions();
+ verify_oversize_wide_geometry(scale);
+ verify_camera_plane_clip(scale);
  /* World and UI use different origins in an anchored wide frame. Keep the
   * canonical-center optimization enabled to catch an erroneous blit over the
   * completed mirror, and change origins with a pending flat batch. */

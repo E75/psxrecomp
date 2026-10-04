@@ -32,7 +32,11 @@ per swap, LEFT on the left, RIGHT on the right, with each eye using the configur
 display aspect. Zero disables it. The first implementation uses ordinary game
 VBlank presentation cadence; it does not submit to OpenXR or create headset poses.
 Stereo and temporal interpolation should be configured separately; SBS takes
-precedence when a compatible complete pair is available.
+precedence when a compatible complete pair is available. A pair is shown only while
+the plugin keeps submitting: it expires 24 VBlanks of guest time after its capture
+cycle (3x the slowest 8-VBlank cadence) and the presenter falls back to the normal
+flat image (menus, same-size FMV, a plugin that stopped submitting). Savestate/rollback loads and
+session resets drop the pair immediately.
 
 Inside an eye callback, `psx_mod_render_view_offset(x,y,z)` replaces a scoped
 camera-space translation. RTPS and RTPT add it alongside TR before projection;
@@ -41,6 +45,16 @@ not accumulate the offset. Normal returns and watchdog rollback restore the
 previous host value. Calls outside a render transaction are refused. The GTE
 test compares this seam against explicit pre-divide translation and measures
 12 pixels at Z=800 versus 3 pixels at Z=3200 for X=24 and H=400.
+
+`psx_mod_render_view` (full pose) is an explicit per-eye projection. With
+`projection=1` it REPLACES the guest X/Y projection entirely: guest `H`, the
+widescreen/dome squash and the `[video] fov_scale` scaled-H do not feed it, and the
+guest-formula PGXP shadows are skipped for those vertices. The only coupling is
+`projection_h_ref`: when non-zero the focal lengths are multiplied by (fov-scaled
+guest `H`) / `projection_h_ref`, so a plugin can follow per-draw H changes. SZ, the
+depth cue and divide flags still come from the guest division. The pose exists only
+inside a render transaction and is restored with it, so nothing outside the sandbox
+sees it. `test_render_pose` covers the override together with `fov_scale`.
 
 TCP inspection:
 

@@ -76,6 +76,7 @@ uint32_t overlay_codegen_config_hash(const GameConfig& c) {
             h.u32(site.reject_mask);
         }
     }
+    h.words("mod_instruction_sites", c.mod_instruction_sites);
     h.words("cull_bias", c.ws_cull_bias_sites);
     if (!c.ws_cull_bias_lower_sites.empty())
         h.words("cull_bias_lower", c.ws_cull_bias_lower_sites);
@@ -1668,6 +1669,14 @@ GameConfig load_game_config(const fs::path& config_path_in) {
     }
     // Optional [recompiler] hot_funcs — __attribute__((hot)) on emitted C.
     // Optional trusted, statically linked game-mod entry hooks.
+    std::vector<uint32_t> mod_instruction_sites;
+    if (recomp.contains("mod_instruction_sites"))
+        for (const auto& a : toml::find<std::vector<std::string>>(recomp, "mod_instruction_sites")) {
+            const auto pc = parse_hex(a, "recompiler.mod_instruction_sites");
+            if ((pc & 3u) || pc >= 0xC0000000u || (pc & 0x1FFFFFFFu) >= 0x00800000u)
+                throw std::runtime_error("mod instruction site must be aligned main RAM");
+            mod_instruction_sites.push_back(pc);
+        }
     std::vector<uint32_t> mod_function_entry_funcs;
     if (recomp.contains("mod_function_entry_funcs")) {
         const auto& arr = toml::find<std::vector<std::string>>(
@@ -2396,6 +2405,7 @@ GameConfig load_game_config(const fs::path& config_path_in) {
         /*ws_auto_ui_in_place*/    ws_auto_ui_in_place,
         /*data_shard_funcs*/      data_shard_funcs,
         /*mod_function_entry_funcs*/ mod_function_entry_funcs,
+        /*mod_instruction_sites*/ mod_instruction_sites,
         /*hot_funcs*/             hot_funcs,
         /*load_charge_batch*/     load_charge_batch,
         /*load_charge_batch_funcs*/ load_charge_batch_funcs,
@@ -2610,6 +2620,13 @@ UserSettings load_user_settings(const fs::path& path) {
             if (d < 0.0) d = 0.0;
             if (d > 1.0) d = 1.0;
             s.scanline_strength = d; s.has_scanline_strength = true;
+        });
+        if (v.contains("fov_scale")) try_get([&]{
+            const auto& n = toml::find(v, "fov_scale");
+            if (n.is_floating())     s.fov_scale = n.as_floating();
+            else if (n.is_integer()) s.fov_scale = static_cast<double>(n.as_integer());
+            else return;
+            s.has_fov_scale = true;
         });
         if (v.contains("auto_skip_fmv")) try_get([&]{
             s.auto_skip_fmv = toml::find<bool>(v, "auto_skip_fmv"); s.has_auto_skip_fmv = true;
@@ -2973,6 +2990,8 @@ bool save_user_settings(const fs::path& path, const UserSettings& s) {
         f << "scanlines         = " << (s.scanlines ? "true" : "false") << "\n";
     if (s.has_scanline_strength)
         f << "scanline_strength = " << s.scanline_strength << "\n";
+    if (s.has_fov_scale)
+        f << "fov_scale         = " << s.fov_scale << "\n";
     if (s.has_auto_skip_fmv)
         f << "auto_skip_fmv     = " << (s.auto_skip_fmv ? "true" : "false") << "\n";
     /* turbo_loads is deliberately NOT written back: it is deprecated and no

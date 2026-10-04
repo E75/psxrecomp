@@ -566,6 +566,33 @@ int main(void) {
         CHECK(lookup(ADDR_B, packed, 1023, 152, &x, &y, &z) == PGXP_SRC_NATIVE);
     }
 
+    /* Signed camera depth survives exact word transport and sandbox rollback;
+     * byte-identical partial writes must still discard the 3D association. */
+    {
+        PGXPProjection p={12345.5f,-7311.0f,-62.0f,150.0f}, out;
+        pgxp_set_projection_tracking(1);
+        pgxp_gte_push_sxy(X16,Y16,0,PACKED);
+        pgxp_gte_set_projection(&p);
+        CHECK(pgxp_get_gte_projection(2,PACKED,&out) && out.z==-62.0f);
+        CHECK(!pgxp_get_gte_projection(2,PACKED^1,&out));
+        psx_pgxp_cop2(nullptr,MFC2(9,14),PACKED,0);
+        psx_pgxp_store(nullptr,SW(1,9),ADDR_B,PACKED);
+        CHECK(pgxp_load_projection(ADDR_B,PACKED,&out) && out.x==p.x && out.z==p.z);
+        CHECK(!pgxp_load_projection(ADDR_B,PACKED^1,&out));
+        pgxp_checkpoint_begin();
+        psx_pgxp_store(nullptr,SB(1,9),ADDR_B,PACKED&255);
+        CHECK(!pgxp_load_projection(ADDR_B,PACKED,&out));
+        pgxp_checkpoint_rollback();
+        CHECK(pgxp_load_projection(ADDR_B,PACKED,&out) && out.z==p.z);
+        psx_pgxp_store(nullptr,SH(1,9),ADDR_B,PACKED&65535);
+        CHECK(!pgxp_load_projection(ADDR_B,PACKED,&out));
+        pgxp_store_gte_reg(ADDR_B,14);
+        CHECK(pgxp_load_projection(ADDR_B,PACKED,&out));
+        pgxp_invalidate_all();
+        CHECK(!pgxp_load_projection(ADDR_B,PACKED,&out));
+        pgxp_set_projection_tracking(0);
+    }
+
     /* --- stats sanity: dataflow hits were counted --- */
     {
         PGXPStats st;
