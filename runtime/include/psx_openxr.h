@@ -13,6 +13,7 @@ typedef struct PSXOpenXRStats {
     float ipd_m;
     double units_per_meter;
     uint64_t gl_version, min_gl_version, max_gl_version;
+    int64_t swapchain_format; /* GL_SRGB8_ALPHA8 preferred; GL_RGBA8 decoded copy */
     char runtime[128];
     float pose[2][7], fov[2][4];
     PSXModRenderView view[2];

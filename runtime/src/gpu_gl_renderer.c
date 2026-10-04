@@ -91,6 +91,7 @@
 #include "frame_pacing.h"
 #include "psx_rewind.h"
 #include "psx_openxr.h"
+#include "openxr_color.h"
 
 #include "psx_sdl.h"
 #if defined(PSX_SDL3)
@@ -163,6 +164,7 @@ typedef void   (APIENTRY *PFN_glCompileShader)(GLuint);
 typedef void   (APIENTRY *PFN_glGetShaderiv)(GLuint, GLenum, GLint *);
 typedef void   (APIENTRY *PFN_glGetShaderInfoLog)(GLuint, GLsizei, GLsizei *, char *);
 typedef void   (APIENTRY *PFN_glDeleteShader)(GLuint);
+typedef void   (APIENTRY *PFN_glDeleteProgram)(GLuint);
 typedef GLuint (APIENTRY *PFN_glCreateProgram)(void);
 typedef void   (APIENTRY *PFN_glAttachShader)(GLuint, GLuint);
 typedef void   (APIENTRY *PFN_glLinkProgram)(GLuint);
@@ -226,6 +228,7 @@ static PFN_glCompileShader     p_glCompileShader;
 static PFN_glGetShaderiv       p_glGetShaderiv;
 static PFN_glGetShaderInfoLog  p_glGetShaderInfoLog;
 static PFN_glDeleteShader      p_glDeleteShader;
+static PFN_glDeleteProgram     p_glDeleteProgram;
 static PFN_glCreateProgram     p_glCreateProgram;
 static PFN_glAttachShader      p_glAttachShader;
 static PFN_glLinkProgram       p_glLinkProgram;
@@ -286,6 +289,7 @@ static int load_modern_gl(void) {
     LOAD(p_glCreateShader, "glCreateShader");   LOAD(p_glShaderSource, "glShaderSource");
     LOAD(p_glCompileShader, "glCompileShader"); LOAD(p_glGetShaderiv, "glGetShaderiv");
     LOAD(p_glGetShaderInfoLog, "glGetShaderInfoLog"); LOAD(p_glDeleteShader, "glDeleteShader");
+    LOAD(p_glDeleteProgram, "glDeleteProgram");
     LOAD(p_glCreateProgram, "glCreateProgram"); LOAD(p_glAttachShader, "glAttachShader");
     LOAD(p_glLinkProgram, "glLinkProgram");     LOAD(p_glGetProgramiv, "glGetProgramiv");
     LOAD(p_glGetProgramInfoLog, "glGetProgramInfoLog"); LOAD(p_glUseProgram, "glUseProgram");
@@ -416,6 +420,7 @@ static int           s_present_w = 0, s_present_h = 0;
 static GLuint        s_osd_tex = 0;
 static int           s_osd_tw = 0, s_osd_th = 0;
 static GLuint        s_present_prog = 0, s_present_vao = 0;
+static GLuint        s_xr_color_prog = 0, s_xr_native_tex = 0;
 static void          gl_swap_with_osd(void);
 static int s_native_surface_enabled, s_native_surface_pending;
 static int s_native_surface_rect[4]; /* Fresh native backbuffer content, GL coordinates. */
@@ -6330,6 +6335,11 @@ static void pass_free_color_fbo(GLuint *tex, GLuint *rb, GLuint *fbo,
  * and journal, and forget their names so a new context makes fresh ones. */
 static void pass_resources_release(void) {
     psx_openxr_shutdown();
+    if(s_ctx) {
+        if(s_xr_color_prog) p_glDeleteProgram(s_xr_color_prog);
+        if(s_xr_native_tex) glDeleteTextures(1,&s_xr_native_tex);
+    }
+    s_xr_color_prog=s_xr_native_tex=0;
     stereo_resources_release();
     pass_gen_release(0);
     pass_gen_release(1);
@@ -6747,10 +6757,48 @@ int psx_mod_openxr_input(PSXModOpenXRInput *input) {
 int psx_mod_openxr_hands(PSXModOpenXRHands *hands) {
     return psx_openxr_hands(hands); /* Snapshot only, also safe during replay. */
 }
+/* The target stores display-encoded RGB for an sRGB swapchain, or explicitly
+ * decoded RGB for a linear-only runtime. Never apply hardware sRGB encoding
+ * to these outputs. All shader state is restored before returning to native. */
+static int openxr_color_draw(GLuint source, int w, int h, int flip, float gamma, int linear) {
+    if (!s_xr_color_prog) s_xr_color_prog = build_program(PRESENT_VS, PSX_XR_COLOR_FS);
+    if (!s_xr_color_prog || !s_present_vao) return 0;
+    GLint program, vao, viewport[4], active, binding, min_filter, mag_filter;
+    GLboolean mask[4];
+    const GLenum caps[] = {GL_BLEND, GL_DEPTH_TEST, GL_STENCIL_TEST, GL_CULL_FACE};
+    GLboolean enabled[4];
+    glGetIntegerv(0x8B8D, &program);glGetIntegerv(0x85B5, &vao);
+    glGetIntegerv(GL_VIEWPORT, viewport);glGetIntegerv(0x84E0, &active);
+    glGetBooleanv(GL_COLOR_WRITEMASK, mask);
+    p_glActiveTexture(PSXGL_TEXTURE0);glGetIntegerv(GL_TEXTURE_BINDING_2D, &binding);
+    glBindTexture(GL_TEXTURE_2D, source);
+    glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, &min_filter);
+    glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, &mag_filter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    for (int i=0;i<4;i++) {enabled[i]=glIsEnabled(caps[i]);glDisable(caps[i]);}
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);glViewport(0,0,w,h);
+    p_glUseProgram(s_xr_color_prog);
+    p_glUniform1i(p_glGetUniformLocation(s_xr_color_prog,"u_tex"),0);
+    p_glUniform1i(p_glGetUniformLocation(s_xr_color_prog,"u_linear"),linear);
+    p_glUniform1f(p_glGetUniformLocation(s_xr_color_prog,"u_gamma"),gamma);
+    p_glUniform4f(p_glGetUniformLocation(s_xr_color_prog,"u_uv_rect"),0,flip?0:1,1,flip?1:0);
+    p_glBindVertexArray(s_present_vao);glDrawArrays(GL_TRIANGLES,0,3);
+    p_glBindVertexArray((GLuint)vao);p_glUseProgram((GLuint)program);
+    glViewport(viewport[0],viewport[1],viewport[2],viewport[3]);
+    glColorMask(mask[0],mask[1],mask[2],mask[3]);
+    for (int i=0;i<4;i++) if(enabled[i]) glEnable(caps[i]);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, min_filter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, mag_filter);
+    glBindTexture(GL_TEXTURE_2D,(GLuint)binding);p_glActiveTexture((GLenum)active);
+    return 1;
+}
 static int openxr_copy_eye(uint32_t eye, uint32_t texture, int w, int h) {
     StereoPair *p = &s_stereo_pair[s_stereo_current];
     GLint read_fbo, draw_fbo; GLuint target = 0;
     GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+    GLboolean srgb = glIsEnabled(0x8DB9); /* GL_FRAMEBUFFER_SRGB */
+    PSXOpenXRStats xr;psx_openxr_stats(&xr);
     glGetIntegerv(0x8CAA, &read_fbo);
     glGetIntegerv(0x8CA6, &draw_fbo);
     p_glGenFramebuffers(1, &target);
@@ -6759,17 +6807,23 @@ static int openxr_copy_eye(uint32_t eye, uint32_t texture, int w, int h) {
     int ok = p_glCheckFramebufferStatus(PSXGL_DRAW_FRAMEBUFFER) == PSXGL_FRAMEBUFFER_COMPLETE;
     if (ok) {
         glDisable(GL_SCISSOR_TEST);
+        glDisable(0x8DB9);
         p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, p->fbo[eye]);
         /* Stereo capture texture row convention is opposite the XR layer.
          * User confirmed inverted headset output with the original direct blit.
          * Flip only submission; eye dumps and desktop presentation stay intact. */
-        p_glBlitFramebuffer(0, p->th[eye], p->tw[eye], 0, 0, 0, w, h,
-                            GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        if (xr.swapchain_format == PSX_XR_SRGB8_ALPHA8 && s_present_gamma == 1.0f)
+            p_glBlitFramebuffer(0, p->th[eye], p->tw[eye], 0, 0, 0, w, h,
+                                GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        else
+            ok = openxr_color_draw(p->tex[eye], w, h, 1, s_present_gamma,
+                                   xr.swapchain_format != PSX_XR_SRGB8_ALPHA8);
         glFlush();
     }
     p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, (GLuint)read_fbo);
     p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, (GLuint)draw_fbo);
     if (scissor) glEnable(GL_SCISSOR_TEST);
+    if (srgb) glEnable(0x8DB9);
     p_glDeleteFramebuffers(1, &target);return ok;
 }
 int psx_mod_openxr_end(int rendered) {
@@ -6783,6 +6837,8 @@ int psx_mod_openxr_end(int rendered) {
 static int openxr_copy_native(uint32_t eye,uint32_t texture,int w,int h) {
     GLint read_fbo,draw_fbo,read_buffer;GLuint target=0;
     GLboolean scissor=glIsEnabled(GL_SCISSOR_TEST);
+    GLboolean srgb=glIsEnabled(0x8DB9);
+    PSXOpenXRStats xr;psx_openxr_stats(&xr);
     (void)eye;
     glGetIntegerv(0x8CAA,&read_fbo);glGetIntegerv(0x8CA6,&draw_fbo);
     glGetIntegerv(GL_READ_BUFFER,&read_buffer);
@@ -6792,15 +6848,30 @@ static int openxr_copy_native(uint32_t eye,uint32_t texture,int w,int h) {
     if(ok) {
         int *r=s_native_surface_rect;
         glDisable(GL_SCISSOR_TEST);p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER,0);glReadBuffer(GL_BACK);
+        glDisable(0x8DB9);
         /* Default framebuffer is already upright: unlike native VRAM/eye
          * textures, its bottom GL row is the displayed bottom row. */
         (void)pass_gl_errors();
-        p_glBlitFramebuffer(r[0],r[1],r[0]+r[2],r[1]+r[3],0,0,w,h,GL_COLOR_BUFFER_BIT,GL_LINEAR);
-        glFlush();ok=pass_gl_errors()==0;
+        if (xr.swapchain_format == PSX_XR_SRGB8_ALPHA8)
+            p_glBlitFramebuffer(r[0],r[1],r[0]+r[2],r[1]+r[3],0,0,w,h,GL_COLOR_BUFFER_BIT,GL_LINEAR);
+        else {
+            GLint active,binding;glGetIntegerv(0x84E0,&active);
+            p_glActiveTexture(PSXGL_TEXTURE0);glGetIntegerv(GL_TEXTURE_BINDING_2D,&binding);
+            if(!s_xr_native_tex) glGenTextures(1,&s_xr_native_tex);
+            glBindTexture(GL_TEXTURE_2D,s_xr_native_tex);
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+            glCopyTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,r[0],r[1],r[2],r[3],0);
+            glBindTexture(GL_TEXTURE_2D,(GLuint)binding);p_glActiveTexture((GLenum)active);
+            /* Desktop gamma is already baked into GL_BACK; decode it once. */
+            ok=openxr_color_draw(s_xr_native_tex,w,h,0,1.0f,1);
+        }
+        glFlush();ok=ok && pass_gl_errors()==0;
     }
     p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER,(GLuint)read_fbo);glReadBuffer((GLenum)read_buffer);
     p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER,(GLuint)draw_fbo);
     if(scissor)glEnable(GL_SCISSOR_TEST);
+    if(srgb)glEnable(0x8DB9);
     p_glDeleteFramebuffers(1,&target);return ok;
 }
 static void openxr_present_native(void) {

@@ -119,3 +119,23 @@ See [Third-Party Attribution](../THIRD_PARTY_ATTRIBUTION.md#openxr-sdk-loader---
 for the Apache-2.0 SDK, MIT JsonCpp notices, cold-cache requirements and package
 distribution. Consuming this feature requires a framework pin update and runtime
 rebuild; it does not change guest code generation.
+
+## Headset color candidate (2026-10-05)
+
+`fix/vr-headset-color` corrects submission encoding. Native PSX/stereo textures
+contain display-encoded RGB; the previous unconverted GL_RGBA8 swapchain made
+the compositor interpret those values as linear. Prefer GL_SRGB8_ALPHA8, with
+GL_FRAMEBUFFER_SRGB disabled during the copy and restored afterward. If only
+GL_RGBA8 is available, the copy shader explicitly decodes sRGB instead.
+
+Gameplay applies desktop post-gamma once before encoding/decoding. Native
+GL_BACK already contains that adjustment and is copied without applying it
+again. Neither path changes guest GPU lighting, textures or simulation.
+`openxr_stats.swapchain_format` reports the selected GL enum (35907 sRGB,
+32856 linear). The linear-only native fallback uses an intermediate copy.
+
+`runtime/tests/run_openxr_color_gl.py` runs the actual private copy functions
+and shader against source-owned RGB/grayscale ramps in hidden real GL. Eight
+format/gamma/incoming-sRGB-state combinations pass for gameplay and native
+copies, including vertical orientation, alpha and GL state restoration.
+

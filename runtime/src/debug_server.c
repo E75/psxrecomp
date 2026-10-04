@@ -8151,7 +8151,7 @@ static void handle_openxr_stats(int id, const char *json) {
              "\"last_failure\":\"%s\",\"last_failure_result\":%d,\"view_flags\":%llu,"
              "\"waits\":%llu,\"submitted\":%llu,\"empty\":%llu,\"failures\":%llu,"
              "\"predicted_time\":%llu,\"ipd_m\":%.6f,\"units_per_meter\":%.6f,"
-             "\"gl_version\":%llu,\"min_gl_version\":%llu,\"max_gl_version\":%llu,"
+             "\"gl_version\":%llu,\"min_gl_version\":%llu,\"max_gl_version\":%llu,\"swapchain_format\":%lld,"
              "\"submitted_layer\":%u,\"quad_submitted\":%llu,"
              "\"submitted_source\":%u,\"native_submitted\":%llu,\"submitted_native_frame\":%llu,"
              "\"quad_distance_m\":%.6f,\"quad_width_m\":%.6f,\"quad_height_m\":%.6f,\"losses\":%llu}", id,s.compiled,s.enabled,
@@ -8161,7 +8161,7 @@ static void handle_openxr_stats(int id, const char *json) {
              (unsigned long long)s.submitted,(unsigned long long)s.empty,
              (unsigned long long)s.failures,(unsigned long long)s.predicted_time,s.ipd_m,s.units_per_meter,
              (unsigned long long)s.gl_version,(unsigned long long)s.min_gl_version,
-             (unsigned long long)s.max_gl_version,s.submitted_layer,
+             (unsigned long long)s.max_gl_version,(long long)s.swapchain_format,s.submitted_layer,
              (unsigned long long)s.quad_submitted,s.submitted_source,
              (unsigned long long)s.native_submitted,(unsigned long long)s.submitted_native_frame,
              s.quad_distance_m,s.quad_width_m,s.quad_height_m,(unsigned long long)s.losses);

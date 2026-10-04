@@ -8,6 +8,7 @@
  * no other thread creates a GL context or touches XR. Hence no locking. */
 #include "psx_openxr.h"
 #include "vr_pose_math.h"
+#include "openxr_color.h"
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -239,15 +240,16 @@ static int initialize(void) {
     uint32_t formats_n=0;
     if(!check(xrEnumerateSwapchainFormats(s_session,0,&formats_n,NULL),"formats"))return 0;
     int64_t *formats=calloc(formats_n,sizeof *formats);if(!formats){s_stats.stage="formats_memory";return 0;}
-    supported=0;
-    if(check(xrEnumerateSwapchainFormats(s_session,formats_n,&formats_n,formats),"formats"))
-        for(uint32_t i=0;i<formats_n;i++)if(formats[i]==GL_RGBA8)supported=1;
+    if(!check(xrEnumerateSwapchainFormats(s_session,formats_n,&formats_n,formats),"formats")) {
+        free(formats);return 0;
+    }
+    s_stats.swapchain_format=psx_xr_color_format(formats,formats_n);
     free(formats);
-    if(!supported){s_stats.stage="rgba8_format_missing";return 0;}
+    if(!s_stats.swapchain_format){s_stats.stage="color_format_missing";return 0;}
     for(int eye=0;eye<2;eye++) {
         s_w[eye]=config[eye].recommendedImageRectWidth;s_h[eye]=config[eye].recommendedImageRectHeight;
         XrSwapchainCreateInfo sc={XR_TYPE_SWAPCHAIN_CREATE_INFO};
-        sc.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;sc.format=GL_RGBA8;
+        sc.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;sc.format=s_stats.swapchain_format;
         sc.sampleCount=1;sc.width=s_w[eye];sc.height=s_h[eye];sc.faceCount=1;sc.arraySize=1;sc.mipCount=1;
         if(!check(xrCreateSwapchain(s_session,&sc,&s_chain[eye]),"swapchain"))return 0;
         if(!check(xrEnumerateSwapchainImages(s_chain[eye],0,&s_count[eye],NULL),"images"))return 0;
