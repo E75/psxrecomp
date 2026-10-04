@@ -1806,9 +1806,88 @@ static void render_pass_mmio_write(uint32_t phys, uint32_t val,
 
 /* The policy is render_pass_store_to (render_pass_plan.c, unit-tested by
  * render_pass_sandbox_test); this only wires it to memory.c's arrays. */
+/* Mod arenas (Expansion-1 mod memory, the GPU-DMA aperture) are guest
+ * memory a pass may draw into: a title that moves its primitive buffers there
+ * (an extended draw distance) has its passes build their packets there. Each
+ * arena page a pass writes is backed up on its first write and put back by
+ * render_pass_mod_arenas_rollback(), with the rest of the pass restore. */
+#define RP_MOD_PAGE 4096u
+#define RP_MOD_PAGES ((MOD_MEMORY_SIZE + PSX_MOD_GPU_DMA_APERTURE_SIZE) / RP_MOD_PAGE)
+typedef struct { uint8_t *page; uint32_t index; uint8_t data[RP_MOD_PAGE]; } RpModPage;
+static uint8_t  s_rp_mod_bits[RP_MOD_PAGES / 8u];
+static RpModPage *s_rp_mod_log = NULL;
+static uint32_t s_rp_mod_n = 0, s_rp_mod_cap = 0;
+static int      s_rp_mod_lossy = 0;
+uint64_t g_render_pass_mod_pages = 0;              /* pages journaled, total */
+
+static int rp_mod_journal(uint8_t *base, uint32_t page_base, uint32_t off,
+                          uint32_t width) {
+    for (uint32_t pg = off / RP_MOD_PAGE; pg <= (off + width - 1u) / RP_MOD_PAGE; pg++) {
+        const uint32_t index = page_base + pg;
+        const uint8_t bit = (uint8_t)(1u << (index & 7u));
+        if (s_rp_mod_bits[index >> 3] & bit) continue;
+        if (s_rp_mod_n == s_rp_mod_cap) {
+            uint32_t cap = s_rp_mod_cap ? s_rp_mod_cap * 2u : 64u;
+            RpModPage *p = (RpModPage *)realloc(s_rp_mod_log, cap * sizeof *p);
+            if (!p) { s_rp_mod_lossy = 1; return 0; }
+            s_rp_mod_log = p;
+            s_rp_mod_cap = cap;
+        }
+        s_rp_mod_bits[index >> 3] |= bit;
+        s_rp_mod_log[s_rp_mod_n].page = base + pg * RP_MOD_PAGE;
+        s_rp_mod_log[s_rp_mod_n].index = index;
+        memcpy(s_rp_mod_log[s_rp_mod_n].data, base + pg * RP_MOD_PAGE, RP_MOD_PAGE);
+        s_rp_mod_n++;
+        g_render_pass_mod_pages++;
+    }
+    return 1;
+}
+
+/* 1 when the store landed in a mod arena (journaled and written). */
+static int render_pass_mod_store(uint32_t addr, uint32_t val, uint32_t width) {
+    uint32_t phys, off;
+    uint8_t *base = NULL;
+    uint32_t page_base = 0;
+    if (addr >= 0xC0000000u) return 0;
+    phys = addr & 0x1FFFFFFFu;
+    if (phys < psx_ram_live_bytes()) return 0;
+    if (phys < 0x00800000u && psx_ram_live_bytes() < 0x00800000u) return 0;   /* mirrors */
+    if (mod_gpu_dma_memory_offset(phys, width, &off)) {
+        base = mod_gpu_dma_memory;
+        page_base = MOD_MEMORY_SIZE / RP_MOD_PAGE;
+    } else if (mod_memory_offset(phys, width, &off)) {
+        base = mod_memory;
+    } else {
+        return 0;
+    }
+    if (!rp_mod_journal(base, page_base, off, width)) return 1;   /* lossy: drop */
+    for (uint32_t i = 0; i < width; i++) base[off + i] = (uint8_t)(val >> (8u * i));
+    return 1;
+}
+
+void render_pass_mod_arenas_rollback(void) {
+    for (uint32_t i = s_rp_mod_n; i-- > 0;) {
+        memcpy(s_rp_mod_log[i].page, s_rp_mod_log[i].data, RP_MOD_PAGE);
+        s_rp_mod_bits[s_rp_mod_log[i].index >> 3] &=
+            (uint8_t)~(1u << (s_rp_mod_log[i].index & 7u));
+    }
+    s_rp_mod_n = 0;
+    s_rp_mod_lossy = 0;
+}
+
+/* FNV-1a over the used part of both arenas (PSX_RENDER_PASS_VERIFY). */
+uint64_t render_pass_mod_arenas_hash(void) {
+    uint64_t h = 1469598103934665603ULL;
+    for (uint32_t i = 0; i < mod_memory_used; i++) h = (h ^ mod_memory[i]) * 1099511628211ULL;
+    for (uint32_t i = 0; i < mod_gpu_dma_memory_used; i++)
+        h = (h ^ mod_gpu_dma_memory[i]) * 1099511628211ULL;
+    return h;
+}
+
 static void render_pass_store(uint32_t addr, uint32_t val, uint32_t width) {
     RenderPassStoreTarget t;
     int cls;
+    if (render_pass_mod_store(addr, val, width)) return;
     t.ram = ram;
     t.ram_size = psx_ram_live_bytes();   /* live geometry, as psx_ram_map_write */
     t.scratchpad = scratchpad;

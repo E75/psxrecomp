@@ -1,6 +1,7 @@
 #include "cpu_state.h"
 #include "gte.h"
 #include "pgxp.h"
+#include "render_pass_projection.h"
 
 #include <array>
 #include <cmath>
@@ -405,6 +406,57 @@ int test_sequence_fuzz() {
                 return fail_state("sequence state", iteration, reg, value,
                                   expected, actual);
         }
+    }
+    return 0;
+}
+
+static unsigned projection_callback_calls;
+static int substitute_projection(CPUState *cpu, uint32_t) {
+    ++projection_callback_calls;
+    cpu->gte_ctrl[0] = 0x1000u;
+    cpu->gte_ctrl[1] = 0u;
+    cpu->gte_ctrl[2] = 0x1000u;
+    cpu->gte_ctrl[3] = 0u;
+    cpu->gte_ctrl[4] = 0x1000u;
+    cpu->gte_ctrl[5] = 32u;
+    cpu->gte_ctrl[6] = 16u;
+    cpu->gte_ctrl[7] = 1024u;
+    return 1;
+}
+
+int test_projection_override_restores_transform() {
+    for (uint32_t command : {0x80001u, 0x80030u}) {
+        CPUState actual{};
+        actual.gte_ctrl[0] = 0x800u;
+        actual.gte_ctrl[2] = 0x800u;
+        actual.gte_ctrl[4] = 0x800u;
+        actual.gte_ctrl[5] = 80u;
+        actual.gte_ctrl[6] = 40u;
+        actual.gte_ctrl[7] = 2048u;
+        actual.gte_ctrl[26] = 256u;
+        actual.gte_data[0] = 0x00100020u;
+        actual.gte_data[1] = 64u;
+        actual.gte_data[2] = 0x00300040u;
+        actual.gte_data[3] = 96u;
+        actual.gte_data[4] = 0x00500060u;
+        actual.gte_data[5] = 128u;
+        CPUState original = actual, expected = actual;
+        substitute_projection(&expected, command);
+        gte_test_execute_reference(&expected, command);
+        projection_callback_calls = 0;
+        g_psx_projection_command = substitute_projection;
+        gte_execute(&actual, command);
+        g_psx_projection_command = nullptr;
+        if (projection_callback_calls != 1 ||
+            std::memcmp(actual.gte_ctrl, original.gte_ctrl, 8 * sizeof(uint32_t)) ||
+            std::memcmp(actual.gte_data, expected.gte_data, sizeof(actual.gte_data))) {
+            std::fprintf(stderr, "FAIL: projection override leaked transform or changed output (%x)\n", command);
+            return 1;
+        }
+        g_psx_projection_command = substitute_projection;
+        gte_execute(&actual, 0x06u);
+        g_psx_projection_command = nullptr;
+        if (projection_callback_calls != 1) return 1;
     }
     return 0;
 }
@@ -1022,6 +1074,7 @@ int main() {
     if (int rc = test_writes()) return rc;
     if (int rc = test_sequence_fuzz()) return rc;
     if (int rc = test_command_marshaling()) return rc;
+    if (int rc = test_projection_override_restores_transform()) return rc;
     if (int rc = test_command_timing_hook()) return rc;
     if (int rc = test_precise_sxy_invalidation()) return rc;
     if (int rc = test_precise_nclip_is_title_scoped()) return rc;

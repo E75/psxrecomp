@@ -38,6 +38,8 @@ struct RegisteredPlugin {
     /* Generated-function entry hooks, keyed by guest address. One id may
      * observe several functions. */
     std::vector<ModFunctionEntryHook> function_entries;
+    std::vector<ModFunctionEntryHook> guest_functions;
+    std::vector<ModInstructionHook> instructions;
 };
 
 std::map<std::string, RegisteredPlugin>& registered_plugins() {
@@ -1478,7 +1480,45 @@ bool mod_plugin_registered(const std::string& id) {
     const auto found = registered_plugins().find(id);
     return found != registered_plugins().end() &&
         (found->second.activation || found->second.vblank ||
-         !found->second.function_entries.empty());
+         !found->second.function_entries.empty() || !found->second.guest_functions.empty() ||
+         !found->second.instructions.empty());
+}
+
+bool mod_register_guest_function_plugin(const std::string& id, uint32_t address,
+                                        PSXModFunctionEntryCallback callback) {
+    const uint32_t key = address & 0x1FFFFFFFu;
+    if (!valid_id(id) || !callback || (address & 3u) ||
+        key < 0x0F000000u || key >= 0x10000000u || address >= 0xC0000000u)
+        return false;
+    for (const auto& plugin : registered_plugins())
+        for (const auto& function : plugin.second.guest_functions)
+            if (function.address == key) return false;
+    registered_plugins()[id].guest_functions.push_back({key, callback});
+    return true;
+}
+
+std::vector<ModFunctionEntryHook> mod_guest_functions(const std::string& id) {
+    const auto found = registered_plugins().find(id);
+    return found == registered_plugins().end()
+        ? std::vector<ModFunctionEntryHook>{} : found->second.guest_functions;
+}
+
+bool mod_register_instruction_plugin(const std::string& id, uint32_t address,
+                                      uint32_t expected, PSXModFunctionEntryCallback callback) {
+    if (!valid_id(id) || !callback || (address & 3u) || address >= 0xC0000000u ||
+        (address & 0x1FFFFFFFu) >= 0x00800000u) return false;
+    auto& hooks = registered_plugins()[id].instructions;
+    const uint32_t key = address & 0x1FFFFFFFu;
+    for (const auto& hook : hooks)
+        if (hook.address == key) return false;
+    hooks.push_back({key, expected, callback});
+    return true;
+}
+
+std::vector<ModInstructionHook> mod_instruction_hooks(const std::string& id) {
+    const auto found = registered_plugins().find(id);
+    return found == registered_plugins().end()
+        ? std::vector<ModInstructionHook>{} : found->second.instructions;
 }
 
 void mod_invoke_activation_plugin(const std::string& id) {

@@ -97,9 +97,12 @@ static PGXPStats s_stats;
 /* Lifecycle                                                                  */
 /* ------------------------------------------------------------------------- */
 
+static void ck_wrapped(void);
+
 extern "C" void pgxp_invalidate_all(void) {
     if (s_suppress != 0) { s_deferred_invalidate = 1; return; }
     if (++s_gen == 0) {
+        ck_wrapped();
         /* generation wrapped: physically clear so stale slots can't revive */
         if (s_ram) std::memset(s_ram, 0, PGXP_RAM_WORDS * sizeof(PGXPValue));
         std::memset(s_scratch, 0, sizeof(s_scratch));
@@ -219,6 +222,115 @@ static inline PGXPValue *pgxp_ptr(uint32_t addr) {
     return nullptr;
 }
 
+/* ------------------------------------------------------------------------- */
+/* Checkpoint (render passes)                                                 */
+/* ------------------------------------------------------------------------- */
+
+/* A render pass (render_pass.c) runs guest draw code on a sandboxed machine
+ * and puts RAM, scratchpad and registers back with raw copies afterwards. The
+ * shadows must roll back with them: otherwise they describe the words the
+ * pass wrote (interpolated vertices), and the live frame's packets - consumed
+ * after the passes - fail validation. Copying the shadow arrays whole per
+ * pass would cost tens of MB; instead every RAM / scratchpad slot a pass
+ * mutates is journaled on its first write, and register shadows (small) are
+ * copied whole. A journal that cannot grow, or a generation wrap during the
+ * pass, fails closed: rollback invalidates everything. */
+struct PGXPJournalEntry {
+    PGXPValue *slot;
+    PGXPValue old;
+};
+
+static uint32_t          s_ck_depth = 0;
+static uint8_t          *s_ck_bits = nullptr;     /* one bit per shadow slot */
+static PGXPValue        *s_ck_ram = nullptr;      /* s_ram the bits index    */
+static PGXPJournalEntry *s_ck_log = nullptr;
+static size_t            s_ck_n = 0, s_ck_cap = 0;
+static int               s_ck_lossy = 0;
+static PGXPValue         s_ck_gpr[34], s_ck_gte[32];
+static uint32_t          s_ck_gen = 0, s_ck_suppress = 0;
+static int               s_ck_deferred = 0;
+
+static inline size_t ck_index(const PGXPValue *pv) {
+    if (pv >= s_scratch && pv < s_scratch + PGXP_SCRATCH_WORDS)
+        return (size_t)PGXP_RAM_WORDS + (size_t)(pv - s_scratch);
+    return (size_t)(pv - s_ram);
+}
+
+/* Journal a RAM / scratchpad slot before its first mutation in a pass. */
+static inline void ck_note(PGXPValue *pv) {
+    if (s_ck_depth == 0 || !pv) return;
+    if (s_ram != s_ck_ram && !(pv >= s_scratch &&
+                               pv < s_scratch + PGXP_SCRATCH_WORDS)) {
+        s_ck_lossy = 1;                        /* shadow RAM appeared mid-pass */
+        return;
+    }
+    size_t i = ck_index(pv);
+    uint8_t bit = (uint8_t)(1u << (i & 7u));
+    if (s_ck_bits[i >> 3] & bit) return;
+    if (s_ck_n == s_ck_cap) {
+        size_t cap = s_ck_cap ? s_ck_cap * 2 : 65536;
+        PGXPJournalEntry *p = (PGXPJournalEntry *)std::realloc(
+            s_ck_log, cap * sizeof *p);
+        if (!p) { s_ck_lossy = 1; return; }
+        s_ck_log = p;
+        s_ck_cap = cap;
+    }
+    s_ck_bits[i >> 3] |= bit;
+    s_ck_log[s_ck_n].slot = pv;
+    s_ck_log[s_ck_n].old = *pv;
+    s_ck_n++;
+}
+
+static void ck_wrapped(void) {
+    if (s_ck_depth != 0) s_ck_lossy = 1;       /* shadows were cleared        */
+}
+
+static inline PGXPValue *pgxp_ptr_w(uint32_t addr) {
+    PGXPValue *pv = pgxp_ptr(addr);
+    ck_note(pv);
+    return pv;
+}
+
+extern "C" void pgxp_checkpoint_begin(void) {
+    if (s_ck_depth++ != 0) return;             /* the outermost pass journals */
+    if (!s_ck_bits) {
+        s_ck_bits = (uint8_t *)std::calloc(
+            ((size_t)PGXP_RAM_WORDS + PGXP_SCRATCH_WORDS + 7u) / 8u, 1);
+        if (!s_ck_bits) s_ck_lossy = 1;
+    }
+    s_ck_ram = s_ram;
+    s_ck_n = 0;
+    std::memcpy(s_ck_gpr, s_gpr, sizeof s_gpr);
+    std::memcpy(s_ck_gte, s_gte, sizeof s_gte);
+    s_ck_gen = s_gen;
+    s_ck_suppress = s_suppress;
+    s_ck_deferred = s_deferred_invalidate;
+}
+
+extern "C" void pgxp_checkpoint_rollback(void) {
+    if (s_ck_depth == 0) return;
+    if (--s_ck_depth != 0) return;
+    for (size_t i = s_ck_n; i-- > 0;) {
+        PGXPJournalEntry *e = &s_ck_log[i];
+        *e->slot = e->old;
+        size_t k = ck_index(e->slot);
+        s_ck_bits[k >> 3] &= (uint8_t)~(1u << (k & 7u));
+    }
+    s_ck_n = 0;
+    std::memcpy(s_gpr, s_ck_gpr, sizeof s_gpr);
+    std::memcpy(s_gte, s_ck_gte, sizeof s_gte);
+    s_gen = s_ck_gen;
+    /* A watchdog abort can leave a suppress bracket open: the machine it
+     * interrupted is gone, so its bracket is too. */
+    s_suppress = s_ck_suppress;
+    s_deferred_invalidate = s_ck_deferred;
+    recompute_active();
+    if (s_ck_lossy || s_ram != s_ck_ram) {
+        s_ck_lossy = 0;
+        pgxp_invalidate_all();
+    }
+}
+
 static inline int pv_live(const PGXPValue *pv) {
     return pv && pv->gen == s_gen && (pv->flags & PGXP_F_VXY) != 0;
 }
@@ -272,7 +384,7 @@ extern "C" void psx_pgxp_load(struct CPUState *cpu, uint32_t instr,
 
     switch (f_op(instr)) {
     case 0x23: {                               /* LW                          */
-        PGXPValue *src = pgxp_ptr(addr);
+        PGXPValue *src = pgxp_ptr_w(addr);     /* validation may mutate it    */
         if (src && src->gen == s_gen) {
             pv_validate(src, value);
             *dst = *src;
@@ -312,7 +424,7 @@ extern "C" void psx_pgxp_store(struct CPUState *cpu, uint32_t instr,
                                uint32_t addr, uint32_t value) {
     (void)cpu;
     if (!g_pgxp_active) return;
-    PGXPValue *dst = pgxp_ptr(addr);
+    PGXPValue *dst = pgxp_ptr_w(addr);
     if (!dst) return;
     uint32_t rt = f_rt(instr);
     PGXPValue *src = (rt != 0) ? &s_gpr[rt] : nullptr;
@@ -371,7 +483,7 @@ extern "C" void psx_pgxp_cop2(struct CPUState *cpu, uint32_t instr,
 
     switch (f_op(instr)) {
     case 0x32: {                               /* LWC2: gte[rt] <- [addr]     */
-        PGXPValue *src = pgxp_ptr(addr);
+        PGXPValue *src = pgxp_ptr_w(addr);     /* validation may mutate it    */
         PGXPValue *dst = &s_gte[f_rt(instr)];
         if (src && src->gen == s_gen) {
             pv_validate(src, value);
@@ -382,7 +494,7 @@ extern "C" void psx_pgxp_cop2(struct CPUState *cpu, uint32_t instr,
         return;
     }
     case 0x3A: {                               /* SWC2: [addr] <- gte[rt]     */
-        PGXPValue *dst = pgxp_ptr(addr);
+        PGXPValue *dst = pgxp_ptr_w(addr);
         if (!dst) return;
         PGXPValue *src = &s_gte[f_rt(instr)];
         if (src->gen == s_gen) {
@@ -936,7 +1048,7 @@ extern "C" int pgxp_probe_precise_vertex(uint32_t addr, uint32_t packet_word,
  * the double write is idempotent (same source shadow, same destination). */
 extern "C" void pgxp_store_gte_reg(uint32_t addr, uint8_t reg) {
     if (!g_pgxp_active) return;
-    PGXPValue *dst = pgxp_ptr(addr);
+    PGXPValue *dst = pgxp_ptr_w(addr);
     if (!dst) return;
     const PGXPValue *src = &s_gte[reg & 31u];
     if (src->gen != s_gen) return;

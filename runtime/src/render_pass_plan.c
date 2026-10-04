@@ -111,6 +111,16 @@ int render_pass_select(const uint32_t *phases, uint32_t n, double p,
     return 1;
 }
 
+int render_pass_gen_flip_matches(int shown, int gen_x, int gen_y,
+                                 int gen_source, int gen_w, int gen_h,
+                                 int flip_x, int flip_y, int flip_source,
+                                 int flip_w, int flip_h) {
+    const int same_rect = gen_x == flip_x && gen_y == flip_y;
+    if (gen_source != flip_source || gen_w != flip_w || gen_h != flip_h)
+        return 0;
+    return shown ? !same_rect : same_rect;
+}
+
 int render_pass_gen_select(const uint32_t *phases, uint32_t n, double p,
                            uint32_t *lo, uint32_t *hi, float *t) {
     if (!(p <= RENDER_PASS_GEN_HOLD_MAX)) return 0;
@@ -240,8 +250,9 @@ int render_pass_store_to(const RenderPassStoreTarget *t, uint32_t addr,
         t->mmio_write(phys, val, width);
         return -1;
     }
-    /* Mod memory, expansion, ROM, unmapped: never written by a pass (mod
-     * arenas are not part of the pass restore). */
+    /* Expansion, ROM, unmapped: never written by a pass. (Mod arenas are
+     * written and journaled before this policy: memory.c
+     * render_pass_mod_store.) */
     return RENDER_PASS_DROP_OTHER;
 }
 
