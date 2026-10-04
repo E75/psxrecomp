@@ -449,11 +449,16 @@ set(PSXRECOMP_RUNTIME_SOURCES
     ${PSXRECOMP_ROOT}/runtime/src/netplay_exit_reason.c
     ${PSXRECOMP_ROOT}/recompiler/src/config_loader.cpp
     ${PSXRECOMP_ROOT}/recompiler/src/ps1_exe_parser.cpp
-    ${PSXRECOMP_ROOT}/recompiler/src/mips_decoder.cpp
-    ${PSXRECOMP_ROOT}/runtime/src/disasm_shim.cpp
     # (sljit Tier-2 in-process JIT backend removed 2026-07-15 — was disabled by
     # default since 2026-06-25; gaps fall to the interpreter, gcc/tcc unaffected.)
 )
+# TCP `disasm` command only (debug_server.c); stripped with the rest of the TCP
+# server when PSX_DEBUG_TOOLS is OFF.
+if(PSX_DEBUG_TOOLS)
+    list(APPEND PSXRECOMP_RUNTIME_SOURCES
+        ${PSXRECOMP_ROOT}/recompiler/src/mips_decoder.cpp
+        ${PSXRECOMP_ROOT}/runtime/src/disasm_shim.cpp)
+endif()
 
 # Optional delay-sync netplay (recomp-net). Auto-discovers a sibling checkout
 # (…/recomp-net next to the game repo or next to psxrecomp). Override with
