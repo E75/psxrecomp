@@ -2,9 +2,43 @@
 
 Build with `-DPSX_OPENXR=ON` to opt in. The default is OFF: ordinary builds
 do not fetch the SDK or require an active headset runtime. The enabled build
-uses official OpenXR-SDK annotated tag object `b76b80adaf65ac3ad6cc1ce61974fb29a5d02352`
-and currently supports Win32/OpenGL. This is a PC headset backend; it does not
+uses the official OpenXR-SDK source archive for annotated tag object
+`b76b80adaf65ac3ad6cc1ce61974fb29a5d02352` (SHA256-pinned in `third_party/deps.manifest`;
+same vendored/offline resolution as libchdr) and currently supports Win32/OpenGL. This is a PC headset backend; it does not
 provide an Android/standalone Quest build.
+
+## Opting in at run time: `PSX_OPENXR_ENABLE`
+
+The CMake option `PSX_OPENXR` only compiles the backend. A compiled-in build
+still creates the usual OpenGL 3.3 core context. Setting the environment variable
+`PSX_OPENXR_ENABLE=1` makes an XR build request an OpenGL **4.6** core context
+instead (the OpenXR OpenGL runtime requirements need it); the runtime logs one
+line to stderr when this changes the context version. It has no effect in a build
+without `-DPSX_OPENXR=ON`. The older spelling `PSX_OPENXR=1` (identical to
+the CMake option name) still works but is deprecated, logs a note, and will be
+removed. The variable only selects the context; the game plugin still enables
+XR with `psx_mod_openxr_enable`.
+
+## Threading
+
+Every OpenXR entry point runs on the emulation/main thread that owns the GL
+context: plugin hooks (`psx_mod_openxr_*`), the GL present path
+(`gl_swap_with_osd` and the interpolation/hold presents it serves) and TCP
+command handlers, which the debug server executes at its `debug_server_poll`
+safe point on that same thread (its I/O thread only queues requests). There is
+no second GL or XR thread, so the module has no locks. New code must keep it
+that way or add marshalling.
+
+## Session loss and recovery
+
+`XR_ERROR_SESSION_LOST`/`XR_ERROR_INSTANCE_LOST` (from any call), session
+`LOSS_PENDING` and instance loss tear the whole XR stack down at the end of
+the failing call and fall back to the flat present. The backend stays enabled,
+retries initialisation every few seconds, and counts `losses` in
+`openxr_stats`. A session that reaches `EXITING` (the user closed the headset
+app) is torn down and left disabled until `openxr_control enable=1` /
+`psx_mod_openxr_enable(1)`. A swapchain image whose wait fails is treated as an
+unrecoverable swapchain and takes the same path.
 
 ## Frame ownership and stereo submission
 
