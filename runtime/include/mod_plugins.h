@@ -28,6 +28,10 @@ void psx_mod_function_entry(struct CPUState* cpu, uint32_t address);
 
 /* Narrow guest services available to trusted plugin callbacks. */
 int psx_mod_game_started(void);
+/* Mounted-disc read for native asset preparation; guest CD state is untouched.
+ * Emulation thread only. NULL buffer queries size. Active sector mods apply. */
+int psx_mod_read_disc_file(const char* path, void* buffer, uint32_t capacity,
+                           uint32_t* size);
 uint8_t psx_mod_read_byte(uint32_t address);
 void psx_mod_write_byte(uint32_t address, uint8_t value);
 uint16_t psx_mod_read_half(uint32_t address);

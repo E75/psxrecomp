@@ -213,6 +213,17 @@ on a fixed region -> next.
 
 ## 5. Status / Log (update every session)
 
+- **2026-10-04 (Tomba 2 resident-resource spike, beads-eio.3.258):**
+  Backported the existing trusted-plugin mounted-disc read service to this
+  pinned baseline. It reads verified ISO file data with the active sector mod
+  plan and does not advance or alter the guest CD controller. Tomba-specific
+  decoding, resource-worker completion and sample installation remain in the
+  game repository's optional enhancement. Runtime build and live first-run
+  preparation passed; the game integration test covers all source/decoded
+  hashes, warm-cache behavior and repair/failure paths. No faithful timing-core
+  behavior changed. Separately recorded early-savestate boot-turbo bookkeeping
+  as beads-eio.3.259; test restores now wait for the real game-entry handoff.
+
 - **2026-08-31 (GPU DMA2 review correction — source gate passed):**
   The first fork review found two valid timing defects in the DMA2 candidate. The
   linked-list engine now reads and emits one live payload word at each
