@@ -113,6 +113,46 @@ static void verify_oversize_wide_geometry(int scale) {
  check(glb_vram_read(100,100)==0x001f,"admitted backend geometry remains coherent without mirror");
  glb_wide_set_target(0);
 }
+static void verify_camera_plane_clip(int scale) {
+ glb_set_draw_area(0,0,511,239);glb_wide_configure(848,168);
+ glb_wide_set_target(0);glb_wide_set_view(0,0,0,0);
+ glb_wide_clear(0,0,240,0);glb_draw_flat_rect(-168,0,848,240,0x7c00);
+ glb_vram_write(512,0,0x03e0);
+ /* One corner is behind the camera, with two at z=2 in front. The
+  * visible trapezoid contains (100,100), and extends into the left margin. */
+ const PSXProjectedVertex crossing[3]={
+   {-1600,0,-1,0,0,1,1,1},{600,0,2,0,0,1,1,1},{600,480,2,0,0,1,1,1}};
+ check(gl_renderer_projective_supported(),"projective GPU path ready");
+ gl_renderer_draw_projected_triangle(crossing,0x108,0,0,1,-1,1);
+ check(glb_vram_read(100,100)==0x03e0,"crossing wall retained in front of camera");
+ check(glb_vram_read(400,100)==0x7c00,"outside crossing wall remains untouched");
+ const PSXProjectedVertex hidden[3]={
+   {-400,0,-2,0,0,1,1,1},{600,0,-1,0,0,1,1,1},{600,480,-2,0,0,1,1,1}};
+ gl_renderer_draw_projected_triangle(hidden,0x108,0,0,1,-1,1);
+ check(glb_vram_read(400,100)==0x7c00,"entirely behind-camera triangle rejected");
+ glb_draw_flat_rect(120,100,4,4,0x001f);
+ check(glb_vram_read(121,101)==0x001f,"ordinary draw after clipped wall keeps painter order");
+ check(!s_pc_valid && !s_pq_valid && !s_projected_uv_valid,"clipped overrides consumed");
+ verify("camera-plane clipping preserves GPU and CPU authority");
+ uint32_t *pixels=calloc((size_t)848*240*scale*scale,sizeof(uint32_t));
+ check(pixels!=NULL,"camera-plane wide allocation");
+ if(pixels) {
+  check(glb_render_wide_display(pixels,848*scale*4,0,0,240)>0,"camera-plane wide readback");
+  check(pixels[100*scale*(848*scale)+68*scale]==0xff00ff00u,"crossing wall retained in wide margin");
+  check(pixels[100*scale*(848*scale)+268*scale]==0xff00ff00u,"same crossing wall across center copy");
+  free(pixels);
+ }
+ /* Perspective UVs must survive intersections without integer rounding.
+  * Analytic barycentric values at the two samples are (15.789,5.702)
+  * and (17.5,6.771), independent of the clipped polygon's triangulation. */
+ for(int v=0;v<32;++v) for(int u=0;u<32;++u)
+  glb_vram_write(512+u,v,(uint16_t)((u+1)|((v+1)<<5)));
+ PSXProjectedVertex mapped[3]={crossing[0],crossing[1],crossing[2]};
+ mapped[1].u=mapped[2].u=20;mapped[2].v=20;
+ gl_renderer_draw_projected_triangle(mapped,0x108,0,0,1,-1,1);
+ check(glb_vram_read(100,100)==(16|(6<<5)),"fractional clipped UV sample one");
+ check(glb_vram_read(200,100)==(18|(7<<5)),"fractional clipped UV sample two");
+}
 int main(int argc,char **argv){
  int scale=argc>1?atoi(argv[1]):1;
  if(SDL_Init(SDL_INIT_VIDEO)!=0)return 2;
@@ -231,6 +271,7 @@ int main(int argc,char **argv){
  verify("retained indices with animated guest CLUT");
  verify_bank_batching();
  verify_oversize_wide_geometry(scale);
+ verify_camera_plane_clip(scale);
  /* World and UI use different origins in an anchored wide frame. Keep the
   * canonical-center optimization enabled to catch an erroneous blit over the
   * completed mirror, and change origins with a pending flat batch. */

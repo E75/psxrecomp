@@ -8,6 +8,7 @@
  * same struct tag) so this header needs no SDL include. */
 
 #include <stdint.h>
+#include "gpu_projective_clip.h"
 
 struct SDL_Window;
 
@@ -335,6 +336,12 @@ uint64_t gl_renderer_perf_prim_split(double *out_tex_frac);
  * reject. Diagnostic only; they use the normal canonical and mirror passes. */
 void gl_renderer_note_wide_triangle_recovery(int enabled);
 uint64_t gl_renderer_wide_triangle_recovery_count(void);
+/* Exact-provenance world polygons only. Returns zero when the GPU context or
+ * authority policy cannot support clipping; the caller then uses its stock path. */
+int gl_renderer_projective_supported(void);
+void gl_renderer_draw_projected_triangle(const PSXProjectedVertex vertices[3],
+    uint16_t texpage, uint16_t clut_x, uint16_t clut_y, int raw, int semi,
+    int perspective);
 /* Cumulative textured-batch diagnostics: total, then flushes caused by
  * isolation, blend-mode, mask, filter, backdrop-gate, texture-window, capacity. */
 void gl_renderer_batch_diag(uint64_t out[8]);

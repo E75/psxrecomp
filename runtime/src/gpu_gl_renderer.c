@@ -554,6 +554,8 @@ static GLuint s_pack_prog = 0, s_stencil_prog = 0, s_empty_vao = 0;
  * gpu.c sets these immediately before the matching gr_draw_*_triangle and they
  * are consumed by it. All-zero == the faithful integer/affine path. */
 static int     s_pc_valid = 0;                  /* sub-pixel positions present */
+static int s_projected_uv_valid;
+static float s_projected_u[3], s_projected_v[3];
 static float   s_pc_x[3], s_pc_y[3];            /* native VRAM px, fractional  */
 static int     s_pq_valid = 0;                  /* perspective weights present */
 static float   s_pq[3];
@@ -3282,7 +3284,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
                                   int semi, const int *lim) {
     // Mode 2 needs proven world geometry. Sprites, HUD and untracked packets
     // retain point sampling; their cutout pixels must stay sharp.
-    const int filter=s_tex_filter==2 && (lim || (!s_pc_valid && !s_pq_valid)) ? 0 : s_tex_filter;
+    const int filter=s_tex_filter==2 && ((lim && !s_projected_uv_valid) || (!s_pc_valid && !s_pq_valid)) ? 0 : s_tex_filter;
     int lim_buf[4];
     int uv_buf[6];
     if (!lim) {
@@ -3369,7 +3371,8 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
         for (int i = 0; i < 3; i++, vp += TEXV) {
             vp[0] = s_pc_valid ? s_pc_x[i] : (float)xs[i];
             vp[1] = s_pc_valid ? s_pc_y[i] : (float)ys[i];
-            vp[2] = (float)us[i];   vp[3] = (float)vs[i];
+            vp[2] = s_projected_uv_valid ? s_projected_u[i] : (float)us[i];
+            vp[3] = s_projected_uv_valid ? s_projected_v[i] : (float)vs[i];
             vp[4] = col[i*3+0];     vp[5] = col[i*3+1];     vp[6] = col[i*3+2];   vp[7] = 1.0f;
             vp[8]  = (float)base_x;  vp[9]  = (float)base_y;        /* a_tpage  */
             vp[10] = (float)clut_x;  vp[11] = (float)clut_y;        /* a_clut   */
@@ -3686,7 +3689,44 @@ static int cpu_raster_required(void) {
 }
 /* The sub-pixel / perspective override describes exactly one triangle; drop it
  * once that triangle has been submitted so a later prim can never inherit it. */
-static inline void precise_consumed(void) { s_pc_valid = 0; s_pq_valid = 0; }
+static inline void precise_consumed(void) { s_pc_valid = 0; s_pq_valid = 0; s_projected_uv_valid = 0; }
+
+int gl_renderer_projective_supported(void) {
+    return s_raster_ok && g_wide_cur && !cpu_vram_authoritative();
+}
+void gl_renderer_draw_projected_triangle(const PSXProjectedVertex vertices[3],
+    uint16_t texpage, uint16_t cx, uint16_t cy, int raw, int semi, int perspective) {
+    PSXProjectedVertex polygon[12];
+    const double left=fmin(s_area_x1, -wide_dx())-1.0;
+    const double right=fmax(s_area_x2+1, g_wide_w-wide_dx())+1.0;
+    const int n=psx_projective_clip_triangle(vertices,polygon,
+        left,right,s_area_y1-1.0,s_area_y2+1.0);
+    int limits[4]={(int)vertices[0].u,(int)vertices[0].v,
+                   (int)vertices[0].u,(int)vertices[0].v};
+    for (int i=1;i<3;++i) {
+        if (vertices[i].u<limits[0]) limits[0]=(int)vertices[i].u;
+        if (vertices[i].v<limits[1]) limits[1]=(int)vertices[i].v;
+        if (vertices[i].u>limits[2]) limits[2]=(int)vertices[i].u;
+        if (vertices[i].v>limits[3]) limits[3]=(int)vertices[i].v;
+    }
+    for (int k=1;k+1<n;++k) {
+        const PSXProjectedVertex v[3]={polygon[0],polygon[k],polygon[k+1]};
+        int xs[3],ys[3],us[3],vs[3]; float col[9];
+        s_pc_valid=1; s_pq_valid=perspective; s_projected_uv_valid=1;
+        for (int i=0;i<3;++i) {
+            s_pc_x[i]=(float)(v[i].x/v[i].z);
+            s_pc_y[i]=(float)(v[i].y/v[i].z);
+            xs[i]=(int)floorf(s_pc_x[i]); ys[i]=(int)floorf(s_pc_y[i]);
+            s_pq[i]=(float)(1.0/v[i].z);
+            s_projected_u[i]=(float)v[i].u; s_projected_v[i]=(float)v[i].v;
+            us[i]=(int)v[i].u; vs[i]=(int)v[i].v;
+            col[i*3]=(float)v[i].r; col[i*3+1]=(float)v[i].g; col[i*3+2]=(float)v[i].b;
+        }
+        gpu_textured_triangle(xs,ys,us,vs,col,texpage,cx,cy,raw,semi,limits);
+        precise_consumed();
+    }
+    precise_consumed();
+}
 
 static void glb_draw_flat_triangle(int x0,int y0,int x1,int y1,int x2,int y2,uint16_t col) {
     if (cpu_raster_required())

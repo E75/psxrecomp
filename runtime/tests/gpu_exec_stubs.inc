@@ -19,6 +19,27 @@ uint32_t g_psx_ram_mask = 0x001FFFFFu;
 static GrBackend fixture_backend = GR_BACKEND_SOFTWARE;
 GrBackend gr_backend(void) { return fixture_backend; }
 int gl_renderer_texture_banks_supported(void) { return 0; }
+static int fixture_projective_supported, fixture_projective_draws;
+static PSXProjectedVertex fixture_projective_vertices[3];
+int gl_renderer_projective_supported(void) { return fixture_projective_supported; }
+void gl_renderer_draw_projected_triangle(const PSXProjectedVertex v[3],
+    uint16_t tp, uint16_t cx, uint16_t cy, int raw, int semi, int perspective) {
+    memcpy(fixture_projective_vertices,v,sizeof fixture_projective_vertices);
+    fixture_projective_draws++;
+    (void)tp;(void)cx;(void)cy;(void)raw;(void)semi;(void)perspective;
+}
+static struct { uint32_t addr,word; PGXPProjection p; int valid; } fixture_homogeneous[4];
+int pgxp_load_projection(uint32_t addr, uint32_t word, PGXPProjection *out) {
+    for(int i=0;i<4;++i) if(fixture_homogeneous[i].valid &&
+        fixture_homogeneous[i].addr==addr && fixture_homogeneous[i].word==word) {
+        if(out)*out=fixture_homogeneous[i].p;
+        return 1;
+    }
+    return 0;
+}
+static int fixture_projection_tracking;
+int pgxp_projection_tracking(void) { return fixture_projection_tracking; }
+void pgxp_set_projection_tracking(int enabled) { fixture_projection_tracking=!!enabled; }
 int gl_renderer_select_texture_bank(uint16_t id) { return id == 0; }
 int gl_renderer_select_texture_bank_live_clut(uint16_t id) { return id == 0; }
 uint16_t mod_texture_packet_bank(uint32_t source, const uint32_t *words,

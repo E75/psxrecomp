@@ -1,6 +1,7 @@
 #include "cpu_state.h"
 #include "gte.h"
 #include "render_pass_projection.h"
+#include "pgxp.h"
 
 #include <array>
 #include <cstdint>
@@ -842,6 +843,28 @@ int main() {
     if (int rc = test_precise_nclip_is_title_scoped()) return rc;
     if (int rc = test_saturated_nclip_keeps_architectural_result()) return rc;
     if (int rc = test_precision_speculative_transaction()) return rc;
+    /* Signed host projection spans the camera plane without changing any
+     * architectural register, including unsigned SZ and divider/screen flags. */
+    pgxp_set_enabled(1);
+    for (int depth : {-158,-1,0,1,149,150,151,900}) {
+        GTEState native{}, enhanced{};
+        native.RT[0][0]=native.RT[1][1]=native.RT[2][2]=4096;
+        native.V0[0]=100;native.V0[1]=30;native.TR[2]=depth;
+        native.H=300;native.OFX=256*65536;native.OFY=120*65536;
+        enhanced=native;
+        pgxp_set_projection_tracking(0);
+        PSXRecomp::GTE::gte_rtps(&native,0x0180001u);
+        pgxp_set_projection_tracking(1);
+        PSXRecomp::GTE::gte_rtps(&enhanced,0x0180001u);
+        PGXPProjection p;
+        if (std::memcmp(&native,&enhanced,sizeof native) ||
+            !pgxp_get_gte_projection(2,enhanced.SXY[2],&p) ||
+            p.z!=depth || p.x!=256*depth+30000 || p.y!=120*depth+9000 || p.near_z!=150) {
+            std::fprintf(stderr,"FAIL signed camera projection at depth %d\n",depth);
+            return 1;
+        }
+    }
+    pgxp_set_projection_tracking(0);
     std::puts("PASS: canonical GTE register helpers match GTEState transfer oracle");
     return 0;
 }

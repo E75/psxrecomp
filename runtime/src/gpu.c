@@ -4046,6 +4046,15 @@ int gpu_ws_native_wide_projection_correction(uint64_t *vertices) {
     return s_native_wide_projection_correction;
 }
 
+static int gpu_ws_projective_enabled(void) {
+    return pgxp_projection_tracking() && s_native_wide_projection_correction && ws_native_wide_active() &&
+        ws_nw_extra() > 0 && gr_backend() == GR_BACKEND_OPENGL &&
+        gl_renderer_projective_supported();
+}
+void psx_mod_set_native_wide_near_clip(int enabled) {
+    pgxp_set_projection_tracking(enabled);
+}
+
 /* The PS1 clamps each projected X independently. At a wider FOV that can
  * bend an otherwise planar quad, even while both clamped vertices remain
  * outside the viewport. Recover only a proven saturated projection. An
@@ -4631,8 +4640,47 @@ static void setup_textured_draw(uint32_t color24, int semi_trans, int raw_textur
     gr_set_semi_transparency(semi_trans, (int)semi_transparency);
 }
 
+/* A close corner may cross the camera plane while the face is still visible.
+ * The hardware's clamped H/Z and unsigned SZ cannot describe that polygon.
+ * Use only intact GTE-derived words, clip their signed homogeneous projection,
+ * and submit through the normal ordered GL passes and VRAM authority path. */
+static int native_wide_projective_draw(void) {
+    if (!gpu_ws_projective_enabled() || gp0_cmd_source_addr == UINT32_MAX) return 0;
+    const unsigned op=gp0_cmd_buf[0]>>24;
+    const unsigned stride=(op&16u)?3u:2u, n=(op&8u)?4u:3u;
+    PSXProjectedVertex vertices[4];
+    int needs_clip=0;
+    for (unsigned i=0;i<n;++i) {
+        const unsigned index=1+stride*i;
+        const uint32_t word=gp0_cmd_buf[index];
+        PGXPProjection p;
+        if (!pgxp_load_projection(gp0_cmd_source_addr+4*index,word,&p)) return 0;
+        int32_t x,y; parse_vertex(word,&x,&y);
+        needs_clip |= p.z<p.near_z || x==-1024 || x==1023 || y==-1024 || y==1023;
+        const uint32_t color=gp0_cmd_buf[(op&16u)?index-1:0];
+        const uint32_t uv=gp0_cmd_buf[index+1];
+        vertices[i]=(PSXProjectedVertex){p.x+(double)draw_offset_x*p.z,
+            p.y+(double)draw_offset_y*p.z,p.z,uv&255,(uv>>8)&255,
+            (color&255)/255.0,((color>>8)&255)/255.0,((color>>16)&255)/255.0};
+    }
+    if (!needs_clip) return 0;
+    const uint16_t clut=gp0_cmd_buf[2]>>16;
+    const uint16_t tpage=gp0_cmd_buf[2+stride]>>16;
+    set_tpage_from_poly(tpage);
+    const int semi=(op&2u)?(int)semi_transparency:-1;
+    gl_renderer_draw_projected_triangle(vertices,tpage&0x1ff,
+        (clut&63)*16,(clut>>6)&511,op&1u,semi,s_texture_correction_enabled);
+    if (n==4) {
+        const PSXProjectedVertex second[3]={vertices[2],vertices[1],vertices[3]};
+        gl_renderer_draw_projected_triangle(second,tpage&0x1ff,
+            (clut&63)*16,(clut>>6)&511,op&1u,semi,s_texture_correction_enabled);
+    }
+    return 1;
+}
+
 /* Execute textured triangle (GP0 0x24-0x27) */
 static void gp0_exec_textured_tri(void) {
+    if (native_wide_projective_draw()) return;
     uint32_t color24 = gp0_cmd_buf[0] & 0xFFFFFFu;
     int semi_trans = (gp0_cmd_buf[0] >> 25) & 1;
     int raw_texture = (gp0_cmd_buf[0] >> 24) & 1;
@@ -4673,6 +4721,7 @@ static void gp0_exec_textured_tri(void) {
 
 /* Execute textured quad (GP0 0x2C-0x2F) */
 static void gp0_exec_textured_quad(void) {
+    if (native_wide_projective_draw()) return;
     uint32_t color24 = gp0_cmd_buf[0] & 0xFFFFFFu;
     int semi_trans = (gp0_cmd_buf[0] >> 25) & 1;
     int raw_texture = (gp0_cmd_buf[0] >> 24) & 1;
@@ -4765,6 +4814,7 @@ static void gp0_exec_textured_quad(void) {
 
 /* Execute shaded textured triangle (GP0 0x34-0x37) */
 static void gp0_exec_shaded_textured_tri(void) {
+    if (native_wide_projective_draw()) return;
     int semi_trans = (gp0_cmd_buf[0] >> 25) & 1;
     int raw_texture = (gp0_cmd_buf[0] >> 24) & 1;
     int32_t vx[3], vy[3];
@@ -4829,6 +4879,7 @@ int psx_mod_texture_banks_supported(void) {
 
 /* Execute shaded textured quad (GP0 0x3C-0x3F) */
 static void gp0_exec_shaded_textured_quad(void) {
+    if (native_wide_projective_draw()) return;
     int semi_trans = (gp0_cmd_buf[0] >> 25) & 1;
     int raw_texture = (gp0_cmd_buf[0] >> 24) & 1;
     int32_t vx[4], vy[4];

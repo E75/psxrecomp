@@ -978,6 +978,19 @@ void gte_rtps_internal(GTEState* gte, int16_t* V, bool setMac0, uint32_t instr) 
         int64_t cy16 = sy16 < -kLim ? -kLim : (sy16 > kLim - 1 ? kLim - 1 : sy16);
         pgxp_gte_push_sxy((int32_t)cx16, (int32_t)cy16, gte->SZ[3],
                           (uint32_t)gte->SXY[2]);
+        if (pgxp_projection_tracking() && shift == 12 && !lm) {
+            const double z = (double)(mac3 >> 12);
+            double hx = (double)gte->MAC1 * gte->H;
+            if (do_squash) hx = hx * s_ws_xnum / s_ws_xden;
+            else if (s_ws_dome_on && s_ws_dome_num != s_ws_dome_den &&
+                     !gpu_ws_present_native_43() && gte->SZ[3] >= s_ws_far_threshold)
+                hx = hx * s_ws_dome_num / s_ws_dome_den;
+            PGXPProjection projection = {
+                (float)(gte->OFX / 65536.0 * z + hx),
+                (float)(gte->OFY / 65536.0 * z + (double)gte->MAC2 * gte->H),
+                (float)z, (float)gte->H / 2.0f};
+            pgxp_gte_set_projection(&projection);
+        }
     }
     geom_note((uint32_t)gte->SXY[2], sx16, sy16);
 

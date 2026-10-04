@@ -979,3 +979,30 @@ surface, including copies between the buffers and 1000-column copies staged
 in chunks; at 18x both buffers must read back at S with two tiles. In R4 on an M4, the 8K preset reports
 `effective_scale 18, internal_lines 4320, hr_scale 1, hires_fbo 5760x9216`, and
 `screenshot_hires` in a race is 5760×4320 with the rear-view mirror present.
+
+
+### Opt-in camera-plane clipping for native-wide textured worlds
+
+`psx_mod_set_native_wide_near_clip(1)` complements horizontal projection
+recovery. A large face can remain visible while a corner crosses the camera
+plane: unsigned SZ, the capped H/Z divider and saturated SXY cannot represent
+that face. PGXP now optionally carries the signed homogeneous projection from
+RTPS/RTPT through exact full-word copies. CPU arithmetic, partial writes,
+stale words and timeline invalidation discard the association; sandbox
+rollback restores it with the rest of the precision shadow.
+
+Opted-in native-wide OpenGL sessions clip proven textured faces at depth 1
+and the visible bounds before perspective division. UV and color attributes
+follow each intersection, and ordinary GPU batches, painter order, masking,
+texture filtering and canonical/wide readback remain in use. The existing
+guest GTE registers, gameplay state and title culling branches do not change.
+Software/CPU-authoritative rendering, 4:3 and missing provenance use the
+original path. The larger PGXP value increases the full 8 MiB RAM shadow
+from 40 to 72 MiB; projection calculations are disabled unless a title opts in.
+
+MediEvil II's title hallway provided the camera-crossing reproduction. The
+GL authority/order fixture passes 197 checks at 1x and 4x; provenance tests
+cover negative depth, stale packets, identical partial writes, rollback and
+mode guards. Live captures remove the previously observed triangular holes;
+the owner confirmed the hallway walls stay intact. Broader map coverage
+remains separate from this reproduction.
