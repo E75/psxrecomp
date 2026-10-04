@@ -50,6 +50,10 @@ uint32_t i_stat;
 uint32_t i_mask;
 uint64_t psx_cycle_count;
 uint32_t g_psx_mod_function_entry_hooks;
+uint32_t g_psx_mod_instruction_hooks;
+void psx_mod_instruction(CPUState *cpu, uint32_t pc, uint32_t instruction) {
+    (void)cpu; (void)pc; (void)instruction;
+}
 uint32_t g_psx_ram_size = PSX_MAIN_RAM_RETAIL_BYTES;
 uint32_t g_psx_ram_mask = PSX_MAIN_RAM_RETAIL_BYTES - 1u;
 

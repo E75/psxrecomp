@@ -1837,6 +1837,8 @@ void FullFunctionEmitter::emit_dispatch(
     out += " * NULL (the default) = pure LLE, dispatch identical to a build without\n";
     out += " * the tier. */\n";
     out += "extern int (*g_psx_bios_hle_hook)(CPUState* cpu, uint32_t phys);\n\n";
+    out += "extern uint32_t g_psx_mod_guest_functions;\n";
+    out += "extern int psx_mod_dispatch_guest_function(CPUState*, uint32_t);\n\n";
     out += "#ifdef PSX_HAS_GAME_DISPATCH\n";
     out += "extern int psx_game_address_in_text(uint32_t addr);\n";
     out += "#endif\n\n";
@@ -2265,6 +2267,8 @@ void FullFunctionEmitter::emit_dispatch(
     out += "        cpu->pc = 0;\n";
     out += fmt::format("        int lo = 0, hi = {} - 1;\n", total_entries);
     out += "        int found = 0;\n";
+    out += "        if (g_psx_mod_guest_functions)\n";
+    out += "            found = psx_mod_dispatch_guest_function(cpu, addr);\n";
     out += "        /* BIOS HLE tier: consult the hook FIRST, on the pre-normalize\n";
     out += "         * physical address. It must see (a) the A0/B0/C0 service vectors\n";
     out += "         * (game thunks jr there with the function number in $t1) and (b)\n";
@@ -2273,7 +2277,7 @@ void FullFunctionEmitter::emit_dispatch(
     out += "         * backends. Handled (rc 1) \xE2\x87\x92 the service completed against guest\n";
     out += "         * state and the guest resumes at $ra via the trampoline's normal\n";
     out += "         * return/tail contract below. rc 0 \xE2\x87\x92 pure LLE fall-through. */\n";
-        out += "        if (g_psx_bios_hle_hook &&\n";
+        out += "        if (!found && g_psx_bios_hle_hook &&\n";
         out += "            g_psx_bios_hle_hook(cpu, addr & 0x1FFFFFFFu)) {\n";
         out += "            cpu->pc = cpu->gpr[31];\n";
         out += "            found = 1;\n";

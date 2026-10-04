@@ -42,9 +42,11 @@ extern "C" {
  * v5 = v4 + CD-ROM Sub-Q replacement state;
  * v6 = v5 + per-word GPU DMA2 linked-list progress;
  * v7 = v6 + pending XA DATA_END IRQ state. */
-#define BOOT_STATE_VERSION 8u
-/* v8 adds allocated enhancement memory. Vanilla writers remain v7; older
+#define BOOT_STATE_VERSION 9u
+/* v8 added allocated enhancement memory (vanilla v8-era writers kept v7); older
  * runtimes must not accept enhanced snapshots while ignoring their arenas. */
+/* v9 persists the BIOS-to-game handoff latch. Engine overlays may have
+ * replaced the original entry code by the time a gameplay state is loaded. */
 /* v7 intentionally breaks older savestates after the CD-ROM wire grew. Reject
  * them at the header before any section changes the live machine. */
 #define BOOT_STATE_VERSION_MIN_READ 7u
@@ -84,6 +86,7 @@ typedef struct {
  * never allowed) -> normal boot + recapture.
  */
 enum {
+    BS_SEC_GAME_START = 0x12, /* u32 LE boolean: BIOS-to-game handoff completed */
     BS_SEC_MODMEM = 0x11,  /* allocated opt-in CPU/GPU enhancement arenas */
     BS_SEC_CPU    = 0x01,  /* CPUState: gpr/pc/hi/lo/cop0/gte_data/gte_ctrl       */
     BS_SEC_RAM    = 0x02,  /* 2 MB main RAM                                       */

@@ -213,6 +213,13 @@ on a fixed region -> next.
 
 ## 5. Status / Log (update every session)
 
+- **2026-10-03 - Render replay validation and texture streaming.** Increased the bounded small-transfer VRAM journal from 16 to 64 entries; Jersey Devil streams 31 texture/CLUT uploads in a draw. The 32-transfer rollback regression compares all VRAM bytes. Jersey Devil configures the SDK draw environment before replay packet allocation, preventing its command storage from overwriting a world quad. Final live runs completed at least 1,040 Jersey Devil and 1,088 A Bug's Life extra passes with zero state-verification mismatches, VRAM leaks, watchdogs or span failures. Changes remain local beyond base 9c1e716a.
+
+- **2026-10-03 - Ape Escape wall-flicker regression.** Dense frame/VRAM capture isolated world GT4s incorrectly promoted to UI behind a front-layer fade. UI grouping now selects the actual populated drawing layer, retaining empty trailing OT behavior. Captured-packet tests fail on the prior core and pass on the fix; software and 4K OpenGL/PGXP captures show no gaps in the affected camera interval. No guest timing or draw replay changes.
+
+- **2026-10-02 - Native high-rate rendering for Jersey Devil, A Bug's Life, and Ape Escape.** Added final RTPS/RTPT transform capture and guarded replay through the original draw sections. Projection overrides restore rotation/translation registers after each command. Camera cuts, unmatched geometry, stale captures, overflow, and aborted spans retain current poses or skip extra frames. Authoritative CPU/RAM/VRAM and guest timing remain isolated; live verification found zero mismatches in the sampled Ape Escape and A Bug's Life routes. GTE register and projection replay regressions pass. Ape Escape's card-menu scene predicate now applies in squash projection mode as well as native-wide; session resets clear it. Keyboard routing preserves analog mode on analog-locked titles. Changes are local beyond base 9c1e716a.
+
+
 - **2026-10-01 — MMX6 adaptive framework integration.** The opt-in function
   filters from the MMX6 branch are being reconciled with the active-plan
   function-entry registry and master overlay store-PC forwarding. A handled
@@ -221,6 +228,66 @@ on a fixed region -> next.
   overlays cannot mix the two incompatible callback layouts. The adaptive
   view, host tile packets, retained texture banks and screen masks remain
   presentation-only enhancements; faithful guest timing is unchanged.
+
+- **2026-09-30 (Phase 5 owner-requested source checkpoint):** Preserve the
+  existing V8:2 combined-content title and generic callback/disc-extent support
+  on local `checkpoint/v82-combined-20260930` branches. Source, tests and
+  attribution only; donor media, generated outputs and playtest evidence stay
+  external. Owner explicitly paused further implementation, including
+  widescreen, original music and netplay, pending a check-in. No publication.
+
+- **2026-09-30 (Phase 5 Dreamland mushroom freeze):** `beads-eio.12.5`
+  identified an imported projectile flag write altering its callback, followed
+  by a skipped prologue and invalid return into the BIOS exception loop. The
+  title converter now tracks the local projectile factory and target pointers.
+  Added 4163 relocation/flag property cases and an opt-in native mushroom-event
+  stress driver; the old overlay fails and the repaired overlay completes both
+  families. All 16 title checks pass. No framework behavior changes.
+
+- **2026-09-30 (Phase 5 Dreamland effect cleanup):** `beads-eio.12.2` traced
+  the owner's frozen V8:2 match to an imported projectile effect writing its
+  matrix over the native child link. The title's input-overlay converter now
+  recognizes both effect-factory object returns. Five corrected field accesses,
+  owner-media regression checks, complete overlay code generation and a live
+  explosion allocation/free check validate the repair. No framework execution,
+  timing or generated-source changes; owner handoff remains at 1x rendering.
+
+- **2026-09-30 (Phase 5 instruction callbacks):** `beads-kbj0` adds plan-owned,
+  exact-word-guarded callbacks before opt-in game instructions, including branch
+  and delay slots. Native/overlay metadata participates in the codegen hash;
+  dirty-RAM execution routes through the same guard after load retirement.
+  Overlay ABI v27 forwards the callback. Runtime, parser/emitter and interpreter
+  routing checks pass. V8:2 uses seven seams for independent vehicle stats,
+  upgrades, transformation parts and special dependencies. Chassey's live match,
+  input/pause and savestate roundtrip were observed after correcting the title
+  allocator to retain shrinking allocations, matching its source implementation.
+
+- **2026-09-30 (Phase 5 mod-defined callbacks):** `beads-eio.3.212` adds
+  trusted mod-defined guest functions in an unused address range, separate
+  from original function-entry hooks. Active plans own availability and
+  callback resource context. Generated BIOS dispatch handles these through
+  its normal return/stack contract, with no synthetic guest instructions.
+  Runtime tests cover aliases, collisions, activation/clearing and nested
+  callback scopes; emitter tests cover routing before hardware dispatch.
+  OpenBIOS/SCPH1001 regenerated; V8:2 title rebuilt. Imported content still
+  needs its title-side runtime/selection adapters (`beads-eio.12.1`).
+
+- **2026-09-30 (Phase 5 combined V8 project):** Owner selected USA 2nd Offense
+  as the game-code base while retaining psxrecomp as the runtime/recompiler.
+  New local `Vigilante82PSXRecomp` builds against `071847ab`, reaches a stock
+  match, responds to driving input and reloads a savestate in an isolated run.
+  The reference's thirteen original-car conversions roundtrip successfully;
+  imported runtime/selector adapters remain title work (`beads-eio.12.1`).
+  No generic execution or hardware change was needed for this bring-up.
+
+- **2026-09-30 (Phase 5 callback reentrancy):** Plugin activation, VBlank and
+  function-entry callbacks now use the same scoped resource/completion context.
+  A native call inside an entry hook can deliver VBlank; previously those
+  callbacks cleared its plugin, making explicit completion fail and executing
+  the original function again. A regression fails before the fix and passes
+  after it, also refusing VBlank completion of the interrupted function. The
+  runtime test and seven V8 checks pass; isolated six-contact construction now
+  produces one chassis and survives drive/save/load. Tracked by `beads-i3ow`.
 
 - **2026-09-30 — Original-disc overlay discovery (beads-eio.3.215).**
   Ape Escape Primordial Ooze exposed return-adjacent functions omitted by the
