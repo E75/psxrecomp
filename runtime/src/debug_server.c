@@ -7836,6 +7836,7 @@ extern uint16_t sio_get_pad_buttons_slot(int slot);
 extern int sio_get_pad_connected(int slot);
 extern int sio_get_pad_analog(int slot);
 extern void sio_get_pad_sticks(int slot, uint8_t out[4]);
+extern void sio_get_pad_negcon_values(int slot, uint8_t out[3]);
 static void handle_pad_status(int id, const char *json)
 {
     (void)json;
@@ -7844,9 +7845,12 @@ static void handle_pad_status(int id, const char *json)
     uint8_t sticks0[4], sticks1[4];
     sio_get_pad_sticks(0, sticks0);
     sio_get_pad_sticks(1, sticks1);
+    uint8_t negcon0[3], negcon1[3];
+    sio_get_pad_negcon_values(0, negcon0);
+    sio_get_pad_negcon_values(1, negcon1);
     send_fmt("{\"id\":%d,\"ok\":true,\"pad\":\"0x%04X\","
-             "\"slot0\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s,\"type\":%d,\"sticks\":[%u,%u,%u,%u]},"
-             "\"slot1\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s,\"type\":%d,\"sticks\":[%u,%u,%u,%u]},"
+             "\"slot0\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s,\"type\":%d,\"sticks\":[%u,%u,%u,%u],\"negcon\":[%u,%u,%u]},"
+             "\"slot1\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s,\"type\":%d,\"sticks\":[%u,%u,%u,%u],\"negcon\":[%u,%u,%u]},"
              "\"override\":%d,\"override_frames\":%d,\"override_pad_type\":%d,"
              "\"override_axes\":[%u,%u,%u,%u],\"override_axes_valid\":%s,"
              "\"override_trigger_flags\":%d,\"override_triggers\":[%u,%u]}\n",
@@ -7854,9 +7858,11 @@ static void handle_pad_status(int id, const char *json)
              pad0, sio_get_pad_connected(0) ? "true" : "false", sio_get_pad_analog(0) ? "true" : "false",
              sio_get_pad_analog(0),
              sticks0[0], sticks0[1], sticks0[2], sticks0[3],
+             negcon0[0], negcon0[1], negcon0[2],
              pad1, sio_get_pad_connected(1) ? "true" : "false", sio_get_pad_analog(1) ? "true" : "false",
              sio_get_pad_analog(1),
              sticks1[0], sticks1[1], sticks1[2], sticks1[3],
+             negcon1[0], negcon1[1], negcon1[2],
              s_input_override, s_input_frames, s_pad_type_override,
              s_axis_st[0], s_axis_st[1], s_axis_st[2], s_axis_st[3],
              s_axis_override ? "true" : "false", s_trigger_override_flags,

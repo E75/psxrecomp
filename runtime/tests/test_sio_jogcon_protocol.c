@@ -211,6 +211,22 @@ int main(void) {
     EXPECT("switch.jogcon.id", 0xE3, xchg(0, 0x42));
     for (int i = 0; i < 7; i++) (void)xchg(0, 0x00);
 
+    /* Native NeGcon ID 0x23 exposes twist + analog I/II/L in the 0x42
+     * payload. Partial pressures must survive byte-for-byte. */
+    sio_set_pad_state_slot(0, 0xEFFFu);
+    sio_set_pad_type(0, SIO_PAD_NEGCON, 0x37, 0x80, 0x80, 0x80);
+    sio_set_pad_negcon_values(0, 0x42, 0x81, 0xF3);
+    EXPECT("negcon.prefix", 0xFF, xchg(0, 0x01));
+    EXPECT("negcon.id", 0x23, xchg(0, 0x42));
+    EXPECT("negcon.status", 0x5A, xchg(0, 0x00));
+    EXPECT("negcon.buttons.low", 0xFF, xchg(0, 0x00));
+    EXPECT("negcon.buttons.high", 0xEF, xchg(0, 0x00));
+    EXPECT("negcon.twist", 0x37, xchg(0, 0x00));
+    EXPECT("negcon.pressure.i", 0x42, xchg(0, 0x00));
+    EXPECT("negcon.pressure.ii", 0x81, xchg(0, 0x00));
+    EXPECT("negcon.pressure.l", 0xF3, xchg(0, 0x00));
+
+    sio_set_pad_type(0, SIO_PAD_JOGCON, 0x80, 0x80, 0x80, 0x80);
     sio_set_pad_sticks(0, 0x00, 0x80, 0x80, 0x80);
     EXPECT("left.prefix", 0xFF, xchg(0, 0x01));
     EXPECT("left.id", 0xE3, xchg(0, 0x42));

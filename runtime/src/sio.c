@@ -53,6 +53,11 @@ static PSX_BSS uint8_t pad_analog[PSX_MAX_PLAYERS];
 static uint8_t pad_stick[PSX_MAX_PLAYERS][4] = {
     PSX_PAD_INIT({ 0x80, 0x80, 0x80, 0x80 })
 }; /* lx,ly,rx,ry */
+/* neGcon pressure channels: analog I, II, L. These are host input values,
+ * like sticks, and are refreshed before each guest poll. */
+static uint8_t pad_negcon_pressure[PSX_MAX_PLAYERS][3] = {
+    PSX_PAD_INIT({ 0, 0, 0 })
+};
 
 /* DualShock command 0x4D maps the six writable bytes in a 0x42 poll onto the
  * two motors: 0x00 = small/high-frequency, 0x01 = large/low-frequency,
@@ -252,6 +257,7 @@ static void mtap_finish_42(void) {
 static uint8_t pad_protocol_id(int logical) {
     if (pad_in_config[logical]) return 0xF3;
     if (pad_analog[logical] == SIO_PAD_JOGCON) return 0xE3;
+    if (pad_analog[logical] == SIO_PAD_NEGCON) return 0x23;
     if (pad_analog[logical] == SIO_PAD_DUALSHOCK) return 0x73;
     return 0x41;
 }
@@ -273,9 +279,22 @@ static void pad_fill_jogcon_poll(int logical, uint8_t id, uint8_t out[8]) {
     pad_jogcon_last_steering[logical] = steering;
 }
 
+/* NeGcon polling reports the twist axis followed by analog I, II and L. */
+static void pad_fill_negcon_poll(int logical, uint8_t id, uint8_t out[8]) {
+    out[0] = id;
+    out[1] = 0x5A;
+    out[2] = (uint8_t)(pad_buttons[logical] & 0xFF);
+    out[3] = (uint8_t)(pad_buttons[logical] >> 8);
+    out[4] = pad_stick[logical][0];
+    out[5] = pad_negcon_pressure[logical][0];
+    out[6] = pad_negcon_pressure[logical][1];
+    out[7] = pad_negcon_pressure[logical][2];
+}
+
 /* Fill 8-byte per-pad status block used in multitap bulk 0x42 responses.
  * Disconnected → all 0xFF. Digital → 0x41, DualShock → 0x73 + axes,
- * JogCon → 0xE3 + signed steering, config mode → corresponding config ID. */
+ * JogCon → 0xE3 + signed steering, NeGcon → 0x23 + pressure channels,
+ * config mode → corresponding config ID. */
 static void pad_fill_status8(int logical, uint8_t out[8]) {
     if (logical < 0 || logical >= PSX_MAX_PLAYERS ||
         !(pad_connected & (1u << logical))) {
@@ -292,6 +311,8 @@ static void pad_fill_status8(int logical, uint8_t out[8]) {
         uint8_t poll[8];
         pad_fill_jogcon_poll(logical, id, poll);
         memcpy(out, poll, sizeof(poll));
+    } else if (pad_analog[logical] == SIO_PAD_NEGCON) {
+        pad_fill_negcon_poll(logical, id, out);
     } else if (pad_analog[logical] || pad_in_config[logical]) {
         out[4] = pad_stick[logical][2]; /* right X */
         out[5] = pad_stick[logical][3]; /* right Y */
@@ -821,6 +842,7 @@ void sio_init(void) {
     memset(pad_rumble_map, 0xFF, sizeof(pad_rumble_map));
     memset(pad_rumble_small, 0, sizeof(pad_rumble_small));
     memset(pad_rumble_large, 0, sizeof(pad_rumble_large));
+    memset(pad_negcon_pressure, 0, sizeof(pad_negcon_pressure));
     memset(pad_jogcon_last_steering, 0, sizeof(pad_jogcon_last_steering));
     memset(pad_jogcon_motor_command, 0, sizeof(pad_jogcon_motor_command));
     for (int i = 0; i < PSX_MAX_PLAYERS; i++) {
@@ -1073,10 +1095,14 @@ void sio_set_pad_type(int slot, int type,
         type = SIO_PAD_DIGITAL;
         lx = ly = rx = ry = 0x80;
     }
-    if (type < SIO_PAD_DIGITAL || type > SIO_PAD_JOGCON)
+    if (type < SIO_PAD_DIGITAL || type > SIO_PAD_NEGCON)
         type = SIO_PAD_DIGITAL;
     if (type == SIO_PAD_JOGCON)
         pad_supports_config[slot] = 1;
+    if (type == SIO_PAD_DUALSHOCK)
+        pad_supports_config[slot] = 1;
+    if (type == SIO_PAD_NEGCON)
+        pad_supports_config[slot] = 0;
     if (pad_analog[slot] != (uint8_t)type) {
         pad_jogcon_last_steering[slot] = 0;
         pad_jogcon_motor_command[slot] = 0;
@@ -1100,19 +1126,32 @@ void sio_set_pad_sticks(int slot, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry
     pad_stick[slot][2] = rx; pad_stick[slot][3] = ry;
 }
 
+void sio_set_pad_negcon_values(int slot, uint8_t i, uint8_t ii, uint8_t l) {
+    if (slot < 0 || slot >= PSX_MAX_PLAYERS) return;
+    pad_negcon_pressure[slot][0] = i;
+    pad_negcon_pressure[slot][1] = ii;
+    pad_negcon_pressure[slot][2] = l;
+}
+
+void sio_get_pad_negcon_values(int slot, uint8_t out[3]) {
+    if (!out) return;
+    if (slot < 0 || slot >= PSX_MAX_PLAYERS) {
+        out[0] = out[1] = out[2] = 0;
+        return;
+    }
+    out[0] = pad_negcon_pressure[slot][0];
+    out[1] = pad_negcon_pressure[slot][1];
+    out[2] = pad_negcon_pressure[slot][2];
+}
+
 /* Per-frame type request (the emulated controller type). The flip is
  * deferred and applied atomically at the next idle, non-config boundary, so it
  * can never split a poll or a config handshake. A no-op if already that type. */
 void sio_request_pad_type(int slot, int type) {
     if (slot < 0 || slot >= PSX_MAX_PLAYERS) return;
     if (sio_tap_force_digital(slot)) type = SIO_PAD_DIGITAL;
-    if (type < SIO_PAD_DIGITAL || type > SIO_PAD_JOGCON)
+    if (type < SIO_PAD_DIGITAL || type > SIO_PAD_NEGCON)
         type = SIO_PAD_DIGITAL;
-    /* A JogCon is a config-capable controller even when its type is selected
-     * through this deferred per-frame path (debug injection / hot selection).
-     * Otherwise it reports ID 0xE3 to 0x42 but silently ignores R4's 0x43
-     * setup transaction, leaving the game with a half-initialized device. */
-    if (type == SIO_PAD_JOGCON) pad_supports_config[slot] = 1;
     int want = type;
     pad_type_req[slot] = (pad_analog[slot] == want) ? -1 : (int8_t)want;
 }
@@ -1219,7 +1258,17 @@ static void pad_process_byte(uint8_t tx_byte) {
              * button — and our hybrid auto-flip IS that button — so a locked slot
              * drops the pending host request instead of applying it. */
             if (pad_type_req[s] >= 0 && !pad_in_config[s] && !analog_mode_locked[s]) {
-                pad_analog[s] = (uint8_t)pad_type_req[s];
+                const uint8_t requested_type = (uint8_t)pad_type_req[s];
+                /* Keep reported type and config capability on the same clean
+                 * boundary. NeGcon is a simple 0x42 poll device; DualShock
+                 * and JogCon answer their setup commands. Digital preserves
+                 * the configured capability for the existing hybrid model. */
+                if (requested_type == SIO_PAD_NEGCON)
+                    pad_supports_config[s] = 0;
+                else if (requested_type == SIO_PAD_DUALSHOCK ||
+                         requested_type == SIO_PAD_JOGCON)
+                    pad_supports_config[s] = 1;
+                pad_analog[s] = requested_type;
                 pad_type_req[s] = -1;
             }
         }
@@ -1318,6 +1367,9 @@ static void pad_process_byte(uint8_t tx_byte) {
             pad_response[3] = (uint8_t)(btn >> 8);
             if (pad_analog[lp] == SIO_PAD_JOGCON) {
                 pad_fill_jogcon_poll(lp, cur_id, pad_response);
+                pad_response_len = 8;
+            } else if (pad_analog[lp] == SIO_PAD_NEGCON) {
+                pad_fill_negcon_poll(lp, cur_id, pad_response);
                 pad_response_len = 8;
             } else if (pad_analog[lp] || pad_in_config[lp]) {
                 pad_response[4] = pad_stick[lp][2]; /* right X */

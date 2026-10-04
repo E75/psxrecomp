@@ -55,7 +55,12 @@ extern "C" {
 #define SIO_BASE 0x1F801040
 
 /* Emulated controller identity used by the game's SIO poll. */
-enum { SIO_PAD_DIGITAL = 0, SIO_PAD_DUALSHOCK = 1, SIO_PAD_JOGCON = 2 };
+enum {
+    SIO_PAD_DIGITAL = 0,
+    SIO_PAD_DUALSHOCK = 1,
+    SIO_PAD_JOGCON = 2,
+    SIO_PAD_NEGCON = 3
+};
 
 /* Phase 1.0c-v2: cycle-paced SIO model. Default 1 enables the dispatch-
  * loop quantum tick (gated by g_sio_timing_active). Set to 0 to revert
@@ -145,7 +150,7 @@ void sio_set_pad_state_slot(int slot, uint16_t buttons);
 void sio_set_pad_analog(int slot, int enabled,
                         uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry);
 /* Set one of SIO_PAD_* explicitly. JogCon consumes left-X as a signed
- * steering position, centered at 0x80; the remaining axes are ignored. */
+ * steering position, centered at 0x80; NegCon uses it as a 0..255 twist axis. */
 void sio_set_pad_type(int slot, int type,
                       uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry);
 
@@ -158,6 +163,10 @@ void sio_set_pad_type(int slot, int type,
 void sio_set_pad_sticks(int slot, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry);
 /* Request SIO_PAD_* at the next idle, non-config bus boundary. */
 void sio_request_pad_type(int slot, int type);
+/* Per-frame NeGcon pressure values (I, II, L), each 0..255. Released is 0;
+ * fully pressed is 255. Steering is supplied through sio_set_pad_sticks(). */
+void sio_set_pad_negcon_values(int slot, uint8_t i, uint8_t ii, uint8_t l);
+void sio_get_pad_negcon_values(int slot, uint8_t out[3]);
 
 /* Connect / disconnect a logical pad (0 .. PSX_MAX_PLAYERS-1). By default no
  * pads are connected during initial BIOS boot. */

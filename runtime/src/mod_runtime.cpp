@@ -1964,16 +1964,16 @@ extern "C" int psx_mod_register_pad_input_plugin(
     return mod_register_pad_input_plugin(id, callback) ? 1 : 0;
 }
 
-extern "C" void psx_mod_transform_pad_buttons(uint32_t port,
-                                                uint64_t guest_frame,
-                                                uint16_t* buttons) {
+extern "C" void psx_mod_transform_pad_input(uint32_t port,
+                                             uint64_t guest_frame,
+                                             PSXModPadInput* input) {
     using namespace PSXRecompV4;
-    if (!buttons) return;
+    if (!input) return;
     RuntimeMods& s = state();
     for (const ActivePadInputCallback& hook : active_pad_input_callbacks()) {
         const ModResolution::Plugin* previous = s.current_plugin;
         s.current_plugin = hook.plugin;
-        hook.callback(port, guest_frame, buttons);
+        hook.callback(port, guest_frame, input);
         s.current_plugin = previous;
     }
 }

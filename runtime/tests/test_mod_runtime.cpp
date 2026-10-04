@@ -146,17 +146,17 @@ static void test_active_entry(CPUState* cpu, uint32_t address) {
 static void test_disabled_entry(CPUState*, uint32_t) { disabled_entry_hits++; }
 static void test_unselected_entry(CPUState*, uint32_t) { unselected_entry_hits++; }
 static void test_active_pad_input(uint32_t port, uint64_t guest_frame,
-                                  uint16_t* buttons) {
+                                  PSXModPadInput* input) {
     (void)guest_frame;
-    if (port == 0 && buttons) {
+    if (port == 0 && input) {
         active_pad_hits++;
-        *buttons = (uint16_t)(*buttons & (uint16_t)~0x0010u);
+        input->buttons = (uint16_t)(input->buttons & (uint16_t)~0x0010u);
     }
 }
-static void test_disabled_pad_input(uint32_t, uint64_t, uint16_t*) {
+static void test_disabled_pad_input(uint32_t, uint64_t, PSXModPadInput*) {
     disabled_pad_hits++;
 }
-static void test_unselected_pad_input(uint32_t, uint64_t, uint16_t*) {
+static void test_unselected_pad_input(uint32_t, uint64_t, PSXModPadInput*) {
     unselected_pad_hits++;
 }
 
@@ -536,11 +536,12 @@ int main() {
               g_psx_mod_guest_functions == 0,
           "committed guest functions remain unavailable until activation");
     psx_mod_function_entry(&entry_cpu, 0x80003000u);
-    uint16_t pad_buttons = 0xFFFFu;
-    psx_mod_transform_pad_buttons(0, 0, &pad_buttons);
+    PSXModPadInput pad_input{};
+    pad_input.buttons = 0xFFFFu;
+    psx_mod_transform_pad_input(0, 0, &pad_input);
     check(g_psx_mod_function_entry_hooks == 0 && active_entry_hits == 0,
           "function-entry hooks must not run before plugin activation");
-    check(pad_buttons == 0xFFFFu && active_pad_hits == 0,
+    check(pad_input.buttons == 0xFFFFu && active_pad_hits == 0,
           "pad transforms must not run before plugin activation");
     mod_runtime_activate_plugins();
     check(activation_calls == 1,
@@ -560,9 +561,9 @@ int main() {
           "resolved trusted plugin must run on guest VBlank");
     check(g_psx_mod_function_entry_hooks == 1,
           "activation must flatten exactly the active plan's entry hooks");
-    pad_buttons = 0xFFFFu;
-    psx_mod_transform_pad_buttons(0, 1, &pad_buttons);
-    check(pad_buttons == 0xFFEFu && active_pad_hits == 1 &&
+    pad_input.buttons = 0xFFFFu;
+    psx_mod_transform_pad_input(0, 1, &pad_input);
+    check(pad_input.buttons == 0xFFEFu && active_pad_hits == 1 &&
               disabled_pad_hits == 0 && unselected_pad_hits == 0,
           "only the active plan's local pad transform must run");
     psx_mod_function_entry(&entry_cpu, 0x80003000u);
@@ -586,11 +587,11 @@ int main() {
               g_psx_mod_guest_functions == 0,
           "clearing the plan drops guest callback availability");
     psx_mod_function_entry(&entry_cpu, 0x80003000u);
-    pad_buttons = 0xFFFFu;
-    psx_mod_transform_pad_buttons(0, 2, &pad_buttons);
+    pad_input.buttons = 0xFFFFu;
+    psx_mod_transform_pad_input(0, 2, &pad_input);
     check(g_psx_mod_function_entry_hooks == 0 && active_entry_hits == 3,
           "clearing the plan must drop its function-entry hooks");
-    check(pad_buttons == 0xFFFFu && active_pad_hits == 1,
+    check(pad_input.buttons == 0xFFFFu && active_pad_hits == 1,
           "clearing mods for netplay must remove host pad transforms");
     check(PSXRecompV4::mod_runtime_commit(cue_path, &error), error.c_str());
     psx_mod_function_entry(&entry_cpu, 0x80003000u);
@@ -598,12 +599,12 @@ int main() {
           "a re-committed plan must not run hooks before activation");
     mod_runtime_activate_plugins();
     psx_mod_function_entry(&entry_cpu, 0x80003000u);
-    pad_buttons = 0xFFFFu;
-    psx_mod_transform_pad_buttons(0, 3, &pad_buttons);
+    pad_input.buttons = 0xFFFFu;
+    psx_mod_transform_pad_input(0, 3, &pad_input);
     check(active_entry_hits == 4 && disabled_entry_hits == 0 &&
               unselected_entry_hits == 0,
           "re-activation restores exactly the active plan's hooks");
-    check(pad_buttons == 0xFFEFu && active_pad_hits == 2,
+    check(pad_input.buttons == 0xFFEFu && active_pad_hits == 2,
           "offline re-activation restores the active plan's pad transform");
     /* The lobby rematch, in the order main.cpp's start_mod_session() drives
      * it: a netplay match (plan cleared, then activated) and an offline

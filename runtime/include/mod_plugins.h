@@ -8,13 +8,31 @@ extern "C" {
 
 typedef void (*PSXModVBlankCallback)(void);
 typedef void (*PSXModActivationCallback)(void);
-/* Transform one local, offline PSX pad word at the host sampling boundary.
- * `buttons` is the SIO active-low bitmask. Stick and trigger data are exposed
- * through their separate read-only APIs. `guest_frame` is stable across all
- * input samples associated with one guest vblank; low-latency mode may invoke
- * a transform twice with the same frame value. */
+/* Values align with SIO_PAD_*; kept here to make the plugin ABI independent
+ * from sio.h. */
+enum {
+    PSX_MOD_PAD_DIGITAL = 0,
+    PSX_MOD_PAD_DUALSHOCK = 1,
+    PSX_MOD_PAD_JOGCON = 2,
+    PSX_MOD_PAD_NEGCON = 3
+};
+/* Mutable host-side pad sample for a local, offline transform. `buttons` is
+ * the SIO active-low bitmask. `negcon_*` are used only when setting type to
+ * PSX_MOD_PAD_NEGCON. The sample never enters the serialized netplay format.
+ * `rewind_enabled` is the existing host rewind setting, allowing a feature to
+ * leave a guest button alone when its host action is unavailable. */
+typedef struct PSXModPadInput {
+    uint16_t buttons;
+    uint8_t type;
+    uint8_t lx, ly, rx, ry;
+    uint8_t negcon_i, negcon_ii, negcon_l;
+    uint8_t rewind_enabled;
+} PSXModPadInput;
+/* Transform one local, offline pad sample at the host sampling boundary.
+ * `guest_frame` is stable across all input samples associated with one guest
+ * vblank; low-latency mode may invoke a transform twice with the same value. */
 typedef void (*PSXModPadInputCallback)(uint32_t port, uint64_t guest_frame,
-                                      uint16_t* buttons);
+                                      PSXModPadInput* input);
 struct CPUState;
 typedef void (*PSXModFunctionEntryCallback)(struct CPUState* cpu,
                                             uint32_t address);
@@ -63,8 +81,8 @@ int psx_mod_register_pad_input_plugin(const char* id,
 /* Run the active plan's local pad transforms. Called only for offline local
  * input, before SIO receives the sampled buttons. The same guest_frame value
  * can recur when low-latency sampling repeats within one guest vblank. */
-void psx_mod_transform_pad_buttons(uint32_t port, uint64_t guest_frame,
-                                   uint16_t* buttons);
+void psx_mod_transform_pad_input(uint32_t port, uint64_t guest_frame,
+                                 PSXModPadInput* input);
 /* Called from generated functions listed by the game config and from every
  * interpreted entry, so the hook contract does not depend on the backend.
  * Hooks match by code address (segment bits ignored) and run only for plugins

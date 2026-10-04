@@ -5713,11 +5713,20 @@ static void apply_input_override_to_sio(int override_word) {
     if (debug_type >= SIO_PAD_DIGITAL && debug_type <= SIO_PAD_JOGCON)
         injected_type = debug_type;
 #endif
-    psx_mod_transform_pad_buttons(0, s_frame_count, &w);
-    sio_set_pad_state_slot(0, w);
-    sio_request_pad_type(0, injected_type);
-    psx_selfcheck_note_pad(0, w, st[0], st[1], st[2], st[3],
-                           (uint8_t)injected_type);
+    PSXModPadInput input{};
+    input.buttons = w;
+    input.type = (uint8_t)injected_type;
+    input.lx = st[0]; input.ly = st[1];
+    input.rx = st[2]; input.ry = st[3];
+    input.rewind_enabled = psx_rewind_enabled() ? 1u : 0u;
+    psx_mod_transform_pad_input(0, s_frame_count, &input);
+    sio_set_pad_state_slot(0, input.buttons);
+    sio_set_pad_sticks(0, input.lx, input.ly, input.rx, input.ry);
+    sio_set_pad_negcon_values(0, input.negcon_i, input.negcon_ii,
+                              input.negcon_l);
+    sio_request_pad_type(0, input.type);
+    psx_selfcheck_note_pad(0, input.buttons, input.lx, input.ly, input.rx,
+                           input.ry, input.type);
 }
 
 /* Capture one SIO slot's host pad into a netplay/local blob. Returns 1 if a
@@ -5746,11 +5755,13 @@ static int capture_pad_slot(int s, PsxNetPad* out) {
     /* One source set, consumed by the presentation policy, the button merge and the
      * stick fold below — see pad_sources_for(). */
     const PadSources src = pad_sources_for(p, dev_here);
+    const bool modern_r4_controls = g_r4_modern_controls_game &&
+        PSXRecompV4::mod_runtime_plugin_enabled("r4.modern-controls");
 
     const int mode = effective_player_mode_for_sio(p, s);
     uint8_t st[4] = { 0x80, 0x80, 0x80, 0x80 };
     if (mode == PSXRecompV4::PAD_MODE_ANALOG || p.steering_wheel ||
-        g_mod_controller_policy[s].callback) {
+        g_mod_controller_policy[s].callback || modern_r4_controls) {
         pad_sticks_for(p, player, st);
     }
     const uint16_t policy_buttons =
@@ -5783,7 +5794,8 @@ static int capture_pad_slot(int s, PsxNetPad* out) {
      * exactly as on a real DualShock. This is what stops a dual-analog game's
      * D-pad control (Ape Escape's camera rotate) from being spun by stick
      * movement or centre drift. Digital mode keeps the stick->D-pad fold. */
-    const bool suppress_stick = (eff_analog != 0) || p.steering_wheel;
+    const bool suppress_stick = (eff_analog != 0) || p.steering_wheel ||
+                                modern_r4_controls;
     uint16_t btn = src.device ? pad_buttons_for(p, player, suppress_stick)
                               : (uint16_t)0xFFFF;
     /* kind==1 already consumed the binds inside pad_buttons_for — ANDing the
@@ -5809,7 +5821,7 @@ static int capture_pad_slot(int s, PsxNetPad* out) {
         if (src.all_pads)
             dev_any_controller_sticks(st);
     }
-    if (!eff_analog && !p.steering_wheel) {
+    if (!eff_analog && !p.steering_wheel && !modern_r4_controls) {
         st[0] = st[1] = st[2] = st[3] = 0x80;
     }
 
@@ -5877,6 +5889,21 @@ static void apply_pad_slot_to_sio(int s, const PsxNetPad& pad) {
     /* Solo resim self-check records exactly what was applied this boundary. */
     psx_selfcheck_note_pad(s, pad.buttons, pad.lx, pad.ly, pad.rx, pad.ry,
                            pad.analog);
+}
+
+/* Offline transforms may select a richer local-only controller protocol.
+ * Keep PsxNetPad unchanged: peer input stays the existing 8-byte format. */
+static void apply_offline_pad_input_to_sio(int s,
+                                           const PSXModPadInput& input) {
+    if (sio_pad_on_multitap(s) && !sio_get_multitap_analog())
+        sio_set_pad_config_capable(s, 0);
+    sio_set_pad_state_slot(s, input.buttons);
+    sio_set_pad_sticks(s, input.lx, input.ly, input.rx, input.ry);
+    sio_set_pad_negcon_values(s, input.negcon_i, input.negcon_ii,
+                              input.negcon_l);
+    sio_request_pad_type(s, input.type);
+    psx_selfcheck_note_pad(s, input.buttons, input.lx, input.ly, input.rx,
+                           input.ry, input.type);
 }
 
 /* Raw SDL Start face-button (ignores remaps) — pad-trace only. */
@@ -6363,19 +6390,24 @@ static void sample_pad_into_sio(int override) {
     for (int s = 0; s < n; s++) {
         PsxNetPad pad;
         if (!capture_pad_slot(s, &pad)) continue;  /* no device in this port */
-        psx_mod_transform_pad_buttons((uint32_t)s, s_frame_count,
-                                      &pad.buttons);
+        PSXModPadInput input{};
+        input.buttons = pad.buttons;
+        input.type = pad.analog;
+        input.lx = pad.lx; input.ly = pad.ly;
+        input.rx = pad.rx; input.ry = pad.ry;
+        input.rewind_enabled = psx_rewind_enabled() ? 1u : 0u;
+        psx_mod_transform_pad_input((uint32_t)s, s_frame_count, &input);
         /* Push sticks every frame; request the pad type (digital/analog) through
          * the coherent channel so a policy switch is applied only at an idle,
          * non-config bus boundary (never mid-poll / mid-handshake). This is the
          * fix for the v0.5.0 phantom-input regression: slamming the type each
          * frame raced Tomba's DualShock config handshake -> garbage reads. */
-        apply_pad_slot_to_sio(s, pad);
+        apply_offline_pad_input_to_sio(s, input);
         if (psx_start_consumer_enabled())
-            psx_start_consumer_note(s, consumer_sim, pad.buttons);
+            psx_start_consumer_note(s, consumer_sim, input.buttons);
         if (psx_start_bisect_enabled() && s == 0) {
             const int sdl = netplay_sdl_start_held(s);
-            const int cap = ((uint16_t)(~pad.buttons) & 0x0008u) != 0;
+            const int cap = ((uint16_t)(~input.buttons) & 0x0008u) != 0;
             const int sio =
                 ((uint16_t)(~sio_get_pad_buttons_slot(s)) & 0x0008u) != 0;
             psx_start_bisect_log("offline", consumer_sim, sdl, cap, cap, sio, 1,
