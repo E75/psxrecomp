@@ -8,6 +8,7 @@
  * same struct tag) so this header needs no SDL include. */
 
 #include <stdint.h>
+#include "gpu_projective_clip.h"
 
 struct SDL_Window;
 
@@ -66,6 +67,9 @@ uint32_t gl_renderer_pass_plan(uint32_t period_vblanks,
  * rect at the same scale. Returns 0 when refused (nothing changed). */
 int      gl_renderer_pass_begin(int x, int y, int w, int h, int open_gen,
                                 uint32_t period_vblanks, int reuse_backup);
+/* Generations opened from now on are for a frame already on screen (1) or
+ * for the next flip (0, default); render_pass_gen_flip_matches. */
+void     gl_renderer_pass_set_flip_shown(int shown);
 /* Capture the drawn rect at alpha_q16 (keep) and roll the rect back. */
 void     gl_renderer_pass_end(uint32_t alpha_q16, int keep);
 uint32_t gl_renderer_pass_leaks(void);
@@ -328,6 +332,16 @@ int  gl_renderer_get_ws_ablate(void);
 /* Cumulative textured fraction of scene primitives since boot (flat vs textured
  * batching decision). Sets *out_tex_frac; returns total prim count. */
 uint64_t gl_renderer_perf_prim_split(double *out_tex_frac);
+/* Counts proven projected world triangles admitted past the hardware size
+ * reject. Diagnostic only; they use the normal canonical and mirror passes. */
+void gl_renderer_note_wide_triangle_recovery(int enabled);
+uint64_t gl_renderer_wide_triangle_recovery_count(void);
+/* Exact-provenance world polygons only. Returns zero when the GPU context or
+ * authority policy cannot support clipping; the caller then uses its stock path. */
+int gl_renderer_projective_supported(void);
+void gl_renderer_draw_projected_triangle(const PSXProjectedVertex vertices[3],
+    uint16_t texpage, uint16_t clut_x, uint16_t clut_y, int raw, int semi,
+    int perspective);
 /* Cumulative textured-batch diagnostics: total, then flushes caused by
  * isolation, blend-mode, mask, filter, backdrop-gate, texture-window, capacity. */
 void gl_renderer_batch_diag(uint64_t out[8]);

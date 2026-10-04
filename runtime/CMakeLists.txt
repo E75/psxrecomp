@@ -76,6 +76,23 @@ if(BUILD_TESTING)
         target_compile_options(ws_world_scene_test PRIVATE -O2 -flto -ffunction-sections -fdata-sections)
         target_link_options(ws_world_scene_test PRIVATE -flto -Wl,--gc-sections)
         add_test(NAME ws_world_scene_test COMMAND ws_world_scene_test)
+        add_executable(boot_state_handoff_test tests/test_boot_state_handoff.c)
+        target_include_directories(boot_state_handoff_test PRIVATE include src)
+        target_compile_definitions(boot_state_handoff_test PRIVATE PSX_COSIM=1)
+        target_compile_options(boot_state_handoff_test PRIVATE -O2 -flto -ffunction-sections -fdata-sections -UNDEBUG)
+        target_link_options(boot_state_handoff_test PRIVATE -flto -Wl,--gc-sections)
+        target_link_libraries(boot_state_handoff_test PRIVATE ZLIB::ZLIB)
+        add_test(NAME boot_state_handoff_test COMMAND boot_state_handoff_test)
+
+        add_executable(static_match_cache_test tests/test_static_match_cache.c
+            src/overlay_loader.c src/crc32.c)
+        target_include_directories(static_match_cache_test PRIVATE include)
+        target_compile_definitions(static_match_cache_test PRIVATE
+            PSX_HAS_OVERLAY_DISPATCH PSX_NO_DEBUG_TOOLS)
+        target_compile_options(static_match_cache_test PRIVATE -O2 -flto -ffunction-sections -fdata-sections -UNDEBUG)
+        target_link_options(static_match_cache_test PRIVATE -flto -Wl,--gc-sections)
+        add_test(NAME static_match_cache_test COMMAND static_match_cache_test)
+
         add_executable(mod_memory_snapshot_test tests/test_mod_memory_snapshot.c
             src/psx_ram_geometry.c)
         target_include_directories(mod_memory_snapshot_test PRIVATE include src)
@@ -99,6 +116,8 @@ if(BUILD_TESTING)
     set(PSX_GL_READBACK_COMPILER_BIN "${_gl_test_default_bin}" CACHE PATH "GCC/MinGW bin for GL fixture")
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
+        add_test(NAME counted_mips_relocations_test COMMAND "${Python3_EXECUTABLE}"
+            "${PSXRECOMP_ROOT}/tools/tests/test_counted_mips_relocations.py")
         add_test(NAME interp_mod_entry_guards_test COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_interp_mod_entry_guards.py")
         add_test(NAME mirror_pc_preserved_guards_test COMMAND "${Python3_EXECUTABLE}"
@@ -154,6 +173,17 @@ if(BUILD_TESTING)
         unset(_gl_scale_sdl_inc)
     else()
         message(STATUS "gl_scale_invariance_test: not registered (needs a non-Windows host, Python 3 and SDL3)")
+    endif()
+    if(Python3_Interpreter_FOUND AND TARGET SDL3::SDL3-static)
+        add_test(NAME gl_texture_filter_test
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_gl_texture_filter.py"
+                --fixture "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gl_texture_filter.c"
+                --cc "${CMAKE_C_COMPILER}"
+                --sdl-include "$<TARGET_PROPERTY:SDL3::Headers,INTERFACE_INCLUDE_DIRECTORIES>"
+                --sdl-library "$<TARGET_FILE:SDL3::SDL3-static>"
+                --output "${CMAKE_CURRENT_BINARY_DIR}/gl-filter-results")
+        set_tests_properties(gl_texture_filter_test PROPERTIES LABELS "gpu;opengl;hardware" TIMEOUT 180)
     endif()
     add_executable(launcher_device_roundtrip_test
         tests/test_launcher_device_roundtrip.cpp)
@@ -516,6 +546,9 @@ if(BUILD_TESTING)
     add_test(NAME ws_repeat_rect_test COMMAND ws_repeat_rect_test)
     add_executable(ws_screen_mask_test tests/test_ws_screen_mask.c)
     target_include_directories(ws_screen_mask_test PRIVATE include)
+    if(UNIX)
+        target_link_libraries(ws_screen_mask_test PRIVATE m)
+    endif()
     add_test(NAME ws_screen_mask_test COMMAND ws_screen_mask_test)
 
     add_executable(mod_gpu_dma_aperture_test
@@ -707,6 +740,7 @@ if(BUILD_TESTING)
 
     add_executable(mod_runtime_test
         tests/test_mod_runtime.cpp
+        src/iso_reader_c.cpp
         src/mod_runtime.cpp
         src/mod_packages.cpp
         src/disc_path.cpp
@@ -841,6 +875,27 @@ if(BUILD_TESTING)
         target_link_libraries(render_pass_plan_test PRIVATE m)
     endif()
     add_test(NAME render_pass_plan_test COMMAND render_pass_plan_test)
+
+    # Motion kit and per-frame driver for render-pass plugins: blending,
+    # identity matching, limits and the crossfade fallback, on mock RAM.
+    add_executable(render_pass_motion_test
+        tests/test_render_pass_motion.c
+        src/render_pass_motion.c
+        src/render_pass_frame.c)
+    target_include_directories(render_pass_motion_test PRIVATE include)
+    if(NOT MSVC)
+        target_link_libraries(render_pass_motion_test PRIVATE m)
+    endif()
+    add_test(NAME render_pass_motion_test COMMAND render_pass_motion_test)
+    add_executable(render_pass_projection_test
+        tests/test_render_pass_projection.cpp
+        src/render_pass_projection.cpp
+        src/render_pass_motion.c)
+    target_include_directories(render_pass_projection_test PRIVATE include)
+    if(NOT MSVC)
+        target_link_libraries(render_pass_projection_test PRIVATE m)
+    endif()
+    add_test(NAME render_pass_projection_test COMMAND render_pass_projection_test)
 
     # Render-pass time freeze against mock devices (psx_cycles.c only).
     add_executable(render_pass_freeze_test
