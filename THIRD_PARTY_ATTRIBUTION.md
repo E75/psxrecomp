@@ -164,8 +164,10 @@ currently Win32/OpenGL-only and defaults OFF, so ordinary builds do not fetch it
 The dependency is pinned by annotated tag object
 `b76b80adaf65ac3ad6cc1ce61974fb29a5d02352`, resolving to commit
 `c15d38cb4bb10a5b7e075f74493ff13896e2597a`. Enabled builds fetch and compile that
-source, including bundled JsonCpp; they need Git/network on a cold cache or a
-`FETCHCONTENT_SOURCE_DIR_PSX_OPENXR_SDK` override. No proprietary headset SDK,
+source, including bundled JsonCpp; they need network on a cold cache (the pinned
+archive is verified against the SHA256 in `third_party/deps.manifest`), a vendored
+archive (`tools/ci/vendor_deps.sh psx_openxr_sdk`), or a
+`FETCHCONTENT_SOURCE_DIR_PSX_OPENXR_SDK` / `PSX_OPENXR_SDK_SOURCE_DIR` override. No proprietary headset SDK,
 runtime binary, API layer or vendor driver is redistributed.
 
 The complete SDK and JsonCpp notices are in

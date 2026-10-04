@@ -28,7 +28,8 @@ copy before recomp-net asks for it, and stops the configure if recomp-net's pin
 and this manifest row ever differ.
 
 SDL3 (~15 MB) and zlib resolve from a system package or a toolchain pack first
-and are **not** committed; `.gitignore` keeps them out. Stage them on demand:
+and are **not** committed; neither is the OpenXR SDK (`psx_openxr_sdk`, ~0.7 MB),
+which only a `-DPSX_OPENXR=ON` configure uses and otherwise falls back to the pinned upstream URL; `.gitignore` keeps them out. Stage them on demand:
 
 ```sh
 tools/ci/vendor_deps.sh              # every dependency in the manifest
