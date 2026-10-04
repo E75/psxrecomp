@@ -282,6 +282,11 @@ static int s_input_frames   = 0;
  * pad sampler alongside the button word. */
 static int     s_axis_override = 0;
 static uint8_t s_axis_st[4]    = { 0x80, 0x80, 0x80, 0x80 };
+/* Debug-only SDL-trigger stand-in for deterministic host-input integration
+ * tests. set_input values are persistent until another set_input/clear. */
+static int s_trigger_override_flags = 0;
+static uint8_t s_trigger_left = 0;
+static uint8_t s_trigger_right = 0;
 /* Test-only controller identity override for set_input/press. -1 follows the
  * selected host device/config; 0/1/2 force digital/DualShock/JogCon. */
 static int s_pad_type_override = -1;
@@ -7785,6 +7790,13 @@ static void handle_set_input(int id, const char *json)
         int v = ax[i] < 0 ? 0x80 : (ax[i] > 255 ? 255 : ax[i]);
         s_axis_st[i] = (uint8_t)v;
     }
+    int lt = json_get_int(json, "left_trigger", -1);
+    int rt = json_get_int(json, "right_trigger", -1);
+    s_trigger_override_flags = (lt >= 0 || rt >= 0) ? 1 : 0;
+    if (lt >= 0) s_trigger_override_flags |= 2;
+    if (rt >= 0) s_trigger_override_flags |= 4;
+    s_trigger_left = lt < 0 ? 0 : (uint8_t)(lt > 255 ? 255 : lt);
+    s_trigger_right = rt < 0 ? 0 : (uint8_t)(rt > 255 ? 255 : rt);
     send_ok(id);
 }
 
@@ -7807,6 +7819,13 @@ static void handle_press(int id, const char *json)
         int v = ax[i] < 0 ? 0x80 : (ax[i] > 255 ? 255 : ax[i]);
         s_axis_st[i] = (uint8_t)v;
     }
+    int lt = json_get_int(json, "left_trigger", -1);
+    int rt = json_get_int(json, "right_trigger", -1);
+    s_trigger_override_flags = (lt >= 0 || rt >= 0) ? 1 : 0;
+    if (lt >= 0) s_trigger_override_flags |= 2;
+    if (rt >= 0) s_trigger_override_flags |= 4;
+    s_trigger_left = lt < 0 ? 0 : (uint8_t)(lt > 255 ? 255 : lt);
+    s_trigger_right = rt < 0 ? 0 : (uint8_t)(rt > 255 ? 255 : rt);
     send_ok(id);
 }
 
@@ -7829,7 +7848,8 @@ static void handle_pad_status(int id, const char *json)
              "\"slot0\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s,\"type\":%d,\"sticks\":[%u,%u,%u,%u]},"
              "\"slot1\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s,\"type\":%d,\"sticks\":[%u,%u,%u,%u]},"
              "\"override\":%d,\"override_frames\":%d,\"override_pad_type\":%d,"
-             "\"override_axes\":[%u,%u,%u,%u],\"override_axes_valid\":%s}\n",
+             "\"override_axes\":[%u,%u,%u,%u],\"override_axes_valid\":%s,"
+             "\"override_trigger_flags\":%d,\"override_triggers\":[%u,%u]}\n",
              id, pad0,
              pad0, sio_get_pad_connected(0) ? "true" : "false", sio_get_pad_analog(0) ? "true" : "false",
              sio_get_pad_analog(0),
@@ -7839,7 +7859,8 @@ static void handle_pad_status(int id, const char *json)
              sticks1[0], sticks1[1], sticks1[2], sticks1[3],
              s_input_override, s_input_frames, s_pad_type_override,
              s_axis_st[0], s_axis_st[1], s_axis_st[2], s_axis_st[3],
-             s_axis_override ? "true" : "false");
+             s_axis_override ? "true" : "false", s_trigger_override_flags,
+             s_trigger_left, s_trigger_right);
 }
 
 static void handle_clear_input(int id, const char *json)
@@ -7851,6 +7872,8 @@ static void handle_clear_input(int id, const char *json)
     s_input_override = -1;
     s_input_frames   = 0;
     s_axis_override  = 0;
+    s_trigger_override_flags = 0;
+    s_trigger_left = s_trigger_right = 0;
     s_pad_type_override = -1;
     s_axis_st[0] = s_axis_st[1] = s_axis_st[2] = s_axis_st[3] = 0x80;
     send_ok(id);
@@ -7898,6 +7921,8 @@ static void handle_input_route_start(int id, const char *json)
     s_input_override = -1;
     s_input_frames = 0;
     s_axis_override = 0;
+    s_trigger_override_flags = 0;
+    s_trigger_left = s_trigger_right = 0;
     s_pad_type_override = -1;
     s_input_route_index = 0;
     s_input_route_remaining = s_input_route[0].frames;
@@ -15712,8 +15737,11 @@ int debug_server_get_input_override(void)
     }
     int current = s_input_override;
     if (s_input_override >= 0 && s_input_frames > 0) {
-        if (--s_input_frames == 0)
+        if (--s_input_frames == 0) {
             s_input_override = -1;
+            s_trigger_override_flags = 0;
+            s_trigger_left = s_trigger_right = 0;
+        }
     }
     return current;
 }
@@ -15724,6 +15752,13 @@ int debug_server_get_axis_override(unsigned char st[4])
     st[0] = s_axis_st[0]; st[1] = s_axis_st[1];
     st[2] = s_axis_st[2]; st[3] = s_axis_st[3];
     return 1;
+}
+
+int debug_server_get_trigger_override(uint8_t *left, uint8_t *right)
+{
+    if (left) *left = s_trigger_left;
+    if (right) *right = s_trigger_right;
+    return s_trigger_override_flags;
 }
 
 int debug_server_get_pad_type_override(void)

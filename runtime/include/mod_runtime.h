@@ -19,6 +19,8 @@ bool mod_runtime_initialize(const std::filesystem::path& root,
                             std::string* error = nullptr);
 bool mod_runtime_commit(const std::filesystem::path& disc_path = {},
                         std::string* error = nullptr);
+/* True when the committed launch plan contains this trusted plugin. */
+bool mod_runtime_plugin_enabled(const std::string& plugin_id);
 /* Drop the in-session mod plan for a netplay launch without rewriting the
  * user's persisted offline selection on disk. Netplay is always vanilla for
  * now (no synced mod plans). */

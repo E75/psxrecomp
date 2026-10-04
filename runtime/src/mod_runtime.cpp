@@ -138,6 +138,11 @@ struct ActiveFunctionEntryHook {
     const ModResolution::Plugin* plugin = nullptr;
 };
 
+struct ActivePadInputCallback {
+    PSXModPadInputCallback callback = nullptr;
+    const ModResolution::Plugin* plugin = nullptr;
+};
+
 std::vector<ActiveFunctionEntryHook>& active_function_entry_hooks() {
     static std::vector<ActiveFunctionEntryHook> value;
     return value;
@@ -159,12 +164,18 @@ std::vector<ActiveInstructionHook>& active_instruction_hooks() {
     return value;
 }
 
+std::vector<ActivePadInputCallback>& active_pad_input_callbacks() {
+    static std::vector<ActivePadInputCallback> value;
+    return value;
+}
+
 inline uint32_t function_entry_key(uint32_t address) {
     return address & 0x1FFFFFFFu;
 }
 
 void clear_function_entry_hooks() {
     active_function_entry_hooks().clear();
+    active_pad_input_callbacks().clear();
     g_psx_mod_function_entry_hooks = 0;
     active_guest_functions().clear();
     g_psx_mod_guest_functions = 0;
@@ -176,10 +187,14 @@ void build_function_entry_hooks(const RuntimeMods& s) {
     clear_function_entry_hooks();
     if (!s.initialized || !s.plan.ok) return;
     auto& table = active_function_entry_hooks();
-    for (const ModResolution::Plugin& plugin : s.plan.plugins)
+    auto& pad_callbacks = active_pad_input_callbacks();
+    for (const ModResolution::Plugin& plugin : s.plan.plugins) {
         for (const ModFunctionEntryHook& hook : mod_function_entry_hooks(plugin.id))
             table.push_back({function_entry_key(hook.address), hook.callback,
                              hook.filter, &plugin});
+        for (PSXModPadInputCallback callback : mod_pad_input_callbacks(plugin.id))
+            pad_callbacks.push_back({callback, &plugin});
+    }
     /* Stable: hooks sharing an address keep plan (plugin order) order. */
     std::stable_sort(table.begin(), table.end(),
                      [](const ActiveFunctionEntryHook& a,
@@ -1372,6 +1387,14 @@ const std::string& mod_runtime_fingerprint() {
     return state().plan.fingerprint;
 }
 
+bool mod_runtime_plugin_enabled(const std::string& plugin_id) {
+    const RuntimeMods& s = state();
+    if (!s.initialized || !s.plan.ok || plugin_id.empty()) return false;
+    for (const ModResolution::Plugin& plugin : s.plan.plugins)
+        if (plugin.id == plugin_id) return true;
+    return false;
+}
+
 const std::filesystem::path& mod_runtime_effective_disc_path() {
     return state().effective_disc_path;
 }
@@ -1932,6 +1955,27 @@ extern "C" int psx_mod_register_function_filter_plugin(
     using namespace PSXRecompV4;
     if (!id || !address || !callback) return 0;
     return mod_register_function_filter_plugin(id, address, callback) ? 1 : 0;
+}
+
+extern "C" int psx_mod_register_pad_input_plugin(
+    const char* id, PSXModPadInputCallback callback) {
+    using namespace PSXRecompV4;
+    if (!id || !callback) return 0;
+    return mod_register_pad_input_plugin(id, callback) ? 1 : 0;
+}
+
+extern "C" void psx_mod_transform_pad_buttons(uint32_t port,
+                                                uint64_t guest_frame,
+                                                uint16_t* buttons) {
+    using namespace PSXRecompV4;
+    if (!buttons) return;
+    RuntimeMods& s = state();
+    for (const ActivePadInputCallback& hook : active_pad_input_callbacks()) {
+        const ModResolution::Plugin* previous = s.current_plugin;
+        s.current_plugin = hook.plugin;
+        hook.callback(port, guest_frame, buttons);
+        s.current_plugin = previous;
+    }
 }
 
 extern "C" int psx_mod_finish_function(CPUState* cpu) {

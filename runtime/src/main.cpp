@@ -62,6 +62,7 @@ extern "C" void psx_event_step_conservative_env_init(void);
 #endif
 #include "psx_netplay.h"
 #include "psx_stick.h"       /* radial SDL-stick -> DualShock response transform */
+#include "psx_trigger.h"     /* continuous SDL trigger -> plugin magnitude */
 #include "psx_controller_type.h" /* mapped wheel-name classification */
 #include "psx_netplay_rb.h"
 #include "psx_selfcheck.h"
@@ -414,6 +415,37 @@ struct PlayerInput {
     bool    steering_wheel = false;
 };
 static PlayerInput g_players[PSX_MAX_PLAYERS];
+
+extern "C" int psx_mod_get_host_trigger_values(uint32_t port, uint8_t* left,
+                                                  uint8_t* right) {
+    if (left) *left = 0;
+    if (right) *right = 0;
+    if (port >= PSX_MAX_PLAYERS || psx_netplay_active()) return 0;
+    uint8_t injected_left = 0, injected_right = 0;
+    const int injected_flags = debug_server_get_trigger_override(
+        &injected_left, &injected_right);
+    if (injected_flags & 1) {
+        if (left) *left = injected_left;
+        if (right) *right = injected_right;
+        return injected_flags;
+    }
+    SDL_GameController* handle = g_players[port].handle;
+    if (!handle) return 0;
+    int flags = 1;
+    const auto trigger_value = [handle](SDL_GameControllerAxis axis) -> uint8_t {
+        int value = (int)SDL_GameControllerGetAxis(handle, axis);
+        return psx_trigger_axis_to_u8((int16_t)value);
+    };
+    if (SDL_GameControllerHasAxis(handle, SDL_CONTROLLER_AXIS_TRIGGERLEFT)) {
+        flags |= 2;
+        if (left) *left = trigger_value(SDL_CONTROLLER_AXIS_TRIGGERLEFT);
+    }
+    if (SDL_GameControllerHasAxis(handle, SDL_CONTROLLER_AXIS_TRIGGERRIGHT)) {
+        flags |= 4;
+        if (right) *right = trigger_value(SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
+    }
+    return flags;
+}
 /* Offline SIO sample loop bound (from game.toml players; clamped). */
 static int g_offline_pad_count = 2;
 /* Set when [controller] lock_mode pins every seat to digital — blocks the
@@ -1328,6 +1360,7 @@ static int           g_rewind_enabled = 0;
 static int           g_rewind_depth  = 50;  /* local rewind snap count (50/100/150/200) */
 static int           g_rewind_interval = 15; /* frames between snaps (1/4/8/12/15) */
 static int           g_hotkey_pad_rewind = 1272;       /* select + r3 */
+static int           g_r4_modern_controls_game = 0;
 static int           g_hotkey_pad_save_state_menu = 2040;/* select + r1 */
 static int           g_hotkey_pad_fast_forward = 1528;   /* select + l1 (hold) */
 static int           g_hotkey_pad_fast_forward_toggle = 0; /* unbound: latch fast-forward */
@@ -5626,8 +5659,7 @@ static int savestate_input_guard_active(void) {
  * handshake (the v0.5.0 phantom-input lesson). */
 static void apply_input_override_to_sio(int override_word) {
     PlayerInput& p = g_players[0];
-    const uint16_t w = (uint16_t)override_word;
-    sio_set_pad_state_slot(0, w);
+    uint16_t w = (uint16_t)override_word;
 
     uint8_t st[4] = { 0x80, 0x80, 0x80, 0x80 };
     int axes = 0;
@@ -5681,6 +5713,8 @@ static void apply_input_override_to_sio(int override_word) {
     if (debug_type >= SIO_PAD_DIGITAL && debug_type <= SIO_PAD_JOGCON)
         injected_type = debug_type;
 #endif
+    psx_mod_transform_pad_buttons(0, s_frame_count, &w);
+    sio_set_pad_state_slot(0, w);
     sio_request_pad_type(0, injected_type);
     psx_selfcheck_note_pad(0, w, st[0], st[1], st[2], st[3],
                            (uint8_t)injected_type);
@@ -6329,6 +6363,8 @@ static void sample_pad_into_sio(int override) {
     for (int s = 0; s < n; s++) {
         PsxNetPad pad;
         if (!capture_pad_slot(s, &pad)) continue;  /* no device in this port */
+        psx_mod_transform_pad_buttons((uint32_t)s, s_frame_count,
+                                      &pad.buttons);
         /* Push sticks every frame; request the pad type (digital/analog) through
          * the coherent channel so a policy switch is applied only at an idle,
          * non-config bus boundary (never mid-poll / mid-handshake). This is the
@@ -6744,9 +6780,58 @@ static int normalize_hotkey_pad_binding(int binding, int fallback) {
     return fallback;
 }
 
+/* The debug server injects a PSX active-low pad word rather than an SDL
+ * GameController state. Mirror the normal Xbox-layout button names here so
+ * loaded-game debug runs can exercise host shortcuts and pause-menu input. */
+static uint16_t debug_gamecontroller_button_mask(int code) {
+    switch ((SDL_GameControllerButton)code) {
+        case SDL_CONTROLLER_BUTTON_A: return PAD_CROSS;
+        case SDL_CONTROLLER_BUTTON_B: return PAD_CIRCLE;
+        case SDL_CONTROLLER_BUTTON_X: return PAD_SQUARE;
+        case SDL_CONTROLLER_BUTTON_Y: return PAD_TRIANGLE;
+        case SDL_CONTROLLER_BUTTON_BACK: return PAD_SELECT;
+        case SDL_CONTROLLER_BUTTON_START: return PAD_START;
+        case SDL_CONTROLLER_BUTTON_LEFTSTICK: return PAD_L3;
+        case SDL_CONTROLLER_BUTTON_RIGHTSTICK: return PAD_R3;
+        case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: return PAD_L1;
+        case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return PAD_R1;
+        case SDL_CONTROLLER_BUTTON_DPAD_UP: return PAD_UP;
+        case SDL_CONTROLLER_BUTTON_DPAD_DOWN: return PAD_DOWN;
+        case SDL_CONTROLLER_BUTTON_DPAD_LEFT: return PAD_LEFT;
+        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return PAD_RIGHT;
+        default: return 0;
+    }
+}
+
+static int debug_pad_button_down(uint16_t buttons, int code) {
+    const uint16_t mask = debug_gamecontroller_button_mask(code);
+    return mask && (buttons & mask) == 0;
+}
+
 static int hotkey_pad_binding_down(int binding) {
     SDL_GameController *h = g_players[0].handle;
-    if (!h || binding == 0)
+    if (binding == 0)
+        return 0;
+    const int debug_override = debug_server_get_input_override();
+    if (debug_override >= 0) {
+        const uint16_t buttons = (uint16_t)debug_override;
+        if (PSX_HOTKEY_PAD_IS_BUTTON_COMBO(binding)) {
+            uint32_t mask = (uint32_t)PSX_HOTKEY_PAD_BUTTON_COMBO_MASK(binding);
+            if (!mask) return 0;
+            for (int code = 0; code < SDL_CONTROLLER_BUTTON_MAX && code < 32;
+                 ++code) {
+                if ((mask & ((uint32_t)1u << code)) == 0) continue;
+                if (!debug_pad_button_down(buttons, code)) return 0;
+            }
+            return 1;
+        }
+        if (!debug_pad_button_down(buttons, SDL_CONTROLLER_BUTTON_BACK))
+            return 0;
+        if (PSX_HOTKEY_PAD_IS_BUTTON(binding))
+            return debug_pad_button_down(
+                buttons, PSX_HOTKEY_PAD_BUTTON_CODE(binding));
+    }
+    if (!h)
         return 0;
     if (PSX_HOTKEY_PAD_IS_BUTTON_COMBO(binding)) {
         uint32_t mask = (uint32_t)PSX_HOTKEY_PAD_BUTTON_COMBO_MASK(binding);
@@ -6955,7 +7040,34 @@ static void savestate_menu_poll_nav(uint32_t now_ms) {
 }
 
 static int rewind_toggle_buttons_down(void) {
-    return hotkey_pad_binding_down(g_hotkey_pad_rewind);
+    const int binding = g_hotkey_pad_rewind;
+    if (g_r4_modern_controls_game &&
+        PSX_HOTKEY_PAD_IS_BUTTON_COMBO(binding)) {
+        const uint32_t mask =
+            (uint32_t)PSX_HOTKEY_PAD_BUTTON_COMBO_MASK(binding);
+        const int single_button = mask && !(mask & (mask - 1u));
+        uint8_t left_trigger = 0, right_trigger = 0;
+        const int trigger_flags = psx_mod_get_host_trigger_values(
+            0, &left_trigger, &right_trigger);
+        (void)left_trigger;
+        (void)right_trigger;
+        const int modern_mapping_available =
+            PSXRecompV4::mod_runtime_plugin_enabled("r4.modern-controls") &&
+            (trigger_flags & 7) == 7;
+        /* The Modern Controls package clears guest Triangle from gameplay, so
+         * a direct Rewind button cannot also switch the camera. When the
+         * package is disabled (or either trigger axis is absent), keep the
+         * stock camera map and require Select for this new one-button combo.
+         * Legacy button/axis settings and explicit multi-button chords retain
+         * their existing hotkey_pad_binding_down semantics. */
+        if (single_button && !modern_mapping_available) {
+            SDL_GameController* h = g_players[0].handle;
+            if (!h || !SDL_GameControllerGetButton(
+                          h, SDL_CONTROLLER_BUTTON_BACK))
+                return 0;
+        }
+    }
+    return hotkey_pad_binding_down(binding);
 }
 
 static void rewind_poll_toggle_buttons(void) {
@@ -7014,7 +7126,10 @@ static void rewind_poll_nav(uint32_t now_ms) {
     int can = (keys[SDL_SCANCODE_ESCAPE] || keys[SDL_SCANCODE_BACKSPACE]) ? 1 : 0;
     /* Honor remapped Cross/Circle (and Select/R3) via the same pad path as
      * gameplay — GameController A/B alone miss keyboard-as-pad and remaps. */
-    uint16_t btn = pad_buttons_for(g_players[0], 1, true);
+    const int debug_override = debug_server_get_input_override();
+    uint16_t btn = debug_override >= 0
+        ? (uint16_t)debug_override
+        : pad_buttons_for(g_players[0], 1, true);
     if ((btn & PAD_LEFT) == 0)
         left = 1;
     if ((btn & PAD_RIGHT) == 0)
@@ -7069,6 +7184,12 @@ static void rewind_pause_present(void) {
 static void rewind_host_pause_loop(void) {
     freeze_heartbeat_set_paused(1);
     while (psx_rewind_is_open()) {
+#ifndef PSX_NO_DEBUG_TOOLS
+        /* The guest is frozen here, but keep the developer TCP endpoint live
+         * so input injection, screenshots and status reads can exercise the
+         * host-owned filmstrip without advancing game state. */
+        debug_server_poll();
+#endif
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT) {
@@ -13362,6 +13483,15 @@ namespace {
         "Fast-forward",
         "Fast-forward toggle",
     };
+    static const int kR4AssistDefaultKeyBinds[PSX_ASSIST_BIND_COUNT] = {
+        0, 0, 0, 0,
+    };
+    static const int kR4AssistDefaultPadBinds[PSX_ASSIST_BIND_COUNT] = {
+        PSX_HOTKEY_PAD_BUTTON_COMBO(1u << SDL_CONTROLLER_BUTTON_Y),
+        PSX_HOTKEY_PAD_SELECT_R1,
+        PSX_HOTKEY_PAD_SELECT_L1,
+        0,
+    };
 
 #if defined(RECOMP_LAUNCHER_HAS_INTERNAL_RESOLUTION)
     /* Internal resolution vocabulary for the launcher's Display card: the
@@ -13401,6 +13531,7 @@ namespace {
     void ae_fill_psx_launcher_game_info(
         RecompLauncherCGameInfo* gi,
         const char* game_name_c,
+        const char* game_id_c,
         const char* region_c,
         int game_players_n,
         bool ws_offered_b,
@@ -13443,6 +13574,16 @@ namespace {
         gi->settings_bindings = 1;
         gi->assist_binding_labels = kPsxHostShortcutLabels;
         gi->assist_binding_count = PSX_ASSIST_BIND_COUNT;
+        if (game_id_c && std::strcmp(game_id_c, "SLUS-00797") == 0) {
+            gi->assist_default_key_bind = kR4AssistDefaultKeyBinds;
+            gi->assist_default_pad_bind = kR4AssistDefaultPadBinds;
+            /* The default-enabled R4 Modern Controls package clears Triangle
+             * from guest gameplay, so a one-button host Rewind cannot also
+             * switch the camera. Old single-button saved values keep their
+             * historical implicit Select chord in the runtime. */
+            gi->assist_direct_pad_bind_action =
+                PSX_ASSIST_BIND_REWIND + 1;
+        }
         gi->has_skip_fmv = skip_fmv_offered_b ? 1 : 0;
         gi->has_turbo_loads = turbo_loads_offered_b ? 1 : 0;
         /* The Perspective textures row. Hidden for a title that ships PGXP
@@ -13904,6 +14045,7 @@ int main(int argc, char** argv) {
             const auto gc = PSXRecompV4::load_game_config(game_config_path);
             game_name = gc.name;
             game_id   = gc.id;
+            g_r4_modern_controls_game = game_id == "SLUS-00797";
             game_region = gc.region;
             game_players = gc.players;
             apply_offline_pad_count(game_players, multitap_enabled);
@@ -14509,6 +14651,9 @@ int main(int argc, char** argv) {
             g_hotkey_pad_rewind = normalize_hotkey_pad_binding(
                 us.hotkey_pad_rewind,
                 PSX_HOTKEY_PAD_SELECT_R3);
+        else if (g_r4_modern_controls_game)
+            g_hotkey_pad_rewind = PSX_HOTKEY_PAD_BUTTON_COMBO(
+                1u << SDL_CONTROLLER_BUTTON_Y);
         if (us.has_hotkey_pad_save_state_menu)
             g_hotkey_pad_save_state_menu = normalize_hotkey_pad_binding(
                 us.hotkey_pad_save_state_menu,
@@ -15355,6 +15500,7 @@ int main(int argc, char** argv) {
             ae_fill_psx_launcher_game_info(
                 &gi,
                 game_name.empty() ? nullptr : game_name.c_str(),
+                game_id.c_str(),
                 rui_region.empty() ? nullptr : rui_region.c_str(),
                 game_players,
                 ws_offered,
@@ -17609,6 +17755,7 @@ soft_return_lobby:
         ae_fill_psx_launcher_game_info(
             &gi,
             game_name.empty() ? nullptr : game_name.c_str(),
+            game_id.c_str(),
             rui_region.empty() ? nullptr : rui_region.c_str(),
             game_players,
             ws_offered,

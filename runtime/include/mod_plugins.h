@@ -8,6 +8,13 @@ extern "C" {
 
 typedef void (*PSXModVBlankCallback)(void);
 typedef void (*PSXModActivationCallback)(void);
+/* Transform one local, offline PSX pad word at the host sampling boundary.
+ * `buttons` is the SIO active-low bitmask. Stick and trigger data are exposed
+ * through their separate read-only APIs. `guest_frame` is stable across all
+ * input samples associated with one guest vblank; low-latency mode may invoke
+ * a transform twice with the same frame value. */
+typedef void (*PSXModPadInputCallback)(uint32_t port, uint64_t guest_frame,
+                                      uint16_t* buttons);
 struct CPUState;
 typedef void (*PSXModFunctionEntryCallback)(struct CPUState* cpu,
                                             uint32_t address);
@@ -51,6 +58,13 @@ int psx_mod_register_instruction_plugin(const char* id, uint32_t address,
                                          uint32_t expected, PSXModFunctionEntryCallback callback);
 void psx_mod_instruction(struct CPUState* cpu, uint32_t address, uint32_t instruction);
 extern uint32_t g_psx_mod_instruction_hooks;
+int psx_mod_register_pad_input_plugin(const char* id,
+                                      PSXModPadInputCallback callback);
+/* Run the active plan's local pad transforms. Called only for offline local
+ * input, before SIO receives the sampled buttons. The same guest_frame value
+ * can recur when low-latency sampling repeats within one guest vblank. */
+void psx_mod_transform_pad_buttons(uint32_t port, uint64_t guest_frame,
+                                   uint16_t* buttons);
 /* Called from generated functions listed by the game config and from every
  * interpreted entry, so the hook contract does not depend on the backend.
  * Hooks match by code address (segment bits ignored) and run only for plugins
@@ -84,6 +98,15 @@ int psx_mod_function_entry_active(void);
 
 /* Narrow guest services available to trusted plugin callbacks. */
 int psx_mod_game_started(void);
+/* Sample local controller trigger axes for an emulation-thread plugin. Values
+ * are unthresholded 0..255 magnitudes (released=0, fully pressed=255). The
+ * result is a bitmask: bit 0 means the requested local gamepad is available,
+ * bit 1 its left-trigger axis is mapped, and bit 2 its right-trigger axis is
+ * mapped. Outputs are zero for unavailable axes, keyboard/absent pads, and
+ * during netplay, where unsynchronized host axes must not affect guest state.
+ * `port` is zero-based (0 or 1). */
+int psx_mod_get_host_trigger_values(uint32_t port, uint8_t* left,
+                                    uint8_t* right);
 /* Read an original mounted-disc file without changing guest CD state/timing.
  * Emulation-thread callbacks only. NULL buffer + zero capacity queries size;
  * otherwise capacity must hold the entire file. Active sector mods apply. */

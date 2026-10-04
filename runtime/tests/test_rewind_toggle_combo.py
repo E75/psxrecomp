@@ -12,8 +12,19 @@ assert "static int           g_hotkey_pad_save_state_menu = 2040;" in MAIN
 assert "PSX_HOTKEY_PAD_IS_BUTTON_COMBO" in MAIN
 assert "PSX_HOTKEY_PAD_SELECT_R3" in MAIN
 assert "static int hotkey_pad_binding_down(int binding)" in MAIN
+assert "static uint16_t debug_gamecontroller_button_mask(int code)" in MAIN
+assert "debug_server_get_input_override()" in MAIN
+assert "debug_override >= 0" in MAIN
 assert "SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_BACK)" in MAIN
-assert "return hotkey_pad_binding_down(g_hotkey_pad_rewind);" in MAIN
+assert "static int rewind_toggle_buttons_down(void)" in MAIN
+assert "if (g_r4_modern_controls_game &&" in MAIN
+assert 'mod_runtime_plugin_enabled("r4.modern-controls")' in MAIN
+assert "(trigger_flags & 7) == 7" in MAIN
+assert "down = rewind_toggle_buttons_down();" in MAIN
+assert ("else if (g_r4_modern_controls_game)\n"
+        "            g_hotkey_pad_rewind = PSX_HOTKEY_PAD_BUTTON_COMBO(") in MAIN
+assert "return hotkey_pad_binding_down(binding);" in MAIN
+assert "g_r4_modern_controls_game = game_id == \"SLUS-00797\";" in MAIN
 assert "(btn & PAD_SELECT) == 0 && (btn & PAD_L3) == 0" not in MAIN
 assert (
     "SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_BACK) &&\n"

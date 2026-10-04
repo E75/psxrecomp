@@ -204,6 +204,11 @@ int debug_server_get_input_override(void);
  * 0 when the injection is buttons-only. */
 int debug_server_get_axis_override(unsigned char st[4]);
 
+/* Optional debug-injected trigger values (set_input left_trigger/right_trigger,
+ * 0..255). Flags use the mod host-trigger contract: bit 0 is an injected pad,
+ * bit 1 left trigger available, bit 2 right trigger available. */
+int debug_server_get_trigger_override(uint8_t* left, uint8_t* right);
+
 /* Optional debug-only emulated controller identity set by set_input/press:
  * -1 follows normal device selection; otherwise 0=digital, 1=DualShock,
  * 2=JogCon. */

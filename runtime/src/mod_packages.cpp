@@ -42,6 +42,7 @@ struct RegisteredPlugin {
     std::vector<ModFunctionEntryHook> function_entries;
     std::vector<ModFunctionEntryHook> guest_functions;
     std::vector<ModInstructionHook> instructions;
+    std::vector<PSXModPadInputCallback> pad_input_callbacks;
 };
 
 std::map<std::string, RegisteredPlugin>& registered_plugins() {
@@ -1484,12 +1485,25 @@ bool mod_register_function_filter_plugin(const std::string& id, uint32_t address
     return true;
 }
 
+bool mod_register_pad_input_plugin(const std::string& id,
+                                   PSXModPadInputCallback callback) {
+    if (!valid_id(id) || !callback) return false;
+    RegisteredPlugin& plugin = registered_plugins()[id];
+    if (std::find(plugin.pad_input_callbacks.begin(),
+                  plugin.pad_input_callbacks.end(), callback) !=
+        plugin.pad_input_callbacks.end())
+        return false;
+    plugin.pad_input_callbacks.push_back(callback);
+    return true;
+}
+
 bool mod_plugin_registered(const std::string& id) {
     const auto found = registered_plugins().find(id);
     return found != registered_plugins().end() &&
         (found->second.activation || found->second.vblank || found->second.savestate ||
          !found->second.function_entries.empty() || !found->second.guest_functions.empty() ||
-         !found->second.instructions.empty());
+         !found->second.instructions.empty() ||
+         !found->second.pad_input_callbacks.empty());
 }
 
 bool mod_register_guest_function_plugin(const std::string& id, uint32_t address,
@@ -1562,6 +1576,13 @@ std::vector<ModFunctionEntryHook> mod_function_entry_hooks(const std::string& id
     return found->second.function_entries;
 }
 
+std::vector<PSXModPadInputCallback> mod_pad_input_callbacks(
+    const std::string& id) {
+    const auto found = registered_plugins().find(id);
+    if (found == registered_plugins().end()) return {};
+    return found->second.pad_input_callbacks;
+}
+
 void mod_clear_plugins_for_tests() {
     registered_plugins().clear();
 }
@@ -1570,7 +1591,8 @@ std::vector<std::string> mod_registered_plugin_ids() {
     std::vector<std::string> ids;
     for (const auto& entry : registered_plugins())
         if (entry.second.activation || entry.second.vblank ||
-            !entry.second.function_entries.empty() || !entry.second.guest_functions.empty())
+            !entry.second.function_entries.empty() || !entry.second.guest_functions.empty() ||
+            !entry.second.pad_input_callbacks.empty())
             ids.push_back(entry.first);
     return ids;  /* std::map keeps them sorted */
 }
