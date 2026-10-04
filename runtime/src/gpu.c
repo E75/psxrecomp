@@ -888,6 +888,7 @@ int psx_ws_masked_reject_site(uint32_t pc, uint32_t instr,
 }
 
 static WsMaskedRejectSite ws_nclip_sites[WS_EXPLICIT_CULL_SITES_MAX];
+static uint8_t ws_nclip_previous[WS_EXPLICIT_CULL_SITES_MAX];
 static int ws_nclip_site_count;
 static uint64_t ws_nclip_rescues;
 uint64_t gpu_ws_native_wide_nclip_rescues(void) { return ws_nclip_rescues; }
@@ -899,18 +900,33 @@ void psx_mod_set_native_wide_nclip_sites(const uint32_t* addresses,
         if (!((op == 1 && rt <= 1) || ((op == 6 || op == 7) && rt == 0))) abort();
         ws_nclip_sites[i].address = addresses[i] & 0x1FFFFFFFu;
         ws_nclip_sites[i].expected = expected[i];
+        ws_nclip_previous[i] = 0;
     }
     ws_nclip_site_count = count;
     ws_nclip_rescues = 0;
 }
+void psx_mod_set_native_wide_nclip_previous_site(uint32_t address, uint32_t expected) {
+    for (int i = 0; i < ws_nclip_site_count; ++i) {
+        if (ws_nclip_sites[i].address == (address & 0x1FFFFFFFu) &&
+            ws_nclip_sites[i].expected == expected) {
+            ws_nclip_previous[i] = 1;
+            return;
+        }
+    }
+    abort();
+}
 extern int gte_nclip_native_wide_sign(int32_t mac0, int* sign);
+extern int gte_nclip_native_wide_previous_sign(int32_t mac0, int* sign);
 int psx_ws_nclip_branch(uint32_t pc, uint32_t instr, int32_t mac0, int vanilla) {
     if (psx_ws_x_margin() <= 0 || !gpu_ws_precise_nclip_enabled()) return vanilla;
     for (int i = 0; i < ws_nclip_site_count; ++i) {
         if (ws_nclip_sites[i].address != (pc & 0x1FFFFFFFu) ||
             ws_nclip_sites[i].expected != instr) continue;
         int sign;
-        if (!gte_nclip_native_wide_sign(mac0, &sign)) return vanilla;
+        const int valid = ws_nclip_previous[i] ?
+            gte_nclip_native_wide_previous_sign(mac0, &sign) :
+            gte_nclip_native_wide_sign(mac0, &sign);
+        if (!valid) return vanilla;
         const uint32_t op = instr >> 26;
         const int result = op == 6 ? sign <= 0 : op == 7 ? sign > 0 :
             ((instr >> 16) & 1) ? sign >= 0 : sign < 0;

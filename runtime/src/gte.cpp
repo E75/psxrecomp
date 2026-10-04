@@ -237,7 +237,9 @@ static uint32_t s_geom_miss_ambig = 0;   /* recorded, but not unambiguously    *
 static uint32_t s_speculative_depth = 0;
 static int s_speculative_timeline_invalidated = 0;
 
+static void gte_nclip_precision_invalidate();
 static void gte_geom_generation_advance(void) {
+    gte_nclip_precision_invalidate();
     if (++s_geom_generation == 0) {
         if (s_geom_cache)
             std::memset(s_geom_cache, 0, GEOM_CACHE_SIZE * sizeof(GeomVertex));
@@ -1015,6 +1017,15 @@ static int8_t s_nclip_last_precise_sign = 0;
 static bool s_nclip_last_precise_valid = false;
 static bool s_nclip_last_horizontal_saturated = false;
 static uint32_t s_nclip_last_generation;
+static int32_t s_nclip_previous_native;
+static int8_t s_nclip_previous_precise_sign;
+static bool s_nclip_previous_precise_valid;
+static bool s_nclip_previous_horizontal_saturated;
+static uint32_t s_nclip_previous_generation;
+static void gte_nclip_precision_invalidate() {
+    s_nclip_last_precise_valid = false;
+    s_nclip_previous_precise_valid = false;
+}
 extern "C" void gte_nclip_precise_stats(uint64_t *hits, uint64_t *fallbacks,
                                         uint64_t *disagreements) {
     if (hits) *hits = s_nclip_precise_hits;
@@ -1033,6 +1044,17 @@ extern "C" int gte_nclip_native_wide_sign(int32_t native_mac0, int* sign) {
     *sign = s_nclip_last_precise_sign;
     return 1;
 }
+/* Some guarded quad consumers save two MAC0 values before branching. Their
+ * first branch must use the first command's provenance, even when both native
+ * results are equal. This is explicitly selected by the title, never searched
+ * as a fallback for arbitrary architectural MAC0 readers. */
+extern "C" int gte_nclip_native_wide_previous_sign(int32_t native_mac0, int* sign) {
+    if (!s_nclip_previous_precise_valid || !s_nclip_previous_horizontal_saturated ||
+        native_mac0 != s_nclip_previous_native || s_nclip_previous_generation != s_geom_generation ||
+        s_gte_replay_sandbox || s_speculative_depth != 0) return 0;
+    *sign = s_nclip_previous_precise_sign;
+    return 1;
+}
 
 void gte_nclip(GTEState* gte, uint32_t instr) {
     gte->FLAG = 0;
@@ -1047,6 +1069,12 @@ void gte_nclip(GTEState* gte, uint32_t instr) {
                    (int64_t)sx2 * (sy0 - sy1);
     gte->check_mac0_overflow(mac0);
     int32_t out = static_cast<int32_t>(mac0);
+    s_nclip_previous_native = s_nclip_last_native;
+    s_nclip_previous_precise_sign = s_nclip_last_precise_sign;
+    s_nclip_previous_precise_valid = s_nclip_last_precise_valid &&
+        !s_gte_replay_sandbox && s_speculative_depth == 0;
+    s_nclip_previous_horizontal_saturated = s_nclip_last_horizontal_saturated;
+    s_nclip_previous_generation = s_nclip_last_generation;
     s_nclip_last_native = out;
     s_nclip_last_precise_valid = false;
     s_nclip_last_horizontal_saturated = false;

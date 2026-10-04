@@ -693,6 +693,21 @@ int test_saturated_nclip_keeps_architectural_result() {
     if (cpu.gte_data[24] != 0 || !gte_nclip_native_wide_sign(0, &sign) || sign != 1 ||
         gte_nclip_native_wide_sign(1, &sign))
         return fail_value("saturated winding rescue preserves native zero MAC0",0,6,0,0,cpu.gte_data[24]);
+    /* Both quad MAC0 values can saturate to the same zero. Keep each exact
+     * sign separately: the preceding triangle points forward, latest back. */
+    for (unsigned i=0;i<3;i++) {
+        uint32_t packed=1023u | ((uint32_t)py[2-i]<<16);
+        cpu.gte_data[12+i]=packed;
+        gte_test_seed_precise_projection(i,packed,px[2-i]*65536,py[2-i]*65536,1000);
+    }
+    gte_execute(&cpu,6);
+    if (cpu.gte_data[24]!=0 || !gte_nclip_native_wide_sign(0,&sign) || sign!=-1 ||
+        !gte_nclip_native_wide_previous_sign(0,&sign) || sign!=1 ||
+        gte_nclip_native_wide_previous_sign(1,&sign))
+        return fail_value("quad retains independent saturated winding results",0,6,0,0,cpu.gte_data[24]);
+    gte_execute(&cpu,6);
+    if (!gte_nclip_native_wide_previous_sign(0,&sign) || sign!=-1)
+        return fail_value("preceding winding advances one command only",0,6,0,0,1);
     cpu.gte_data[17] = 10;
     gte_execute(&cpu, 6);
     if (gte_nclip_native_wide_sign(0, &sign) || cpu.gte_data[24] != 0)
@@ -700,7 +715,7 @@ int test_saturated_nclip_keeps_architectural_result() {
     cpu.gte_data[17] = 1000;
     gte_execute(&cpu, 6);
     gte_precision_timeline_invalidate();
-    if (gte_nclip_native_wide_sign(0, &sign))
+    if (gte_nclip_native_wide_sign(0, &sign) || gte_nclip_native_wide_previous_sign(0,&sign))
         return fail_value("timeline invalidation clears winding rescue",0,6,0,0,1);
     gte_test_seed_precise_projection(0, cpu.gte_data[12] ^ 1u, px[0]*65536, py[0]*65536, 1000);
     gte_execute(&cpu, 6);
