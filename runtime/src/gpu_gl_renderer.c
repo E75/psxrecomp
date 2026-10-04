@@ -1366,7 +1366,7 @@ static const char *TEX_FS =
     "}\n"
     "int stable_texel(ivec2 p){\n"
     "  /* Clamp before wrap, so a footprint left of u=0 cannot pick up u=255. */\n"
-    "  if ((u_twin.x | u_twin.y) == 0) p=clamp(p,v_limits.xy,v_limits.zw);\n"
+    "  if ((v_twin & 1023) == 0) p=clamp(p,v_limits.xy,v_limits.zw);\n"
     "  return fetch_texel(p.x,p.y);\n"
     "}\n"
     "vec4 stable_bilinear(vec2 uv,int stp){\n"
