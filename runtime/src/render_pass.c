@@ -249,7 +249,9 @@ static RenderPassFailure s_attempt;
 static const char *s_checkpoint_failure;
 
 static int pass_refuse(const char *reason, uint32_t status) {
-    s_attempt.reason = reason;
+    /* A refusal always carries a reason: last_failure.reason == NULL means
+     * "no failure" to the TCP reader. */
+    s_attempt.reason = reason ? reason : "unspecified";
     s_attempt.status = status;
     s_stats.last_failure = s_attempt;
     return 0;
@@ -608,7 +610,8 @@ int psx_mod_render_pass(struct CPUState *cpu, const PSXModRenderPass *pass,
         /* Capture the rejection status before rolling the GL transaction back. */
         status = pass_status();
         gl_renderer_pass_end(0, 0);
-        return pass_refuse(s_checkpoint_failure, status);
+        return pass_refuse(s_checkpoint_failure ? s_checkpoint_failure
+                                                : "checkpoint", status);
     }
     if (verify_on()) hash_before = state_hash(cpu);
 

@@ -208,9 +208,10 @@ uint32_t gl_renderer_pass_plan(uint32_t p, uint32_t s, uint32_t *a,
     if (wanted) *wanted = 0;
     return 0;
 }
-static int s_open_passes, s_kept, s_begin_ok = 1;
+static int s_open_passes, s_kept, s_begin_ok = 1, s_diag_null;
 void gl_renderer_pass_begin_diag(GLRenderPassBeginDiag *out) {
     memset(out, 0, sizeof *out);
+    if (s_diag_null) return;
     out->reason = "capture_size";
     out->requested_w = 320; out->requested_h = 240;
     out->capture_w = 512; out->capture_h = 240;
@@ -442,9 +443,20 @@ static void test_pass(void) {
           "checkpoint failure closes transaction without calling guest code");
     failed_attempt = st.last_failure.attempt;
     s_checkpoint_ok = 1;
+    /* A refusal whose producer named no reason still reads as a failure. */
+    s_begin_ok = 0;
+    s_diag_null = 1;
+    CHECK(psx_mod_render_pass(&cpu, &pass, never_fn, NULL) == 0, "anonymous begin refusal");
+    render_pass_get_stats(&st);
+    CHECK(st.last_failure.reason && st.last_failure.reason[0] &&
+          st.last_failure.attempt > failed_attempt,
+          "refusal without a producer reason records a fallback reason");
+    failed_attempt = st.last_failure.attempt;
+    s_diag_null = 0;
+    s_begin_ok = 1;
     CHECK(psx_mod_render_pass(&cpu, &pass, pass_fn, NULL) == 1, "success after refusals");
     render_pass_get_stats(&st);
-    CHECK(st.last_failure.attempt == failed_attempt && st.pass_attempts == 6,
+    CHECK(st.last_failure.attempt == failed_attempt && st.pass_attempts == 7,
           "success does not erase last failure");
     render_pass_reset_session();
     render_pass_get_stats(&st);
