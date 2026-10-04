@@ -41,6 +41,13 @@ extern uint8_t *memory_get_scratchpad_ptr(void);
 extern uint32_t memory_get_ram_bytes(void);
 extern uint32_t i_stat;
 extern uint32_t i_mask;
+/* gte.cpp: precision-tracking shadows (PGXP + the position cache) roll back
+ * with the machine, or they describe the words a pass wrote. */
+extern void gte_precision_checkpoint_begin(void);
+extern void gte_precision_checkpoint_rollback(void);
+/* memory.c: mod arena pages a pass wrote, and their hash for verify mode. */
+extern void render_pass_mod_arenas_rollback(void);
+extern uint64_t render_pass_mod_arenas_hash(void);
 extern uint32_t dma_snapshot_bytes(void);
 extern void     dma_snapshot_write(uint8_t *p);
 extern int      dma_snapshot_read(const uint8_t *p, uint32_t len);
@@ -110,6 +117,7 @@ typedef struct RenderPassNesting {
     uint32_t ov_inprogress;
     void   (*ov_flush)(void);
     ModFunctionEntryContext mod_entry;
+    uint32_t span_lo, span_hi;       /* open guest span (dirty_ram_run_span) */
 } RenderPassNesting;
 
 static void nesting_save(RenderPassNesting *n) {
@@ -128,6 +136,7 @@ static void nesting_save(RenderPassNesting *n) {
     overlay_loader_native_nesting(&n->ov_active_depth, &n->ov_inprogress);
     n->ov_flush = g_overlay_flush_pending_cycles;
     mod_runtime_function_entry_context_save(&n->mod_entry);
+    dirty_ram_span_get(&n->span_lo, &n->span_hi);
 }
 
 static void nesting_restore(const RenderPassNesting *n) {
@@ -146,6 +155,7 @@ static void nesting_restore(const RenderPassNesting *n) {
     overlay_loader_set_native_nesting(n->ov_active_depth, n->ov_inprogress);
     g_overlay_flush_pending_cycles = n->ov_flush;
     mod_runtime_function_entry_context_restore(&n->mod_entry);
+    dirty_ram_span_set(n->span_lo, n->span_hi);
 }
 
 /* PSX_RENDER_PASS_VERIFY: a pass that returned normally must leave the
@@ -163,6 +173,7 @@ static int nesting_balanced(const RenderPassNesting *n) {
            now.precise_mode == n->precise_mode &&
            now.ov_active_depth == n->ov_active_depth &&
            now.ov_flush == n->ov_flush &&
+           now.span_lo == n->span_lo && now.span_hi == n->span_hi &&
            now.mod_entry.depth == n->mod_entry.depth &&
            now.mod_entry.plugin == n->mod_entry.plugin;
 }
@@ -202,6 +213,7 @@ static int nesting_describe(const RenderPassNesting *n, int bb_defer_ck,
     RP_NOTE(now.mod_entry.depth != n->mod_entry.depth, "mod entries %+d",
             (int)now.mod_entry.depth - (int)n->mod_entry.depth);
     RP_NOTE(now.mod_entry.plugin != n->mod_entry.plugin, "mod owner");
+    RP_NOTE(now.span_hi != n->span_hi, "guest span");
 #undef RP_NOTE
     return count;
 }
@@ -229,6 +241,7 @@ static RenderPassCheckpoint s_ck;
 static PsxCycleFreeze s_freeze;
 static jmp_buf s_abort_jmp;
 static volatile int s_abort_armed;
+static const CPUState* s_pass_cpu;
 static int s_nesting;
 
 static RenderPassStats s_stats;
@@ -245,7 +258,9 @@ static RenderPassFailure s_attempt;
 static const char *s_checkpoint_failure;
 
 static int pass_refuse(const char *reason, uint32_t status) {
-    s_attempt.reason = reason;
+    /* A refusal always carries a reason: last_failure.reason == NULL means
+     * "no failure" to the TCP reader. */
+    s_attempt.reason = reason ? reason : "unspecified";
     s_attempt.status = status;
     s_stats.last_failure = s_attempt;
     return 0;
@@ -289,6 +304,15 @@ void render_pass_reset_session(void) {
     s_open_generation = 0;
     s_restored_valid = 0;
     memset(&s_attempt, 0, sizeof s_attempt);
+    gl_renderer_pass_set_flip_shown(0);
+}
+
+int psx_mod_set_render_pass_flip(uint32_t mode) {
+    if (mode != PSX_MOD_RENDER_PASS_FLIP_PENDING &&
+        mode != PSX_MOD_RENDER_PASS_FLIP_SHOWN)
+        return 0;
+    gl_renderer_pass_set_flip_shown(mode == PSX_MOD_RENDER_PASS_FLIP_SHOWN);
+    return 1;
 }
 
 /* Everything that must hold before guest code may run frozen, as a
@@ -315,6 +339,16 @@ static int passes_allowed(void) {
 
 uint32_t psx_mod_render_pass_status(void) {
     return pass_status();
+}
+
+int psx_mod_run_guest_span(CPUState *cpu, uint32_t start_pc, uint32_t stop_pc) {
+    if (!g_psx_render_pass_active || !cpu) return 0;
+    if (dirty_ram_run_span(cpu, start_pc, stop_pc, 1000000u)) {
+        s_stats.spans++;
+        return 1;
+    }
+    s_stats.span_failures++;
+    return 0;
 }
 
 uint32_t psx_mod_render_pass_plan(uint32_t period_vblanks,
@@ -373,6 +407,10 @@ static uint64_t state_hash(const CPUState *cpu) {
     h = fnv(h, cpu->gte_ctrl, sizeof cpu->gte_ctrl);
     h = fnv(h, memory_get_ram_ptr(), memory_get_ram_bytes());
     h = fnv(h, memory_get_scratchpad_ptr(), RP_SPAD_SIZE);
+    {
+        const uint64_t mh = render_pass_mod_arenas_hash();
+        h = fnv(h, &mh, sizeof mh);
+    }
     h = fnv(h, g_psx_icache_tv, sizeof g_psx_icache_tv);
     h = fnv(h, &i_stat, sizeof i_stat);
     h = fnv(h, &i_mask, sizeof i_mask);
@@ -449,6 +487,7 @@ static int checkpoint_save(const CPUState *cpu) {
     s_ck.call_bail = g_psx_call_bail;
     memset(&s_ck.nest, 0, sizeof s_ck.nest);
     nesting_save(&s_ck.nest);
+    gte_precision_checkpoint_begin();
     return 1;
 }
 
@@ -472,6 +511,8 @@ static void checkpoint_restore(CPUState *cpu) {
     g_psx_dispatch_depth = s_ck.dispatch_depth;
     g_psx_call_bail = s_ck.call_bail;
     nesting_restore(&s_ck.nest);
+    render_pass_mod_arenas_rollback();
+    gte_precision_checkpoint_rollback();
 }
 
 static double s_ms_per_tick = 0.0;
@@ -483,6 +524,11 @@ static double ema_ms(double cur, uint64_t ticks) {
 static void watchdog_overrun(void) {
     s_stats.watchdog++;
     s_stats.watchdog_flag = 1;
+    if (s_stats.watchdog <= 4 && s_pass_cpu)
+        fprintf(stderr, "psxrecomp: render pass watchdog pc=0x%08X "
+                "function=0x%08X ra=0x%08X last_store=0x%08X\n",
+                s_pass_cpu->pc, g_debug_current_func_addr,
+                s_pass_cpu->gpr[31], g_debug_last_store_pc);
     if (s_abort_armed) {
         s_abort_armed = 0;
         longjmp(s_abort_jmp, 1);
@@ -573,7 +619,8 @@ int psx_mod_render_pass(struct CPUState *cpu, const PSXModRenderPass *pass,
         /* Capture the rejection status before rolling the GL transaction back. */
         status = pass_status();
         gl_renderer_pass_end(0, 0);
-        return pass_refuse(s_checkpoint_failure, status);
+        return pass_refuse(s_checkpoint_failure ? s_checkpoint_failure
+                                                : "checkpoint", status);
     }
     if (verify_on()) hash_before = state_hash(cpu);
 
@@ -583,6 +630,7 @@ int psx_mod_render_pass(struct CPUState *cpu, const PSXModRenderPass *pass,
     (void)psx_cycle_freeze_begin(&s_freeze, watchdog_cycles(),
                                  watchdog_overrun);
     if (setjmp(s_abort_jmp) == 0) {
+        s_pass_cpu = cpu;
         s_abort_armed = 1;
         ok = fn(cpu, user, pass->alpha_q16) ? 1 : 0;
         s_abort_armed = 0;
@@ -608,6 +656,7 @@ int psx_mod_render_pass(struct CPUState *cpu, const PSXModRenderPass *pass,
     }
     s_stats.guest_cycles_last = psx_cycle_count - cycles_before;
     tg = gl_renderer_perf_ticks();
+    s_pass_cpu = NULL;
 
     leaks = gl_renderer_pass_leaks() - s_leaks_before;
     if (leaks) {

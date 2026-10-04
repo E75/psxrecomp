@@ -4,7 +4,10 @@
  * -------------------------------------------
  * The FBO color texture (`s_hr_tex`, RGBA8, 1024*S x 512*S where S is the
  * internal-resolution scale from [video] supersampling) is the single
- * authoritative copy of VRAM. EVERY mutation goes through the GPU:
+ * authoritative copy of VRAM during normal 15-bit rendering. Every mutation
+ * goes through the GPU; depth24 scanout additionally keeps the CPU mirror
+ * authoritative because packed RGB888 framebuffer uploads are not staged as
+ * 1555 FBO pixels. GP0 clears/draws/copies must also update that mirror:
  *
  *   - polys / rects / lines  -> rasterized into the hr FBO
  *   - GP0(02h) fills         -> scissored glClear (color + stencil)
@@ -39,14 +42,15 @@
  * coords). CPU->VRAM uploads update the raw mirror directly. So content
  * rendered by the GPU is immediately valid as a texture source.
  *
- * CPU READBACKS (VRAM->CPU transfers, GPUREAD, screenshots, 24-bit FMV
- * display) flush uploads + pack, then glReadPixels the raw mirror straight
- * into the CPU VRAM array (raw 1555, no conversion loop).
+ * CPU READBACKS (VRAM->CPU transfers, GPUREAD, screenshots) in 15-bit mode
+ * flush uploads + pack, then glReadPixels the raw mirror straight into CPU
+ * VRAM (raw 1555, no conversion loop). Depth24 entry synchronizes once before
+ * the first write; readback is then suppressed until 15-bit rendering resumes.
  *
  * PRESENT is deterministic: 15-bit frames always blit the display region
  * from the hr FBO into a 4:3 letterboxed rect (single path — no more
  * frame-to-frame alternation between FBO and CPU presents). 24-bit (FMV)
- * frames sync to CPU and use the quad-present path, also letterboxed.
+ * frames use the authoritative CPU mirror and quad-present, also letterboxed.
  * PSX_GL_FORCE_CPU_PRESENT=1 (read by main.cpp) forces the CPU path as a
  * diagnostic.
  *
@@ -552,6 +556,8 @@ static GLuint s_pack_prog = 0, s_stencil_prog = 0, s_empty_vao = 0;
  * gpu.c sets these immediately before the matching gr_draw_*_triangle and they
  * are consumed by it. All-zero == the faithful integer/affine path. */
 static int     s_pc_valid = 0;                  /* sub-pixel positions present */
+static int s_projected_uv_valid;
+static float s_projected_u[3], s_projected_v[3];
 static float   s_pc_x[3], s_pc_y[3];            /* native VRAM px, fractional  */
 static int     s_pq_valid = 0;                  /* perspective weights present */
 static float   s_pq[3];
@@ -694,6 +700,16 @@ static int    g_wide_cur_base = 0;           /* base_x of g_wide_cur */
  * gpu_geometry wide mirror is skipped and the flat path emits its own
  * full-wide-width pass instead (mirrors sw_draw_flat_rect). */
 static int    s_wide_suppress = 0;
+/* Diagnostic only. The frontend admits proven world geometry into both the
+ * canonical and wide passes so a face cannot split at the center-copy edge. */
+static uint64_t s_wide_triangle_recovery_count;
+void gl_renderer_note_wide_triangle_recovery(int recovered) {
+    if (recovered && s_raster_ok && g_wide_cur) ++s_wide_triangle_recovery_count;
+}
+uint64_t gl_renderer_wide_triangle_recovery_count(void) {
+    return s_wide_triangle_recovery_count;
+}
+
 
 /* X-translation (native px) from canonical VRAM space into the active wide
  * surface: local_x = vram_x - base_x + OFFSET. Same as SW wide_dx(). */
@@ -1329,7 +1345,7 @@ static const char *TEX_FS =
     "uniform int u_semipass;  /* 0=all texels, 1=STP=0 only, 2=STP=1 only */\n"
     "uniform int u_semimode;  /* PS1 blend mode; drives dual-source factors */\n"
     "uniform int u_maskset;   /* GP0(E6h) set-mask: OR bit15 into output */\n"
-    "uniform int u_filter;    /* 1 = bilinear */\n"
+    "uniform int u_filter;    /* 0 nearest, 1 bilinear, 2 stable */\n"
     "uniform float u_shift;\n"
     "int vram_at(int x, int y){\n"
     "  ivec2 p = ivec2(x & 1023, y & 511);\n"
@@ -1365,17 +1381,46 @@ static const char *TEX_FS =
     "vec3 col5(int raw){\n"
     "  return vec3(float(raw & 31), float((raw >> 5) & 31), float((raw >> 10) & 31)) / 31.0;\n"
     "}\n"
+    "int stable_texel(ivec2 p){\n"
+    "  /* Clamp before wrap, so a footprint left of u=0 cannot pick up u=255. */\n"
+    "  if ((v_twin & 1023) == 0) p=clamp(p,v_limits.xy,v_limits.zw);\n"
+    "  return fetch_texel(p.x,p.y);\n"
+    "}\n"
+    "vec4 stable_bilinear(vec2 uv,int stp){\n"
+    "  vec2 p=uv-vec2(0.5), f=fract(p); ivec2 b=ivec2(floor(p));\n"
+    "  vec4 sum=vec4(0.0);\n"
+    "  for(int y=0;y<2;++y) for(int x=0;x<2;++x){\n"
+    "    int raw=stable_texel(b+ivec2(x,y));\n"
+    "    float w=(x==0 ? 1.0-f.x : f.x)*(y==0 ? 1.0-f.y : f.y);\n"
+    "    if(raw!=0 && ((raw>>15)&1)==stp) sum+=vec4(col5(raw),1.0)*w;\n"
+    "  }\n"
+    "  return sum;\n"
+    "}\n"
     "void main(){\n"
     "  int stp; vec3 rgb;\n"
     "  /* v_persp is 0 for every prim unless [video] perspective_texturing is on\n"
     "   * AND this prim's packet carried full GTE projection provenance, so the\n"
     "   * default is the PS1's affine (noperspective) mapping. */\n"
     "  vec2 uv = (v_persp != 0) ? v_uv_p : v_uv;\n"
+    "  vec2 dx=dFdx(uv), dy=dFdy(uv);\n"
     "  if (u_filter == 0) {\n"
     "    int raw = fetch_texel(int(floor(uv.x)), int(floor(uv.y)));\n"
     "    if (raw == 0) discard;\n"
     "    rgb = col5(raw);\n"
     "    stp = (raw >> 15) & 1;\n"
+    "  } else if (u_filter == 2) {\n"
+    "    uv+=vec2(u_shift); int raw=stable_texel(ivec2(floor(uv)));\n"
+    "    if(raw==0) discard; stp=(raw>>15)&1;\n"
+    "    float lx=length(dx), ly=length(dy);\n"
+    "    dx*=min(1.0,8.0/max(lx,0.001)); dy*=min(1.0,8.0/max(ly,0.001));\n"
+    "    int nx=clamp(int(ceil(lx)),1,4), ny=clamp(int(ceil(ly)),1,4);\n"
+    "    vec4 sum=vec4(0.0);\n"
+    "    for(int y=0;y<ny;++y) for(int x=0;x<nx;++x){\n"
+    "      vec2 offset=dx*((float(x)+0.5)/float(nx)-0.5)\n"
+    "                 +dy*((float(y)+0.5)/float(ny)-0.5);\n"
+    "      sum+=stable_bilinear(uv+offset,stp);\n"
+    "    }\n"
+    "    rgb=sum.a>0.00001 ? sum.rgb/sum.a : col5(raw);\n"
     "  } else {\n"
     "    /* Bilinear, Beetle-PSX formulation: the NEAREST texel is the base\n"
     "     * (cutout + STP authority), the neighbours lie toward the sub-texel\n"
@@ -2235,13 +2280,17 @@ static void flush_pack_if_sampling(int tpage_x, int tpage_y, int depth,
 /* Defined with the depth24 policy below; needed here for the readback guard. */
 static int s_depth24_skip_up = 0;
 static DirtyRect s_d24_skip_fb; /* union of skipped MDEC FB rects (VRAM halfwords) */
+static int cpu_vram_authoritative(void) {
+    return s_cpu_auth_dual || s_depth24_skip_up;
+}
 
 static void ensure_cpu(void) {
     extern int psx_netplay_active(void);
     if (!s_raster_ok || !s_gpu_dirty) return;
-    /* Dual-raster / netplay: CPU VRAM is written on every GP0 (or pure SW).
-     * Never glReadPixels — that forked peer snaps/resim. */
-    if (s_cpu_auth_dual || psx_netplay_active()) {
+    /* Dual-raster / netplay and depth24: CPU VRAM is written on every GP0.
+     * Packed RGB888 movie uploads are deliberately absent from the FBO;
+     * reading it back would overwrite the movie with stale 1555 words. */
+    if (cpu_vram_authoritative() || psx_netplay_active()) {
         s_gpu_dirty = 0;
         rect_clear(&s_cpu_dirty);
         return;
@@ -2298,9 +2347,9 @@ static void mark_prim_dirty(const int *xs, const int *ys, int n, int textured) {
     if (y1 > s_area_y2) y1 = s_area_y2;
     rect_add(&s_pack_dirty, x0, y0, x1, y1);
     if (s_out_scale > 1) rect_add(&s_stencil_stale, x0, y0, x1, y1);
-    if (!s_cpu_auth_dual) rect_add(&s_cpu_dirty, x0, y0, x1, y1);
+    if (!cpu_vram_authoritative()) rect_add(&s_cpu_dirty, x0, y0, x1, y1);
     /* Dual-raster keeps CPU current via SW writes — do not mark GPU-ahead. */
-    if (!s_cpu_auth_dual)
+    if (!cpu_vram_authoritative())
         s_gpu_dirty = 1;
     coh_record(GL_COH_DRAW, x0, y0, x1, y1);
 }
@@ -3257,6 +3306,9 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
                                   const float *col, uint16_t texpage,
                                   uint16_t clut_x, uint16_t clut_y, int rawtex,
                                   int semi, const int *lim) {
+    // Mode 2 needs proven world geometry. Sprites, HUD and untracked packets
+    // retain point sampling; their cutout pixels must stay sharp.
+    const int filter=s_tex_filter==2 && ((lim && !s_projected_uv_valid) || (!s_pc_valid && !s_pq_valid)) ? 0 : s_tex_filter;
     int lim_buf[4];
     int uv_buf[6];
     if (!lim) {
@@ -3324,7 +3376,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
             else if (isolate) reason = 0;
             else if (batch_semi != s_tb_semi) reason = 1;
             else if (s_mask_set != s_tb_mask) reason = 2;
-            else if (s_tex_filter != s_tb_filter) reason = 3;
+            else if (filter != s_tb_filter) reason = 3;
             else if (gate != s_tb_gate) reason = 4;
             else if ((!s_twin_batching || s_mask_check) &&
                      (twx != s_tb_twin[0] || twy != s_tb_twin[1] ||
@@ -3336,7 +3388,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
         }
         if (s_tb_n + 3 > TEXBATCH_MAXV) { s_batch_reason[6]++; flush_tex_batch(); }
         if (s_tb_n == 0) {            /* opening a batch: capture its keyed state */
-            s_tb_semi = batch_semi; s_tb_mask = s_mask_set; s_tb_filter = s_tex_filter; s_tb_gate = gate;
+            s_tb_semi = batch_semi; s_tb_mask = s_mask_set; s_tb_filter = filter; s_tb_gate = gate;
             s_tb_bank_tex = s_selected_bank_tex;
             s_tb_bank_live_clut = s_selected_bank_live_clut;
             s_tb_twin[0] = twx; s_tb_twin[1] = twy; s_tb_twin[2] = tox; s_tb_twin[3] = toy;
@@ -3347,7 +3399,8 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
         for (int i = 0; i < 3; i++, vp += TEXV) {
             vp[0] = s_pc_valid ? s_pc_x[i] : (float)xs[i];
             vp[1] = s_pc_valid ? s_pc_y[i] : (float)ys[i];
-            vp[2] = (float)us[i];   vp[3] = (float)vs[i];
+            vp[2] = s_projected_uv_valid ? s_projected_u[i] : (float)us[i];
+            vp[3] = s_projected_uv_valid ? s_projected_v[i] : (float)vs[i];
             vp[4] = col[i*3+0];     vp[5] = col[i*3+1];     vp[6] = col[i*3+2];   vp[7] = 1.0f;
             vp[8]  = (float)base_x;  vp[9]  = (float)base_y;        /* a_tpage  */
             vp[10] = (float)clut_x;  vp[11] = (float)clut_y;        /* a_clut   */
@@ -3474,7 +3527,7 @@ static void fill_segment(int x, int y, int w, int h, float r, float g, float b) 
     glStencilMask(0xFF);
     glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
     rect_add(&s_pack_dirty, x, y, x + w - 1, y + h - 1);
-    if (!s_cpu_auth_dual) rect_add(&s_cpu_dirty, x, y, x + w - 1, y + h - 1);
+    if (!cpu_vram_authoritative()) rect_add(&s_cpu_dirty, x, y, x + w - 1, y + h - 1);
 }
 
 static void gpu_fill(int x,int y,int w,int h,uint16_t c) {
@@ -3505,7 +3558,7 @@ static void gpu_fill(int x,int y,int w,int h,uint16_t c) {
     }
     glDisable(GL_SCISSOR_TEST);
     p_glBindFramebuffer(PSXGL_FRAMEBUFFER, 0);
-    if (!s_cpu_auth_dual)
+    if (!cpu_vram_authoritative())
         s_gpu_dirty = 1;
     coh_record(GL_COH_FILL, x, y, x + w - 1, y + h - 1);
 }
@@ -3571,8 +3624,8 @@ static void gpu_copy_rect(int sx,int sy,int dx,int dy,int w,int h) {
     hiw_mirror_copy(sx, sy, dx, dy, w, h);   /* scratch still holds the 1x source */
 
     rect_add(&s_pack_dirty, dx, dy, dx + w - 1, dy + h - 1);
-    if (!s_cpu_auth_dual) rect_add(&s_cpu_dirty, dx, dy, dx + w - 1, dy + h - 1);
-    if (!s_cpu_auth_dual)
+    if (!cpu_vram_authoritative()) rect_add(&s_cpu_dirty, dx, dy, dx + w - 1, dy + h - 1);
+    if (!cpu_vram_authoritative())
         s_gpu_dirty = 1;
     coh_record(GL_COH_COPY_SRC, sx, sy, sx + w - 1, sy + h - 1);
     coh_record(GL_COH_COPY,     dx, dy, dx + w - 1, dy + h - 1);
@@ -3596,7 +3649,7 @@ static int  glb_scale(void) { return s_out_scale; }   /* real internal SSAA scal
                                                       native-wide CPU present path + gr_scale() callers
                                                       need the true scale — the FBO-direct present is
                                                       unaffected since it never reads gr_scale()) */
-static void glb_set_texture_filter(int b) { s_tex_filter = b ? 1 : 0; sw_set_texture_filter(b); }
+static void glb_set_texture_filter(int b) { s_tex_filter = b >= 0 && b <= 2 ? b : 0; sw_set_texture_filter(b != 0); }
 static int  glb_texture_filter(void) { return s_tex_filter; }
 
 static void glb_set_semi_transparency(int e, int m) { s_semi_en = e; s_semi_mode = m & 3; sw_set_semi_transparency(e, m); }
@@ -3654,21 +3707,65 @@ static void glb_set_draw_offset(int x,int y) { flush_flat_batch(); flush_tex_bat
 
 /* Pre-context draws (s_raster_ok == 0) fall back to the software rasterizer
  * over CPU VRAM; the initial full-VRAM upload at context init folds them in.
- * Offline post-init is GPU-only (FBO-auth). Netplay dual-raster always writes
- * SW @ 1× for authority, then GPU @ s_out_scale for present quality. */
+ * Offline 15-bit rendering is GPU-only (FBO-auth). Netplay dual-raster and
+ * depth24 scanout write SW @ 1× for authority, then GPU @ s_out_scale. Movie
+ * players can clear with tiles between movies without leaving depth24; those
+ * clears must reach the CPU mirror the RGB888 presenter reads. */
+static void depth24_upload_policy(void);
+static int cpu_raster_required(void) {
+    depth24_upload_policy();
+    return !s_raster_ok || cpu_vram_authoritative();
+}
 /* The sub-pixel / perspective override describes exactly one triangle; drop it
  * once that triangle has been submitted so a later prim can never inherit it. */
-static inline void precise_consumed(void) { s_pc_valid = 0; s_pq_valid = 0; }
+static inline void precise_consumed(void) { s_pc_valid = 0; s_pq_valid = 0; s_projected_uv_valid = 0; }
+
+int gl_renderer_projective_supported(void) {
+    return s_raster_ok && g_wide_cur && !cpu_vram_authoritative();
+}
+void gl_renderer_draw_projected_triangle(const PSXProjectedVertex vertices[3],
+    uint16_t texpage, uint16_t cx, uint16_t cy, int raw, int semi, int perspective) {
+    PSXProjectedVertex polygon[12];
+    const double left=fmin(s_area_x1, -wide_dx())-1.0;
+    const double right=fmax(s_area_x2+1, g_wide_w-wide_dx())+1.0;
+    const int n=psx_projective_clip_triangle(vertices,polygon,
+        left,right,s_area_y1-1.0,s_area_y2+1.0);
+    int limits[4]={(int)vertices[0].u,(int)vertices[0].v,
+                   (int)vertices[0].u,(int)vertices[0].v};
+    for (int i=1;i<3;++i) {
+        if (vertices[i].u<limits[0]) limits[0]=(int)vertices[i].u;
+        if (vertices[i].v<limits[1]) limits[1]=(int)vertices[i].v;
+        if (vertices[i].u>limits[2]) limits[2]=(int)vertices[i].u;
+        if (vertices[i].v>limits[3]) limits[3]=(int)vertices[i].v;
+    }
+    for (int k=1;k+1<n;++k) {
+        const PSXProjectedVertex v[3]={polygon[0],polygon[k],polygon[k+1]};
+        int xs[3],ys[3],us[3],vs[3]; float col[9];
+        s_pc_valid=1; s_pq_valid=perspective; s_projected_uv_valid=1;
+        for (int i=0;i<3;++i) {
+            s_pc_x[i]=(float)(v[i].x/v[i].z);
+            s_pc_y[i]=(float)(v[i].y/v[i].z);
+            xs[i]=(int)floorf(s_pc_x[i]); ys[i]=(int)floorf(s_pc_y[i]);
+            s_pq[i]=(float)(1.0/v[i].z);
+            s_projected_u[i]=(float)v[i].u; s_projected_v[i]=(float)v[i].v;
+            us[i]=(int)v[i].u; vs[i]=(int)v[i].v;
+            col[i*3]=(float)v[i].r; col[i*3+1]=(float)v[i].g; col[i*3+2]=(float)v[i].b;
+        }
+        gpu_textured_triangle(xs,ys,us,vs,col,texpage,cx,cy,raw,semi,limits);
+        precise_consumed();
+    }
+    precise_consumed();
+}
 
 static void glb_draw_flat_triangle(int x0,int y0,int x1,int y1,int x2,int y2,uint16_t col) {
-    if (s_cpu_auth_dual || !s_raster_ok)
+    if (cpu_raster_required())
         sw_draw_flat_triangle(x0,y0,x1,y1,x2,y2,col);
     if (!s_raster_ok) return;
     gpu_triangle(x0,y0,col, x1,y1,col, x2,y2,col, s_semi_en?s_semi_mode:-1);
     precise_consumed();
 }
 static void glb_draw_gouraud_triangle(int x0,int y0,uint16_t c0,int x1,int y1,uint16_t c1,int x2,int y2,uint16_t c2) {
-    if (s_cpu_auth_dual || !s_raster_ok)
+    if (cpu_raster_required())
         sw_draw_gouraud_triangle(x0,y0,c0,x1,y1,c1,x2,y2,c2);
     if (!s_raster_ok) return;
     gpu_triangle(x0,y0,c0, x1,y1,c1, x2,y2,c2, s_semi_en?s_semi_mode:-1);
@@ -3676,20 +3773,20 @@ static void glb_draw_gouraud_triangle(int x0,int y0,uint16_t c0,int x1,int y1,ui
 }
 static void glb_fill_rect(int x,int y,int w,int h,uint16_t c){
     if (pass_refuse_write("fill", x, y, w, h)) return;
-    if (s_cpu_auth_dual || !s_raster_ok)
+    if (cpu_raster_required())
         sw_fill_rect(x,y,w,h,c);
     if (!s_raster_ok) return;
     gpu_fill(x,y,w,h,c);
 }
 static void glb_copy_rect(int sx,int sy,int dx,int dy,int w,int h){
     if (pass_refuse_write("copy", dx, dy, w, h)) return;
-    if (s_cpu_auth_dual || !s_raster_ok)
+    if (cpu_raster_required())
         sw_copy_rect(sx,sy,dx,dy,w,h);
     if (!s_raster_ok) return;
     gpu_copy_rect(sx,sy,dx,dy,w,h);
 }
 static void glb_draw_textured_triangle(int x0,int y0,int u0,int v0,int x1,int y1,int u1,int v1,int x2,int y2,int u2,int v2,uint16_t cx,uint16_t cy,uint16_t tp){
-    if (s_cpu_auth_dual || !s_raster_ok)
+    if (cpu_raster_required())
         sw_draw_textured_triangle(x0,y0,u0,v0,x1,y1,u1,v1,x2,y2,u2,v2,cx,cy,tp);
     if (!s_raster_ok) return;
     int xs[3]={x0,x1,x2}, ys[3]={y0,y1,y2}, us[3]={u0,u1,u2}, vs[3]={v0,v1,v2};
@@ -3699,7 +3796,7 @@ static void glb_draw_textured_triangle(int x0,int y0,int u0,int v0,int x1,int y1
     precise_consumed();
 }
 static void glb_draw_shaded_textured_triangle(int x0,int y0,int u0,int v0,uint32_t c0,int x1,int y1,int u1,int v1,uint32_t c1,int x2,int y2,int u2,int v2,uint32_t c2,uint16_t cx,uint16_t cy,uint16_t tp,int raw){
-    if (s_cpu_auth_dual || !s_raster_ok)
+    if (cpu_raster_required())
         sw_draw_shaded_textured_triangle(x0,y0,u0,v0,c0,x1,y1,u1,v1,c1,x2,y2,u2,v2,c2,cx,cy,tp,raw);
     if (!s_raster_ok) return;
     int xs[3]={x0,x1,x2}, ys[3]={y0,y1,y2}, us[3]={u0,u1,u2}, vs[3]={v0,v1,v2};
@@ -3709,37 +3806,37 @@ static void glb_draw_shaded_textured_triangle(int x0,int y0,int u0,int v0,uint32
     precise_consumed();
 }
 static void glb_draw_flat_rect(int x,int y,int w,int h,uint16_t c){
-    if (s_cpu_auth_dual || !s_raster_ok)
+    if (cpu_raster_required())
         sw_draw_flat_rect(x,y,w,h,c);
     if (!s_raster_ok) return;
     gpu_flat_rect(x,y,w,h,c, s_semi_en?s_semi_mode:-1);
 }
 static void glb_draw_textured_rect(int x,int y,int w,int h,int u,int v,uint16_t cx,uint16_t cy,uint16_t tp){
-    if (s_cpu_auth_dual || !s_raster_ok)
+    if (cpu_raster_required())
         sw_draw_textured_rect(x,y,w,h,u,v,cx,cy,tp);
     if (!s_raster_ok) return;
     gpu_textured_rect(x,y,w,h, u,v, u+w,v+h, cx,cy,tp, s_semi_en?s_semi_mode:-1);
 }
 static void glb_draw_textured_rect_scaled(int x,int y,int w,int h,int u0,int v0,int u1,int v1,uint16_t cx,uint16_t cy,uint16_t tp){
-    if (s_cpu_auth_dual || !s_raster_ok)
+    if (cpu_raster_required())
         sw_draw_textured_rect_scaled(x,y,w,h,u0,v0,u1,v1,cx,cy,tp);
     if (!s_raster_ok) return;
     gpu_textured_rect(x,y,w,h, u0,v0, u1,v1, cx,cy,tp, s_semi_en?s_semi_mode:-1);
 }
 static void glb_draw_line(int x0,int y0,int x1,int y1,uint16_t c){
-    if (s_cpu_auth_dual || !s_raster_ok)
+    if (cpu_raster_required())
         sw_draw_line(x0,y0,x1,y1,c);
     if (!s_raster_ok) return;
     gpu_line(x0,y0,c, x1,y1,c, s_semi_en?s_semi_mode:-1);
 }
 static void glb_draw_shaded_line(int x0,int y0,uint16_t c0,int x1,int y1,uint16_t c1){
-    if (s_cpu_auth_dual || !s_raster_ok)
+    if (cpu_raster_required())
         sw_draw_shaded_line(x0,y0,c0,x1,y1,c1);
     if (!s_raster_ok) return;
     gpu_line(x0,y0,c0, x1,y1,c1, s_semi_en?s_semi_mode:-1);
 }
-static int  glb_render_display(uint32_t *o,int p,int dx,int dy,int dw,int dh){ ensure_cpu(); return sw_render_display(o,p,dx,dy,dw,dh); }
-static int  glb_render_display_hires(uint32_t *o,int p,int dx,int dy,int dw,int dh){ ensure_cpu(); return sw_render_display_hires(o,p,dx,dy,dw,dh); }
+static int  glb_render_display(uint32_t *o,int p,int dx,int dy,int dw,int dh){ depth24_upload_policy(); ensure_cpu(); return sw_render_display(o,p,dx,dy,dw,dh); }
+static int  glb_render_display_hires(uint32_t *o,int p,int dx,int dy,int dw,int dh){ depth24_upload_policy(); ensure_cpu(); return sw_render_display_hires(o,p,dx,dy,dw,dh); }
 /* While GP1 depth24 is on, packed RGB888 lives in the CPU mirror and is
  * presented via gl_renderer_present — never as 1555 FBO texels. Queuing those
  * MDEC A0 rects hits UP_RECTS_MAX (16) and force-flushes mid-movie (MotK intro
@@ -3833,6 +3930,7 @@ static void depth24_clear_skipped_fb(void) {
 }
 
 static void depth24_upload_policy(void) {
+    if (!s_raster_ok) return;
     int d24 = gpu_display_is_depth24();
     if (d24 && !s_depth24_skip_up) {
         /* Entering 24-bit: from here the frame is presented from the CPU
@@ -3850,6 +3948,8 @@ static void depth24_upload_policy(void) {
         s_up_nrects = 0;
         rect_clear(&s_d24_skip_fb);
     } else if (!d24 && s_depth24_skip_up) {
+        /* GPU writes own the 15-bit image again, including the clear below. */
+        s_depth24_skip_up = 0;
         /* Small texture uploads are still queued while depth24 scanout uses
          * the CPU mirror. Clear only the skipped movie band first, then land
          * those newer uploads so texture pages which overlap that band win in
@@ -3867,16 +3967,16 @@ static void depth24_upload_policy(void) {
 
 static void glb_vram_write(int x,int y,uint16_t px){
     if (pass_refuse_write("poke", x & (VRAM_W-1), y & (VRAM_H-1), 1, 1)) return;
-    sw_vram_write(x,y,px);
     depth24_upload_policy();
+    sw_vram_write(x,y,px);
     /* Point pokes are never MDEC frames — always stage to FBO. */
     up_add(x & (VRAM_W-1), y & (VRAM_H-1), x & (VRAM_W-1), y & (VRAM_H-1));
 }
-static uint16_t glb_vram_read(int x,int y){ ensure_cpu(); return sw_vram_read(x,y); }
+static uint16_t glb_vram_read(int x,int y){ depth24_upload_policy(); ensure_cpu(); return sw_vram_read(x,y); }
 static void glb_vram_transfer_in(int x,int y,int w,int h,const uint16_t *d){
     if (pass_refuse_write("upload", x, y, w, h)) return;
-    sw_vram_transfer_in(x,y,w,h,d);
     depth24_upload_policy();
+    sw_vram_transfer_in(x,y,w,h,d);
     if (s_depth24_skip_up && depth24_is_fb_transfer(x, y, w, h)) {
         /* Full-VRAM restore (boot_state): must stage into the FBO or every
          * texture page outside the movie band is missing after FMV→menus.
@@ -3897,7 +3997,7 @@ static void glb_vram_transfer_in(int x,int y,int w,int h,const uint16_t *d){
     up_add_transfer(x, y, w, h);   /* exact touched rects, incl. per-pixel wrap */
     coh_record(GL_COH_UPLOAD, x, y, x+w-1, y+h-1);
 }
-static void glb_vram_transfer_out(int x,int y,int w,int h,uint16_t *d){ ensure_cpu(); sw_vram_transfer_out(x,y,w,h,d); }
+static void glb_vram_transfer_out(int x,int y,int w,int h,uint16_t *d){ depth24_upload_policy(); ensure_cpu(); sw_vram_transfer_out(x,y,w,h,d); }
 
 /* ---- context init / present -------------------------------------------- */
 static void upload_present_tex(const uint32_t *pixels, int w, int h, int linear) {
@@ -4074,6 +4174,7 @@ static int make_fbo(GLuint *out_fbo, GLuint color_tex, GLuint stencil_rb) {
     s_last_fbo_status = st;
     p_glBindFramebuffer(PSXGL_FRAMEBUFFER, 0);
     if (st != PSXGL_FRAMEBUFFER_COMPLETE) {
+        fprintf(stdout, "psxrecomp: GL FBO incomplete (0x%X)\n", st);
         return 0;
     }
     return 1;
@@ -5811,8 +5912,10 @@ typedef struct PassGen {
     uint32_t n;                   /* images: [0] = the game's own */
     uint32_t phase[PASS_SLOTS];   /* Q16, ascending */
     uint32_t period;              /* guest VBlanks the frame stays on screen */
+    int      shown;               /* built for a frame already on screen */
     double   t_start, t_len;      /* host ticks, set on promotion */
 } PassGen;
+static int      s_pass_flip_shown = 0;
 static PassGen  s_pgen[2];
 /* Slot textures are made as slots fill: [0, s_pgen_alloc_n) exist, all at
  * s_pgen_alloc_w x h. A generation never fills past pass_slot_cap, so two
@@ -6285,6 +6388,7 @@ int gl_renderer_pass_begin(int x, int y, int w, int h, int open_gen,
         g->tex_w = tw; g->tex_h = th;
         g->source_path = wide ? GL_PRES_WIDE : GL_PRES_VRAM;
         g->period = period_vblanks ? period_vblanks : 1u;
+        g->shown = s_pass_flip_shown;
         pass_capture_into(s_pgen_tex[gi][0], g);   /* the game's own image */
         g->phase[0] = 0;
         g->n = 1;
@@ -6514,14 +6618,17 @@ static uint64_t s_present_ticks_accum_fwd(uint64_t add) {
     return s_present_ticks_accum;
 }
 
+void gl_renderer_pass_set_flip_shown(int shown) { s_pass_flip_shown = shown ? 1 : 0; }
+
 /* FLIP source saw a new frame: it is the flip a pending generation was built
- * for (same rect, same presented geometry) or a frame without passes. */
+ * for (render_pass_gen_flip_matches) or a frame without passes. */
 static void pass_note_new_frame(int origin_x, int origin_y, int source_path,
                                 int pw, int ph) {
     PassGen *pend = &s_pgen[1 - s_pgen_cur];
-    if (pend->valid && !pend->promoted && pend->x == origin_x &&
-        pend->y == origin_y && pend->source_path == source_path &&
-        pend->tex_w == pw && pend->tex_h == ph) {
+    if (pend->valid && !pend->promoted &&
+        render_pass_gen_flip_matches(pend->shown, pend->x, pend->y,
+                                     pend->source_path, pend->tex_w, pend->tex_h,
+                                     origin_x, origin_y, source_path, pw, ph)) {
         s_pgen_promote = 1;
     } else {
         s_pgen_promote = 0;
@@ -6577,6 +6684,19 @@ static void pass_apply_promotion(void) {
         g->promoted = 1;
         g->t_start = s_interp_schedule.frame_start;
         g->t_len = (double)g->period * sp;
+        /* Phase 0 is the image the game actually flipped to. The capture at
+         * the pass point is the same for a game that draws nothing more into
+         * the rect before its flip; a game that finishes the frame later (V8:2
+         * draws its HUD at the next submit, onto the rect about to be shown)
+         * would otherwise show its own frame without that last layer. The
+         * flip was matched to this generation's rect and presented geometry,
+         * and no guest code ran since it, so the rect holds that image. A
+         * FLIP_SHOWN generation's rect is not the one flipped to: it keeps
+         * the image taken when it opened. */
+        if (!g->shown) {
+            pass_capture_into(s_pgen_tex[s_pgen_cur][0], g);
+            p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, 0);
+        }
         s_pgen_promotions++;
         if (s_pdump_left > 0) pass_dump_generation(s_pgen_cur);
     }

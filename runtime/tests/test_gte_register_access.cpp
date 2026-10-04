@@ -1,6 +1,7 @@
 #include "cpu_state.h"
 #include "gte.h"
 #include "pgxp.h"
+#include "render_pass_projection.h"
 
 #include <array>
 #include <cmath>
@@ -409,6 +410,57 @@ int test_sequence_fuzz() {
     return 0;
 }
 
+static unsigned projection_callback_calls;
+static int substitute_projection(CPUState *cpu, uint32_t) {
+    ++projection_callback_calls;
+    cpu->gte_ctrl[0] = 0x1000u;
+    cpu->gte_ctrl[1] = 0u;
+    cpu->gte_ctrl[2] = 0x1000u;
+    cpu->gte_ctrl[3] = 0u;
+    cpu->gte_ctrl[4] = 0x1000u;
+    cpu->gte_ctrl[5] = 32u;
+    cpu->gte_ctrl[6] = 16u;
+    cpu->gte_ctrl[7] = 1024u;
+    return 1;
+}
+
+int test_projection_override_restores_transform() {
+    for (uint32_t command : {0x80001u, 0x80030u}) {
+        CPUState actual{};
+        actual.gte_ctrl[0] = 0x800u;
+        actual.gte_ctrl[2] = 0x800u;
+        actual.gte_ctrl[4] = 0x800u;
+        actual.gte_ctrl[5] = 80u;
+        actual.gte_ctrl[6] = 40u;
+        actual.gte_ctrl[7] = 2048u;
+        actual.gte_ctrl[26] = 256u;
+        actual.gte_data[0] = 0x00100020u;
+        actual.gte_data[1] = 64u;
+        actual.gte_data[2] = 0x00300040u;
+        actual.gte_data[3] = 96u;
+        actual.gte_data[4] = 0x00500060u;
+        actual.gte_data[5] = 128u;
+        CPUState original = actual, expected = actual;
+        substitute_projection(&expected, command);
+        gte_test_execute_reference(&expected, command);
+        projection_callback_calls = 0;
+        g_psx_projection_command = substitute_projection;
+        gte_execute(&actual, command);
+        g_psx_projection_command = nullptr;
+        if (projection_callback_calls != 1 ||
+            std::memcmp(actual.gte_ctrl, original.gte_ctrl, 8 * sizeof(uint32_t)) ||
+            std::memcmp(actual.gte_data, expected.gte_data, sizeof(actual.gte_data))) {
+            std::fprintf(stderr, "FAIL: projection override leaked transform or changed output (%x)\n", command);
+            return 1;
+        }
+        g_psx_projection_command = substitute_projection;
+        gte_execute(&actual, 0x06u);
+        g_psx_projection_command = nullptr;
+        if (projection_callback_calls != 1) return 1;
+    }
+    return 0;
+}
+
 int test_command_marshaling() {
     constexpr std::array<uint8_t, 22> kFunctions = {
         0x01, 0x06, 0x0C, 0x10, 0x11, 0x12, 0x13, 0x14,
@@ -645,6 +697,21 @@ int test_saturated_nclip_keeps_architectural_result() {
     if (cpu.gte_data[24] != 0 || !gte_nclip_native_wide_sign(0, &sign) || sign != 1 ||
         gte_nclip_native_wide_sign(1, &sign))
         return fail_value("saturated winding rescue preserves native zero MAC0",0,6,0,0,cpu.gte_data[24]);
+    /* Both quad MAC0 values can saturate to the same zero. Keep each exact
+     * sign separately: the preceding triangle points forward, latest back. */
+    for (unsigned i=0;i<3;i++) {
+        uint32_t packed=1023u | ((uint32_t)py[2-i]<<16);
+        cpu.gte_data[12+i]=packed;
+        gte_test_seed_precise_projection(i,packed,px[2-i]*65536,py[2-i]*65536,1000);
+    }
+    gte_execute(&cpu,6);
+    if (cpu.gte_data[24]!=0 || !gte_nclip_native_wide_sign(0,&sign) || sign!=-1 ||
+        !gte_nclip_native_wide_previous_sign(0,&sign) || sign!=1 ||
+        gte_nclip_native_wide_previous_sign(1,&sign))
+        return fail_value("quad retains independent saturated winding results",0,6,0,0,cpu.gte_data[24]);
+    gte_execute(&cpu,6);
+    if (!gte_nclip_native_wide_previous_sign(0,&sign) || sign!=-1)
+        return fail_value("preceding winding advances one command only",0,6,0,0,1);
     cpu.gte_data[17] = 10;
     gte_execute(&cpu, 6);
     if (gte_nclip_native_wide_sign(0, &sign) || cpu.gte_data[24] != 0)
@@ -652,7 +719,7 @@ int test_saturated_nclip_keeps_architectural_result() {
     cpu.gte_data[17] = 1000;
     gte_execute(&cpu, 6);
     gte_precision_timeline_invalidate();
-    if (gte_nclip_native_wide_sign(0, &sign))
+    if (gte_nclip_native_wide_sign(0, &sign) || gte_nclip_native_wide_previous_sign(0,&sign))
         return fail_value("timeline invalidation clears winding rescue",0,6,0,0,1);
     gte_test_seed_precise_projection(0, cpu.gte_data[12] ^ 1u, px[0]*65536, py[0]*65536, 1000);
     gte_execute(&cpu, 6);
@@ -1022,6 +1089,7 @@ int main() {
     if (int rc = test_writes()) return rc;
     if (int rc = test_sequence_fuzz()) return rc;
     if (int rc = test_command_marshaling()) return rc;
+    if (int rc = test_projection_override_restores_transform()) return rc;
     if (int rc = test_command_timing_hook()) return rc;
     if (int rc = test_precise_sxy_invalidation()) return rc;
     if (int rc = test_precise_nclip_is_title_scoped()) return rc;
@@ -1029,6 +1097,28 @@ int main() {
     if (int rc = test_precision_speculative_transaction()) return rc;
     if (int rc = test_preserve_projection_is_shadow_only()) return rc;
     if (int rc = test_pgxp_culling()) return rc;
+    /* Signed host projection spans the camera plane without changing any
+     * architectural register, including unsigned SZ and divider/screen flags. */
+    pgxp_set_enabled(1);
+    for (int depth : {-158,-1,0,1,149,150,151,900}) {
+        GTEState native{}, enhanced{};
+        native.RT[0][0]=native.RT[1][1]=native.RT[2][2]=4096;
+        native.V0[0]=100;native.V0[1]=30;native.TR[2]=depth;
+        native.H=300;native.OFX=256*65536;native.OFY=120*65536;
+        enhanced=native;
+        pgxp_set_projection_tracking(0);
+        PSXRecomp::GTE::gte_rtps(&native,0x0180001u);
+        pgxp_set_projection_tracking(1);
+        PSXRecomp::GTE::gte_rtps(&enhanced,0x0180001u);
+        PGXPProjection p;
+        if (std::memcmp(&native,&enhanced,sizeof native) ||
+            !pgxp_get_gte_projection(2,enhanced.SXY[2],&p) ||
+            p.z!=depth || p.x!=256*depth+30000 || p.y!=120*depth+9000 || p.near_z!=150) {
+            std::fprintf(stderr,"FAIL signed camera projection at depth %d\n",depth);
+            return 1;
+        }
+    }
+    pgxp_set_projection_tracking(0);
     std::puts("PASS: canonical GTE register helpers match GTEState transfer oracle");
     return 0;
 }
