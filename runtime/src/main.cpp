@@ -4977,10 +4977,12 @@ static int pad_mode_boot_analog(int mode) {
     return mode == PSXRecompV4::PAD_MODE_ANALOG ? 1 : 0;
 }
 
-/* Keyboard mappings can drive both DualShock sticks. Honor the configured
- * mode, including analog-only title locks; multitap policy belongs to the
- * SIO seat below and applies equally to keyboards and physical controllers. */
+/* Keyboard has no DualShock sticks/config handshake — always present as a
+ * plain digital pad (SCPH-1080). Leaving keyboard slots in ANALOG/policy mode made
+ * P2–P5 show as connected while games that expect digital multitap pads never
+ * saw usable button input. */
 static int effective_player_mode(const PlayerInput& p) {
+    if (p.kind == 1) return (int)PSXRecompV4::PAD_MODE_DIGITAL;
     return p.mode;
 }
 

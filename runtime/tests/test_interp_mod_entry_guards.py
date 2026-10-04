@@ -21,7 +21,7 @@ def main():
     assert source.count('psx_mod_function_entry(cpu, addr)') == 1
     # Every interpreted entry reaches these calls: without an active hook they
     # must cost one load, never a call into the plugin table.
-    assert 'if (g_psx_mod_function_entry_hooks && psx_mod_function_entry(cpu, addr)) return 1;' in source
+    assert 'if (!forced && g_psx_mod_function_entry_hooks && psx_mod_function_entry(cpu, addr))\n            return 1;' in source
     assert 'if (g_psx_mod_function_entry_hooks &&\n' in source
     local_start = source.index('if (allow_local_dirty_flow && target != 0 &&')
     local_end = source.index('current_page = target_phys >> 12;', local_start)
