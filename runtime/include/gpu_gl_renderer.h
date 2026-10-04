@@ -331,10 +331,10 @@ int  gl_renderer_get_ws_ablate(void);
 /* Cumulative textured fraction of scene primitives since boot (flat vs textured
  * batching decision). Sets *out_tex_frac; returns total prim count. */
 uint64_t gl_renderer_perf_prim_split(double *out_tex_frac);
-/* gpu.c arms this only for an exact-provenance world triangle admitted past
- * the hardware size reject. Consumed by the next triangle, not rectangles. */
-void gl_renderer_set_triangle_wide_only(int enabled);
-uint64_t gl_renderer_wide_only_triangle_count(void);
+/* Counts proven projected world triangles admitted past the hardware size
+ * reject. Diagnostic only; they use the normal canonical and mirror passes. */
+void gl_renderer_note_wide_triangle_recovery(int enabled);
+uint64_t gl_renderer_wide_triangle_recovery_count(void);
 /* Cumulative textured-batch diagnostics: total, then flushes caused by
  * isolation, blend-mode, mask, filter, backdrop-gate, texture-window, capacity. */
 void gl_renderer_batch_diag(uint64_t out[8]);

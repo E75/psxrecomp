@@ -4071,11 +4071,11 @@ static int native_wide_projection_x(uint32_t addr, uint32_t word,
     return 1;
 }
 
-/* Original, unsubdivided world faces can exceed the PS1 size limit only
- * after the wider view admits them. Let GL clip proven projected triangles
- * into the extra margins; its backend still rejects their canonical writes.
- * Missing/stale provenance, depth behind the camera, saturated Y and UI keep
- * the hardware reject. No architectural packet or GPU state is changed. */
+/* Original, unsubdivided world faces can exceed the PS1 size limit after the
+ * wider view admits them. Proven projected triangles use normal GL clipping,
+ * with the SAME geometry in canonical and wide passes: margin-only recovery
+ * splits a face at the presentation center-copy edge. Missing/stale provenance,
+ * depth behind the camera, saturated Y and UI retain the hardware reject. */
 static int gpu_triangle_rejected(const int32_t* x, const int32_t* y,
                                  int a, int b, int c) {
     if (!psx_gpu_triangle_oversize(x, y, a, b, c)) return 0;
@@ -4132,7 +4132,7 @@ static void prepare_precise_triangle(int i0, int i1, int i2,
         int32_t raw_x[3], raw_y[3];
         for (unsigned i=0; i<3; ++i)
             parse_vertex(gp0_cmd_buf[indices[i]], &raw_x[i], &raw_y[i]);
-        gl_renderer_set_triangle_wide_only(s_native_wide_projection_correction &&
+        gl_renderer_note_wide_triangle_recovery(s_native_wide_projection_correction &&
             ws_native_wide_active() &&
             psx_gpu_triangle_oversize(raw_x,raw_y,0,1,2));
     }

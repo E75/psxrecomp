@@ -696,17 +696,16 @@ static int    g_wide_cur_base = 0;           /* base_x of g_wide_cur */
  * gpu_geometry wide mirror is skipped and the flat path emits its own
  * full-wide-width pass instead (mirrors sw_draw_flat_rect). */
 static int    s_wide_suppress = 0;
-/* Only a proven oversized GP0 world triangle may reach this path from gpu.c.
- * The native/CPU surfaces retain the hardware reject; added pixels live solely
- * in the wide margins. This flag is scoped to one backend triangle call. */
-static int    s_triangle_wide_only;
-static uint64_t s_triangle_wide_only_count;
-void gl_renderer_set_triangle_wide_only(int enabled) {
-    s_triangle_wide_only = enabled ? 1 : 0;
-    if (s_triangle_wide_only && s_raster_ok && g_wide_cur)
-        ++s_triangle_wide_only_count;
+/* Diagnostic only. The frontend admits proven world geometry into both the
+ * canonical and wide passes so a face cannot split at the center-copy edge. */
+static uint64_t s_wide_triangle_recovery_count;
+void gl_renderer_note_wide_triangle_recovery(int recovered) {
+    if (recovered && s_raster_ok && g_wide_cur) ++s_wide_triangle_recovery_count;
 }
-uint64_t gl_renderer_wide_only_triangle_count(void) { return s_triangle_wide_only_count; }
+uint64_t gl_renderer_wide_triangle_recovery_count(void) {
+    return s_wide_triangle_recovery_count;
+}
+
 
 /* X-translation (native px) from canonical VRAM space into the active wide
  * surface: local_x = vram_x - base_x + OFFSET. Same as SW wide_dx(). */
@@ -2400,25 +2399,6 @@ static void wide_target_end(GLint uXoff, GLint uXhalf) {
         p_glBindFramebuffer(PSXGL_FRAMEBUFFER, s_hr_fbo);
 }
 
-static int wide_margin_scissor(int side) {
-    const int native_w = g_wide_w - 2 * g_wide_off;
-    int x0 = side ? g_wide_off + view_shift + native_w : view_pad_left;
-    int x1 = side ? g_wide_w - view_pad_right : g_wide_off + view_shift;
-    if (x0 < view_pad_left) x0 = view_pad_left;
-    if (x1 > g_wide_w - view_pad_right) x1 = g_wide_w - view_pad_right;
-    int y0 = s_area_y1, y1 = s_area_y2 + 1;
-    if (s_pass_active) {
-        if (y0 < s_pass_y) y0 = s_pass_y;
-        if (y1 > s_pass_y + s_pass_h) y1 = s_pass_y + s_pass_h;
-    }
-    if (y0 < 0) y0 = 0;
-    if (y1 > VRAM_H) y1 = VRAM_H;
-    if (x1 <= x0 || y1 <= y0) return 0;
-    glScissor(x0 * s_out_scale, y0 * s_out_scale,
-              (x1 - x0) * s_out_scale, (y1 - y0) * s_out_scale);
-    return 1;
-}
-
 extern int psx_ws_prim_is_tagged(void);   /* gpu.c: is the current GP0 prim sprite-tagged? */
 extern int psx_ws_prim_in_backdrop(void); /* gpu.c: is its source addr in the flower-field struct? */
 extern int gpu_ws_nw_flat_backdrop_enabled(void); /* gpu.c: per-title flat backdrop opt-in */
@@ -2530,7 +2510,6 @@ static float s_tb[TEXBATCH_MAXV * TEXV];
 static int   s_tb_n = 0;                    /* verts queued */
 static int   s_tb_semi = -2;
 static int   s_tb_mask = 0, s_tb_filter = 0;
-static int   s_tb_wide_only;
 static GLuint s_tb_bank_tex;
 static int   s_tb_twin[4] = {0, 0, 0, 0};
 static uint64_t s_batch_total = 0, s_batch_reason[7];
@@ -2918,8 +2897,6 @@ static void flush_tex_batch(void) {
     double cw_t0 = cw_ms();
     s_cw_batches++; s_batch_total++; s_cw_flush_depth++;
 
-    if (s_tb_wide_only && hiw_on()) hiw_flush_queue();
-
     hr_begin(1);
     p_glUseProgram(s_tex_prog);
     p_glActiveTexture(PSXGL_TEXTURE0);
@@ -2936,7 +2913,7 @@ static void flush_tex_batch(void) {
     p_glBindBuffer(PSXGL_ARRAY_BUFFER, s_tex_vbo);
     p_glBufferData(PSXGL_ARRAY_BUFFER, (ptrdiff_t)(nverts * TEXV * sizeof(float)), s_tb, PSXGL_STREAM_DRAW);
 
-    if (!s_tb_wide_only) tex_batch_draw_passes(nverts, semi);
+    tex_batch_draw_passes(nverts, semi);
 
     /* Native-wide mirror — skipped for a batch fully inside the 4:3 frame (its
      * centre content comes from the present-time canonical blit; nothing to add
@@ -2947,8 +2924,7 @@ static void flush_tex_batch(void) {
     /* Windowed high-resolution surface: the same batch at S, queued and
      * replayed in one render pass at the next sync point (see s_hq), with its
      * native-wide mirror. No-op unless that mode is engaged. */
-    if (!s_tb_wide_only && hiw_on() &&
-        hiw_enqueue_tex(nverts, semi, mirror, s_tb_gate)) mirror = 0;
+    if (hiw_on() && hiw_enqueue_tex(nverts, semi, mirror, s_tb_gate)) mirror = 0;
 
     if (mirror) {   /* native-wide mirror */
         int dx = wide_dx();
@@ -2956,12 +2932,7 @@ static void flush_tex_batch(void) {
         gl_perf_mirror_begin();
         wide_target_begin(dx, s_tex_uXoff, s_tex_uXhalf);
         wide_set_bd_scale(s_tex_uXscale, s_tex_uXcenter);
-        if (s_ws_ablate != 2 && !(s_tb_wide_only && s_ws_ablate == 3)) {
-            if (s_tb_wide_only) {
-                for (int side = 0; side < 2; ++side)
-                    if (wide_margin_scissor(side)) tex_batch_draw_passes(nverts, semi);
-            } else tex_batch_draw_passes(nverts, semi);
-        }
+        if (s_ws_ablate != 2) tex_batch_draw_passes(nverts, semi);
         wide_clear_bd_scale(s_tex_uXscale, s_tex_uXcenter);
         wide_target_end(s_tex_uXoff, s_tex_uXhalf);
         gl_perf_mirror_end();
@@ -2981,7 +2952,6 @@ static float s_fb[(FLATBATCH_MAXV + 2 * FLATBATCH_MAXL) * 6];
 static int   s_fb_n = 0;
 static int   s_fb_semi = -2;
 static int   s_fb_mask = -1;
-static int   s_fb_wide_only;
 /* GL_TRIANGLES, or GL_LINES for a batch of native-wide lines (gpu_geometry). */
 static GLenum s_fb_mode = GL_TRIANGLES;
 /* Windowed high-resolution mode (s_hiw): the hr surface is the 1x
@@ -3031,8 +3001,6 @@ static void flush_flat_batch(void) {
     s_fb_n = 0;
     s_fbl_n = 0;
 
-    if (s_fb_wide_only && hiw_on()) hiw_flush_queue();
-
     hr_begin(1);
     if (semi >= 0) apply_psx_blend(semi); else glDisable(GL_BLEND);
     mask_stencil(mask);
@@ -3043,14 +3011,11 @@ static void flush_flat_batch(void) {
     if (nl) memcpy(&s_fb[nverts * 6], s_fbl, (size_t)nl * 2 * 6 * sizeof(float));
     p_glBufferData(PSXGL_ARRAY_BUFFER, (ptrdiff_t)((nverts + 2 * nl) * 6 * sizeof(float)),
                    s_fb, PSXGL_STREAM_DRAW);
-    if (!s_fb_wide_only) {
-        if (nl) flat_batch_draw_hr_lines(nverts, nl);
-        else glDrawArrays(fmode, 0, nverts);
-    }
+    if (nl) flat_batch_draw_hr_lines(nverts, nl);
+    else glDrawArrays(fmode, 0, nverts);
     int mirror = g_wide_cur && !s_wide_suppress && s_ws_ablate != 1 &&
                  !(!g_ws_bd_stretch_on && mirror_flat_batch_center_only(nverts));
-    if (!s_fb_wide_only && hiw_on() &&
-        hiw_enqueue_geo(s_fb, nverts, semi, mask, mirror, 0)) mirror = 0;
+    if (hiw_on() && hiw_enqueue_geo(s_fb, nverts, semi, mask, mirror, 0)) mirror = 0;
 
     if (mirror) {
         int dx = wide_dx();
@@ -3059,12 +3024,7 @@ static void flush_flat_batch(void) {
         gl_perf_mirror_begin();
         wide_target_begin(dx, s_geo_uXoff, s_geo_uXhalf);
         wide_set_bd_scale(s_geo_uXscale, s_geo_uXcenter);
-        if (s_ws_ablate != 2 && !(s_fb_wide_only && s_ws_ablate == 3)) {
-            if (s_fb_wide_only) {
-                for (int side = 0; side < 2; ++side)
-                    if (wide_margin_scissor(side)) glDrawArrays(fmode, 0, nverts);
-            } else glDrawArrays(fmode, 0, nverts);
-        }
+        if (s_ws_ablate != 2) glDrawArrays(fmode, 0, nverts);
         wide_clear_bd_scale(s_geo_uXscale, s_geo_uXcenter);
         wide_target_end(s_geo_uXoff, s_geo_uXhalf);
         gl_perf_mirror_end();
@@ -3116,7 +3076,7 @@ static void gpu_geometry(GLenum mode, const int *xs, const int *ys,
                          const uint16_t *cs, int n, int semi) {
     flush_tex_batch();   /* flat prim: drain textured draws first (order + program) */
     flush_cpu_upload();  /* also drains flat batch if an upload was pending */
-    if (!s_triangle_wide_only) mark_prim_dirty(xs, ys, n, 0 /* flat */);
+    mark_prim_dirty(xs, ys, n, 0 /* flat */);
     /* Sub-pixel positions only describe a 3-vertex projected triangle. */
     const int precise = s_pc_valid && mode == GL_TRIANGLES && n == 3;
 
@@ -3137,14 +3097,13 @@ static void gpu_geometry(GLenum mode, const int *xs, const int *ys,
     if (mode == GL_LINES && n == 2 && s_hr_scale == 1 && !s_hiw && g_wide_cur &&
         !bd_prim_gate(xs, n, 0)) {
         if (s_fb_n > 0 && (s_fb_mode != GL_LINES || s_fb_semi != semi ||
-                           s_fb_mask != (int)s_mask_set || s_fb_wide_only))
+                           s_fb_mask != (int)s_mask_set))
             flush_flat_batch();
         if (s_fb_n + 2 > FLATBATCH_MAXV)
             flush_flat_batch();
         s_fb_mode = GL_LINES;
         s_fb_semi = semi;
         s_fb_mask = (int)s_mask_set;
-        s_fb_wide_only = 0;
         float mask_a = s_mask_set ? 1.0f : 0.0f;
         for (int i = 0; i < 2; i++) {
             float *v = &s_fb[s_fb_n * 6];
@@ -3183,14 +3142,13 @@ static void gpu_geometry(GLenum mode, const int *xs, const int *ys,
         }
         line_to_quad(lv, quad);
         if (s_fb_n > 0 && (s_fb_mode != GL_TRIANGLES || s_fb_semi != semi ||
-                           s_fb_mask != (int)s_mask_set || s_fb_wide_only))
+                           s_fb_mask != (int)s_mask_set))
             flush_flat_batch();
         if (s_fb_n + 6 > FLATBATCH_MAXV)
             flush_flat_batch();
         s_fb_mode = GL_TRIANGLES;
         s_fb_semi = semi;
         s_fb_mask = (int)s_mask_set;
-        s_fb_wide_only = 0;
         if (s_hiw) {   /* the 1x hr surface draws the line itself */
             s_fbl_at[s_fbl_n] = s_fb_n;
             memcpy(&s_fbl[s_fbl_n * 2 * 6], lv, sizeof lv);
@@ -3264,8 +3222,7 @@ static void gpu_geometry(GLenum mode, const int *xs, const int *ys,
         return;
     }
 
-    if (s_fb_n > 0 && (s_fb_wide_only != s_triangle_wide_only ||
-                       s_fb_mode != GL_TRIANGLES || s_fb_semi != semi ||
+    if (s_fb_n > 0 && (s_fb_mode != GL_TRIANGLES || s_fb_semi != semi ||
                        s_fb_mask != (int)s_mask_set))
         flush_flat_batch();
     if (s_fb_n + n > FLATBATCH_MAXV)
@@ -3273,7 +3230,6 @@ static void gpu_geometry(GLenum mode, const int *xs, const int *ys,
     s_fb_mode = GL_TRIANGLES;
     s_fb_semi = semi;
     s_fb_mask = (int)s_mask_set;
-    s_fb_wide_only = s_triangle_wide_only;
 
     float mask_a = s_mask_set ? 1.0f : 0.0f;
     for (int i = 0; i < n; i++) {
@@ -3350,7 +3306,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
         flush_pack_if_sampling(base_x, base_y, depth, clut_x, clut_y);
     else if (s_selected_bank_live_clut)
         flush_pack_if_sampling(-1, 0, depth, clut_x, clut_y);
-    if (!s_triangle_wide_only) mark_prim_dirty(xs, ys, 3, 1 /* textured */);
+    mark_prim_dirty(xs, ys, 3, 1 /* textured */);
 
     /* Append to the textured batch. Flush first if this prim's blend/mask/twin/
      * filter differ from the open batch, or the buffer is full. Per-prim texture
@@ -3389,8 +3345,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
             !mod_texture_bank_batchable(s_selected_bank_tex != 0, s_mask_check, semi);
         int reason = -1;
         if (s_tb_n > 0) {
-            if (s_tb_wide_only != s_triangle_wide_only ||
-                s_tb_bank_tex != s_selected_bank_tex || s_tb_bank_live_clut != s_selected_bank_live_clut) reason = 0;
+            if (s_tb_bank_tex != s_selected_bank_tex || s_tb_bank_live_clut != s_selected_bank_live_clut) reason = 0;
             else if (isolate) reason = 0;
             else if (batch_semi != s_tb_semi) reason = 1;
             else if (s_mask_set != s_tb_mask) reason = 2;
@@ -3406,7 +3361,6 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
         if (s_tb_n + 3 > TEXBATCH_MAXV) { s_batch_reason[6]++; flush_tex_batch(); }
         if (s_tb_n == 0) {            /* opening a batch: capture its keyed state */
             s_tb_semi = batch_semi; s_tb_mask = s_mask_set; s_tb_filter = filter; s_tb_gate = gate;
-            s_tb_wide_only = s_triangle_wide_only;
             s_tb_bank_tex = s_selected_bank_tex;
             s_tb_bank_live_clut = s_selected_bank_live_clut;
             s_tb_twin[0] = twx; s_tb_twin[1] = twy; s_tb_twin[2] = tox; s_tb_twin[3] = toy;
@@ -3735,21 +3689,17 @@ static int cpu_raster_required(void) {
 static inline void precise_consumed(void) { s_pc_valid = 0; s_pq_valid = 0; }
 
 static void glb_draw_flat_triangle(int x0,int y0,int x1,int y1,int x2,int y2,uint16_t col) {
-    if (s_triangle_wide_only && (!s_raster_ok || !g_wide_cur)) { s_triangle_wide_only=0; precise_consumed(); return; }
-    if (!s_triangle_wide_only && cpu_raster_required())
+    if (cpu_raster_required())
         sw_draw_flat_triangle(x0,y0,x1,y1,x2,y2,col);
     if (!s_raster_ok) return;
     gpu_triangle(x0,y0,col, x1,y1,col, x2,y2,col, s_semi_en?s_semi_mode:-1);
-    s_triangle_wide_only = 0;
     precise_consumed();
 }
 static void glb_draw_gouraud_triangle(int x0,int y0,uint16_t c0,int x1,int y1,uint16_t c1,int x2,int y2,uint16_t c2) {
-    if (s_triangle_wide_only && (!s_raster_ok || !g_wide_cur)) { s_triangle_wide_only=0; precise_consumed(); return; }
-    if (!s_triangle_wide_only && cpu_raster_required())
+    if (cpu_raster_required())
         sw_draw_gouraud_triangle(x0,y0,c0,x1,y1,c1,x2,y2,c2);
     if (!s_raster_ok) return;
     gpu_triangle(x0,y0,c0, x1,y1,c1, x2,y2,c2, s_semi_en?s_semi_mode:-1);
-    s_triangle_wide_only = 0;
     precise_consumed();
 }
 static void glb_fill_rect(int x,int y,int w,int h,uint16_t c){
@@ -3767,27 +3717,23 @@ static void glb_copy_rect(int sx,int sy,int dx,int dy,int w,int h){
     gpu_copy_rect(sx,sy,dx,dy,w,h);
 }
 static void glb_draw_textured_triangle(int x0,int y0,int u0,int v0,int x1,int y1,int u1,int v1,int x2,int y2,int u2,int v2,uint16_t cx,uint16_t cy,uint16_t tp){
-    if (s_triangle_wide_only && (!s_raster_ok || !g_wide_cur)) { s_triangle_wide_only=0; precise_consumed(); return; }
-    if (!s_triangle_wide_only && cpu_raster_required())
+    if (cpu_raster_required())
         sw_draw_textured_triangle(x0,y0,u0,v0,x1,y1,u1,v1,x2,y2,u2,v2,cx,cy,tp);
     if (!s_raster_ok) return;
     int xs[3]={x0,x1,x2}, ys[3]={y0,y1,y2}, us[3]={u0,u1,u2}, vs[3]={v0,v1,v2};
     float mr=s_mod_r/255.0f, mg=s_mod_g/255.0f, mb=s_mod_b/255.0f;
     float col[9]={mr,mg,mb, mr,mg,mb, mr,mg,mb};
     gpu_textured_triangle(xs,ys,us,vs,col,tp,cx,cy,s_mod_raw, s_semi_en?s_semi_mode:-1, NULL);
-    s_triangle_wide_only = 0;
     precise_consumed();
 }
 static void glb_draw_shaded_textured_triangle(int x0,int y0,int u0,int v0,uint32_t c0,int x1,int y1,int u1,int v1,uint32_t c1,int x2,int y2,int u2,int v2,uint32_t c2,uint16_t cx,uint16_t cy,uint16_t tp,int raw){
-    if (s_triangle_wide_only && (!s_raster_ok || !g_wide_cur)) { s_triangle_wide_only=0; precise_consumed(); return; }
-    if (!s_triangle_wide_only && cpu_raster_required())
+    if (cpu_raster_required())
         sw_draw_shaded_textured_triangle(x0,y0,u0,v0,c0,x1,y1,u1,v1,c1,x2,y2,u2,v2,c2,cx,cy,tp,raw);
     if (!s_raster_ok) return;
     int xs[3]={x0,x1,x2}, ys[3]={y0,y1,y2}, us[3]={u0,u1,u2}, vs[3]={v0,v1,v2};
     uint32_t cc[3]={c0,c1,c2}; float col[9];
     for (int i=0;i<3;i++){ col[i*3+0]=(cc[i]&0xFF)/255.0f; col[i*3+1]=((cc[i]>>8)&0xFF)/255.0f; col[i*3+2]=((cc[i]>>16)&0xFF)/255.0f; }
     gpu_textured_triangle(xs,ys,us,vs,col,tp,cx,cy,raw, s_semi_en?s_semi_mode:-1, NULL);
-    s_triangle_wide_only = 0;
     precise_consumed();
 }
 static void glb_draw_flat_rect(int x,int y,int w,int h,uint16_t c){

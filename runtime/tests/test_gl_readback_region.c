@@ -61,55 +61,56 @@ static void verify_bank_batching(void) {
  psx_mod_set_texture_bank_batching(0);s_tex_filter=0;
  glb_set_mask_bits(0,0);glb_set_semi_transparency(0,0);
 }
-static void verify_oversize_wide_margins(int scale) {
- /* Captured hallway triangles exceed the PS1 height limit. They may fill
-  * the added view, but must never write the canonical framebuffer/VRAM. */
+static void verify_oversize_wide_geometry(int scale) {
+ /* Captured hallway triangles exceed the PS1 height limit. Proven geometry
+  * must use identical canonical/wide passes, including the center-copy edge. */
  glb_set_draw_area(0,0,511,239);glb_set_precise_triangle(0,0,0,0,0,0,0);
  glb_wide_configure(848,168);glb_wide_set_target(0);
  glb_wide_set_view(0,0,0,0);s_wide_fast=1;
  glb_wide_clear(0,0,240,0);
  glb_draw_flat_rect(-168,0,848,240,0x7c00);
- gl_renderer_set_triangle_wide_only(1);
+ gl_renderer_note_wide_triangle_recovery(1);
  glb_draw_flat_triangle(-300,-200,300,100,-100,500,0x001f);
- check(glb_vram_read(100,100)==0x7c00,"oversize flat leaves canonical pixels unchanged");
- /* A line queued immediately after a margin-only flat triangle must use
+ check(glb_vram_read(100,100)==0x001f,"recovered flat updates canonical pixels coherently");
+ /* A line queued immediately after a recovered flat triangle must use
   * the ordinary batch at both native and supersampled resolutions. */
- gl_renderer_set_triangle_wide_only(1);
+ gl_renderer_note_wide_triangle_recovery(1);
  glb_draw_flat_triangle(-300,-200,300,100,-100,500,0x001f);
  glb_draw_line(203,40,219,40,0x03e0);
  check(glb_vram_read(210,40)==0x03e0,"ordinary line after oversize flat");
  glb_vram_write(512,0,0x03e0);
- gl_renderer_set_triangle_wide_only(1);
+ gl_renderer_note_wide_triangle_recovery(1);
  glb_draw_shaded_textured_triangle(561,184,0,0,0x808080,
    1023,-724,0,0,0x808080,1023,334,0,0,0x808080,0,0,0x108,1);
- gl_renderer_set_triangle_wide_only(1);
+ gl_renderer_note_wide_triangle_recovery(1);
  glb_draw_shaded_textured_triangle(-300,-200,0,0,0x808080,
    300,100,0,0,0x808080,-100,500,0,0,0x808080,0,0,0x108,1);
- check(glb_vram_read(100,100)==0x7c00,"oversize textured leaves canonical pixels unchanged");
- gl_renderer_set_triangle_wide_only(1);
+ check(glb_vram_read(100,100)==0x03e0,"recovered textured updates canonical pixels coherently");
+ gl_renderer_note_wide_triangle_recovery(1);
+ glb_draw_shaded_textured_triangle(400,-200,0,0,0x808080,
+   900,100,0,0,0x808080,400,500,0,0,0x808080,0,0,0x108,1);
+ gl_renderer_note_wide_triangle_recovery(1);
  glb_draw_shaded_textured_triangle(561,184,0,0,0x808080,
    1023,-724,0,0,0x808080,1023,334,0,0,0x808080,0,0,0x108,1);
  glb_draw_shaded_textured_triangle(40,100,0,0,0x808080,
    70,100,0,0,0x808080,40,130,0,0,0x808080,0,0,0x108,1);
  check(glb_vram_read(45,105)==0x03e0,"ordinary textured after oversize textured");
- verify("oversize wide triangles preserve canonical authority");
+ verify("recovered geometry keeps CPU/GPU readback coherent");
  uint32_t *pixels=calloc((size_t)848*240*scale*scale,sizeof(uint32_t));
  check(pixels!=NULL,"oversize wide pixels allocation");
  if(pixels) {
   check(glb_render_wide_display(pixels,848*scale*4,0,0,240)>0,"oversize wide readback");
   check(pixels[(100*scale)*(848*scale)+68*scale]==0xff00ff00u,"left oversize margin drawn in painter order");
   check(pixels[(100*scale)*(848*scale)+818*scale]==0xff00ff00u,"captured right hallway wall drawn");
-  check(pixels[(100*scale)*(848*scale)+268*scale]==0xff0000f8u,"canonical center excludes oversize faces");
+  check(pixels[(100*scale)*(848*scale)+268*scale]==0xff00ff00u,"canonical center retains recovered faces");
+  check(pixels[(100*scale)*(848*scale)+678*scale]==0xff00ff00u,"recovered wall before center-copy boundary");
+  check(pixels[(100*scale)*(848*scale)+680*scale]==0xff00ff00u,"same recovered wall after center-copy boundary");
   free(pixels);
  }
  glb_wide_disable_target();
- gl_renderer_set_triangle_wide_only(1);
+ gl_renderer_note_wide_triangle_recovery(1);
  glb_draw_flat_triangle(-300,-200,300,100,-100,500,0x001f);
- check(glb_vram_read(100,100)==0x7c00,"oversize rejected without a wide target");
- /* Mod-generated triangles keep their existing behavior; only the frontend
-  * explicitly arms host-only clipping after rejecting canonical geometry. */
- glb_draw_flat_triangle(-300,-200,300,100,-100,500,0x001f);
- check(glb_vram_read(100,100)==0x001f,"unarmed backend triangles retain ordinary behavior");
+ check(glb_vram_read(100,100)==0x001f,"admitted backend geometry remains coherent without mirror");
  glb_wide_set_target(0);
 }
 int main(int argc,char **argv){
@@ -229,7 +230,7 @@ int main(int argc,char **argv){
  check(glb_vram_read(482,252)==0x001f,"palette update visible without replacing indices");
  verify("retained indices with animated guest CLUT");
  verify_bank_batching();
- verify_oversize_wide_margins(scale);
+ verify_oversize_wide_geometry(scale);
  /* World and UI use different origins in an anchored wide frame. Keep the
   * canonical-center optimization enabled to catch an erroneous blit over the
   * completed mirror, and change origins with a pending flat batch. */

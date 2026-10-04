@@ -101,7 +101,7 @@ int main(void) {
     assert(psx_gpu_triangle_oversize(wall_x,wall_y,0,1,2));
     assert(!gpu_triangle_rejected(wall_x,wall_y,0,1,2));
     prepare_precise_triangle(1,4,7,wall_x,wall_y);
-    assert(fixture_triangle_wide_only);
+    assert(fixture_triangle_recovered);
     fixture_backend=GR_BACKEND_SOFTWARE;
     assert(gpu_triangle_rejected(wall_x,wall_y,0,1,2));
     fixture_backend=GR_BACKEND_OPENGL;
@@ -130,7 +130,7 @@ int main(void) {
     psx_mod_set_native_wide_projection_correction(0);
     assert(!fixture_pgxp_enabled);
     prepare_precise_triangle(7,4,10,bx,by);
-    assert(!fixture_triangle_wide_only);
+    assert(!fixture_triangle_recovered);
     assert(!fixture_precise_triangle.enabled);
     puts("native_wide_projection_test: PASS");
     return 0;
