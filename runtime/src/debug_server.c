@@ -9709,7 +9709,7 @@ static void wtrace_fill_entry(WriteTraceEntry *e, uint64_t seq,
      * instead of the stale last-CPU-store PC (which is meaningless mid-DMA). */
     if (g_dma_exec_depth > 0) {
         e->dma_ch = (int8_t)g_dma_cur_ch;
-        if (g_dma_initiator_pc) e->pc = g_dma_initiator_pc;
+        e->pc = g_dma_initiator_pc; /* 0 = unknown; never a stale CPU store PC */
     } else {
         e->dma_ch = -1;
     }
@@ -11316,14 +11316,21 @@ static void handle_wtrace_dump(int id, const char *json)
     if (json_get_str(json, "addr_hi", hi_str, sizeof(hi_str)))
         filter_hi = hex_to_u32(hi_str) & 0x1FFFFFFFu;
 
-    /* Filter the recorded producer PC, including its segment. DMA entries use
-     * the initiator PC already stored by wtrace_fill_entry. Post-hoc only:
-     * recording, fingerprints and guest execution are unchanged. */
+    /* Filter the recorded producer PC, segment-masked like the address filter
+     * (KSEG0/KSEG1/KUSEG alias). DMA entries use the initiator PC stored by
+     * wtrace_fill_entry; an unknown (0) initiator matches only when no PC
+     * bound is given. Post-hoc only: recording, fingerprints and guest
+     * execution are unchanged. pc_lo/pc_hi echo the raw request. */
     uint32_t pc_lo = 0, pc_hi = 0xFFFFFFFFu;
-    if (json_get_str(json, "pc_lo", lo_str, sizeof(lo_str)))
-        pc_lo = hex_to_u32(lo_str);
-    if (json_get_str(json, "pc_hi", hi_str, sizeof(hi_str)))
-        pc_hi = hex_to_u32(hi_str);
+    int pc_filtered = 0;
+    /* Default upper bound sits above every masked PC so no entry is excluded. */
+    uint32_t pc_lo_m = 0, pc_hi_m = 0x20000000u;
+    if (json_get_str(json, "pc_lo", lo_str, sizeof(lo_str))) {
+        pc_lo = hex_to_u32(lo_str); pc_lo_m = pc_lo & 0x1FFFFFFFu; pc_filtered = 1;
+    }
+    if (json_get_str(json, "pc_hi", hi_str, sizeof(hi_str))) {
+        pc_hi = hex_to_u32(hi_str); pc_hi_m = pc_hi & 0x1FFFFFFFu; pc_filtered = 1;
+    }
 
     /* Optional frame-window filter — the "query the ring for the window of
      * interest" primitive.  Lets a caller reach entries in the MIDDLE of a deep,
@@ -11361,7 +11368,10 @@ static void handle_wtrace_dump(int id, const char *json)
         }
         WriteTraceEntry *e = &s_wtrace[idx];
         if (e->addr < filter_lo || e->addr >= filter_hi) continue;
-        if (e->pc < pc_lo || e->pc >= pc_hi) continue;
+        if (pc_filtered) {
+            uint32_t epc = e->pc & 0x1FFFFFFFu;
+            if (e->pc == 0 || epc < pc_lo_m || epc >= pc_hi_m) continue;
+        }
         if (frame_lo >= 0 && (int)e->frame < frame_lo) continue;
         if (frame_hi >= 0 && (int)e->frame > frame_hi) continue;
         pos += snprintf(buf + pos, BUF_SZ - pos,
