@@ -164,6 +164,28 @@ static inline uint32_t psx_phys_addr_store(uint32_t addr) {
 /* Expose RAM pointer for oracle comparison (find_first_divergence). */
 uint8_t *memory_get_ram_ptr(void) { return ram; }
 uint8_t *memory_get_scratchpad_ptr(void) { return scratchpad; }
+
+/* Side-effect-FREE aligned word peek for the debug/observability path ONLY:
+ * main RAM (every KUSEG/KSEG0/KSEG1 mirror), scratchpad and BIOS ROM. Never
+ * touches MMIO, the lockstep/DS read hooks, read watches, or unmapped_fatal.
+ * Returns 1 and fills *out when addr is backed by one of those; 0 otherwise. */
+int psx_peek_word(uint32_t addr, uint32_t *out) {
+    uint32_t phys, off;
+    const uint8_t *p;
+    if (addr >= 0xC0000000u || (addr & 3u)) return 0;
+    phys = addr & 0x1FFFFFFFu;
+    if (psx_ram_resolve(addr, 4u, &off)) {
+        p = &ram[off];
+    } else if (phys >= 0x1F800000u && phys <= 0x1F8003FCu) {
+        p = &scratchpad[phys - 0x1F800000u];
+    } else if (phys >= 0x1FC00000u && phys <= 0x1FC7FFFCu) {
+        p = &bios_rom[phys - 0x1FC00000u];
+    } else {
+        return 0;
+    }
+    if (out) memcpy(out, p, sizeof(*out));
+    return 1;
+}
 void memory_clear_low_boot_scratch(void) {
     memset(ram, 0, 0x10u);
 }
