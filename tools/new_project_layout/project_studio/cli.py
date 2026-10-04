@@ -1337,35 +1337,6 @@ def cmd_git_bulk_migrate_bundled(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
-def cmd_git_bulk_update_cmake(args: argparse.Namespace) -> int:
-    from project_studio.bulkops import bulk_update_cmake
-    from project_studio.repo_index import load_index
-
-    repos = _bulk_repos_or_die(args)
-    if repos is None:
-        return 2
-    jobs = int(getattr(args, "jobs", 0) or 0) or int(getattr(load_index(), "bulk_jobs", 1) or 1)
-
-    def on_repo(label: str, results: list) -> None:
-        for r in results:
-            print(f"  [{'OK' if r.ok else 'FAIL'}] {r.message}", flush=True)
-            if r.detail:
-                for ln in r.detail.splitlines():
-                    print(f"         {ln}", flush=True)
-
-    results = bulk_update_cmake(
-        repos,
-        commit=not bool(getattr(args, "no_commit", False)),
-        push_remote=bool(getattr(args, "push", False)),
-        dry_run=bool(getattr(args, "dry_run", False)),
-        jobs=jobs,
-        on_repo=on_repo,
-    )
-    failed = sum(1 for r in results if not r.ok)
-    print(f"bulk update-cmake: {len(results) - failed} ok, {failed} failed", flush=True)
-    return 1 if failed else 0
-
-
 def cmd_git_migrate_bundled(args: argparse.Namespace) -> int:
     from project_studio.migrate_bundled import BundledMigrateOptions, migrate_to_bundled_release
 
@@ -2328,17 +2299,6 @@ def build_parser() -> argparse.ArgumentParser:
     add_migrate_bundled_flags(p_gbmb)
     p_gbmb.add_argument("--jobs", type=int, default=0, help="Parallel repos (default: index setting)")
     p_gbmb.set_defaults(func=cmd_git_bulk_migrate_bundled)
-
-    p_gbuc = git_sub.add_parser(
-        "bulk-update-cmake",
-        help="Sync selected repos' CMakeLists.txt with the scaffold template "
-             "(tools/update_cmake.py); commits CMakeLists.txt only",
-    )
-    add_bulk_select(p_gbuc)
-    p_gbuc.add_argument("--no-commit", action="store_true", help="Edit CMakeLists.txt but do not commit")
-    p_gbuc.add_argument("--push", action="store_true", help="Push after committing")
-    p_gbuc.add_argument("--jobs", type=int, default=0, help="Parallel repos (default: index setting)")
-    p_gbuc.set_defaults(func=cmd_git_bulk_update_cmake)
 
     p_gmb = git_sub.add_parser(
         "migrate-bundled",
