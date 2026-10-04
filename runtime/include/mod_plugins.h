@@ -153,11 +153,21 @@ int32_t psx_mod_widescreen_view_x_margin(void);
  * native-wide gameplay. Requires exact packet-address/word provenance and
  * depth; never changes guest SXY, vertical coordinates, or the 4:3 path. */
 void psx_mod_set_native_wide_projection_correction(int enabled);
+/* Separately qualify near-camera world clipping for a title. The GL path
+ * carries signed, unclamped projection through exact PGXP word transport,
+ * clips at the camera/view planes, and preserves ordered GPU/VRAM writes.
+ * Requires projection correction above; 4:3, software and untracked UI stay
+ * on their existing paths. No architectural GTE or gameplay changes. */
+void psx_mod_set_native_wide_near_clip(int enabled);
 /* Bind render-only NCLIP branch consumers to full instruction words. These
  * recover winding only when valid horizontal projections saturated; guest
  * MAC0 and flags remain architectural. Empty registration disables the sites. */
 void psx_mod_set_native_wide_nclip_sites(const uint32_t* addresses,
     const uint32_t* expected, int count);
+/* After registering sites, bind a verified first-of-two quad branch to the
+ * preceding NCLIP result. Exact address/word must match an existing site;
+ * registering the base site list again resets every site to the latest result. */
+void psx_mod_set_native_wide_nclip_previous_site(uint32_t address, uint32_t expected);
 
 /* Mark a guest GPU packet (P_TAG address) as persistent screen-space HUD.
  * edge = -1 left, +1 right, 0 clears a reused packet's tag. The native-wide
