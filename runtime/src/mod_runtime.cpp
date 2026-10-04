@@ -7,7 +7,9 @@
 #include "mod_plugins.h"
 #include "gpu.h"
 #include "psx_memory.h"
+#include "render_pass_projection.h"
 #include "psx_sha256.h"
+#include "cpu_state.h"
 
 #if defined(RECOMP_LAUNCHER)
 #include "recomp_launcher.h"
@@ -54,6 +56,10 @@ extern "C" int fntrace_is_game_started(void);
 
 /* Declared in mod_plugins.h; see active_function_entry_hooks() below. */
 uint32_t g_psx_mod_function_entry_hooks = 0;
+uint32_t g_psx_mod_guest_functions = 0;
+uint32_t g_psx_mod_instruction_hooks = 0;
+/* Guest vblanks seen by the mod runtime: the plugin counters' time base. */
+static uint64_t g_mod_vblanks = 0;
 
 namespace PSXRecompV4 {
 namespace {
@@ -78,12 +84,41 @@ struct RuntimeMods {
     bool disc_enabled = false;
     bool disc_guard_failed = false;
     const ModResolution::Plugin* current_plugin = nullptr;
+    CPUState* current_function_cpu = nullptr;
+    bool current_function_finished = false;
 };
 
 RuntimeMods& state() {
     static RuntimeMods value;
     return value;
 }
+
+/* Guest calls made from an entry hook can deliver VBlank callbacks before
+ * returning. Every callback owns its resource/completion context; restoring
+ * only entry hooks would let VBlank erase the interrupted plugin or complete
+ * a function that belongs to another callback. */
+class PluginCallbackScope {
+    RuntimeMods& runtime;
+    const ModResolution::Plugin* previous_plugin;
+    CPUState* previous_cpu;
+    bool previous_finished;
+public:
+    PluginCallbackScope(RuntimeMods& s, const ModResolution::Plugin* plugin,
+                        CPUState* cpu = nullptr)
+        : runtime(s), previous_plugin(s.current_plugin),
+          previous_cpu(s.current_function_cpu), previous_finished(s.current_function_finished) {
+        s.current_plugin = plugin;
+        s.current_function_cpu = cpu;
+        s.current_function_finished = false;
+    }
+    ~PluginCallbackScope() {
+        runtime.current_plugin = previous_plugin;
+        runtime.current_function_cpu = previous_cpu;
+        runtime.current_function_finished = previous_finished;
+    }
+    PluginCallbackScope(const PluginCallbackScope&) = delete;
+    PluginCallbackScope& operator=(const PluginCallbackScope&) = delete;
+};
 
 /* Function-entry hooks of the ACTIVE plan, flattened at plugin activation into
  * one table sorted by code key (address with the segment bits stripped, so a
@@ -105,6 +140,21 @@ std::vector<ActiveFunctionEntryHook>& active_function_entry_hooks() {
 }
 unsigned function_entry_depth;
 
+std::vector<ActiveFunctionEntryHook>& active_guest_functions() {
+    static std::vector<ActiveFunctionEntryHook> value;
+    return value;
+}
+
+struct ActiveInstructionHook {
+    uint32_t key, expected;
+    PSXModFunctionEntryCallback callback;
+    const ModResolution::Plugin* plugin;
+};
+std::vector<ActiveInstructionHook>& active_instruction_hooks() {
+    static std::vector<ActiveInstructionHook> value;
+    return value;
+}
+
 inline uint32_t function_entry_key(uint32_t address) {
     return address & 0x1FFFFFFFu;
 }
@@ -112,6 +162,10 @@ inline uint32_t function_entry_key(uint32_t address) {
 void clear_function_entry_hooks() {
     active_function_entry_hooks().clear();
     g_psx_mod_function_entry_hooks = 0;
+    active_guest_functions().clear();
+    g_psx_mod_guest_functions = 0;
+    active_instruction_hooks().clear();
+    g_psx_mod_instruction_hooks = 0;
 }
 
 void build_function_entry_hooks(const RuntimeMods& s) {
@@ -127,6 +181,20 @@ void build_function_entry_hooks(const RuntimeMods& s) {
                      [](const ActiveFunctionEntryHook& a,
                         const ActiveFunctionEntryHook& b) { return a.key < b.key; });
     g_psx_mod_function_entry_hooks = (uint32_t)table.size();
+    auto& functions = active_guest_functions();
+    for (const auto& plugin : s.plan.plugins)
+        for (const auto& function : mod_guest_functions(plugin.id))
+            functions.push_back({function.address, function.callback, nullptr, &plugin});
+    std::sort(functions.begin(), functions.end(),
+              [](const auto& a, const auto& b) { return a.key < b.key; });
+    g_psx_mod_guest_functions = (uint32_t)functions.size();
+    auto& instructions = active_instruction_hooks();
+    for (const auto& plugin : s.plan.plugins)
+        for (const auto& hook : mod_instruction_hooks(plugin.id))
+            instructions.push_back({hook.address, hook.expected, hook.callback, &plugin});
+    std::stable_sort(instructions.begin(), instructions.end(),
+                    [](const auto& a, const auto& b) { return a.key < b.key; });
+    g_psx_mod_instruction_hooks = (uint32_t)instructions.size();
 }
 
 const ModPackage* selected_package(const std::string& id) {
@@ -1414,24 +1482,25 @@ extern "C" int psx_mod_read_disc_file(const char* path, void* buffer,
 extern "C" void mod_runtime_activate_plugins(void) {
     using namespace PSXRecompV4;
     RuntimeMods& s = state();
+    psx_projection_reset_session();
+    gpu_ws_set_native_scene_predicate(nullptr);
     psx_ram_reset_size_request();
     if (!s.initialized || !s.plan.ok) return;
     for (const ModResolution::Plugin& plugin : s.plan.plugins) {
-        s.current_plugin = &plugin;
+        PluginCallbackScope scope(s, &plugin);
         mod_invoke_activation_plugin(plugin.id);
-        s.current_plugin = nullptr;
     }
     build_function_entry_hooks(s);
 }
 
 extern "C" void mod_runtime_on_vblank(void) {
     using namespace PSXRecompV4;
+    ++g_mod_vblanks;
     RuntimeMods& s = state();
     if (!s.initialized || !s.plan.ok) return;
     for (const ModResolution::Plugin& plugin : s.plan.plugins) {
-        s.current_plugin = &plugin;
+        PluginCallbackScope scope(s, &plugin);
         mod_invoke_vblank_plugin(plugin.id);
-        s.current_plugin = nullptr;
     }
 }
 
@@ -1523,12 +1592,71 @@ extern "C" uint32_t psx_mod_alloc_gpu_dma_memory(uint32_t size,
     return psx_mod_gpu_dma_memory_alloc(size, alignment);
 }
 
+namespace {
+struct ModCounter {
+    const char* name = nullptr;   /* caller literal; compared by content */
+    uint64_t count = 0;
+    uint64_t last_frame = 0;
+};
+constexpr size_t kModCounterCap = 128;
+ModCounter g_mod_counters[kModCounterCap];
+size_t g_mod_counter_count = 0;
+uint64_t g_mod_counter_overflow = 0;
+}  // namespace
+
+extern "C" void psx_mod_counter_add(const char* name, uint32_t delta) {
+    if (!name || !name[0]) return;
+    for (size_t i = 0; i < g_mod_counter_count; i++) {
+        ModCounter& c = g_mod_counters[i];
+        if (c.name == name || std::strcmp(c.name, name) == 0) {
+            c.count += delta;
+            c.last_frame = g_mod_vblanks;
+            return;
+        }
+    }
+    if (g_mod_counter_count == kModCounterCap) {
+        g_mod_counter_overflow += delta;
+        return;
+    }
+    ModCounter& c = g_mod_counters[g_mod_counter_count++];
+    c.name = name;
+    c.count = delta;
+    c.last_frame = g_mod_vblanks;
+}
+
+/* Debug-server accessor: copies up to `cap` entries; returns the total count
+ * of distinct counters and writes the overflow bucket. */
+extern "C" int psx_mod_counters_snapshot(const char** names, uint64_t* counts,
+                                         uint64_t* last_frames, int cap,
+                                         uint64_t* overflow) {
+    const int n = (int)g_mod_counter_count;
+    for (int i = 0; i < n && i < cap; i++) {
+        names[i] = g_mod_counters[i].name;
+        counts[i] = g_mod_counters[i].count;
+        last_frames[i] = g_mod_counters[i].last_frame;
+    }
+    if (overflow) *overflow = g_mod_counter_overflow;
+    return n;
+}
+
 extern "C" int32_t psx_mod_widescreen_x_margin(void) {
     return (int32_t)psx_ws_x_margin();
+}
+extern "C" int32_t psx_mod_widescreen_view_x_margin(void) {
+    return (int32_t)gpu_ws_configured_x_reveal();
 }
 
 extern "C" void psx_mod_tag_hud_primitive(uint32_t primitive, int edge) {
     gpu_ws_tag_hud_primitive(primitive, edge);
+}
+extern "C" void psx_mod_anchor_hud_primitive(uint32_t primitive, int edge) {
+    gpu_ws_tag_hud_prim(primitive, edge);
+}
+extern "C" void psx_mod_tag_screen_mask_quad(uint32_t primitive) {
+    gpu_ws_tag_screen_mask_quad(primitive);
+}
+extern "C" void psx_mod_tag_radial_screen_mask_quad(uint32_t primitive, float scale) {
+    gpu_ws_tag_radial_screen_mask_quad(primitive, scale);
 }
 
 extern "C" void psx_mod_tag_world_primitive(uint32_t primitive, int is_world) {
@@ -1574,6 +1702,55 @@ extern "C" int psx_mod_register_function_filter_plugin(
     return mod_register_function_filter_plugin(id, address, callback) ? 1 : 0;
 }
 
+extern "C" int psx_mod_finish_function(CPUState* cpu) {
+    using namespace PSXRecompV4;
+    RuntimeMods& s = state();
+    if (!cpu || s.current_function_cpu != cpu || !s.current_plugin) return 0;
+    s.current_function_finished = true;
+    return 1;
+}
+
+extern "C" int psx_mod_register_guest_function_plugin(
+    const char* id, uint32_t address, PSXModFunctionEntryCallback callback) {
+    return id && PSXRecompV4::mod_register_guest_function_plugin(id, address, callback);
+}
+
+extern "C" int psx_mod_dispatch_guest_function(CPUState* cpu, uint32_t address) {
+    using namespace PSXRecompV4;
+    if (!g_psx_mod_guest_functions || !cpu || address >= 0xC0000000u) return 0;
+    const auto& functions = active_guest_functions();
+    const uint32_t key = function_entry_key(address);
+    auto it = std::lower_bound(functions.begin(), functions.end(), key,
+        [](const auto& function, uint32_t k) { return function.key < k; });
+    if (it == functions.end() || it->key != key) return 0;
+    PluginCallbackScope scope(state(), it->plugin, cpu);
+    it->callback(cpu, address);
+    cpu->pc = cpu->gpr[31];
+    return 1;
+}
+
+extern "C" int psx_mod_register_instruction_plugin(const char* id, uint32_t address,
+                                                    uint32_t expected, PSXModFunctionEntryCallback callback) {
+    return id && PSXRecompV4::mod_register_instruction_plugin(id, address, expected, callback);
+}
+
+extern "C" void psx_mod_instruction(CPUState* cpu, uint32_t address, uint32_t instruction) {
+    using namespace PSXRecompV4;
+    if (!g_psx_mod_instruction_hooks || !cpu || address >= 0xC0000000u) return;
+    const auto& hooks = active_instruction_hooks();
+    const auto key = function_entry_key(address);
+    auto it = std::lower_bound(hooks.begin(), hooks.end(), key,
+                              [](const auto& h, uint32_t k) { return h.key < k; });
+    for (; it != hooks.end() && it->key == key; ++it) {
+        if (it->expected != instruction || psx_mod_read_word(address) != instruction) continue;
+        PluginCallbackScope scope(state(), it->plugin, nullptr);
+        const uint32_t pc = cpu->pc;
+        it->callback(cpu, address);
+        if (cpu->pc != pc) std::abort();
+        cpu->gpr[0] = 0;
+    }
+}
+
 extern "C" int psx_mod_function_entry(CPUState* cpu, uint32_t address) {
     using namespace PSXRecompV4;
     if (!g_psx_mod_function_entry_hooks || !cpu) return 0;
@@ -1584,14 +1761,12 @@ extern "C" int psx_mod_function_entry(CPUState* cpu, uint32_t address) {
         table.begin(), table.end(), key,
         [](const ActiveFunctionEntryHook& hook, uint32_t k) { return hook.key < k; });
     for (; it != table.end() && it->key == key; ++it) {
-        const ModResolution::Plugin* previous = s.current_plugin;
-        s.current_plugin = it->plugin;
+        PluginCallbackScope scope(s, it->plugin, cpu);
         ++function_entry_depth;
         if (it->callback) it->callback(cpu, address);
-        const int handled = it->filter && it->filter(cpu, address);
+        const bool finished = s.current_function_finished || (it->filter && it->filter(cpu, address));
         --function_entry_depth;
-        s.current_plugin = previous;
-        if (handled) {
+        if (finished) {
             cpu->pc = cpu->gpr[31];
             return 1;
         }

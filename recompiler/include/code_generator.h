@@ -66,6 +66,7 @@ struct CodeGenConfig {
     // Trusted game-mod entry hooks ([recompiler] mod_function_entry_funcs).
     // Only explicitly listed guest functions call the runtime dispatcher.
     std::set<uint32_t> mod_function_entry_funcs;
+    std::set<uint32_t> mod_instruction_sites;
 
     // [recompiler] hot_funcs: emit __attribute__((hot)) on these guest
     // addresses (MotK VLC leaves, etc.). Host locality hint only.
@@ -490,6 +491,7 @@ private:
     std::string translate_instruction_core(uint32_t addr, uint32_t instr);
     // The [[draw_distance.clamp]] statement for (addr, instr), or "".
     std::string draw_distance_clamp_prefix(uint32_t addr, uint32_t instr) const;
+    std::string mod_instruction_call(uint32_t addr, uint32_t instr) const;
 
     // Register name mapping
     static std::string reg_name(int reg_num);

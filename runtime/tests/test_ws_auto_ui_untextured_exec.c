@@ -17,6 +17,7 @@
 #include <string.h>
 
 #define GPU_EXEC_REAL_UI_GROUP
+#define GPU_EXEC_RECORD_SHADED_TEXTURED
 #include "../src/gpu.c"
 
 #include "gpu_exec_stubs.inc"
@@ -152,8 +153,58 @@ static void run_fills(int *gouraud_min, int *gouraud_max,
     *flat_max = gpu_exec_triangles.max_x;
 }
 
+/* Captured Ape intro GT4: world rank 3105, then a full-screen fade at 4095.
+ * Relative ranks suffice here. The wall becomes exactly rectangular for a
+ * few frames, but it must never become UI just because the fade is excluded. */
+static void test_wall_behind_front_layer(int triangle) {
+    reset_state(0);
+    hres1 = 0; hres2 = 1; /* Ape's 384x240 display */
+    ws_cfg_num = 16; ws_cfg_den = 9; ws_xnum = 3; ws_xden = 4;
+    memset(test_ram, 0, sizeof(test_ram));
+    const uint32_t wall[12] = {
+        0x3C00FEFEu, 0x001C00C4u, 0x3ED8593Fu,
+        0x0000FEFEu, 0x004100C4u, 0x0089653Fu,
+        0x003FBEBEu, 0x001C008Bu, 0x006F591Fu,
+        0x003FBEBEu, 0x0041008Bu, 0x0042651Fu,
+    };
+    const uint32_t fade[3] = {
+        0x63000000u, pack_vertex(0, 0), 0x00F00180u,
+    };
+    const uint32_t front_triangle[4] = {
+        0x20808080u, pack_vertex(1, 1), pack_vertex(8, 1), pack_vertex(1, 8),
+    };
+    test_ram[OT_HEAD / 4u] = NODE_RING;
+    put_node(NODE_RING, NODE_GAP, wall, 12);
+    test_ram[NODE_GAP / 4u] = NODE_FILL;
+    put_node(NODE_FILL, NODE_FLAT, triangle ? front_triangle : fade,
+             triangle ? 4 : 3);
+    test_ram[NODE_FLAT / 4u] = 0xFFFFFFu; /* trailing empty rank */
+    gpu_ws_prepass_linked_list(OT_HEAD);
+    assert(ws_ui_prepass_count == 0);
+    gpu_exec_reset_triangles();
+    load_packet(NODE_RING, 12);
+    gp0_exec_shaded_textured_quad();
+    assert(gpu_exec_triangles.calls == 2);
+    assert(gpu_exec_triangles.min_x == 139);
+    assert(gpu_exec_triangles.max_x == 196);
+    assert(ws_auto_ui_transform_count == 0);
+}
+
 int main(void) {
     int gmin, gmax, fmin, fmax;
+
+    test_wall_behind_front_layer(0);
+    test_wall_behind_front_layer(1);
+
+    /* A real HUD remains eligible when its last drawing layer is followed
+     * by an empty OT bucket, as in Ape's memory-card menu. */
+    reset_state(1);
+    build_hud(60, 128, 64, 120);
+    test_ram[NODE_FLAT / 4u] = (5u << 24) | NODE_PANEL;
+    test_ram[NODE_PANEL / 4u] = 0xFFFFFFu;
+    run_fills(&gmin, &gmax, &fmin, &fmax);
+    assert(gmin == ws_scale_about(64, 94));
+    assert(gmax == ws_scale_about(120, 94));
 
     /* in_place: the fill and its frame share the run's own centre. */
     reset_state(1);
