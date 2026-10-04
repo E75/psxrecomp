@@ -1010,6 +1010,42 @@ int test_render_pose() {
     if ((int16_t)g.SXY[2] != 16 || (int16_t)(g.SXY[2] >> 16) != 1)
         return fail_value("authored focal ratio",0,0,0,16,g.SXY[2] & 65535);
     pose = {}; gte_render_pose_set(&pose);
+    /* Composition with [video] fov_scale (scaled guest H): an absolute override
+     * (projection_h_ref == 0) replaces the guest projection entirely, so the
+     * result does not depend on fov_scale; with projection_h_ref the focal
+     * lengths follow the fov-scaled guest H. Outside the override (pose reset)
+     * the guest path, including fov_scale, is untouched. */
+    {
+        GTEState base;
+        base.RT[0][0] = base.RT[1][1] = base.RT[2][2] = 4096;
+        base.V0[0] = 80; base.V0[1] = 160; base.V0[2] = 800;
+        base.H = 400; base.OFX = 256 << 16; base.OFY = 120 << 16;
+        PSXModRenderView ov = {}; ov.struct_size = sizeof ov;
+        ov.rotation_q12[0] = ov.rotation_q12[4] = ov.rotation_q12[8] = 4096;
+        ov.projection = 1; ov.fx_q16 = 200 << 16; ov.fy_q16 = 100 << 16;
+        GTEState a = base, b = base, c = base, guest1 = base, guest2 = base;
+        gte_set_fov_scale(1, 1);
+        gte_render_pose_set(&ov);
+        PSXRecomp::GTE::gte_rtps_internal(&a, a.V0, true);
+        gte_set_fov_scale(1, 2);
+        PSXRecomp::GTE::gte_rtps_internal(&b, b.V0, true);
+        if (a.SXY[2] != b.SXY[2])
+            return fail_value("absolute override independent of fov_scale",0,0,0,a.SXY[2],b.SXY[2]);
+        ov.projection_h_ref = 400;
+        gte_render_pose_set(&ov);                     /* scaled H = 200 -> half focal */
+        PSXRecomp::GTE::gte_rtps_internal(&c, c.V0, true);
+        if ((int16_t)c.SXY[2] != 256 + 10 || (int16_t)(c.SXY[2] >> 16) != 120 + 10)
+            return fail_value("h_ref override follows fov-scaled H",0,0,0,266,c.SXY[2] & 65535);
+        PSXModRenderView none = {}; gte_render_pose_set(&none);
+        PSXRecomp::GTE::gte_rtps_internal(&guest2, guest2.V0, true);
+        gte_set_fov_scale(1, 1);
+        PSXRecomp::GTE::gte_rtps_internal(&guest1, guest1.V0, true);
+        if (guest1.SXY[2] == guest2.SXY[2])
+            return fail_value("guest path keeps fov_scale after override reset",0,0,0,guest1.SXY[2],guest2.SXY[2]);
+        if (guest1.SXY[2] == a.SXY[2])
+            return fail_value("override differs from guest projection (sanity)",0,0,0,guest1.SXY[2],a.SXY[2]);
+    }
+    gte_set_fov_scale(1, 1);
     std::puts("PASS: rigid rotation and asymmetric projection before division");
     return 0;
 }

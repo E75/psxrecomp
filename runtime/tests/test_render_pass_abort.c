@@ -544,7 +544,8 @@ int main(void) {
     CHECK(psx_mod_render_pass(&cpu, &pass, span_pass_fn, &runaway) == 0,
           "a runaway span is rolled back");
     render_pass_get_stats(&st);
-    CHECK(st.watchdog == 2, "the watchdog cut the span off");
+    /* Cumulative: the plain abort, the stereo right-eye abort, and this span. */
+    CHECK(st.watchdog == 3, "the watchdog cut the span off");
     CHECK(s_span_hi == 0 && s_span_lo == 0, "the abort closed the open span");
     check_live(&live, "after a span watchdog abort");
     CHECK(s_prec_begins > 0 && s_prec_open == 0,

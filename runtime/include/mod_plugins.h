@@ -460,7 +460,10 @@ int psx_mod_render_view_offset(int32_t x, int32_t y, int32_t z);
 /* Rigid camera transform after guest RT*V+TR, before division. Rotation is
  * row-major Q12; translation uses camera units. Optional projection supplies
  * focal lengths and centre deltas from guest OFX/OFY in Q16 pixel units.
- * Identity rotation with projection=0 preserves the architectural path. */
+ * Identity rotation with projection=0 preserves the architectural path.
+ * projection=1 REPLACES the guest X/Y projection (guest H, widescreen squash and
+ * [video] fov_scale do not apply); projection_h_ref != 0 scales the focal lengths
+ * by (fov-scaled guest H)/ref. Valid only inside a render callback; restored with it. */
 typedef struct PSXModRenderView {
     uint32_t struct_size;
     int32_t rotation_q12[9], translation[3];

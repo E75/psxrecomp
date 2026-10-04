@@ -1054,7 +1054,20 @@ void gte_rtps_internal(GTEState* gte, int16_t* V, bool setMac0, uint32_t instr) 
     dome_probe_note(gte->SZ[3]);   /* locate the dome draw fn (far-vertex tally) */
     int64_t sx16 = gte->OFX + xterm;
     int64_t sy16 = gte->OFY + (int64_t)gte->IR2 * h_div_sz;
-    if (s_render_pose.projection && gte->SZ[3]) {
+    /* Render-view projection override (psx_mod_render_view, projection=1).
+     * Only reachable inside a render-pass sandbox (set/restored by render_pass.c,
+     * rolled back with the GTE state), so no guest-visible state outside the
+     * pass sees it. It is an explicit per-eye projection and REPLACES the guest
+     * X/Y projection above entirely: the [video] fov_scale scaled-H, the
+     * widescreen/dome squash and guest H do not feed it, except through
+     * projection_h_ref, which deliberately multiplies the focal lengths by
+     * (fov-scaled guest H) / projection_h_ref so a plugin can follow the game's
+     * own per-draw H changes (and fov_scale) when it asks to. The guest-formula
+     * PGXP shadows below (precise projection, projection tracking) describe the
+     * guest projection and are skipped under the override. SZ, MAC0/IR0 depth
+     * cue and the divide flags still come from the guest division above. */
+    const bool proj_override = s_render_pose.projection && gte->SZ[3];
+    if (proj_override) {
         sx16 = (int64_t)gte->OFX + s_render_pose.cx_delta_q16 +
                (int64_t)gte->IR1 * s_render_pose.fx_q16 / gte->SZ[3];
         sy16 = (int64_t)gte->OFY + s_render_pose.cy_delta_q16 +
@@ -1088,7 +1101,7 @@ void gte_rtps_internal(GTEState* gte, int16_t* V, bool setMac0, uint32_t instr) 
          * to native. Shadow only; the guest SXY, MAC and FLAG above are
          * already final. Skipped while the hooks record nothing (speculative
          * passes), where the shadow would be dropped anyway. */
-        if (pgxp_preserve_projection() && pgxp_active()) {
+        if (!proj_override && pgxp_preserve_projection() && pgxp_active()) {
             int32_t ex16, ey16;
             if (pgxp_project_precise(mac1, mac2, mac3, shift, gte->IR1, gte->IR2,
                                      gte->SZ[3], gte_h_scaled(gte), gte->OFX, gte->OFY,
@@ -1099,7 +1112,7 @@ void gte_rtps_internal(GTEState* gte, int16_t* V, bool setMac0, uint32_t instr) 
             }
         }
         pgxp_gte_push_sxy(px16, py16, gte->SZ[3], (uint32_t)gte->SXY[2]);
-        if (pgxp_projection_tracking() && shift == 12 && !lm) {
+        if (!proj_override && pgxp_projection_tracking() && shift == 12 && !lm) {
             const double z = (double)(mac3 >> 12);
             const double h_proj = (double)gte_h_scaled(gte);
             double hx = (double)gte->MAC1 * h_proj;
