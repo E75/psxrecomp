@@ -81,6 +81,8 @@
 #include "mod_texture_banks.h"
 #include "frame_interpolation.h"
 #include "render_pass_plan.h"
+#include "psx_cycles.h"
+#include "psx_video_timing.h"
 #include "mod_plugins.h"      /* PSX_MOD_RENDER_PASS_* reasons */
 #include "host_osd.h"
 #include "psx_savestate_menu.h"
@@ -6691,6 +6693,12 @@ int gl_renderer_stereo_publish(uint64_t id, uint64_t cycle, const int32_t view[2
 static int stereo_present(int w, int h) {
     StereoPair *p = &s_stereo_pair[s_stereo_current];
     int ww, wh, lx, ly, lw, lh;
+    /* A pair is shown only while the plugin keeps submitting; menus, FMV at the
+     * same size and state loads stop publishing, and the last pair must not
+     * stick on screen. Stale pairs fall back to the flat present below. */
+    if (s_stereo_valid &&
+        !render_pass_stereo_pair_fresh(p->cycle, psx_cycle_count, g_psx_vblank_cycles))
+        return 0;
     if (!s_stereo_mode || !s_stereo_valid || s_pass_active ||
         p->w != w || p->h != h || p->tw[0] != w * s_hr_scale ||
         gl_renderer_stereo_unavailable() != PSX_MOD_RENDER_PASS_READY) return 0;

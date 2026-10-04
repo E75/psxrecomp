@@ -5,6 +5,7 @@ uint32_t psx_mod_gpu_dma_memory_alloc(uint32_t n,uint32_t a){(void)n;(void)a;ret
 uint32_t psx_mod_read_word(uint32_t a){(void)a;return 0;}
 static uint16_t image[1024*512], oracle[1024*512];
 int g_psx_vram_dirty_tracking=0;
+uint64_t psx_cycle_count=0;uint32_t g_psx_vblank_cycles=564480u;
 uint64_t s_frame_count=0;
 void gpu_vram_dirty_mark_row_impl(uint32_t y){}
 void gpu_vram_dirty_mark_rect(int x,int y,int w,int h){}
