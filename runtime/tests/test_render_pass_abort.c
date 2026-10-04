@@ -136,6 +136,15 @@ void overlay_loader_set_native_nesting(int d, uint32_t ip) {
     s_ov_active_depth = d; s_ov_inprogress = ip;
 }
 
+/* Precision-tracking checkpoint (gte.cpp): every pass opens one and every
+ * restore - including the watchdog landing - closes it. */
+static int s_prec_open, s_prec_begins;
+void gte_precision_checkpoint_begin(void) { s_prec_open++; s_prec_begins++; }
+void gte_precision_checkpoint_rollback(void) { s_prec_open--; }
+
+/* memory.c mod arenas (render_pass_mod_store): nothing journaled here. */
+void render_pass_mod_arenas_rollback(void) {}
+uint64_t render_pass_mod_arenas_hash(void) { return 0; }
 /* GPU and presenter. */
 uint64_t gpu_pass_state_hash(void) { return 42; }
 int gpu_pass_checkpoint_save(void) { return 1; }
@@ -155,6 +164,7 @@ static int s_open_passes, s_kept;
 void gl_renderer_pass_begin_diag(GLRenderPassBeginDiag *out) {
     memset(out, 0, sizeof *out);
 }
+void gl_renderer_pass_set_flip_shown(int shown) { (void)shown; }
 int gl_renderer_pass_begin(int x, int y, int w, int h, int open_gen,
                            uint32_t period, int reuse_backup) {
     (void)x; (void)y; (void)w; (void)h; (void)open_gen; (void)period;
@@ -239,6 +249,29 @@ static void guest_frame(CPUState *cpu, const Frames *f, int level) {
     g_call_unit_depth = prev_unit;
 }
 
+/* The interpreter's guest-span state (dirty_ram_run_span): a span replays
+ * guest frames like any other code, so a runaway inside one leaves it open
+ * when the watchdog longjmps out. */
+static uint32_t s_span_lo, s_span_hi;
+static const Frames *s_span_frames;
+void dirty_ram_span_get(uint32_t *lo, uint32_t *hi) { *lo = s_span_lo; *hi = s_span_hi; }
+void dirty_ram_span_set(uint32_t lo, uint32_t hi) { s_span_lo = lo; s_span_hi = hi; }
+int dirty_ram_run_span(CPUState *cpu, uint32_t start, uint32_t stop, uint64_t max) {
+    (void)max;
+    if (s_span_hi) return 0;
+    s_span_lo = start & 0x1FFFFFFFu;
+    s_span_hi = stop & 0x1FFFFFFFu;
+    guest_frame(cpu, s_span_frames, 0);
+    s_span_lo = s_span_hi = 0;
+    return 1;
+}
+
+static int span_pass_fn(struct CPUState *cpu, void *user, uint32_t alpha_q16) {
+    (void)alpha_q16;
+    s_span_frames = (const Frames *)user;
+    return psx_mod_run_guest_span(cpu, 0x800143FCu, 0x8001473Cu);
+}
+
 static int pass_fn(struct CPUState *cpu, void *user, uint32_t alpha_q16) {
     (void)alpha_q16;
     guest_frame(cpu, (const Frames *)user, 0);
@@ -254,7 +287,7 @@ static int leaky_pass_fn(struct CPUState *cpu, void *user, uint32_t alpha_q16) {
 typedef struct Live {
     int bb_defer, unit, dma, host, dma_ch, active, phase, precise, dispatch;
     int ov_depth;
-    uint32_t ov_ip, batch, resume;
+    uint32_t ov_ip, batch, resume, span_lo, span_hi;
     void (*flush)(void);
     DirtyRamLoadDelay ld;
     uint64_t cycles, next_service, dev_cycles;
@@ -276,6 +309,8 @@ static void snap(Live *l) {
     l->batch = g_psx_cyc_batch;
     l->resume = g_dirty_safe_resume_pc;
     l->flush = g_overlay_flush_pending_cycles;
+    l->span_lo = s_span_lo;
+    l->span_hi = s_span_hi;
     l->ld = s_ld;
     l->cycles = psx_cycle_count;
     l->next_service = psx_next_service_cycle;
@@ -303,6 +338,8 @@ static void check_live(const Live *a, const char *when) {
     SAME(batch, "pending cycle batch");
     SAME(resume, "interpreter resume latch");
     SAME(flush, "shard cycle-flush hook");
+    SAME(span_lo, "guest span start");
+    SAME(span_hi, "guest span end");
     SAME(ld.armed, "pending load (armed)");
     SAME(ld.val, "pending load (value)");
     SAME(cycles, "guest clock");
@@ -385,6 +422,32 @@ int main(void) {
     render_pass_get_stats(&st);
     CHECK(st.verify_mismatch == 1, "an unbalanced pass is reported in verify mode");
     check_live(&live, "after an unbalanced pass");
+
+    /* 4. A guest span runs only inside a pass. */
+    CHECK(psx_mod_run_guest_span(&cpu, 0x800143FCu, 0x8001473Cu) == 0,
+          "a guest span outside a pass is refused");
+    render_pass_get_stats(&st);
+    CHECK(st.spans == 0 && st.span_failures == 0, "a refused span counts nothing");
+
+    /* 5. A span that completes inside a pass is counted and closed. */
+    snap(&live);
+    CHECK(psx_mod_render_pass(&cpu, &pass, span_pass_fn, &clean) == 1,
+          "a pass that replays a span is presented");
+    render_pass_get_stats(&st);
+    CHECK(st.spans == 1, "the span reached its stop");
+    check_live(&live, "after a pass with a span");
+
+    /* 6. A span that runs away: the watchdog's landing closes it, so later
+     * dispatches of those PCs take their compiled bodies again. */
+    snap(&live);
+    CHECK(psx_mod_render_pass(&cpu, &pass, span_pass_fn, &runaway) == 0,
+          "a runaway span is rolled back");
+    render_pass_get_stats(&st);
+    CHECK(st.watchdog == 2, "the watchdog cut the span off");
+    CHECK(s_span_hi == 0 && s_span_lo == 0, "the abort closed the open span");
+    check_live(&live, "after a span watchdog abort");
+    CHECK(s_prec_begins > 0 && s_prec_open == 0,
+          "precision shadows were checkpointed and rolled back on every pass, aborts included");
 
     printf(failures ? "FAILED (%d)\n" : "ALL PASS\n", failures);
     return failures ? 1 : 0;

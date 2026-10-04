@@ -7833,6 +7833,45 @@ static void handle_input_route_status(int id, const char *json)
  *   {"cmd":"ws_hud_mode","tag_rects":0|1}
  * tag_rects=1 lets TAGGED rect-family prims re-anchor too (Tomba's AP
  * counter renders through the tagged sprite funnel). */
+/* Named plugin counters (psx_mod_counter_add), always on:
+ *   {"cmd":"mod_counters"}
+ * -> counters: [{name, count, last_frame}], overflow. */
+static void handle_mod_counters(int id, const char *json)
+{
+    extern int psx_mod_counters_snapshot(const char **names, uint64_t *counts,
+                                         uint64_t *last_frames, int cap,
+                                         uint64_t *overflow);
+    (void)json;
+    enum { CAP = 128 };
+    const char *names[CAP];
+    uint64_t counts[CAP], last[CAP], overflow = 0;
+    int n = psx_mod_counters_snapshot(names, counts, last, CAP, &overflow);
+    if (n > CAP) n = CAP;
+    size_t cap = 256u + (size_t)n * 160u;
+    char *buf = (char *)malloc(cap);
+    if (!buf) { send_err(id, "alloc failed"); return; }
+    size_t off = 0;
+    off += (size_t)snprintf(buf + off, cap - off,
+                            "{\"id\":%d,\"ok\":true,\"frame\":%llu,\"counters\":[",
+                            id, (unsigned long long)s_frame_count);
+    for (int i = 0; i < n && off < cap; i++) {
+        char esc[96];
+        size_t e = 0;
+        for (const char *p = names[i]; *p && e + 2 < sizeof esc; p++)
+            if (*p != '"' && *p != '\\' && (unsigned char)*p >= 0x20) esc[e++] = *p;
+        esc[e] = '\0';
+        off += (size_t)snprintf(buf + off, cap - off,
+                                "%s{\"name\":\"%s\",\"count\":%llu,\"last_frame\":%llu}",
+                                i ? "," : "", esc, (unsigned long long)counts[i],
+                                (unsigned long long)last[i]);
+    }
+    if (off < cap)
+        snprintf(buf + off, cap - off, "],\"overflow\":%llu}",
+                 (unsigned long long)overflow);
+    debug_server_send_line(buf);
+    free(buf);
+}
+
 static void handle_ws_hud_mode(int id, const char *json)
 {
     int v = json_get_int(json, "tag_rects", -1);
@@ -7992,7 +8031,9 @@ static void handle_render_pass_stats(int id, const char *json)
     uint64_t gd[10], image_bytes = 0;
     uint32_t image_textures;
     char failure_json[2048];
+    DirtyRamSpanFailure sf;
     render_pass_get_stats(&st);
+    dirty_ram_span_last_failure(&sf);
     const RenderPassFailure *f = &st.last_failure;
     const GLRenderPassBeginDiag *b = &f->gl;
     if (!f->reason) {
@@ -8041,7 +8082,11 @@ static void handle_render_pass_stats(int id, const char *json)
              "\"backups_reused\":%llu,\"pass_attempts\":%llu,"
              "\"argument_refused\":%llu,\"status_refused\":%llu,"
              "\"begin_refused\":%llu,\"checkpoint_refused\":%llu,"
-             "\"last_failure\":%s}",
+             "\"spans\":%llu,\"span_failures\":%llu,"
+             "\"last_failure\":%s,"
+             "\"span_fail\":{\"reason\":%u,\"pc\":\"0x%08X\",\"start\":\"0x%08X\","
+             "\"stop\":\"0x%08X\",\"ra\":\"0x%08X\",\"after\":\"0x%08X\","
+             "\"insns\":%llu}}",
              id, (unsigned long long)st.plans, (unsigned long long)st.planned,
              (unsigned long long)st.wanted, (unsigned long long)st.refused,
              (unsigned long long)st.passes, (unsigned long long)st.aborted,
@@ -8071,7 +8116,11 @@ static void handle_render_pass_stats(int id, const char *json)
              (unsigned long long)st.pass_attempts,
              (unsigned long long)st.argument_refused, (unsigned long long)st.status_refused,
              (unsigned long long)st.begin_refused, (unsigned long long)st.checkpoint_refused,
-             failure_json);
+             (unsigned long long)st.spans, (unsigned long long)st.span_failures,
+             failure_json,
+             (unsigned)sf.reason, (unsigned)sf.pc, (unsigned)sf.start_pc,
+             (unsigned)sf.stop_pc, (unsigned)sf.ra, (unsigned)sf.after,
+             (unsigned long long)sf.insns);
 }
 
 /* render_pass_refuse on=<0|1>: make the OpenGL backend decline render passes
@@ -8163,10 +8212,12 @@ static void handle_ws_nw(int id, const char *json)
     GpuWsDebug ws;
     gpu_ws_get_debug(&ws);
     send_fmt("{\"id\":%d,\"ok\":true,\"native_wide\":%d,\"mode\":%d,\"nw_extra\":%d,"
-             "\"projection_correction\":%d,\"projection_vertices\":%llu,\"nclip_rescues\":%llu}",
+             "\"projection_correction\":%d,\"projection_vertices\":%llu,\"nclip_rescues\":%llu,"
+             "\"oversize_triangles\":%llu}",
              id, psx_ws_get_native_wide(), ws.mode, ws.nw_extra,
              correction, (unsigned long long)corrected_vertices,
-             (unsigned long long)gpu_ws_native_wide_nclip_rescues());
+             (unsigned long long)gpu_ws_native_wide_nclip_rescues(),
+             (unsigned long long)gl_renderer_wide_triangle_recovery_count());
 }
 
 /* Live scanline post-process toggle (A/B): `scanline on=<0|1> pct=<0..100>`.
@@ -9167,7 +9218,7 @@ static void handle_video_info(int id, const char *json)
     gpu_get_display_info(&di);
     int eff = gr_scale();
     send_fmt("{\"id\":%d,\"ok\":true,\"backend\":\"%s\",\"preset\":%d,"
-             "\"reference_lines\":%d,\"requested_scale\":%d,\"effective_scale\":%d,"
+             "\"reference_lines\":%d,\"requested_scale\":%d,\"effective_scale\":%d,\"texture_filter\":%d,"
              "\"internal_lines\":%u,\"gl\":%d,\"gl_max_dim\":%d,\"gl_max_scale\":%d,"
              "\"gl_clamp_reason\":%d,\"gl_alloc_retries\":%d,\"gl_budget_mib\":%d,"
              "\"fbo_w\":%d,\"fbo_h\":%d,\"hidpi_window\":%d,\"window_w\":%d,"
@@ -9179,7 +9230,7 @@ static void handle_video_info(int id, const char *json)
              "\"hires_window_mib\":%d}",
              id, gr_backend() == GR_BACKEND_OPENGL ? "opengl"
                  : gr_backend() == GR_BACKEND_VULKAN ? "vulkan" : "software",
-             preset, ref, req, eff, di.height * (unsigned)(eff > 0 ? eff : 1), gl,
+             preset, ref, req, eff, gr_texture_filter(), di.height * (unsigned)(eff > 0 ? eff : 1), gl,
              si.max_dim, si.max_scale, si.clamp_reason, si.alloc_retries, si.budget_mib,
              si.fbo_w, si.fbo_h, hidpi, ww, wh, pw, ph, di.display_x, di.display_y,
              di.width, di.height,
@@ -14181,6 +14232,7 @@ static const CmdEntry s_commands[] = {
     { "ws_aspect_cone_site", handle_ws_aspect_cone_site },
     { "ws_margin",         handle_ws_margin },
     { "ws_hud_mode",       handle_ws_hud_mode },
+    { "mod_counters",      handle_mod_counters },
     { "kernel_bless",      handle_kernel_bless },
     { "ws_aspect",         handle_ws_aspect },
     { "display_aspect",    handle_display_aspect },

@@ -611,7 +611,9 @@ static uint32_t cand_gensum(const Candidate *c) {
  * dynamic DLL loader. Generated code passes immutable {phys_lo, len} pairs and
  * the CRC of the bytes it was compiled from. A page-generation cache keeps the
  * hot path O(number of ranges), without re-hashing unchanged code each call. */
-#define STATIC_MATCH_CACHE_CAP 4096u
+#define STATIC_MATCH_CACHE_CAP 16384u
+#define STATIC_MATCH_CACHE_WAYS 4u
+#define STATIC_MATCH_CACHE_SETS (STATIC_MATCH_CACHE_CAP / STATIC_MATCH_CACHE_WAYS)
 typedef struct {
     const uint32_t *ranges;
     uint32_t count;
@@ -623,6 +625,7 @@ typedef struct {
 } StaticMatchCache;
 
 static StaticMatchCache s_static_match_cache[STATIC_MATCH_CACHE_CAP];
+static uint8_t s_static_match_victim[STATIC_MATCH_CACHE_SETS];
 
 /* Main-RAM offset of a variant code range, through the one geometry contract
  * (psx_memory.h). Retail targets fold the 2nd-4th mirrors of the 8 MiB KSEG
@@ -659,18 +662,33 @@ int psx_overlay_static_code_matches(const uint32_t *lo_len_pairs,
     uintptr_t raw = (uintptr_t)lo_len_pairs;
     uint32_t slot = (uint32_t)(((raw >> 4) ^ (raw >> 19) ^ expected_crc ^
                                 (count * 0x9E3779B9u)) &
-                               (STATIC_MATCH_CACHE_CAP - 1u));
+                               (STATIC_MATCH_CACHE_SETS - 1u));
     StaticMatchCache *entry = NULL;
-    for (uint32_t probe = 0; probe < STATIC_MATCH_CACHE_CAP; probe++) {
+    StaticMatchCache *empty = NULL;
+    /* A saturated linear table used to scan all 4,096 slots, then discard
+     * the new result. Large offline coverage sets made those cold lookups
+     * permanent. Keep four ways per set and replace a way on collision;
+     * cache eviction changes cost only, never the code-byte gate below. */
+    for (uint32_t probe = 0; probe < STATIC_MATCH_CACHE_WAYS; probe++) {
         StaticMatchCache *candidate =
-            &s_static_match_cache[(slot + probe) & (STATIC_MATCH_CACHE_CAP - 1u)];
-        if (!candidate->ranges ||
-            (candidate->ranges == lo_len_pairs &&
+            &s_static_match_cache[slot * STATIC_MATCH_CACHE_WAYS + probe];
+        if (!candidate->ranges) {
+            if (!empty) empty = candidate;
+        } else if (candidate->ranges == lo_len_pairs &&
              candidate->count == count &&
-             candidate->expected_crc == expected_crc)) {
+             candidate->expected_crc == expected_crc) {
             entry = candidate;
             break;
         }
+    }
+    if (!entry) {
+        if (empty) entry = empty;
+        else {
+            uint32_t way = s_static_match_victim[slot]++ & (STATIC_MATCH_CACHE_WAYS - 1u);
+            entry = &s_static_match_cache[slot * STATIC_MATCH_CACHE_WAYS + way];
+        }
+        /* A replacement must not inherit another variant's fast path. */
+        entry->ranges = NULL;
     }
 
     if (entry && entry->ranges && entry->gen_sum == gen_sum) {
@@ -736,7 +754,7 @@ int psx_overlay_static_code_matches(const uint32_t *lo_len_pairs,
  *     residency hash as a hint instead.
  * The CRC is the one the variant was compiled from, so it maps straight back
  * to a capture / .EMI section offline. Called only on EXTERNAL interp
- * entries, so a 4096-slot scan is fine. */
+ * entries; this diagnostic scan is outside the native dispatch hot path. */
 uint32_t psx_overlay_resident_crc_at(uint32_t phys, int *valid) {
     uint32_t stale = 0;
     if (!psx_ram_resolve(phys, 1u, &phys)) {
@@ -2605,6 +2623,8 @@ static void init_callbacks(void) {
             extern int psx_mod_function_entry(CPUState *cpu, uint32_t address);
             s_callbacks.ws_screen_x_bound = psx_ws_screen_x_bound;
             s_callbacks.mod_function_entry = psx_mod_function_entry;
+            extern void psx_mod_instruction(CPUState*, uint32_t, uint32_t);
+            s_callbacks.mod_instruction = psx_mod_instruction;
         }
         /* ABI v14: GTE precision-store tracker — the emitter emits a direct
          * gte_precision_store_word() call for every swc2 (GTE store-word),
@@ -3158,6 +3178,7 @@ void overlay_loader_resync_validation_after_restore(void)
         s_cand[i].val_gen ^= 0x80000000u;
 #ifdef PSX_HAS_OVERLAY_DISPATCH
     memset(s_static_match_cache, 0, sizeof(s_static_match_cache));
+    memset(s_static_match_victim, 0, sizeof(s_static_match_victim));
 #endif
 }
 

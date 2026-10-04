@@ -1280,3 +1280,29 @@ identity when off; main executable only (overlay code keeps its own code);
 native code and the dirty-RAM interpreter agree
 (`draw_distance_codegen_test`, `draw_distance_interp_test`). First user: R4's
 course renderers (RidgeRacerType4Recomp, Max Detail).
+
+### Opt-in camera-plane clipping for native-wide textured worlds
+
+`psx_mod_set_native_wide_near_clip(1)` complements horizontal projection
+recovery. A large face can remain visible while a corner crosses the camera
+plane: unsigned SZ, the capped H/Z divider and saturated SXY cannot represent
+that face. PGXP now optionally carries the signed homogeneous projection from
+RTPS/RTPT through exact full-word copies. CPU arithmetic, partial writes,
+stale words and timeline invalidation discard the association; sandbox
+rollback restores it with the rest of the precision shadow.
+
+Opted-in native-wide OpenGL sessions clip proven textured faces at depth 1
+and the visible bounds before perspective division. UV and color attributes
+follow each intersection, and ordinary GPU batches, painter order, masking,
+texture filtering and canonical/wide readback remain in use. The existing
+guest GTE registers, gameplay state and title culling branches do not change.
+Software/CPU-authoritative rendering, 4:3 and missing provenance use the
+original path. The larger PGXP value increases the full 8 MiB RAM shadow
+from 40 to 72 MiB; projection calculations are disabled unless a title opts in.
+
+MediEvil II's title hallway provided the camera-crossing reproduction. The
+GL authority/order fixture passes 197 checks at 1x and 4x; provenance tests
+cover negative depth, stale packets, identical partial writes, rollback and
+mode guards. Live captures remove the previously observed triangular holes;
+the owner confirmed the hallway walls stay intact. Broader map coverage
+remains separate from this reproduction.

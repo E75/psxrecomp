@@ -50,6 +50,8 @@ typedef struct RenderPassStats {
     uint64_t nesting_repairs; /* aborts whose skipped exits the restore undid */
     uint64_t verify_checks;   /* PSX_RENDER_PASS_VERIFY comparisons */
     uint64_t verify_mismatch; /* ... that found a difference */
+    uint64_t spans;           /* psx_mod_run_guest_span calls that reached stop */
+    uint64_t span_failures;   /* ... that left the span or overran */
     uint64_t dropped[RENDER_PASS_DROP_CLASSES];
     double   last_pass_ms;    /* host time of the last pass (sandbox + draw) */
     double   avg_pass_ms;     /* smoothed */
