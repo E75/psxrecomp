@@ -16,7 +16,8 @@ uint32_t g_psx_ram_mask = 0x001FFFFFu;
 /* This fixture exercises stock GPU packets without a GL context or mod bank.
  * Keep the gpu.c dependencies explicit, including on linkers that retain
  * additional exported command handlers despite --gc-sections. */
-GrBackend gr_backend(void) { return GR_BACKEND_SOFTWARE; }
+static GrBackend fixture_backend = GR_BACKEND_SOFTWARE;
+GrBackend gr_backend(void) { return fixture_backend; }
 int gl_renderer_texture_banks_supported(void) { return 0; }
 int gl_renderer_select_texture_bank(uint16_t id) { return id == 0; }
 int gl_renderer_select_texture_bank_live_clut(uint16_t id) { return id == 0; }
@@ -340,4 +341,11 @@ int gr_render_wide_display(uint32_t *out, int pitch, int base_x,
 }
 int gte_nclip_native_wide_sign(int32_t mac0, int* sign) {
     (void)mac0; (void)sign; return 0;
+}
+int gte_nclip_native_wide_previous_sign(int32_t mac0, int* sign) {
+    (void)mac0; (void)sign; return 0;
+}
+static int fixture_triangle_wide_only;
+void gl_renderer_set_triangle_wide_only(int enabled) {
+    fixture_triangle_wide_only=enabled;
 }

@@ -4071,6 +4071,38 @@ static int native_wide_projection_x(uint32_t addr, uint32_t word,
     return 1;
 }
 
+/* Original, unsubdivided world faces can exceed the PS1 size limit only
+ * after the wider view admits them. Let GL clip proven projected triangles
+ * into the extra margins; its backend still rejects their canonical writes.
+ * Missing/stale provenance, depth behind the camera, saturated Y and UI keep
+ * the hardware reject. No architectural packet or GPU state is changed. */
+static int gpu_triangle_rejected(const int32_t* x, const int32_t* y,
+                                 int a, int b, int c) {
+    if (!psx_gpu_triangle_oversize(x, y, a, b, c)) return 0;
+    if (!s_native_wide_projection_correction || !ws_native_wide_active() ||
+        ws_nw_extra() <= 0 || gr_backend() != GR_BACKEND_OPENGL ||
+        gp0_cmd_source_addr == UINT32_MAX) return 1;
+    const uint32_t op = gp0_cmd_buf[0] >> 24;
+    const unsigned stride = 1u + ((op & 4u) != 0) + ((op & 16u) != 0);
+    const int vertices[3] = {a, b, c};
+    for (unsigned i = 0; i < 3; ++i) {
+        const unsigned index = 1u + stride * (unsigned)vertices[i];
+        const uint32_t word = gp0_cmd_buf[index];
+        int32_t px, py, rx, ry;
+        uint16_t z;
+        parse_vertex(word, &rx, &ry);
+        if (!gte_precision_load_word(gp0_cmd_source_addr + 4u * index,
+                                      word, &px, &py, &z) || !z ||
+            (py >> 16) != ry || ry == -1024 || ry == 1023 ||
+            px <= -4096 * 65536 ||
+            px >= 4096 * 65536 - 1) return 1;
+        const int exact_x = px >> 16;
+        if (rx == -1024 ? exact_x > -1024 :
+            rx == 1023 ? exact_x < 1023 : exact_x != rx) return 1;
+    }
+    return 0;
+}
+
 void gpu_texture_correction_set(int enabled) {
     s_texture_correction_enabled = enabled ? 1 : 0;
     gpu_pgxp_rederive_enable();
@@ -4095,6 +4127,15 @@ uint32_t gpu_texture_correction_hits(void) {
  * any widescreen adjustment already applied by the caller. */
 static void prepare_precise_triangle(int i0, int i1, int i2,
                                      const int32_t vx[3], const int32_t vy[3]) {
+    if (gr_backend() == GR_BACKEND_OPENGL) {
+        const int indices[3] = {i0,i1,i2};
+        int32_t raw_x[3], raw_y[3];
+        for (unsigned i=0; i<3; ++i)
+            parse_vertex(gp0_cmd_buf[indices[i]], &raw_x[i], &raw_y[i]);
+        gl_renderer_set_triangle_wide_only(s_native_wide_projection_correction &&
+            ws_native_wide_active() &&
+            psx_gpu_triangle_oversize(raw_x,raw_y,0,1,2));
+    }
     gr_set_perspective_triangle(0, 0.0f, 0.0f, 0.0f);
     const int geometry = gte_geometry_correction_enabled();
     if (!geometry && !s_native_wide_projection_correction) {
@@ -4366,7 +4407,7 @@ static void gp0_exec_mono_tri(void) {
     for (int i = 0; i < 3; i++) {
         parse_vertex(gp0_cmd_buf[1 + i], &vx[i], &vy[i]);
     }
-    if (psx_gpu_triangle_oversize(vx, vy, 0, 1, 2)) return;
+    if (gpu_triangle_rejected(vx, vy, 0, 1, 2)) return;
     ws_nw_hud_shift_vertices(vx, 3);
     for (int i = 0; i < 3; i++) {
         vx[i] += draw_offset_x;
@@ -4386,8 +4427,8 @@ static void gp0_exec_mono_quad(void) {
     int32_t vx[4], vy[4];
     for (int i = 0; i < 4; i++)
         parse_vertex(gp0_cmd_buf[1 + i], &vx[i], &vy[i]);
-    int rej_a = psx_gpu_triangle_oversize(vx, vy, 0, 1, 2);
-    int rej_b = psx_gpu_triangle_oversize(vx, vy, 2, 1, 3);
+    int rej_a = gpu_triangle_rejected(vx, vy, 0, 1, 2);
+    int rej_b = gpu_triangle_rejected(vx, vy, 2, 1, 3);
     if (rej_a && rej_b) return;
     int radial_mask=ws_nw_radial_mask_transform(vx,vy);
     int screen_mask=ws_native_wide_active() && gp0_cmd_source_addr != UINT32_MAX &&
@@ -4484,7 +4525,7 @@ static void gp0_exec_shaded_tri(void) {
         c[i] = rgb888_to_rgb555(gp0_cmd_buf[i * 2] & 0xFFFFFFu);
         parse_vertex(gp0_cmd_buf[1 + i * 2], &vx[i], &vy[i]);
     }
-    if (psx_gpu_triangle_oversize(vx, vy, 0, 1, 2)) return;
+    if (gpu_triangle_rejected(vx, vy, 0, 1, 2)) return;
     ws_nw_hud_shift_vertices(vx, 3);
     for (int i = 0; i < 3; i++) {
         vx[i] += draw_offset_x;
@@ -4516,8 +4557,8 @@ static void gp0_exec_shaded_quad(void) {
         c[i] = rgb888_to_rgb555(gp0_cmd_buf[i * 2] & 0xFFFFFFu);
         parse_vertex(gp0_cmd_buf[1 + i * 2], &vx[i], &vy[i]);
     }
-    int rej_a = psx_gpu_triangle_oversize(vx, vy, 0, 1, 2);
-    int rej_b = psx_gpu_triangle_oversize(vx, vy, 2, 1, 3);
+    int rej_a = gpu_triangle_rejected(vx, vy, 0, 1, 2);
+    int rej_b = gpu_triangle_rejected(vx, vy, 2, 1, 3);
     if (rej_a && rej_b) return;
     int radial_mask=ws_nw_radial_mask_transform(vx,vy);
     if (!radial_mask) {
@@ -4611,7 +4652,7 @@ static void gp0_exec_textured_tri(void) {
     uint16_t tpage_word = (uint16_t)(gp0_cmd_buf[4] >> 16);
     uint16_t tpage = tpage_word & 0x1FF;
     set_tpage_from_poly(tpage_word);   /* latches even for size-rejected polys */
-    if (psx_gpu_triangle_oversize(vx, vy, 0, 1, 2)) return;
+    if (gpu_triangle_rejected(vx, vy, 0, 1, 2)) return;
 
     ws_nw_hud_shift_vertices(vx, 3);
     for (int i = 0; i < 3; i++) {
@@ -4652,8 +4693,8 @@ static void gp0_exec_textured_quad(void) {
     uint16_t tpage_word = (uint16_t)(gp0_cmd_buf[4] >> 16);
     uint16_t tpage = tpage_word & 0x1FF;
     set_tpage_from_poly(tpage_word);   /* latches even for size-rejected polys */
-    int rej_a = psx_gpu_triangle_oversize(vx, vy, 0, 1, 2);
-    int rej_b = psx_gpu_triangle_oversize(vx, vy, 2, 1, 3);
+    int rej_a = gpu_triangle_rejected(vx, vy, 0, 1, 2);
+    int rej_b = gpu_triangle_rejected(vx, vy, 2, 1, 3);
     if (rej_a && rej_b) return;
 
     /* Widescreen: tagged billboard quads carry CPU-computed pixel offsets the
@@ -4745,7 +4786,7 @@ static void gp0_exec_shaded_textured_tri(void) {
     uint16_t tpage_word = (uint16_t)(gp0_cmd_buf[5] >> 16);
     uint16_t tpage = tpage_word & 0x1FF;
     set_tpage_from_poly(tpage_word);   /* latches even for size-rejected polys */
-    if (psx_gpu_triangle_oversize(vx, vy, 0, 1, 2)) return;
+    if (gpu_triangle_rejected(vx, vy, 0, 1, 2)) return;
 
     ws_nw_hud_shift_vertices(vx, 3);
     for (int i = 0; i < 3; i++) {
@@ -4812,8 +4853,8 @@ static void gp0_exec_shaded_textured_quad(void) {
     uint16_t tpage_word = (uint16_t)(gp0_cmd_buf[5] >> 16);
     uint16_t tpage = tpage_word & 0x1FF;
     set_tpage_from_poly(tpage_word);   /* latches even for size-rejected polys */
-    int rej_a = psx_gpu_triangle_oversize(vx, vy, 0, 1, 2);
-    int rej_b = psx_gpu_triangle_oversize(vx, vy, 2, 1, 3);
+    int rej_a = gpu_triangle_rejected(vx, vy, 0, 1, 2);
+    int rej_b = gpu_triangle_rejected(vx, vy, 2, 1, 3);
     if (rej_a && rej_b) return;
 
     ws_auto_ui_transform_quad(vx, vy);

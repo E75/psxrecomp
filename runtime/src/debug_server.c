@@ -8129,10 +8129,12 @@ static void handle_ws_nw(int id, const char *json)
     GpuWsDebug ws;
     gpu_ws_get_debug(&ws);
     send_fmt("{\"id\":%d,\"ok\":true,\"native_wide\":%d,\"mode\":%d,\"nw_extra\":%d,"
-             "\"projection_correction\":%d,\"projection_vertices\":%llu,\"nclip_rescues\":%llu}",
+             "\"projection_correction\":%d,\"projection_vertices\":%llu,\"nclip_rescues\":%llu,"
+             "\"wide_only_triangles\":%llu}",
              id, psx_ws_get_native_wide(), ws.mode, ws.nw_extra,
              correction, (unsigned long long)corrected_vertices,
-             (unsigned long long)gpu_ws_native_wide_nclip_rescues());
+             (unsigned long long)gpu_ws_native_wide_nclip_rescues(),
+             (unsigned long long)gl_renderer_wide_only_triangle_count());
 }
 
 /* Live scanline post-process toggle (A/B): `scanline on=<0|1> pct=<0..100>`.
