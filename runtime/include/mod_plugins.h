@@ -591,7 +591,12 @@ int psx_mod_set_controller_presentation_policy(
  * Existing TCP overrides take priority; netplay/resim and eye redraws never
  * invoke the source. The runtime keeps coherent SIO type requests/recording.
  * Pass NULL to detach. Local keyboard/pad buttons remain merged for menus;
- * the source owns sticks and type. No source leaves faithful defaults intact. */
+ * the source owns sticks and type. No source leaves faithful defaults intact.
+ * Source and setter are main (emulation) thread only. Sources are sampled once
+ * per frame, only by the normal offline sampler: not in headless mode, not in
+ * netplay. The source's `analog` is the pad's capability; the final type still
+ * goes through the multitap rule, mod mode override and presentation policy.
+ * A bad struct_size or out-of-range value delivers neutral and logs to stderr. */
 typedef struct PSXModControllerState {
     uint32_t struct_size, buttons, lx, ly, rx, ry, analog;
 } PSXModControllerState;
