@@ -16,8 +16,30 @@ uint32_t g_psx_ram_mask = 0x001FFFFFu;
 /* This fixture exercises stock GPU packets without a GL context or mod bank.
  * Keep the gpu.c dependencies explicit, including on linkers that retain
  * additional exported command handlers despite --gc-sections. */
-GrBackend gr_backend(void) { return GR_BACKEND_SOFTWARE; }
+static GrBackend fixture_backend = GR_BACKEND_SOFTWARE;
+GrBackend gr_backend(void) { return fixture_backend; }
 int gl_renderer_texture_banks_supported(void) { return 0; }
+static int fixture_projective_supported, fixture_projective_draws;
+static PSXProjectedVertex fixture_projective_vertices[3];
+int gl_renderer_projective_supported(void) { return fixture_projective_supported; }
+void gl_renderer_draw_projected_triangle(const PSXProjectedVertex v[3],
+    uint16_t tp, uint16_t cx, uint16_t cy, int raw, int semi, int perspective) {
+    memcpy(fixture_projective_vertices,v,sizeof fixture_projective_vertices);
+    fixture_projective_draws++;
+    (void)tp;(void)cx;(void)cy;(void)raw;(void)semi;(void)perspective;
+}
+static struct { uint32_t addr,word; PGXPProjection p; int valid; } fixture_homogeneous[4];
+int pgxp_load_projection(uint32_t addr, uint32_t word, PGXPProjection *out) {
+    for(int i=0;i<4;++i) if(fixture_homogeneous[i].valid &&
+        fixture_homogeneous[i].addr==addr && fixture_homogeneous[i].word==word) {
+        if(out)*out=fixture_homogeneous[i].p;
+        return 1;
+    }
+    return 0;
+}
+static int fixture_projection_tracking;
+int pgxp_projection_tracking(void) { return fixture_projection_tracking; }
+void pgxp_set_projection_tracking(int enabled) { fixture_projection_tracking=!!enabled; }
 int gl_renderer_select_texture_bank(uint16_t id) { return id == 0; }
 int gl_renderer_select_texture_bank_live_clut(uint16_t id) { return id == 0; }
 uint16_t mod_texture_packet_bank(uint32_t source, const uint32_t *words,
@@ -282,6 +304,9 @@ void gr_draw_shaded_textured_triangle(int x0, int y0, int u0, int v0,
                                       uint32_t color2, uint16_t clut_x,
                                       uint16_t clut_y, uint16_t texpage,
                                       int raw_texture) {
+#ifdef GPU_EXEC_RECORD_SHADED_TEXTURED
+    gpu_exec_record_triangle(x0, y0, x1, y1, x2, y2);
+#endif
     (void)x0; (void)y0; (void)u0; (void)v0; (void)color0; (void)x1;
     (void)y1; (void)u1; (void)v1; (void)color1; (void)x2; (void)y2;
     (void)u2; (void)v2; (void)color2; (void)clut_x; (void)clut_y;
@@ -372,4 +397,11 @@ int gr_render_wide_display(uint32_t *out, int pitch, int base_x,
 }
 int gte_nclip_native_wide_sign(int32_t mac0, int* sign) {
     (void)mac0; (void)sign; return 0;
+}
+int gte_nclip_native_wide_previous_sign(int32_t mac0, int* sign) {
+    (void)mac0; (void)sign; return 0;
+}
+static int fixture_triangle_recovered;
+void gl_renderer_note_wide_triangle_recovery(int enabled) {
+    fixture_triangle_recovered=enabled;
 }

@@ -20,6 +20,10 @@
 #include <string.h>
 #include "cpu_state.h"
 
+/* No mod hooks are active in this interpreter fixture. */
+uint32_t g_psx_mod_instruction_hooks = 0;
+uint32_t g_psx_mod_function_entry_hooks = 0;
+
 int dirty_ram_dispatch(CPUState *cpu, uint32_t addr, uint32_t stop_addr);
 extern uint64_t g_dirty_ram_blocks_run;   /* one per interpreter hand-back */
 

@@ -2,6 +2,7 @@
 #include "cpu_state.h"
 #include "nd_intro_ot.h"
 #include "pgxp.h"
+#include "render_pass_projection.h"
 #include <algorithm>
 #include <cstdlib>
 #include <cstdio>
@@ -12,6 +13,7 @@ extern "C" int gpu_ws_precise_nclip_enabled(void);
 /* overlay_loader.c: nonzero while an overlay shadow diff (interpreter record
  * plus native replay of one candidate) is running. */
 extern "C" int psx_overlay_shadow_diff_active(void);
+extern "C" { int (*g_psx_projection_command)(CPUState*, uint32_t) = nullptr; }
 
 namespace PSXRecomp {
 namespace GTE {
@@ -238,7 +240,9 @@ static uint32_t s_geom_miss_ambig = 0;   /* recorded, but not unambiguously    *
 static uint32_t s_speculative_depth = 0;
 static int s_speculative_timeline_invalidated = 0;
 
+static void gte_nclip_precision_invalidate();
 static void gte_geom_generation_advance(void) {
+    gte_nclip_precision_invalidate();
     if (++s_geom_generation == 0) {
         if (s_geom_cache)
             std::memset(s_geom_cache, 0, GEOM_CACHE_SIZE * sizeof(GeomVertex));
@@ -372,6 +376,76 @@ extern "C" int gte_geometry_correction_lookup(uint32_t packed,
     return 1;
 }
 
+/* Render-pass checkpoint for the gte.cpp side of precision tracking: the
+ * position cache entries a pass writes are journaled and put back, and the
+ * speculative bracket depth is restored (a watchdog abort can leave one open).
+ * The PGXP shadows roll back through pgxp_checkpoint_*. */
+struct GeomJournalEntry { GeomVertex *slot; GeomVertex old; };
+static uint32_t          s_gck_depth = 0;
+static GeomJournalEntry *s_gck_log = nullptr;
+static size_t            s_gck_n = 0, s_gck_cap = 0;
+static int               s_gck_lossy = 0;
+static uint32_t          s_gck_generation = 0;
+static GeomVertex       *s_gck_cache = nullptr;
+static uint32_t          s_gck_spec_depth = 0;
+static int               s_gck_spec_invalidated = 0;
+
+static uint8_t *s_gck_bits = nullptr;          /* one bit per cache slot */
+
+static inline void geom_ck_note(GeomVertex *slot) {
+    if (s_gck_depth == 0) return;
+    if (s_geom_cache != s_gck_cache || !s_gck_bits) { s_gck_lossy = 1; return; }
+    size_t i = (size_t)(slot - s_geom_cache);
+    uint8_t bit = (uint8_t)(1u << (i & 7u));
+    if (s_gck_bits[i >> 3] & bit) return;      /* journaled this pass        */
+    if (s_gck_n == s_gck_cap) {
+        size_t cap = s_gck_cap ? s_gck_cap * 2 : 16384;
+        GeomJournalEntry *p = (GeomJournalEntry *)std::realloc(
+            s_gck_log, cap * sizeof *p);
+        if (!p) { s_gck_lossy = 1; return; }
+        s_gck_log = p;
+        s_gck_cap = cap;
+    }
+    s_gck_bits[i >> 3] |= bit;
+    s_gck_log[s_gck_n].slot = slot;
+    s_gck_log[s_gck_n].old = *slot;
+    s_gck_n++;
+}
+
+extern "C" void gte_precision_checkpoint_begin(void) {
+    pgxp_checkpoint_begin();
+    if (s_gck_depth++ != 0) return;
+    if (s_geom_cache && !s_gck_bits)
+        s_gck_bits = (uint8_t *)std::calloc(GEOM_CACHE_SIZE / 8u, 1);
+    s_gck_n = 0;
+    s_gck_generation = s_geom_generation;
+    s_gck_cache = s_geom_cache;
+    s_gck_spec_depth = s_speculative_depth;
+    s_gck_spec_invalidated = s_speculative_timeline_invalidated;
+}
+
+extern "C" void gte_precision_checkpoint_rollback(void) {
+    if (s_gck_depth != 0 && --s_gck_depth == 0) {
+        for (size_t i = s_gck_n; i-- > 0;) {
+            GeomVertex *slot = s_gck_log[i].slot;
+            *slot = s_gck_log[i].old;
+            size_t k = (size_t)(slot - s_gck_cache);
+            s_gck_bits[k >> 3] &= (uint8_t)~(1u << (k & 7u));
+        }
+        s_gck_n = 0;
+        s_speculative_depth = s_gck_spec_depth;
+        s_speculative_timeline_invalidated = s_gck_spec_invalidated;
+        if (s_gck_lossy || s_geom_cache != s_gck_cache ||
+            s_geom_generation < s_gck_generation) {
+            s_gck_lossy = 0;
+            gte_geom_generation_advance();     /* fail closed                 */
+        } else {
+            s_geom_generation = s_gck_generation;
+        }
+    }
+    pgxp_checkpoint_rollback();
+}
+
 static inline void geom_note(uint32_t packed, int64_t x16, int64_t y16) {
     if (s_speculative_depth != 0 || s_gte_replay_sandbox || !s_geom_enabled ||
         !s_geom_cache) return;
@@ -384,6 +458,7 @@ static inline void geom_note(uint32_t packed, int64_t x16, int64_t y16) {
     int64_t slot = geom_slot(packed);
     if (slot < 0) return;
     GeomVertex &entry = s_geom_cache[slot];
+    geom_ck_note(&entry);
     if (entry.generation == s_geom_generation) {
         /* Already occupied this generation: only flag ambiguity if the stored
          * sub-pixel position actually DIFFERS — re-projecting the same vertex
@@ -963,6 +1038,19 @@ void gte_rtps_internal(GTEState* gte, int16_t* V, bool setMac0, uint32_t instr) 
             }
         }
         pgxp_gte_push_sxy(px16, py16, gte->SZ[3], (uint32_t)gte->SXY[2]);
+        if (pgxp_projection_tracking() && shift == 12 && !lm) {
+            const double z = (double)(mac3 >> 12);
+            double hx = (double)gte->MAC1 * gte->H;
+            if (do_squash) hx = hx * s_ws_xnum / s_ws_xden;
+            else if (s_ws_dome_on && s_ws_dome_num != s_ws_dome_den &&
+                     !gpu_ws_present_native_43() && gte->SZ[3] >= s_ws_far_threshold)
+                hx = hx * s_ws_dome_num / s_ws_dome_den;
+            PGXPProjection projection = {
+                (float)(gte->OFX / 65536.0 * z + hx),
+                (float)(gte->OFY / 65536.0 * z + (double)gte->MAC2 * gte->H),
+                (float)z, (float)gte->H / 2.0f};
+            pgxp_gte_set_projection(&projection);
+        }
     }
     geom_note((uint32_t)gte->SXY[2], sx16, sy16);
 
@@ -1002,6 +1090,15 @@ static int8_t s_nclip_last_precise_sign = 0;
 static bool s_nclip_last_precise_valid = false;
 static bool s_nclip_last_horizontal_saturated = false;
 static uint32_t s_nclip_last_generation;
+static int32_t s_nclip_previous_native;
+static int8_t s_nclip_previous_precise_sign;
+static bool s_nclip_previous_precise_valid;
+static bool s_nclip_previous_horizontal_saturated;
+static uint32_t s_nclip_previous_generation;
+static void gte_nclip_precision_invalidate() {
+    s_nclip_last_precise_valid = false;
+    s_nclip_previous_precise_valid = false;
+}
 extern "C" void gte_nclip_precise_stats(uint64_t *hits, uint64_t *fallbacks,
                                         uint64_t *disagreements) {
     if (hits) *hits = s_nclip_precise_hits;
@@ -1018,6 +1115,17 @@ extern "C" int gte_nclip_native_wide_sign(int32_t native_mac0, int* sign) {
         native_mac0 != s_nclip_last_native || s_nclip_last_generation != s_geom_generation ||
         s_gte_replay_sandbox || s_speculative_depth != 0) return 0;
     *sign = s_nclip_last_precise_sign;
+    return 1;
+}
+/* Some guarded quad consumers save two MAC0 values before branching. Their
+ * first branch must use the first command's provenance, even when both native
+ * results are equal. This is explicitly selected by the title, never searched
+ * as a fallback for arbitrary architectural MAC0 readers. */
+extern "C" int gte_nclip_native_wide_previous_sign(int32_t native_mac0, int* sign) {
+    if (!s_nclip_previous_precise_valid || !s_nclip_previous_horizontal_saturated ||
+        native_mac0 != s_nclip_previous_native || s_nclip_previous_generation != s_geom_generation ||
+        s_gte_replay_sandbox || s_speculative_depth != 0) return 0;
+    *sign = s_nclip_previous_precise_sign;
     return 1;
 }
 
@@ -1065,6 +1173,12 @@ void gte_nclip(GTEState* gte, uint32_t instr) {
             }
         }
     }
+    s_nclip_previous_native = s_nclip_last_native;
+    s_nclip_previous_precise_sign = s_nclip_last_precise_sign;
+    s_nclip_previous_precise_valid = s_nclip_last_precise_valid &&
+        !s_gte_replay_sandbox && s_speculative_depth == 0;
+    s_nclip_previous_horizontal_saturated = s_nclip_last_horizontal_saturated;
+    s_nclip_previous_generation = s_nclip_last_generation;
     s_nclip_last_native = out;
     s_nclip_last_precise_valid = false;
     s_nclip_last_horizontal_saturated = false;
@@ -1927,6 +2041,11 @@ static void gte_run_command(PSXRecomp::GTE::GTEState* gte, uint32_t cmd) {
 
 extern "C" void gte_execute(CPUState* cpu, uint32_t cmd) {
     using namespace PSXRecomp::GTE;
+    uint32_t original_transform[8];
+    const bool observe_projection = g_psx_projection_command &&
+        ((cmd & 63) == 1 || (cmd & 63) == 0x30);
+    if (observe_projection) std::memcpy(original_transform, cpu->gte_ctrl, sizeof original_transform);
+    const bool intermediate = observe_projection && g_psx_projection_command(cpu, cmd);
 #ifndef PSX_NO_DEBUG_TOOLS
     if (!s_gte_replay_sandbox) s_gte_exec_count++;
     s_gte_caller_ra = cpu->gpr[31];   /* dome-locate probe: game fn that issued this projection */
@@ -1960,6 +2079,7 @@ extern "C" void gte_execute(CPUState* cpu, uint32_t cmd) {
 #endif
 
     gte_export_cpu_state(cpu, &gte);
+    if (intermediate) std::memcpy(cpu->gte_ctrl, original_transform, sizeof original_transform);
 
 #ifndef PSX_NO_DEBUG_TOOLS
     /* ND digit-rain: NdIntroSiblingFaceLoop (jal 0x80069CC4; $ra stays 69C3C..
