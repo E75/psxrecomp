@@ -13865,10 +13865,6 @@ int main(int argc, char** argv) {
             g_video_aspect_num = gc.runtime.video_aspect_num;
             g_video_aspect_den = gc.runtime.video_aspect_den;
             g_fov_scale = psx_projection_scale_load_config(game_config_path);
-            if (const char* fov_env = std::getenv("PSX_GTE_FOV_SCALE")) {
-                double value;
-                if (psx_projection_scale_parse(fov_env, &value)) g_fov_scale = value;
-            }
             g_low_latency_input = gc.runtime.video_low_latency_input ? 1 : 0;
             gl_renderer_set_texture_window_batching(
                 gc.runtime.video_texture_window_batching ? 1 : 0);
@@ -14304,6 +14300,19 @@ int main(int argc, char** argv) {
         if (us.has_scanlines)      g_video_scanlines = us.scanlines;
         if (us.has_scanline_strength)
             g_video_scanline_strength = (float)us.scanline_strength;
+        /* fov_scale precedence: game.toml < settings.toml < PSX_GTE_FOV_SCALE.
+         * Bad values warn and leave the lower layer's value in place. */
+        if (us.has_fov_scale) {
+            if (psx_projection_scale_valid(us.fov_scale)) g_fov_scale = us.fov_scale;
+            else std::fprintf(stderr, "psxrecomp: settings.toml [video] fov_scale %g ignored "
+                                      "(must be > 0 and <= 8)\n", us.fov_scale);
+        }
+        if (const char* fov_env = std::getenv("PSX_GTE_FOV_SCALE")) {
+            double value;
+            if (psx_projection_scale_parse(fov_env, &value)) g_fov_scale = value;
+            else std::fprintf(stderr, "psxrecomp: PSX_GTE_FOV_SCALE=\"%s\" ignored "
+                                      "(must be a number > 0 and <= 8)\n", fov_env);
+        }
         if (us.has_auto_skip_fmv)  g_auto_skip_fmv   = us.auto_skip_fmv ? 1 : 0;
         /* turbo_loads is deliberately NOT restored from settings.toml. It is a
          * write-only latch: the launcher stopped drawing a Turbo loads row when

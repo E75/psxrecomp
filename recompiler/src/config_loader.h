@@ -1356,6 +1356,9 @@ struct UserSettings {
     // 0..1; the launcher ABI carries it as an integer percent.
     bool has_scanlines         = false; bool   scanlines         = false;
     bool has_scanline_strength = false; double scanline_strength = 0.5;
+    // [video] fov_scale: GTE projection-distance multiplier (1.0 = faithful).
+    // Stored raw (int or float TOML); the runtime range-checks and warns.
+    bool has_fov_scale = false; double fov_scale = 1.0;
     bool has_auto_skip_fmv  = false; bool auto_skip_fmv  = false; // skip FMVs
     // [video] turbo_loads: DEPRECATED AND IGNORED — the legacy home of the
     // generic Turbo loads switch, back when the launcher drew a row for it.
