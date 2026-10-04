@@ -20,6 +20,7 @@
 
 /* State accessors. All defined in other compilation units; declared here
  * to avoid pulling in heavy headers. */
+extern uint64_t gpu_get_gp0_count(void);
 extern uint64_t s_frame_count;                 /* debug_server.c */
 extern uint32_t g_debug_current_func_addr;     /* debug_server.c */
 extern uint32_t g_debug_last_store_pc;         /* debug_server.c */
@@ -151,6 +152,7 @@ typedef struct {
     uint64_t psx_cycle_count;
     uint64_t exc_reentry;
     uint64_t dirty_ram_insns;
+    uint64_t gpu_writes;
     uint32_t current_func;
     uint32_t last_store_pc;
     uint32_t i_stat;
@@ -755,6 +757,7 @@ static void heartbeat_write(void) {
     re->psx_cycle_count = cyc;
     re->exc_reentry     = exc_reentry;
     re->dirty_ram_insns = g_dirty_ram_insns_run;
+    re->gpu_writes = gpu_get_gp0_count();
     re->current_func    = cur_fn;
     re->last_store_pc   = last_store;
     re->i_stat          = i_stat;
@@ -801,14 +804,21 @@ static void heartbeat_write(void) {
         /* Logical-hang (kind D) signature: the executing function, the last
          * store PC, and the retired dirty-RAM instruction count are all
          * unchanged across the whole window. Requiring all three pinned makes
-         * this specific to a guest spin loop — a legitimate long native
+         * a candidate guest spin loop — a legitimate long native
          * compute would still move last_store_pc, and any interpreted/overlay
-         * work would advance dirty_insns. Checked only when frames are
+         * work would advance dirty_insns. New GP0 submissions also disprove
+         * this signature: VSync wait endpoints routinely share both PCs while
+         * the game submits new drawing work between them. Checked when frames are
          * advancing healthily (kinds 1/2/3 take precedence below). */
-        int logic_pinned =
-            (s_ring[newest_idx].current_func    == s_ring[oldest_idx].current_func) &&
-            (s_ring[newest_idx].last_store_pc   == s_ring[oldest_idx].last_store_pc) &&
-            (s_ring[newest_idx].dirty_ram_insns == s_ring[oldest_idx].dirty_ram_insns);
+        FreezeGuestProgress oldest = {
+            s_ring[oldest_idx].current_func, s_ring[oldest_idx].last_store_pc,
+            s_ring[oldest_idx].dirty_ram_insns, s_ring[oldest_idx].gpu_writes
+        };
+        FreezeGuestProgress newest = {
+            s_ring[newest_idx].current_func, s_ring[newest_idx].last_store_pc,
+            s_ring[newest_idx].dirty_ram_insns, s_ring[newest_idx].gpu_writes
+        };
+        int logic_pinned = freeze_guest_progress_pinned(oldest, newest);
 
         if (frame_delta == 0)
             wedge_kind = 1;

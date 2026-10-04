@@ -24,6 +24,23 @@ static void observe_healthy(FreezeDumpPolicy *policy, uint32_t ticks) {
 }
 
 int main(void) {
+    /* Repro: native-rendered gameplay repeatedly samples the same VSync wait
+       with no interpreted instructions, but submits new GPU packets. */
+    FreezeGuestProgress waiting = {0x00000F40u, 0x8002E6CCu, 0, 1000};
+    FreezeGuestProgress drawing = waiting;
+    drawing.gpu_writes += 2000;
+    EXPECT_EQ(freeze_guest_progress_pinned(waiting, drawing), 0);
+    EXPECT_EQ(freeze_guest_progress_pinned(waiting, waiting), 1);
+    drawing = waiting; drawing.function_pc++;
+    EXPECT_EQ(freeze_guest_progress_pinned(waiting, drawing), 0);
+    drawing = waiting; drawing.store_pc++;
+    EXPECT_EQ(freeze_guest_progress_pinned(waiting, drawing), 0);
+    drawing = waiting; drawing.interpreted_insns++;
+    EXPECT_EQ(freeze_guest_progress_pinned(waiting, drawing), 0);
+    /* Restore/reset must count as a changed observation, not unsigned stasis. */
+    drawing = waiting; drawing.gpu_writes = 0;
+    EXPECT_EQ(freeze_guest_progress_pinned(waiting, drawing), 0);
+
     FreezeDumpPolicy policy = {0};
 
     /* Authorization does not consume a slot until the file reaches disk. */

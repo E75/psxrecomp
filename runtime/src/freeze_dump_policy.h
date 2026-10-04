@@ -29,6 +29,24 @@ typedef struct FreezeDumpPolicy {
     int in_wedge;
 } FreezeDumpPolicy;
 
+/* A repeated poll-site sample is not a spin freeze while new GPU command
+ * submissions advance. In particular, a healthy VSync wait can occupy the
+ * same function/store PCs at both ends of the watchdog window. */
+typedef struct FreezeGuestProgress {
+    uint32_t function_pc;
+    uint32_t store_pc;
+    uint64_t interpreted_insns;
+    uint64_t gpu_writes;
+} FreezeGuestProgress;
+
+static inline int freeze_guest_progress_pinned(FreezeGuestProgress before,
+                                              FreezeGuestProgress after) {
+    return before.function_pc == after.function_pc &&
+           before.store_pc == after.store_pc &&
+           before.interpreted_insns == after.interpreted_insns &&
+           before.gpu_writes == after.gpu_writes;
+}
+
 /* Observe one watchdog sample. Returns nonzero when the caller must write an
  * automatic full dump. A new event requires a sustained healthy interval.
  * Fatal state bypasses this automatic policy and does not change its budget. */
