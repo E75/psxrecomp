@@ -4174,6 +4174,7 @@ static int make_fbo(GLuint *out_fbo, GLuint color_tex, GLuint stencil_rb) {
     s_last_fbo_status = st;
     p_glBindFramebuffer(PSXGL_FRAMEBUFFER, 0);
     if (st != PSXGL_FRAMEBUFFER_COMPLETE) {
+        fprintf(stdout, "psxrecomp: GL FBO incomplete (0x%X)\n", st);
         return 0;
     }
     return 1;
