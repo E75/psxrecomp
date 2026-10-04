@@ -1,5 +1,3 @@
-#include "psx_openxr.h"
-#include "mod_controller_source.h"
 /*
  * debug_server.c -- TCP debug server for PSX recomp v4
  *
@@ -28,6 +26,8 @@
 #include "code_provider.h"
 #include "overlay_backend.h"
 #include "cpu_state.h"
+#include "psx_openxr.h"
+#include "mod_controller_source.h"
 #include "pgxp.h"
 #include "dma.h"
 #include "gpu.h"
