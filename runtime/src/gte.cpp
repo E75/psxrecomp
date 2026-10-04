@@ -240,7 +240,9 @@ static uint32_t s_geom_miss_ambig = 0;   /* recorded, but not unambiguously    *
 static uint32_t s_speculative_depth = 0;
 static int s_speculative_timeline_invalidated = 0;
 
+static void gte_nclip_precision_invalidate();
 static void gte_geom_generation_advance(void) {
+    gte_nclip_precision_invalidate();
     if (++s_geom_generation == 0) {
         if (s_geom_cache)
             std::memset(s_geom_cache, 0, GEOM_CACHE_SIZE * sizeof(GeomVertex));
@@ -1006,6 +1008,19 @@ void gte_rtps_internal(GTEState* gte, int16_t* V, bool setMac0, uint32_t instr) 
             }
         }
         pgxp_gte_push_sxy(px16, py16, gte->SZ[3], (uint32_t)gte->SXY[2]);
+        if (pgxp_projection_tracking() && shift == 12 && !lm) {
+            const double z = (double)(mac3 >> 12);
+            double hx = (double)gte->MAC1 * gte->H;
+            if (do_squash) hx = hx * s_ws_xnum / s_ws_xden;
+            else if (s_ws_dome_on && s_ws_dome_num != s_ws_dome_den &&
+                     !gpu_ws_present_native_43() && gte->SZ[3] >= s_ws_far_threshold)
+                hx = hx * s_ws_dome_num / s_ws_dome_den;
+            PGXPProjection projection = {
+                (float)(gte->OFX / 65536.0 * z + hx),
+                (float)(gte->OFY / 65536.0 * z + (double)gte->MAC2 * gte->H),
+                (float)z, (float)gte->H / 2.0f};
+            pgxp_gte_set_projection(&projection);
+        }
     }
     geom_note((uint32_t)gte->SXY[2], sx16, sy16);
 
@@ -1045,6 +1060,15 @@ static int8_t s_nclip_last_precise_sign = 0;
 static bool s_nclip_last_precise_valid = false;
 static bool s_nclip_last_horizontal_saturated = false;
 static uint32_t s_nclip_last_generation;
+static int32_t s_nclip_previous_native;
+static int8_t s_nclip_previous_precise_sign;
+static bool s_nclip_previous_precise_valid;
+static bool s_nclip_previous_horizontal_saturated;
+static uint32_t s_nclip_previous_generation;
+static void gte_nclip_precision_invalidate() {
+    s_nclip_last_precise_valid = false;
+    s_nclip_previous_precise_valid = false;
+}
 extern "C" void gte_nclip_precise_stats(uint64_t *hits, uint64_t *fallbacks,
                                         uint64_t *disagreements) {
     if (hits) *hits = s_nclip_precise_hits;
@@ -1061,6 +1085,17 @@ extern "C" int gte_nclip_native_wide_sign(int32_t native_mac0, int* sign) {
         native_mac0 != s_nclip_last_native || s_nclip_last_generation != s_geom_generation ||
         s_gte_replay_sandbox || s_speculative_depth != 0) return 0;
     *sign = s_nclip_last_precise_sign;
+    return 1;
+}
+/* Some guarded quad consumers save two MAC0 values before branching. Their
+ * first branch must use the first command's provenance, even when both native
+ * results are equal. This is explicitly selected by the title, never searched
+ * as a fallback for arbitrary architectural MAC0 readers. */
+extern "C" int gte_nclip_native_wide_previous_sign(int32_t native_mac0, int* sign) {
+    if (!s_nclip_previous_precise_valid || !s_nclip_previous_horizontal_saturated ||
+        native_mac0 != s_nclip_previous_native || s_nclip_previous_generation != s_geom_generation ||
+        s_gte_replay_sandbox || s_speculative_depth != 0) return 0;
+    *sign = s_nclip_previous_precise_sign;
     return 1;
 }
 
@@ -1108,6 +1143,12 @@ void gte_nclip(GTEState* gte, uint32_t instr) {
             }
         }
     }
+    s_nclip_previous_native = s_nclip_last_native;
+    s_nclip_previous_precise_sign = s_nclip_last_precise_sign;
+    s_nclip_previous_precise_valid = s_nclip_last_precise_valid &&
+        !s_gte_replay_sandbox && s_speculative_depth == 0;
+    s_nclip_previous_horizontal_saturated = s_nclip_last_horizontal_saturated;
+    s_nclip_previous_generation = s_nclip_last_generation;
     s_nclip_last_native = out;
     s_nclip_last_precise_valid = false;
     s_nclip_last_horizontal_saturated = false;

@@ -52,6 +52,7 @@ enum {
     PGXP_F_VX = 1u << 0,   /* low half  (screen X) tracked                    */
     PGXP_F_VY = 1u << 1,   /* high half (screen Y) tracked                    */
     PGXP_F_VZ = 1u << 2,   /* projected depth rode along intact               */
+    PGXP_F_PROJECTION = 1u << 3,
     PGXP_F_VXY = PGXP_F_VX | PGXP_F_VY,
 };
 
@@ -61,6 +62,7 @@ struct PGXPValue {
     uint16_t flags;
     uint32_t value;      /* the guest word this shadow describes              */
     uint32_t gen;        /* valid iff == s_gen (O(1) invalidate-all)          */
+    PGXPProjection projection;
 };
 
 /* Shadow covers the host RAM backing so the opt-in 8 MB map tracks its high
@@ -70,7 +72,7 @@ struct PGXPValue {
 #define PGXP_REG_HI        32
 #define PGXP_REG_LO        33
 
-static PGXPValue *s_ram = nullptr;            /* lazily allocated, ~40 MB VA  */
+static PGXPValue *s_ram = nullptr;            /* lazily allocated, 72 MiB VA  */
 static PGXPValue  s_scratch[PGXP_SCRATCH_WORDS];
 static PGXPValue  s_gpr[34];                  /* 32 GPRs + HI + LO            */
 static PGXPValue  s_gte[32];                  /* GTE data registers           */
@@ -78,6 +80,7 @@ static PGXPValue  s_gte[32];                  /* GTE data registers           */
 static uint32_t s_gen = 1;
 static int      s_enabled = 0;
 static int      s_cpu_mode = 0;
+static int      s_projection_tracking = 0;
 static float    s_tolerance = 0.5f;   /* user-validated seam clamp (G1.10) */
 static int      s_position_fallback = 1;   /* G1.4 cache tier (G1.11 switch) */
 static int      s_preserve_projection = 0; /* exact-projection shadows (G1.11) */
@@ -134,6 +137,13 @@ extern "C" int pgxp_active(void) { return g_pgxp_active; }
 
 extern "C" void pgxp_set_cpu_mode(int enabled) { s_cpu_mode = enabled ? 1 : 0; }
 extern "C" int  pgxp_cpu_mode(void) { return s_cpu_mode; }
+
+extern "C" void pgxp_set_projection_tracking(int enabled) {
+    if (s_projection_tracking == !!enabled) return;
+    s_projection_tracking = !!enabled;
+    pgxp_invalidate_all();
+}
+extern "C" int pgxp_projection_tracking(void) { return s_projection_tracking; }
 
 extern "C" void  pgxp_set_tolerance(float pixels) { s_tolerance = pixels; }
 extern "C" float pgxp_tolerance(void) { return s_tolerance; }
@@ -340,6 +350,7 @@ static inline int pv_live(const PGXPValue *pv) {
 static inline void pv_validate(PGXPValue *pv, uint32_t actual) {
     if (pv->gen != s_gen) return;
     uint32_t diff = pv->value ^ actual;
+    if (diff) pv->flags &= (uint16_t)~PGXP_F_PROJECTION;
     if ((pv->flags & PGXP_F_VX) && (diff & 0x0000FFFFu))
         pv->flags &= (uint16_t)~(PGXP_F_VX | PGXP_F_VZ);
     if ((pv->flags & PGXP_F_VY) && (diff & 0xFFFF0000u))
@@ -448,7 +459,7 @@ extern "C" void psx_pgxp_store(struct CPUState *cpu, uint32_t instr,
          * half-write — the vertex it described no longer exists whole. */
         if (hi_half) dst->value = (dst->value & 0x0000FFFFu) | (half << 16);
         else         dst->value = (dst->value & 0xFFFF0000u) | half;
-        dst->flags &= (uint16_t)~((hi_half ? PGXP_F_VY : PGXP_F_VX) | PGXP_F_VZ);
+        dst->flags &= (uint16_t)~((hi_half ? PGXP_F_VY : PGXP_F_VX) | PGXP_F_VZ | PGXP_F_PROJECTION);
         dst->z = 0;
         if (src && src->gen == s_gen && (src->flags & PGXP_F_VX) &&
             ((src->value ^ value) & 0xFFFFu) == 0) {
@@ -462,7 +473,7 @@ extern "C" void psx_pgxp_store(struct CPUState *cpu, uint32_t instr,
         uint32_t shift = (addr & 3u) * 8u;
         dst->value = (dst->value & ~(0xFFu << shift)) |
                      ((value & 0xFFu) << shift);
-        dst->flags &= (uint16_t)~(((addr & 2u) ? PGXP_F_VY : PGXP_F_VX) | PGXP_F_VZ);
+        dst->flags &= (uint16_t)~(((addr & 2u) ? PGXP_F_VY : PGXP_F_VX) | PGXP_F_VZ | PGXP_F_PROJECTION);
         dst->z = 0;
         return;
     }
@@ -872,6 +883,26 @@ extern "C" void pgxp_gte_push_sxy(int32_t x16, int32_t y16, uint16_t sz3,
 
 extern "C" int pgxp_get_gte_sxy(uint32_t index, int32_t *x16, int32_t *y16) {
     return pgxp_get_gte_sxy_checked(index, 0u, 0, x16, y16);
+}
+
+extern "C" void pgxp_gte_set_projection(const PGXPProjection *projection) {
+    if (!g_pgxp_active || !s_projection_tracking || !projection) return;
+    s_gte[14].projection = *projection;
+    s_gte[14].flags |= PGXP_F_PROJECTION;
+    s_gte[15] = s_gte[14];
+}
+static int projection_read(const PGXPValue *pv, uint32_t packed, PGXPProjection *out) {
+    const uint16_t flags = PGXP_F_VXY | PGXP_F_PROJECTION;
+    if (!s_enabled || !s_projection_tracking || !pv || pv->gen != s_gen || pv->value != packed ||
+        (pv->flags & flags) != flags) return 0;
+    if (out) *out = pv->projection;
+    return 1;
+}
+extern "C" int pgxp_load_projection(uint32_t addr, uint32_t packed, PGXPProjection *out) {
+    return projection_read(pgxp_ptr(addr), packed, out);
+}
+extern "C" int pgxp_get_gte_projection(uint32_t index, uint32_t packed, PGXPProjection *out) {
+    return index < 4 ? projection_read(&s_gte[12+index], packed, out) : 0;
 }
 
 extern "C" int pgxp_get_gte_sxy_checked(uint32_t index, uint32_t expect,
