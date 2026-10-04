@@ -8154,7 +8154,7 @@ static void handle_openxr_stats(int id, const char *json) {
              "\"gl_version\":%llu,\"min_gl_version\":%llu,\"max_gl_version\":%llu,"
              "\"submitted_layer\":%u,\"quad_submitted\":%llu,"
              "\"submitted_source\":%u,\"native_submitted\":%llu,\"submitted_native_frame\":%llu,"
-             "\"quad_distance_m\":%.6f,\"quad_width_m\":%.6f,\"quad_height_m\":%.6f}", id,s.compiled,s.enabled,
+             "\"quad_distance_m\":%.6f,\"quad_width_m\":%.6f,\"quad_height_m\":%.6f,\"losses\":%llu}", id,s.compiled,s.enabled,
              s.initialized,s.running,s.state,s.tracking,s.frame_open,s.result,
              s.stage?s.stage:"off",s.runtime,s.last_failure?s.last_failure:"",s.last_failure_result,
              (unsigned long long)s.view_flags,(unsigned long long)s.waits,
@@ -8164,7 +8164,7 @@ static void handle_openxr_stats(int id, const char *json) {
              (unsigned long long)s.max_gl_version,s.submitted_layer,
              (unsigned long long)s.quad_submitted,s.submitted_source,
              (unsigned long long)s.native_submitted,(unsigned long long)s.submitted_native_frame,
-             s.quad_distance_m,s.quad_width_m,s.quad_height_m);
+             s.quad_distance_m,s.quad_width_m,s.quad_height_m,(unsigned long long)s.losses);
 }
 static void handle_openxr_views(int id,const char *json) {
     PSXOpenXRStats s; (void)json;psx_openxr_stats(&s);

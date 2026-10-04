@@ -23,6 +23,7 @@ typedef struct PSXOpenXRStats {
     double quad_distance_m, quad_width_m, quad_height_m; /* last submitted quad */
     uint32_t submitted_source; /* 1 fresh stereo pair, 2 native presentation */
     uint64_t native_submitted, submitted_native_frame;
+    uint64_t losses; /* session/instance/swapchain losses torn down and retried */
 } PSXOpenXRStats;
 int psx_openxr_enable(int enabled);
 int psx_openxr_begin(int width,int height,double units);

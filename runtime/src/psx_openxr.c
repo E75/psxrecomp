@@ -1,5 +1,11 @@
 /* Opt-in Win32 OpenXR lifecycle. No guest state, console diagnostics or timing
- * phases: located poses and projection submission belong to one host frame. */
+ * phases: located poses and projection submission belong to one host frame.
+ *
+ * THREADING: every entry point runs on the emulation/main thread that owns the
+ * GL context. Plugin hooks (psx_mod_openxr_*), the GL present path
+ * (gl_swap_with_osd) and TCP handlers (executed at the debug_server_poll safe
+ * point; the debug I/O thread only queues requests) are all that thread, and
+ * no other thread creates a GL context or touches XR. Hence no locking. */
 #include "psx_openxr.h"
 #include "vr_pose_math.h"
 #include <string.h>
@@ -100,9 +106,22 @@ static XrView s_views[2];
 static PSXModRenderView s_render[2];
 static double s_oq[4],s_op[3];
 static XrTime s_time;
+/* Loss handling. A lost session/instance (or an unusable swapchain) is only
+ * flagged where it is detected; service_loss() tears the stack down at the end
+ * of the public call so no caller loses handles mid-sequence. */
+#define XR_RETRY_MS 3000u
+static int s_reset_pending,s_exit_pending,s_recovering;
+static const char *s_reset_stage;
+static uint64_t s_retry_ms;
 static int check(XrResult r,const char *stage) {
     s_stats.result=r;
-    if(XR_FAILED(r)) { s_stats.stage=s_stats.last_failure=stage;s_stats.last_failure_result=r;s_stats.failures++;return 0; }
+    if(XR_FAILED(r)) {
+        s_stats.stage=s_stats.last_failure=stage;s_stats.last_failure_result=r;s_stats.failures++;
+        if(r==XR_ERROR_SESSION_LOST || r==XR_ERROR_INSTANCE_LOST) {
+            s_reset_pending=1;s_reset_stage=r==XR_ERROR_SESSION_LOST?"session_lost":"instance_lost";
+        }
+        return 0;
+    }
     return 1;
 }
 static int input_initialize(void) {
@@ -257,23 +276,37 @@ static int events(void) {
             } else if(e->state==XR_SESSION_STATE_STOPPING) {
                 if(!check(xrEndSession(s_session),"end_session"))return 0;
                 s_stats.running=0;
-            } else if(e->state==XR_SESSION_STATE_LOSS_PENDING || e->state==XR_SESSION_STATE_EXITING) {
-                s_stats.enabled=0;s_stats.running=0;s_stats.stage="session_exit";return 0;
+            } else if(e->state==XR_SESSION_STATE_LOSS_PENDING) {
+                s_reset_pending=1;s_reset_stage="session_loss";return 0;
+            } else if(e->state==XR_SESSION_STATE_EXITING) {
+                s_exit_pending=1;return 0;
             }
         } else if(event.type==XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
             /* Recenter from the next valid located pair. */
             const XrEventDataReferenceSpaceChangePending *e=(const void*)&event;
             if(e->referenceSpaceType==XR_REFERENCE_SPACE_TYPE_LOCAL) s_origin_reset_time=e->changeTime;
         } else if(event.type==XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING) {
-            s_stats.enabled=0;s_stats.running=0;s_stats.stage="instance_loss";return 0;
+            s_reset_pending=1;s_reset_stage="instance_loss";return 0;
         }
     }
     return 1;
 }
-static void hands_locate(void) {
+/* Sync the gameplay action set. Needed by both the input poll and hand
+ * location (a pose action is only active after a sync), so a plugin that only
+ * calls psx_mod_openxr_begin still gets hands. True only for XR_SUCCESS: the
+ * session is focused and the actions are current. */
+static int sync_actions(void) {
+    XrActiveActionSet active={s_actions,XR_NULL_PATH};
+    XrActionsSyncInfo sync={XR_TYPE_ACTIONS_SYNC_INFO};sync.countActiveActionSets=1;sync.activeActionSets=&active;
+    XrResult r=xrSyncActions(s_session,&sync);
+    return check(r,"sync_actions") && r==XR_SUCCESS;
+}
+/* Focus for hands comes from the session state events and a successful action
+ * sync in this call, never from whether the plugin polled psx_mod_openxr_input. */
+static void hands_locate(int focused) {
     PSXModOpenXRHands current=s_hands;
     current.predicted_time=(uint64_t)s_time;
-    current.focused=s_stats.state==XR_SESSION_STATE_FOCUSED && s_input.focused;
+    current.focused=focused && s_stats.state==XR_SESSION_STATE_FOCUSED;
     current.origin_valid=s_origin_valid;
     memcpy(current.origin_position_m,s_op,sizeof s_op);
     memcpy(current.origin_orientation_xyzw,s_oq,sizeof s_oq);
@@ -299,6 +332,48 @@ static void hands_locate(void) {
         memcpy(v->orientation_xyzw,q,sizeof q);memcpy(v->position_m,p,sizeof p);
     }
     s_hands=current;s_hands_sample_ms=psx_host_mono_ms();
+}
+/* Destroy every XR object (children before parents). Safe on a partially
+ * initialised stack and on a lost session: destroy calls need no live session. */
+static void xr_destroy(void) {
+    for(int eye=0;eye<2;eye++) {
+        for(int k=0;k<2;k++) {
+            if(s_pose_space[eye][k])xrDestroySpace(s_pose_space[eye][k]);
+            s_pose_space[eye][k]=XR_NULL_HANDLE;
+        }
+        if(s_chain[eye])xrDestroySwapchain(s_chain[eye]);
+        s_chain[eye]=XR_NULL_HANDLE;free(s_images[eye]);s_images[eye]=NULL;s_count[eye]=0;
+    }
+    if(s_space)xrDestroySpace(s_space);s_space=XR_NULL_HANDLE;
+    if(s_view_space)xrDestroySpace(s_view_space);s_view_space=XR_NULL_HANDLE;
+    if(s_session)xrDestroySession(s_session);s_session=XR_NULL_HANDLE;
+    if(s_actions)xrDestroyActionSet(s_actions);s_actions=XR_NULL_HANDLE;s_stick=XR_NULL_HANDLE;
+    s_trigger=s_squeeze=XR_NULL_HANDLE;memset(s_click,0,sizeof s_click);
+    memset(s_pose_action,0,sizeof s_pose_action);
+    if(s_instance)xrDestroyInstance(s_instance);s_instance=XR_NULL_HANDLE;
+    s_origin_valid=0;s_origin_reset_time=0;s_stats.state=0;
+    s_stats.initialized=s_stats.running=s_stats.tracking=s_stats.frame_open=0;
+}
+/* Act on a flagged loss. A lost session/instance or an unusable swapchain tears
+ * everything down so the caller falls back to the flat present, then keeps XR
+ * enabled and re-initialises after XR_RETRY_MS. EXITING (the user closed the
+ * headset app) tears down and leaves XR disabled until an explicit enable.
+ * Returns 1 if it tore the stack down. Call only at the end of a public entry. */
+static int service_loss(void) {
+    if(!s_reset_pending && !s_exit_pending)return 0;
+    const int exiting=s_exit_pending && !s_reset_pending;
+    xr_destroy(); /* a lost session cannot end its frame; xr_destroy clears frame_open */
+    memset(&s_input,0,sizeof s_input);s_input.struct_size=sizeof s_input;
+    hands_clear();
+    s_quad_distance=s_quad_width=s_quad_height=0;
+    if(exiting) {
+        s_stats.enabled=0;s_stats.stage="session_exit";s_recovering=0;s_retry_ms=0;
+    } else {
+        s_stats.losses++;s_stats.stage=s_reset_stage?s_reset_stage:"lost";
+        s_recovering=1;s_retry_ms=psx_host_mono_ms()+XR_RETRY_MS;
+    }
+    s_reset_pending=s_exit_pending=0;s_reset_stage=NULL;
+    return 1;
 }
 #endif
 int psx_openxr_hands(PSXModOpenXRHands *out) {
@@ -332,22 +407,8 @@ void psx_openxr_recenter(void) {
 void psx_openxr_shutdown(void) {
 #if defined(PSX_OPENXR)
     if(s_stats.frame_open)psx_openxr_end(0,NULL);
-    for(int eye=0;eye<2;eye++) {
-        for(int k=0;k<2;k++) {
-            if(s_pose_space[eye][k])xrDestroySpace(s_pose_space[eye][k]);
-            s_pose_space[eye][k]=XR_NULL_HANDLE;
-        }
-        if(s_chain[eye])xrDestroySwapchain(s_chain[eye]);
-        s_chain[eye]=XR_NULL_HANDLE;free(s_images[eye]);s_images[eye]=NULL;s_count[eye]=0;
-    }
-    if(s_space)xrDestroySpace(s_space);s_space=XR_NULL_HANDLE;
-    if(s_view_space)xrDestroySpace(s_view_space);s_view_space=XR_NULL_HANDLE;
-    if(s_session)xrDestroySession(s_session);s_session=XR_NULL_HANDLE;
-    if(s_actions)xrDestroyActionSet(s_actions);s_actions=XR_NULL_HANDLE;s_stick=XR_NULL_HANDLE;
-    s_trigger=s_squeeze=XR_NULL_HANDLE;memset(s_click,0,sizeof s_click);
-    memset(s_pose_action,0,sizeof s_pose_action);
-    if(s_instance)xrDestroyInstance(s_instance);s_instance=XR_NULL_HANDLE;
-    s_origin_valid=0;s_origin_reset_time=0;s_stats.initialized=s_stats.running=s_stats.tracking=s_stats.frame_open=0;
+    xr_destroy();
+    s_reset_pending=s_exit_pending=s_recovering=0;s_reset_stage=NULL;s_retry_ms=0;
 #endif
     s_stats.enabled=0;
     s_quad_distance=s_quad_width=s_quad_height=0;
@@ -392,10 +453,7 @@ int psx_openxr_input(PSXModOpenXRInput *out) {
 #endif
 #if defined(PSX_OPENXR)
     if(s_stats.enabled && s_stats.initialized && !s_stats.frame_open && events() && s_stats.running) {
-        XrActiveActionSet active={s_actions,XR_NULL_PATH};
-        XrActionsSyncInfo sync={XR_TYPE_ACTIONS_SYNC_INFO};sync.countActiveActionSets=1;sync.activeActionSets=&active;
-        XrResult r=xrSyncActions(s_session,&sync);
-        if(check(r,"sync_actions") && r==XR_SUCCESS && s_stats.state==XR_SESSION_STATE_FOCUSED) {
+        if(sync_actions() && s_stats.state==XR_SESSION_STATE_FOCUSED) {
             PSXModOpenXRInput current=s_input;current.focused=1;int valid=1;
             for(int e=0;e<2;e++) {
                 XrActionStateGetInfo get={XR_TYPE_ACTION_STATE_GET_INFO};get.action=s_stick;get.subactionPath=s_hand[e];
@@ -430,6 +488,8 @@ int psx_openxr_input(PSXModOpenXRInput *out) {
             if(valid)s_input=current;
         }
     }
+    /* events()/sync may have flagged a loss: tear down, return neutral input. */
+    (void)service_loss();
 #endif
     if(!s_input.focused)hands_clear();
     *out=s_input;return 1; /* Always a fresh neutral sample when unavailable. */
@@ -441,17 +501,30 @@ int psx_openxr_begin(int width,int height,double units) {
     s_pair_id=s_pair_cycle=s_native_frame=0;s_source=0;
     hands_clear();
     s_stats.units_per_meter=units;
-    if(!s_stats.initialized && !initialize()) {
-        /* Retain the failed producer/result. Avoid repeated costly startup until
-         * explicit re-enable; a disconnected headset is an inspectable state. */
-        psx_openxr_shutdown();return 0;
+    if(!s_stats.initialized) {
+        if(s_retry_ms) { /* backing off after a loss: flat until the retry time */
+            if(psx_host_mono_ms()<s_retry_ms)return 0;
+            s_retry_ms=0;
+        }
+        if(!initialize()) {
+            if(s_recovering) {
+                /* The runtime/headset is still gone after a loss. Stay enabled,
+                 * release the partial stack and try again later; the failure
+                 * stays inspectable through the stats. */
+                xr_destroy();s_retry_ms=psx_host_mono_ms()+XR_RETRY_MS;return 0;
+            }
+            /* Retain the failed producer/result. Avoid repeated costly startup until
+             * explicit re-enable; a disconnected headset is an inspectable state. */
+            psx_openxr_shutdown();return 0;
+        }
+        s_recovering=0;
     }
-    if(!events() || !s_stats.running)return 0;
+    if(!events() || !s_stats.running){(void)service_loss();return 0;}
     XrFrameWaitInfo wait={XR_TYPE_FRAME_WAIT_INFO};XrFrameState fs={XR_TYPE_FRAME_STATE};
-    if(!check(xrWaitFrame(s_session,&wait,&fs),"wait_frame"))return 0;
+    if(!check(xrWaitFrame(s_session,&wait,&fs),"wait_frame")){(void)service_loss();return 0;}
     s_stats.waits++;s_time=fs.predictedDisplayTime;s_stats.predicted_time=(uint64_t)s_time;
     XrFrameBeginInfo begin={XR_TYPE_FRAME_BEGIN_INFO};
-    if(!check(xrBeginFrame(s_session,&begin),"begin_frame"))return 0;
+    if(!check(xrBeginFrame(s_session,&begin),"begin_frame")){(void)service_loss();return 0;}
     s_stats.frame_open=1;s_stats.tracking=0;
     if(!fs.shouldRender){psx_openxr_end(0,NULL);return 0;}
     XrViewLocateInfo loc={XR_TYPE_VIEW_LOCATE_INFO};loc.viewConfigurationType=XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
@@ -496,7 +569,7 @@ int psx_openxr_begin(int width,int height,double units) {
         s_stats.fov[i][2]=s_views[i].fov.angleUp;s_stats.fov[i][3]=s_views[i].fov.angleDown;
         s_stats.view[i]=s_render[i];
     }
-    hands_locate();
+    hands_locate(s_stats.state==XR_SESSION_STATE_FOCUSED && sync_actions());
     s_stats.tracking=1;s_stats.stage="located";return 1;
 #endif
     return 0;
@@ -528,17 +601,28 @@ int psx_openxr_end(int keep,PSXOpenXRCopy copy) {
         if(!check(xrAcquireSwapchainImage(s_chain[eye],&ai,&index),"acquire")){complete=0;break;}
         XrSwapchainImageWaitInfo wi={XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};wi.timeout=1000000000;
         XrResult wr=xrWaitSwapchainImage(s_chain[eye],&wi);
-        /* A timeout leaves ownership acquired. Wait before releasing; never
-         * release an image the runtime has not made writable. */
-        if(wr==XR_TIMEOUT_EXPIRED){wi.timeout=XR_INFINITE_DURATION;wr=xrWaitSwapchainImage(s_chain[eye],&wi);}
-        int writable=check(wr,"wait_image");
+        /* A timeout leaves ownership acquired: wait again (bounded) before
+         * releasing. Only XR_SUCCESS means the image is writable; the timeout
+         * code is a success code and must not be mistaken for it. */
+        if(wr==XR_TIMEOUT_EXPIRED){wi.timeout=2000000000;wr=xrWaitSwapchainImage(s_chain[eye],&wi);}
+        int writable=check(wr,"wait_image") && wr==XR_SUCCESS;
         if(writable) {
             if(index>=s_count[eye] || !copy(eye,s_images[eye][index].image,s_w[eye],s_h[eye])) {
                 s_stats.stage="copy_image";s_stats.failures++;complete=0;
             }
             XrSwapchainImageReleaseInfo ri={XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
             if(!check(xrReleaseSwapchainImage(s_chain[eye],&ri),"release"))complete=0;
-        } else complete=0;
+        } else {
+            /* Acquired but never writable. Release it best-effort so the acquire
+             * count cannot leak; a runtime that refuses (the wait never completed)
+             * leaves this swapchain unusable for the next acquire, so rebuild the
+             * whole stack rather than fail every later frame. */
+            XrSwapchainImageReleaseInfo ri={XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            (void)xrReleaseSwapchainImage(s_chain[eye],&ri);
+            if(wr==XR_TIMEOUT_EXPIRED){s_stats.stage=s_stats.last_failure="wait_image_timeout";s_stats.failures++;}
+            if(!s_reset_pending){s_reset_pending=1;s_reset_stage="swapchain_wait_failed";}
+            complete=0;
+        }
         pv[eye].pose=s_views[eye].pose;pv[eye].fov=s_views[eye].fov;
         pv[eye].subImage.swapchain=s_chain[eye];pv[eye].subImage.imageRect.extent.width=s_w[eye];
         pv[eye].subImage.imageRect.extent.height=s_h[eye];
@@ -566,6 +650,7 @@ int psx_openxr_end(int keep,PSXOpenXRCopy copy) {
     } else s_stats.empty++;
     if(ok && complete)s_stats.stage="submitted";
     s_quad_distance=s_quad_width=s_quad_height=0;
+    (void)service_loss(); /* after the frame is closed: lost session / bad swapchain */
     return ok && complete;
 #else
     return 0;
