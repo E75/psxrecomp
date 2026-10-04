@@ -6,6 +6,11 @@ from pathlib import Path
 def main():
     source = (Path(__file__).resolve().parents[1] /
               'src/dirty_ram_interp.c').read_text(encoding='utf-8')
+    fetched = source[source.index('static int exec_one_fetched(CPUState *cpu, uint32_t pc, uint32_t insn,\n                            uint32_t *next_pc_out) {'):]
+    fetched = fetched[:fetched.index('const uint32_t ld_op')]
+    assert fetched.count('psx_mod_instruction(cpu, pc, insn)') == 1
+    assert fetched.index('if (s_ld_pend_armed') < fetched.index('psx_mod_instruction(cpu, pc, insn)')
+    assert 'if (g_psx_mod_instruction_hooks) psx_mod_instruction(cpu, pc, insn);' in fetched
     start = source.index('static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_addr) {')
     source = source[start:]
     static_dispatch = source[source.index('/* B-2: statically-compiled'):]

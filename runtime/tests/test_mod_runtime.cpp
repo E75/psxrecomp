@@ -76,6 +76,8 @@ extern "C" uint32_t psx_mod_gpu_dma_memory_alloc(uint32_t, uint32_t) {
     return 0;
 }
 extern "C" void psx_ram_reset_size_request(void) {}
+extern "C" void psx_projection_reset_session(void) {}
+extern "C" void gpu_ws_set_native_scene_predicate(int (*)(void)) {}
 extern "C" int psx_ws_x_margin(void) { return 0; }
 
 /* Stand-in for the GPU's display geometry. psx_mod_display_width/height must
@@ -93,9 +95,15 @@ extern "C" int fntrace_is_game_started(void) { return 1; }
 extern "C" void gpu_ws_tag_hud_primitive(uint32_t, int) {}
 extern "C" void gpu_ws_tag_world_primitive(uint32_t, int) {}
 extern "C" void gpu_ws_set_adaptive_backdrop_preload(int) {}
+extern "C" int gpu_ws_configured_x_reveal(void) { return 0; }
+extern "C" void gpu_ws_tag_hud_prim(uint32_t, int) {}
+extern "C" void gpu_ws_tag_screen_mask_quad(uint32_t) {}
+extern "C" void gpu_ws_tag_radial_screen_mask_quad(uint32_t, float) {}
 
+static CPUState* interrupted_entry_cpu;
 static void test_vblank_plugin(void) {
     plugin_calls++;
+    if (interrupted_entry_cpu && psx_mod_finish_function(interrupted_entry_cpu)) failures++;
 }
 
 /* Function-entry hooks: one owned by the plan's active plugin, one by a
@@ -104,9 +112,32 @@ static int active_entry_hits;
 static int disabled_entry_hits;
 static int unselected_entry_hits;
 static uint32_t active_entry_last;
-static void test_active_entry(CPUState*, uint32_t address) {
+static int entry_test_mode, nested_result;
+static uint32_t nested_pc;
+static void test_active_entry(CPUState* cpu, uint32_t address) {
     active_entry_hits++;
     active_entry_last = address;
+    if (entry_test_mode == 1) {
+        CPUState unrelated{};
+        if (psx_mod_finish_function(&unrelated) || !psx_mod_finish_function(cpu)) failures++;
+        cpu->gpr[2] = 0x12345678u;
+    } else if (entry_test_mode == 2 || entry_test_mode == 3) {
+        const int mode = entry_test_mode;
+        if (mode == 3 && !psx_mod_finish_function(cpu)) failures++;
+        CPUState nested{}; nested.gpr[31] = 0x80004000u;
+        entry_test_mode = mode == 2 ? 1 : 0;
+        nested_result = psx_mod_function_entry(&nested, address);
+        nested_pc = nested.pc;
+        entry_test_mode = mode;
+    } else if (entry_test_mode == 4) {
+        /* A native call made by a hook can cross a guest VBlank. Its
+         * callbacks must neither inherit nor discard the interrupted hook. */
+        interrupted_entry_cpu = cpu;
+        mod_runtime_on_vblank();
+        interrupted_entry_cpu = nullptr;
+        if (!psx_mod_finish_function(cpu)) failures++;
+        cpu->gpr[2] = 0x87654321u;
+    }
 }
 static void test_disabled_entry(CPUState*, uint32_t) { disabled_entry_hits++; }
 static void test_unselected_entry(CPUState*, uint32_t) { unselected_entry_hits++; }
@@ -127,6 +158,30 @@ static int test_active_filter(CPUState* cpu, uint32_t address) {
 static int test_inactive_filter(CPUState*, uint32_t) {
     ++inactive_filter_hits;
     return 1;
+}
+
+static int guest_function_hits;
+static int instruction_hits;
+static void test_instruction(CPUState* cpu, uint32_t) {
+    instruction_hits++;
+    cpu->gpr[5] = 0x80301008u;
+    if (psx_mod_finish_function(cpu)) failures++;
+}
+static void test_guest_function(CPUState* cpu, uint32_t) {
+    guest_function_hits++;
+    const uint32_t ra = cpu->gpr[31];
+    CPUState nested{};
+    nested.gpr[31] = 0x80007000u;
+    const int mode = entry_test_mode;
+    entry_test_mode = 1;
+    if (!psx_mod_function_entry(&nested, 0x80003000u) || nested.pc != nested.gpr[31]) failures++;
+    entry_test_mode = mode;
+    interrupted_entry_cpu = cpu;
+    mod_runtime_on_vblank();
+    interrupted_entry_cpu = nullptr;
+    if (!psx_mod_finish_function(cpu)) failures++;
+    cpu->gpr[2] = cpu->gpr[4] + 7u;
+    if (cpu->gpr[31] != ra) failures++;
 }
 
 static void test_activation_plugin(void) {
@@ -380,18 +435,52 @@ int main() {
               "runtime.unselected-entry", 0x80003000u, test_unselected_entry) == 1,
           "unselected function-entry hook must register");
     CPUState entry_cpu{};
+    check(psx_mod_register_instruction_plugin("runtime.test-vblank", 0x80003004u,
+              0x90A30014u, test_instruction), "register guarded instruction callback");
+    check(!psx_mod_register_instruction_plugin("runtime.test-vblank", 0xA0003004u,
+              0x90A30014u, test_instruction) &&
+          !psx_mod_register_instruction_plugin("runtime.other", 0x80003005u,
+              0x90A30014u, test_instruction), "reject aliased duplicate and unaligned sites");
+    psx_mod_write_word(0x80003004u, 0x90A30014u);
+    check(psx_mod_register_guest_function_plugin(
+              "runtime.test-vblank", 0x8FFF0000u, test_guest_function),
+          "trusted callback registers outside the hardware map");
+    check(!psx_mod_register_guest_function_plugin(
+              "runtime.other", 0xAFFF0000u, test_guest_function) &&
+          !psx_mod_register_guest_function_plugin("runtime.other", 0x80003000u, test_guest_function) &&
+          !psx_mod_register_guest_function_plugin("runtime.other", 0x8FFF0001u, test_guest_function) &&
+          !psx_mod_register_guest_function_plugin("runtime.other", 0xCFFF0000u, test_guest_function),
+          "guest callbacks refuse alias collisions, game addresses, misalignment and KSEG2");
+    check(psx_mod_register_guest_function_plugin(
+              "runtime.unselected-entry", 0x8FFF0004u, test_unselected_entry),
+          "unselected callback implementation can register");
     check(PSXRecompV4::mod_runtime_initialize(
               root, "SLUS-RUNTIME", 0x80002000, {}, &error),
           error.c_str());
     check(PSXRecompV4::mod_runtime_commit(cue_path, &error),
           "CUE and its data-track BIN must have the same mod target identity");
     /* Committed but not yet activated: no hook may run. */
+    psx_mod_instruction(&entry_cpu, 0x80003004u, 0x90A30014u);
+    check(instruction_hits == 0 && !g_psx_mod_instruction_hooks, "instruction hooks await activation");
+    check(!psx_mod_dispatch_guest_function(&entry_cpu, 0x8FFF0000u) &&
+              g_psx_mod_guest_functions == 0,
+          "committed guest functions remain unavailable until activation");
     psx_mod_function_entry(&entry_cpu, 0x80003000u);
     check(g_psx_mod_function_entry_hooks == 0 && active_entry_hits == 0,
           "function-entry hooks must not run before plugin activation");
     mod_runtime_activate_plugins();
     check(activation_calls == 1,
           "resolved trusted plugin must activate before runtime startup");
+    entry_cpu.pc = 0x80004000u;
+    psx_mod_instruction(&entry_cpu, 0x80003004u, 0x90A30014u);
+    psx_mod_instruction(&entry_cpu, 0xA0003004u, 0x90A30014u);
+    check(instruction_hits == 2 && entry_cpu.gpr[5] == 0x80301008u &&
+          entry_cpu.pc == 0x80004000u, "instruction aliases preserve control flow and edit registers");
+    psx_mod_instruction(&entry_cpu, 0x80003004u, 0x90A30015u);
+    psx_mod_write_word(0x80003004u, 0x90A30015u);
+    psx_mod_instruction(&entry_cpu, 0x80003004u, 0x90A30014u);
+    check(instruction_hits == 2, "fetched and live instruction guards reject changed code");
+    psx_mod_write_word(0x80003004u, 0x90A30014u);
     mod_runtime_on_vblank();
     check(plugin_calls == 1,
           "resolved trusted plugin must run on guest VBlank");
@@ -412,6 +501,11 @@ int main() {
           "hooks of plugins the plan does not activate must never run");
     /* A replaced plan drops every hook until its own activation. */
     check(PSXRecompV4::mod_runtime_clear_for_netplay(&error), error.c_str());
+    psx_mod_instruction(&entry_cpu, 0x80003004u, 0x90A30014u);
+    check(instruction_hits == 2 && !g_psx_mod_instruction_hooks, "clearing removes instruction hooks");
+    check(!psx_mod_dispatch_guest_function(&entry_cpu, 0x8FFF0000u) &&
+              g_psx_mod_guest_functions == 0,
+          "clearing the plan drops guest callback availability");
     psx_mod_function_entry(&entry_cpu, 0x80003000u);
     check(g_psx_mod_function_entry_hooks == 0 && active_entry_hits == 3,
           "clearing the plan must drop its function-entry hooks");
@@ -481,6 +575,45 @@ int main() {
           "clearing the active plan must also disarm return filters");
     check(PSXRecompV4::mod_runtime_commit(cue_path, &error), error.c_str());
     mod_runtime_activate_plugins();
+
+    entry_cpu.gpr[31] = 0x80005000u;
+    check(!psx_mod_finish_function(&entry_cpu) && !psx_mod_function_entry(nullptr, 0x80003000u),
+          "completion outside an entry callback or with no CPU is refused");
+    entry_test_mode = 1;
+    check(psx_mod_function_entry(&entry_cpu, 0x80003000u) == 1 &&
+              entry_cpu.pc == 0x80005000u && entry_cpu.gpr[2] == 0x12345678u,
+          "explicit completion returns handled and publishes guest return PC/results");
+    entry_test_mode = 2; entry_cpu.pc = 0;
+    check(!psx_mod_function_entry(&entry_cpu, 0x80003000u) && entry_cpu.pc == 0 &&
+              nested_result == 1 && nested_pc == 0x80004000u,
+          "inner completion cannot finish an ordinary outer callback");
+    entry_test_mode = 3;
+    check(psx_mod_function_entry(&entry_cpu, 0x80003000u) == 1 &&
+              entry_cpu.pc == 0x80005000u && nested_result == 0,
+          "outer completion survives a nested ordinary callback");
+    entry_test_mode = 4;
+    check(psx_mod_function_entry(&entry_cpu, 0x80003000u) == 1 &&
+              entry_cpu.pc == 0x80005000u && entry_cpu.gpr[2] == 0x87654321u,
+          "entry completion survives VBlank callbacks during a native call");
+    entry_test_mode = 0;
+
+    entry_cpu.gpr[4] = 35u;
+    const uint32_t guest_sp = entry_cpu.gpr[29];
+    check(g_psx_mod_guest_functions == 1 &&
+              psx_mod_dispatch_guest_function(&entry_cpu, 0x8FFF0000u) &&
+              entry_cpu.gpr[2] == 42u && entry_cpu.pc == 0x80005000u &&
+              entry_cpu.gpr[29] == guest_sp,
+          "active callback returns its result through normal guest PC/stack state");
+    check(psx_mod_dispatch_guest_function(&entry_cpu, 0x0FFF0000u) &&
+              psx_mod_dispatch_guest_function(&entry_cpu, 0xAFFF0000u) &&
+              guest_function_hits == 3,
+          "guest callback aliases retain nested entry and VBlank scope");
+    check(!psx_mod_dispatch_guest_function(&entry_cpu, 0x8FFF0004u) &&
+              !psx_mod_dispatch_guest_function(&entry_cpu, 0x8FFF0001u) &&
+              !psx_mod_dispatch_guest_function(&entry_cpu, 0xCFFF0000u) &&
+              !psx_mod_dispatch_guest_function(nullptr, 0x8FFF0000u) &&
+              unselected_entry_hits == 0,
+          "unselected, unknown, misaligned and invalid callback requests fall through");
 
     ram[0x1000] = 1; ram[0x1001] = 2; ram[0x1002] = 3; ram[0x1003] = 4;
     ram[0x1100] = 0; ram[0x1101] = 0;

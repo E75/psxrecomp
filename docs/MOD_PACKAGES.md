@@ -860,6 +860,50 @@ they are not copied into the package. Optional resources with no selected path
 are omitted from the committed plan. Required resources reject launch while the
 feature is enabled and unset.
 
+
+Format 8 adds engine-verified donor media to the same picker and state format:
+
+```toml
+[[resource]]
+feature = "arena"
+id = "donor-rom"
+label = "Source ROM"
+format = "n64-rom"
+file_patterns = "*.z64,*.v64,*.n64"
+required = true
+size = 8388608
+sha256 = "<64 lowercase hexadecimal digits from the canonical image>"
+```
+
+`size` and `sha256` must both be present. Verification runs only for enabled
+features. Missing required media, a removed selected file, an incorrect size,
+or a hash mismatch rejects the launch plan before plugin activation. Disabling
+the feature restores the stock launch; the selected path is preserved.
+
+Canonical identity domains:
+
+| `format` | Size and SHA-256 domain |
+|---|---|
+| `file` with identity fields | Exact file bytes, at most 512 MiB |
+| `n64-rom` | Big-endian `.z64` bytes; `.v64` halfword swaps and `.n64` word swaps normalize first; 64 bytes to 64 MiB, word aligned |
+| `psx-disc` | First data track's 2048-byte sector payloads, at most 512 MiB; CUE/BIN/ISO/CHD use the shared disc reader; audio tracks are excluded |
+
+For `psx-disc`, Mode 1 payloads start at raw-sector offset 16 and Mode 2
+payloads at 24. This domain retains the first 2048 bytes of Form 2 sectors;
+it is intended for asset data, and is not a full XA/CD-audio identity. Mixed-mode
+retail ISO headers can declare a volume size extending into audio tracks; the
+reader uses the actual first-track boundary from the TOC or single-track image
+length. An audio-first disc or a nonzero first-track start is rejected. Use a
+CUE for a raw image containing multiple tracks. Declared volume metadata must
+have matching byte orders and 2048-byte logical sectors.
+
+Verified resource fingerprints include format, canonical size and SHA-256,
+rather than the selected path, so moving identical media or changing N64 byte
+order does not change save compatibility. Donor bytes are never package files,
+and donor executable code is not dispatched by this API. N64 ZIPs must be
+extracted before selecting the ROM. Format 8 prevents older runtimes from
+silently accepting manifests whose identity checks they cannot enforce.
+
 `resolver = "builtin:<id>"` selects a resolver statically registered by the
 game. Format-5 plugin ids likewise select only statically registered
 implementations. Packages cannot load arbitrary native code or select
@@ -869,6 +913,23 @@ The installer accepts stored or DEFLATE-compressed ZIP entries, validates CRCs,
 rejects encrypted entries and unsafe or absolute paths, limits archives to 4096
 files and 256 MiB expanded size, stages extraction, validates the manifest, and
 publishes the version atomically.
+
+### Guarded instruction callbacks
+
+Trusted plugins can register
+`psx_mod_register_instruction_plugin(id, address, expected_word, callback)`.
+List native code locations in `[recompiler] mod_instruction_sites` and regenerate.
+Callbacks run immediately before the instruction; the registered full word,
+executing word and current RAM word must agree. Segment aliases share a site.
+Only active resolved plugins run, with their feature's resource context.
+The dirty-RAM backend uses the same checks, including nested delay slots.
+Overlay ABI v27 carries the forwarder; site metadata changes the codegen hash.
+
+Callbacks may change registers and data. They must preserve PC and must not
+re-enter guest execution, because pending branch/load state is live.
+`psx_mod_finish_function` is unavailable in this callback scope. Inactive plans
+do not change guest behavior. Function entry replacement remains the separate
+`psx_mod_register_function_entry_plugin` interface.
 
 ### Presentation bezel packages
 

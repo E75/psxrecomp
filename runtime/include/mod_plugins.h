@@ -27,6 +27,26 @@ int psx_mod_register_vblank_plugin(const char* id,
                                    PSXModVBlankCallback callback);
 int psx_mod_register_function_entry_plugin(
     const char* id, uint32_t address, PSXModFunctionEntryCallback callback);
+/* Mod-defined guest functions have no original machine-code body. Addresses
+ * must be aligned and in physical 0x0F000000..0x0FFFFFFF (an unused bus range),
+ * never hardware/BIOS/game text. Only statically linked code can register one;
+ * the active package plan owns its availability and resource context. Address
+ * aliases share one globally unique registration. The callback supplies the
+ * full function behavior; return publishes $ra through normal dispatch. */
+int psx_mod_register_guest_function_plugin(
+    const char* id, uint32_t address, PSXModFunctionEntryCallback callback);
+int psx_mod_dispatch_guest_function(struct CPUState* cpu, uint32_t address);
+extern uint32_t g_psx_mod_guest_functions;
+/* Run immediately before a configured instruction, including delay slots.
+ * The complete instruction word must match both registration and live RAM.
+ * Callbacks may update registers/data but cannot redirect PC, finish a guest
+ * function, or re-enter guest execution (pending load/branch state is live).
+ * Native emits opt in with [recompiler] mod_instruction_sites; dirty-RAM
+ * execution uses the same guarded table. Inactive plans are inert. */
+int psx_mod_register_instruction_plugin(const char* id, uint32_t address,
+                                         uint32_t expected, PSXModFunctionEntryCallback callback);
+void psx_mod_instruction(struct CPUState* cpu, uint32_t address, uint32_t instruction);
+extern uint32_t g_psx_mod_instruction_hooks;
 /* Called from generated functions listed by the game config and from every
  * interpreted entry, so the hook contract does not depend on the backend.
  * Hooks match by code address (segment bits ignored) and run only for plugins
@@ -34,9 +54,26 @@ int psx_mod_register_function_entry_plugin(
 int psx_mod_register_function_filter_plugin(
     const char* id, uint32_t address, PSXModFunctionFilterCallback callback);
 int psx_mod_function_entry(struct CPUState* cpu, uint32_t address);
+/* Complete a guest function from its trusted entry callback after supplying
+ * its full result. Valid only for that callback's CPU. Publishes pc=$ra and
+ * prevents the original body from executing. Nested callbacks have separate
+ * completion scopes; requests outside an entry callback return zero. */
+int psx_mod_finish_function(struct CPUState* cpu);
 /* Active function-entry hook count (0 = none). Hot callers test it before the
  * call, so a run without an active hook pays one load per interpreted entry. */
 extern uint32_t g_psx_mod_function_entry_hooks;
+
+/* Always-on named event counters for trusted plugins (observability, not
+ * logging): e.g. how often each guard in a hook rejected. `name` should be a
+ * string literal of the form "<plugin>.<event>"; up to 128 distinct names are
+ * kept, further names are counted in an overflow bucket. Emulation-thread only.
+ * TCP: {"cmd":"mod_counters"} lists every counter with its last frame. */
+void psx_mod_counter_add(const char* name, uint32_t delta);
+/* Presentation-only filtering: 0 nearest, 1 bilinear, 2 stable minification.
+ * Mode 2 uses a bounded palette-aware footprint for proven 3D polygons on
+ * OpenGL; untracked UI stays nearest. Other backends use bilinear. A session
+ * reset restores the player's configured filter. */
+void psx_mod_set_texture_filter(int mode);
 /* Entry callbacks can make nested guest calls while retaining host registers.
  * Save/load and rewind must wait until that host context has returned. */
 int psx_mod_function_entry_active(void);
@@ -227,6 +264,10 @@ int psx_mod_option_value(const char* package_id, const char* feature_id,
  */
 int psx_mod_current_resource_path(const char* resource_id,
                                   char* out, uint32_t out_size);
+/* Display aspects have no framework ceiling: the native-wide surfaces size
+ * themselves from the live width, and each title caps its own view at what
+ * it has validated (fixed ratio, or the adaptive maximum below). Requests
+ * must be at least native 4:3, with numerator and denominator in 1..99. */
 
 /*
  * Request a fixed host display aspect before renderer/window initialization.
@@ -372,6 +413,67 @@ enum {
     PSX_MOD_RENDER_PASS_BUSY = 6
 };
 uint32_t psx_mod_render_pass_status(void);
+
+/*
+ * When the game flips relative to the pass point. PENDING (default, reset at
+ * every session start): the pass rect is the one the next flip will show --
+ * the PsyQ VSync(0)-then-PutDispEnv loop, whose frame N is drawn and waits.
+ * SHOWN: the game flips each frame as soon as it is drawn (for example
+ * PutDispEnv in a VBlank callback armed by the DrawSync callback), so by the
+ * time frame N+1's logic is done frame N is already on screen. The pass rect
+ * is then that on-screen rect, and frame N's own image and its in-between
+ * images are shown from the game's next flip on: one game frame later than
+ * the game shows them, as a host interpolator with one frame of history
+ * would. Set it from activation, before the first plan.
+ */
+enum {
+    PSX_MOD_RENDER_PASS_FLIP_PENDING = 0,
+    PSX_MOD_RENDER_PASS_FLIP_SHOWN = 1
+};
+int psx_mod_set_render_pass_flip(uint32_t mode);
+
+/*
+ * The per-frame plumbing every frame-rate plugin repeats (render_pass_frame.c).
+ * Blending the game state itself: render_pass_motion.h.
+ *
+ * Activation: read a choice option holding "display" (follow the measured
+ * display refresh) or a frame rate, and select the FLIP source, HOLD blend,
+ * `flip_mode` and that rate. Returns 0 if any setting was refused.
+ */
+int psx_mod_activate_render_pass_rate(const char* package, const char* feature,
+                                      const char* option, uint32_t flip_mode);
+typedef struct PSXModRenderPassFrame {
+    uint32_t struct_size;          /* sizeof(PSXModRenderPassFrame) */
+    uint32_t period_vblanks;       /* VBlanks this game frame stays on screen */
+    uint32_t shown_after_vblanks;  /* VBlank presents before it is shown */
+    uint16_t x, y, w, h;           /* VRAM rect the passes draw */
+} PSXModRenderPassFrame;
+/*
+ * Plan this game frame's passes and run `fn` at each phase. While passes are
+ * unavailable for a lasting reason (BACKEND, DISABLED) the presenter is
+ * switched to a motion-adaptive crossfade, and back to HOLD once they return.
+ * Returns how many passes produced an image.
+ */
+uint32_t psx_mod_render_pass_frame(struct CPUState* cpu,
+                                   const PSXModRenderPassFrame* frame,
+                                   PSXModRenderPassFn fn, void* user);
+
+/*
+ * Replay part of an already-loaded guest function inside a render pass:
+ * run from start_pc with the CPU state given until control reaches stop_pc.
+ * Every PC in [start_pc, stop_pc) is interpreted from its RAM bytes, so the
+ * span may start anywhere in a compiled function, including just after one
+ * of its calls; calls the span makes run normally and return into it.
+ * A plugin uses this to redraw with the game's own frame code, branches and
+ * all, from registers it captured at start_pc during the real frame (an
+ * instruction hook), instead of re-implementing that code's call sequence.
+ * Returns 1 when stop_pc is reached; 0 when control leaves the range another
+ * way (a return or jump out, a nested span), after 1M interpreted
+ * instructions, or outside a pass. The pass restores the machine either way.
+ * Both PCs are 4-aligned, in one segment, start_pc < stop_pc.
+ */
+int psx_mod_run_guest_span(struct CPUState* cpu, uint32_t start_pc,
+                           uint32_t stop_pc);
 int psx_mod_set_auto_skip_fmv(int enabled);
 /*
  * Draw still artwork behind the game image in OpenGL letterbox/pillarbox

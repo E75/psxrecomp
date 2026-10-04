@@ -1328,7 +1328,7 @@ static const char *TEX_FS =
     "uniform int u_semipass;  /* 0=all texels, 1=STP=0 only, 2=STP=1 only */\n"
     "uniform int u_semimode;  /* PS1 blend mode; drives dual-source factors */\n"
     "uniform int u_maskset;   /* GP0(E6h) set-mask: OR bit15 into output */\n"
-    "uniform int u_filter;    /* 1 = bilinear */\n"
+    "uniform int u_filter;    /* 0 nearest, 1 bilinear, 2 stable */\n"
     "uniform float u_shift;\n"
     "int vram_at(int x, int y){\n"
     "  ivec2 p = ivec2(x & 1023, y & 511);\n"
@@ -1364,17 +1364,46 @@ static const char *TEX_FS =
     "vec3 col5(int raw){\n"
     "  return vec3(float(raw & 31), float((raw >> 5) & 31), float((raw >> 10) & 31)) / 31.0;\n"
     "}\n"
+    "int stable_texel(ivec2 p){\n"
+    "  /* Clamp before wrap, so a footprint left of u=0 cannot pick up u=255. */\n"
+    "  if ((u_twin.x | u_twin.y) == 0) p=clamp(p,v_limits.xy,v_limits.zw);\n"
+    "  return fetch_texel(p.x,p.y);\n"
+    "}\n"
+    "vec4 stable_bilinear(vec2 uv,int stp){\n"
+    "  vec2 p=uv-vec2(0.5), f=fract(p); ivec2 b=ivec2(floor(p));\n"
+    "  vec4 sum=vec4(0.0);\n"
+    "  for(int y=0;y<2;++y) for(int x=0;x<2;++x){\n"
+    "    int raw=stable_texel(b+ivec2(x,y));\n"
+    "    float w=(x==0 ? 1.0-f.x : f.x)*(y==0 ? 1.0-f.y : f.y);\n"
+    "    if(raw!=0 && ((raw>>15)&1)==stp) sum+=vec4(col5(raw),1.0)*w;\n"
+    "  }\n"
+    "  return sum;\n"
+    "}\n"
     "void main(){\n"
     "  int stp; vec3 rgb;\n"
     "  /* v_persp is 0 for every prim unless [video] perspective_texturing is on\n"
     "   * AND this prim's packet carried full GTE projection provenance, so the\n"
     "   * default is the PS1's affine (noperspective) mapping. */\n"
     "  vec2 uv = (v_persp != 0) ? v_uv_p : v_uv;\n"
+    "  vec2 dx=dFdx(uv), dy=dFdy(uv);\n"
     "  if (u_filter == 0) {\n"
     "    int raw = fetch_texel(int(floor(uv.x)), int(floor(uv.y)));\n"
     "    if (raw == 0) discard;\n"
     "    rgb = col5(raw);\n"
     "    stp = (raw >> 15) & 1;\n"
+    "  } else if (u_filter == 2) {\n"
+    "    uv+=vec2(u_shift); int raw=stable_texel(ivec2(floor(uv)));\n"
+    "    if(raw==0) discard; stp=(raw>>15)&1;\n"
+    "    float lx=length(dx), ly=length(dy);\n"
+    "    dx*=min(1.0,8.0/max(lx,0.001)); dy*=min(1.0,8.0/max(ly,0.001));\n"
+    "    int nx=clamp(int(ceil(lx)),1,4), ny=clamp(int(ceil(ly)),1,4);\n"
+    "    vec4 sum=vec4(0.0);\n"
+    "    for(int y=0;y<ny;++y) for(int x=0;x<nx;++x){\n"
+    "      vec2 offset=dx*((float(x)+0.5)/float(nx)-0.5)\n"
+    "                 +dy*((float(y)+0.5)/float(ny)-0.5);\n"
+    "      sum+=stable_bilinear(uv+offset,stp);\n"
+    "    }\n"
+    "    rgb=sum.a>0.00001 ? sum.rgb/sum.a : col5(raw);\n"
     "  } else {\n"
     "    /* Bilinear, Beetle-PSX formulation: the NEAREST texel is the base\n"
     "     * (cutout + STP authority), the neighbours lie toward the sub-texel\n"
@@ -3256,6 +3285,9 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
                                   const float *col, uint16_t texpage,
                                   uint16_t clut_x, uint16_t clut_y, int rawtex,
                                   int semi, const int *lim) {
+    // Mode 2 needs proven world geometry. Sprites, HUD and untracked packets
+    // retain point sampling; their cutout pixels must stay sharp.
+    const int filter=s_tex_filter==2 && (lim || (!s_pc_valid && !s_pq_valid)) ? 0 : s_tex_filter;
     int lim_buf[4];
     int uv_buf[6];
     if (!lim) {
@@ -3323,7 +3355,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
             else if (isolate) reason = 0;
             else if (batch_semi != s_tb_semi) reason = 1;
             else if (s_mask_set != s_tb_mask) reason = 2;
-            else if (s_tex_filter != s_tb_filter) reason = 3;
+            else if (filter != s_tb_filter) reason = 3;
             else if (gate != s_tb_gate) reason = 4;
             else if ((!s_twin_batching || s_mask_check) &&
                      (twx != s_tb_twin[0] || twy != s_tb_twin[1] ||
@@ -3335,7 +3367,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
         }
         if (s_tb_n + 3 > TEXBATCH_MAXV) { s_batch_reason[6]++; flush_tex_batch(); }
         if (s_tb_n == 0) {            /* opening a batch: capture its keyed state */
-            s_tb_semi = batch_semi; s_tb_mask = s_mask_set; s_tb_filter = s_tex_filter; s_tb_gate = gate;
+            s_tb_semi = batch_semi; s_tb_mask = s_mask_set; s_tb_filter = filter; s_tb_gate = gate;
             s_tb_bank_tex = s_selected_bank_tex;
             s_tb_bank_live_clut = s_selected_bank_live_clut;
             s_tb_twin[0] = twx; s_tb_twin[1] = twy; s_tb_twin[2] = tox; s_tb_twin[3] = toy;
@@ -3595,7 +3627,7 @@ static int  glb_scale(void) { return s_out_scale; }   /* real internal SSAA scal
                                                       native-wide CPU present path + gr_scale() callers
                                                       need the true scale — the FBO-direct present is
                                                       unaffected since it never reads gr_scale()) */
-static void glb_set_texture_filter(int b) { s_tex_filter = b ? 1 : 0; sw_set_texture_filter(b); }
+static void glb_set_texture_filter(int b) { s_tex_filter = b >= 0 && b <= 2 ? b : 0; sw_set_texture_filter(b != 0); }
 static int  glb_texture_filter(void) { return s_tex_filter; }
 
 static void glb_set_semi_transparency(int e, int m) { s_semi_en = e; s_semi_mode = m & 3; sw_set_semi_transparency(e, m); }
@@ -5810,8 +5842,10 @@ typedef struct PassGen {
     uint32_t n;                   /* images: [0] = the game's own */
     uint32_t phase[PASS_SLOTS];   /* Q16, ascending */
     uint32_t period;              /* guest VBlanks the frame stays on screen */
+    int      shown;               /* built for a frame already on screen */
     double   t_start, t_len;      /* host ticks, set on promotion */
 } PassGen;
+static int      s_pass_flip_shown = 0;
 static PassGen  s_pgen[2];
 /* Slot textures are made as slots fill: [0, s_pgen_alloc_n) exist, all at
  * s_pgen_alloc_w x h. A generation never fills past pass_slot_cap, so two
@@ -6224,6 +6258,7 @@ int gl_renderer_pass_begin(int x, int y, int w, int h, int open_gen,
         g->tex_w = tw; g->tex_h = th;
         g->source_path = wide ? GL_PRES_WIDE : GL_PRES_VRAM;
         g->period = period_vblanks ? period_vblanks : 1u;
+        g->shown = s_pass_flip_shown;
         pass_capture_into(s_pgen_tex[gi][0], g);   /* the game's own image */
         g->phase[0] = 0;
         g->n = 1;
@@ -6449,14 +6484,17 @@ static uint64_t s_present_ticks_accum_fwd(uint64_t add) {
     return s_present_ticks_accum;
 }
 
+void gl_renderer_pass_set_flip_shown(int shown) { s_pass_flip_shown = shown ? 1 : 0; }
+
 /* FLIP source saw a new frame: it is the flip a pending generation was built
- * for (same rect, same presented geometry) or a frame without passes. */
+ * for (render_pass_gen_flip_matches) or a frame without passes. */
 static void pass_note_new_frame(int origin_x, int origin_y, int source_path,
                                 int pw, int ph) {
     PassGen *pend = &s_pgen[1 - s_pgen_cur];
-    if (pend->valid && !pend->promoted && pend->x == origin_x &&
-        pend->y == origin_y && pend->source_path == source_path &&
-        pend->tex_w == pw && pend->tex_h == ph) {
+    if (pend->valid && !pend->promoted &&
+        render_pass_gen_flip_matches(pend->shown, pend->x, pend->y,
+                                     pend->source_path, pend->tex_w, pend->tex_h,
+                                     origin_x, origin_y, source_path, pw, ph)) {
         s_pgen_promote = 1;
     } else {
         s_pgen_promote = 0;
@@ -6512,6 +6550,19 @@ static void pass_apply_promotion(void) {
         g->promoted = 1;
         g->t_start = s_interp_schedule.frame_start;
         g->t_len = (double)g->period * sp;
+        /* Phase 0 is the image the game actually flipped to. The capture at
+         * the pass point is the same for a game that draws nothing more into
+         * the rect before its flip; a game that finishes the frame later (V8:2
+         * draws its HUD at the next submit, onto the rect about to be shown)
+         * would otherwise show its own frame without that last layer. The
+         * flip was matched to this generation's rect and presented geometry,
+         * and no guest code ran since it, so the rect holds that image. A
+         * FLIP_SHOWN generation's rect is not the one flipped to: it keeps
+         * the image taken when it opened. */
+        if (!g->shown) {
+            pass_capture_into(s_pgen_tex[s_pgen_cur][0], g);
+            p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, 0);
+        }
         s_pgen_promotions++;
         if (s_pdump_left > 0) pass_dump_generation(s_pgen_cur);
     }

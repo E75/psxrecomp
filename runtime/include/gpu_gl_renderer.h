@@ -66,6 +66,9 @@ uint32_t gl_renderer_pass_plan(uint32_t period_vblanks,
  * rect at the same scale. Returns 0 when refused (nothing changed). */
 int      gl_renderer_pass_begin(int x, int y, int w, int h, int open_gen,
                                 uint32_t period_vblanks, int reuse_backup);
+/* Generations opened from now on are for a frame already on screen (1) or
+ * for the next flip (0, default); render_pass_gen_flip_matches. */
+void     gl_renderer_pass_set_flip_shown(int shown);
 /* Capture the drawn rect at alpha_q16 (keep) and roll the rect back. */
 void     gl_renderer_pass_end(uint32_t alpha_q16, int keep);
 uint32_t gl_renderer_pass_leaks(void);

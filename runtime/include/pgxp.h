@@ -266,6 +266,12 @@ void pgxp_store_gte_reg(uint32_t addr, uint8_t reg);
 int pgxp_load_precise_word(uint32_t addr, uint32_t packed,
                            int32_t *x16, int32_t *y16, uint16_t *z);
 
+/* Render-pass checkpoint: journal every shadow a sandboxed pass mutates and
+ * put the shadows back when the sandbox restores the machine. Use through
+ * gte_precision_checkpoint_begin / _rollback (which also cover gte.cpp). */
+void pgxp_checkpoint_begin(void);
+void pgxp_checkpoint_rollback(void);
+
 /* --- test accessors (always compiled; trivial) ---------------------------- */
 
 /* index 0..3 selects the SXY0..SXYP register shadow (GTE data regs 12..15). */
