@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+extern "C" int psx_netplay_active(void);
 
 extern "C" uint32_t psx_read_word(uint32_t addr);
 extern "C" int gpu_ws_precise_nclip_enabled(void);
@@ -597,6 +598,7 @@ struct GteRtpRec {
     int16_t  RT[9];
     int32_t  TR[3];
     uint16_t H;  int32_t OFX, OFY;
+    uint16_t Hs;   /* H after fov_scale (== H when identity); SXY0..2 used Hs */
     int32_t  SXY0, SXY1, SXY2;
     uint16_t SZ1, SZ2, SZ3;
     uint32_t FLAG;
@@ -662,7 +664,7 @@ static void gte_rtp_record(const GTEState* g, uint32_t cmd) {
     for (int i = 0; i < 3; i++) { e->V0[i]=g->V0[i]; e->V1[i]=g->V1[i]; e->V2[i]=g->V2[i]; }
     for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) e->RT[r*3+c]=g->RT[r][c];
     for (int i = 0; i < 3; i++) e->TR[i]=g->TR[i];
-    e->H=(uint16_t)gte_h_scaled(g); e->OFX=g->OFX; e->OFY=g->OFY;
+    e->H=g->H; e->Hs=(uint16_t)gte_h_scaled(g); e->OFX=g->OFX; e->OFY=g->OFY;
     e->SXY0=g->SXY[0]; e->SXY1=g->SXY[1]; e->SXY2=g->SXY[2];
     e->SZ1=g->SZ[1]; e->SZ2=g->SZ[2]; e->SZ3=g->SZ[3];
     e->FLAG=g->FLAG;
@@ -836,12 +838,12 @@ extern "C" int gte_latch_dump_json(char* out, int outsz, int max_count) {
         if (pos>outsz-700) break;
         pos+=snprintf(out+pos,outsz-pos,
             "%s{\"frame\":%u,\"ra\":\"0x%08X\",\"cmd\":\"0x%08X\","
-            "\"RT\":[%d,%d,%d,%d,%d,%d,%d,%d,%d],\"TR\":[%d,%d,%d],\"H\":%u,"
+            "\"RT\":[%d,%d,%d,%d,%d,%d,%d,%d,%d],\"TR\":[%d,%d,%d],\"H\":%u,\"Hs\":%u,"
             "\"V0\":[%d,%d,%d],\"V1\":[%d,%d,%d],\"V2\":[%d,%d,%d],"
             "\"S0\":[%d,%d],\"S1\":[%d,%d],\"S2\":[%d,%d],\"SZ\":[%u,%u,%u],\"FLAG\":\"0x%08X\"}",
             emitted?",":"", e->frame, e->caller_ra, e->cmd,
             e->RT[0],e->RT[1],e->RT[2],e->RT[3],e->RT[4],e->RT[5],e->RT[6],e->RT[7],e->RT[8],
-            e->TR[0],e->TR[1],e->TR[2],(unsigned)e->H,
+            e->TR[0],e->TR[1],e->TR[2],(unsigned)e->H,(unsigned)e->Hs,
             e->V0[0],e->V0[1],e->V0[2], e->V1[0],e->V1[1],e->V1[2], e->V2[0],e->V2[1],e->V2[2],
             gte_sxx(e->SXY0),gte_syy(e->SXY0),gte_sxx(e->SXY1),gte_syy(e->SXY1),
             gte_sxx(e->SXY2),gte_syy(e->SXY2),(unsigned)e->SZ1,(unsigned)e->SZ2,(unsigned)e->SZ3,e->FLAG);
@@ -873,13 +875,13 @@ extern "C" int gte_rtp_ring_dump_json(char* out, int outsz, int max_count,
             "%s{\"seq\":%u,\"frame\":%u,\"ra\":\"0x%08X\",\"cmd\":\"0x%08X\","
             "\"V0\":[%d,%d,%d],\"V1\":[%d,%d,%d],\"V2\":[%d,%d,%d],"
             "\"RT\":[%d,%d,%d,%d,%d,%d,%d,%d,%d],\"TR\":[%d,%d,%d],"
-            "\"H\":%u,\"OFX\":%d,\"OFY\":%d,\"render_view\":%u,"
+            "\"H\":%u,\"Hs\":%u,\"OFX\":%d,\"OFY\":%d,\"render_view\":%u,"
             "\"S0\":[%d,%d],\"S1\":[%d,%d],\"S2\":[%d,%d],"
             "\"SZ\":[%u,%u,%u],\"FLAG\":\"0x%08X\"}",
             emitted?",":"", e->seq, e->frame, e->caller_ra, e->cmd,
             e->V0[0],e->V0[1],e->V0[2], e->V1[0],e->V1[1],e->V1[2], e->V2[0],e->V2[1],e->V2[2],
             e->RT[0],e->RT[1],e->RT[2],e->RT[3],e->RT[4],e->RT[5],e->RT[6],e->RT[7],e->RT[8],
-            e->TR[0],e->TR[1],e->TR[2], (unsigned)e->H, e->OFX, e->OFY, e->render_view,
+            e->TR[0],e->TR[1],e->TR[2], (unsigned)e->H, (unsigned)e->Hs, e->OFX, e->OFY, e->render_view,
             sxx(e->SXY0),syy(e->SXY0), sxx(e->SXY1),syy(e->SXY1), sxx(e->SXY2),syy(e->SXY2),
             (unsigned)e->SZ1,(unsigned)e->SZ2,(unsigned)e->SZ3, e->FLAG);
         emitted++;
@@ -920,6 +922,17 @@ extern "C" void gte_set_fov_scale(int num, int den) {
 
 static int32_t gte_h_scaled(const GTEState* gte) {
     if (s_h_scale_num == s_h_scale_den) return gte->H;
+    if (gte->H == 0) return 0;   // a guest H of 0 is a real (degenerate) projection
+    // Both peers must compute identical SXY/MAC/FLAG: the scale is a local
+    // display option, so it is forced to identity for the whole netplay session.
+    if (psx_netplay_active()) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            fprintf(stderr, "psxrecomp: fov_scale ignored while netplay is active\n");
+        }
+        return gte->H;
+    }
     int64_t h = (int64_t)gte->H * s_h_scale_num / s_h_scale_den;
     if (h < 1) h = 1;
     if (h > 0xFFFF) h = 0xFFFF;
@@ -1088,15 +1101,16 @@ void gte_rtps_internal(GTEState* gte, int16_t* V, bool setMac0, uint32_t instr) 
         pgxp_gte_push_sxy(px16, py16, gte->SZ[3], (uint32_t)gte->SXY[2]);
         if (pgxp_projection_tracking() && shift == 12 && !lm) {
             const double z = (double)(mac3 >> 12);
-            double hx = (double)gte->MAC1 * gte->H;
+            const double h_proj = (double)gte_h_scaled(gte);
+            double hx = (double)gte->MAC1 * h_proj;
             if (do_squash) hx = hx * s_ws_xnum / s_ws_xden;
             else if (s_ws_dome_on && s_ws_dome_num != s_ws_dome_den &&
                      !gpu_ws_present_native_43() && gte->SZ[3] >= s_ws_far_threshold)
                 hx = hx * s_ws_dome_num / s_ws_dome_den;
             PGXPProjection projection = {
                 (float)(gte->OFX / 65536.0 * z + hx),
-                (float)(gte->OFY / 65536.0 * z + (double)gte->MAC2 * gte->H),
-                (float)z, (float)gte->H / 2.0f};
+                (float)(gte->OFY / 65536.0 * z + (double)gte->MAC2 * h_proj),
+                (float)z, (float)h_proj / 2.0f};
             pgxp_gte_set_projection(&projection);
         }
     }

@@ -1,9 +1,9 @@
-#include "projection_scale_config.hpp"
+﻿#include "projection_scale_config.hpp"
+#include "projection_scale.hpp"
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <cstdio>
-#include <stdexcept>
 #include <string>
 
 int main() {
@@ -22,12 +22,21 @@ int main() {
         load("[video]\nfov_scale=1.0\n") != 1.0 ||
         load("[video]\nfov_scale=2.0\n") != 2.0 ||
         load("[video]\nfov_scale=8.0\n") != 8.0) return 1;
-    for (const char* value : {"0.0", "-1.0", "9.0", "nan", "inf", "'wide'"}) {
-        bool rejected = false;
+    /* Integer TOML values are accepted. */
+    if (load("[video]\nfov_scale=2\n") != 2.0 ||
+        load("[video]\nfov_scale=1\n") != 1.0 ||
+        load("[video]\nfov_scale=8\n") != 8.0) {
+        std::fprintf(stderr, "integer fov_scale not accepted\n");
+        return 1;
+    }
+    /* Bad values must not throw (a throw would stop the game starting): they
+     * warn on stderr and fall back to 1.0. */
+    for (const char* value : {"0.0", "0", "-1.0", "9.0", "9", "nan", "inf", "'wide'", "true", "[1.0]"}) {
         const std::string text = std::string("[video]\nfov_scale=") + value + "\n";
-        try { load(text.c_str()); }
-        catch (const std::exception&) { rejected = true; }
-        if (!rejected) { std::fprintf(stderr, "accepted invalid scale %s\n", value); return 1; }
+        double got = -1.0;
+        try { got = load(text.c_str()); }
+        catch (...) { std::fprintf(stderr, "threw on invalid scale %s\n", value); return 1; }
+        if (got != 1.0) { std::fprintf(stderr, "invalid scale %s gave %g\n", value, got); return 1; }
     }
     return 0;
 }
