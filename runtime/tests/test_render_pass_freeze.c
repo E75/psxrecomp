@@ -54,6 +54,9 @@ void psx_spu_sample_event_service(void) {}
 int psx_get_in_exception(void) { return 0; }
 void starvation_watchdog_check(void) {}
 void starvation_ring_pc_sample(void) {}
+/* memory.c mod arenas (render_pass_mod_store): nothing journaled here. */
+void render_pass_mod_arenas_rollback(void) {}
+uint64_t render_pass_mod_arenas_hash(void) { return 0; }
 int  psx_netplay_active(void) { return 0; }
 int  psx_selfcheck_enabled(void) { return 0; }
 void dirty_ram_ld_delay_discard(void) {}

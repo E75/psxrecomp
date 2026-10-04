@@ -39,6 +39,10 @@ uint32_t g_debug_current_func_addr;
 uint32_t g_debug_last_store_pc;
 uint32_t g_dirty_ram_code_gen;
 uint64_t g_dispatch_static_hits;
+uint32_t g_psx_mod_instruction_hooks;
+void psx_mod_instruction(CPUState *cpu, uint32_t pc, uint32_t instruction) {
+    (void)cpu; (void)pc; (void)instruction; abort();
+}
 int      g_rfe_escape_pending;
 int      g_exc_escape_reason;
 int      g_psx_call_bail;
@@ -69,8 +73,12 @@ int dirty_ram_is_dirty(uint32_t phys) { (void)phys; return 1; }
 int mdec_recently_active(uint32_t f) { (void)f; return 0; }
 void gte_execute(CPUState *cpu, uint32_t cmd) { (void)cpu; (void)cmd; }
 static int precise_sign_valid, precise_sign;
+static int previous_sign_valid, previous_sign;
 int gte_nclip_native_wide_sign(int32_t mac0, int* sign) {
     (void)mac0; *sign = precise_sign; return precise_sign_valid;
+}
+int gte_nclip_native_wide_previous_sign(int32_t mac0, int* sign) {
+    (void)mac0; *sign = previous_sign; return previous_sign_valid;
 }
 void gte_precision_store_word(uint32_t a, uint8_t r) { (void)a; (void)r; }
 uint32_t gte_read_ctrl(CPUState *cpu, uint8_t r) { (void)cpu; (void)r; return 0; }
@@ -439,6 +447,18 @@ static void test_wide_nclip_branches(void) {
     }
     precise_sign_valid=0; gpu_ws_set_margin_override(53); cpu.gpr[A0]=0;
     CHECK(branch_taken(&cpu,sites[0],words[0]), "missing precision stays native");
+    precise_sign_valid=1; precise_sign=-1;
+    previous_sign_valid=1; previous_sign=1;
+    psx_mod_set_native_wide_nclip_previous_site(sites[1],words[1]);
+    CHECK(branch_taken(&cpu,sites[1],words[1]), "first quad branch selects preceding positive winding");
+    CHECK(!branch_taken(&cpu,sites[2],words[2]), "second quad branch selects latest negative winding");
+    previous_sign_valid=0;
+    CHECK(!branch_taken(&cpu,sites[1],words[1]), "missing preceding winding cannot use latest result");
+    previous_sign_valid=1; gpu_ws_set_margin_override(0);
+    CHECK(!branch_taken(&cpu,sites[1],words[1]), "preceding winding is disabled in native 4:3");
+    gpu_ws_set_margin_override(53);
+    psx_mod_set_native_wide_nclip_sites(sites,words,3);
+    CHECK(!branch_taken(&cpu,sites[1],words[1]), "registration resets preceding-result bindings");
     psx_mod_set_native_wide_nclip_sites(NULL,NULL,0);
     ws_precise_nclip_cfg=0; ws_xnum=ws_xden=1;
     gpu_ws_set_margin_override(-1);

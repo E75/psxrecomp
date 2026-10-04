@@ -32,6 +32,7 @@ import extract_overlays as eo
 import compile_overlays as co
 from packed_sector_table import extract_members as extract_sector_members
 from sector_extent_archive import extract_members as extract_extent_members
+from counted_mips_relocations import parse as parse_counted_relocations
 try:
     import tomllib
 except ImportError:
@@ -51,6 +52,24 @@ def parse_cue_datatrack(cue_path):
             if t and cur_bin:
                 return cur_bin, (int(t.group(2))==2352)
     return eo.parse_cue(cue_path)   # fallback
+
+
+def counted_relocation_inventory(data):
+    """Identify a complete container without inventing its destination or code.
+
+    The format carries image-relative pointers. Sweeping fixed link bases for
+    these bytes cannot establish their heap placement. Report the gap early so
+    a loader profile can provide placements and callback fields before play.
+    """
+    try:
+        members = parse_counted_relocations(data)
+    except ValueError:
+        return None
+    return dict(method='counted_relocated_members', placement_required=True,
+        members=[dict(index=index, image_offset=member.image_offset,
+                      image_size=len(member.image), relocation_count=len(member.relocations),
+                      image_sha256=hashlib.sha256(member.image).hexdigest())
+                 for index, member in enumerate(members)])
 
 def prologues(data, base):
     """Return framed function entries, including a proven pre-frame prelude.
@@ -1015,6 +1034,7 @@ def main():
     # The boot EXE (game.toml `exe`) is the STATIC-recompiled base, NOT an overlay.
     exe_base=os.path.basename(str(game.get('exe',''))).upper()
     records=[]; np=nh=nr=na=ne=nc=0; seen_crc=set(); header_files=[]; raw_files=[]
+    relocatable=[]
     positioned=[]
     for p,l,s in sorted(files):
         if p.upper() in hed_consumed:
@@ -1023,6 +1043,13 @@ def main():
         if exe_base and os.path.basename(p).upper()==exe_base:
             continue   # skip the statically-compiled base executable
         data=dr.read_file_bytes(l,s)
+        relocation = counted_relocation_inventory(data)
+        if relocation is not None:
+            relocatable.append(dict(source_name=p, source_sha256=hashlib.sha256(data).hexdigest(),
+                                    **relocation))
+            print(f"  [counted relocations] {p}: {len(relocation['members'])} images; "
+                  'loader placement required (no fixed base inferred)')
+            continue
         # Position-fixed overlays are reused verbatim across AREA folders; dedup
         # by content so identical bytes -> one shard set, not N (same as hand tool).
         dcrc=binascii.crc32(data)&0xFFFFFFFF
@@ -1271,6 +1298,9 @@ def main():
                   f"sha256={record['bios_sha256'][:12]}...")
     with open(a.out, 'w') as f:
         json.dump(records, f)
+    with open(a.out + '.relocatable.json', 'w') as f:
+        json.dump(dict(schema='psxrecomp unresolved original-disc relocations v1',
+                       containers=relocatable), f, indent=2)
     print(f"producers: {np} PS-X EXE (full-discovery), {nh} header-table, "
           f"{nr} raw-code, {na} indexed-archive members, "
           f"{ne} HED-companion members, "

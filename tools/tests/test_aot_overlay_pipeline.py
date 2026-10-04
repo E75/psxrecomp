@@ -348,6 +348,57 @@ class ModPackageImageTest(unittest.TestCase):
 
 
 class AotMethodsTest(unittest.TestCase):
+    def test_counted_original_members_at_multiple_heap_placements(self):
+        # A relocated callback pointer enters a frameless return stub.
+        image = struct.pack('<4I', 8, 0x12345678, 0x03e00008, 0)
+        original = struct.pack('<4I', 1, 0, len(image), 0) + image + struct.pack('<2I', 0, 0xffffffff)
+        disc = FakeDisc({'RELOCS/MODULE.LVB': original})
+        member = dict(index=0, image_size=16, relocation_count=1,
+                      entry_pointer_offsets=[0], placements=[dict(load_addr='0x80101010'),
+                                                            dict(load_addr='0x80102020')])
+        container = dict(file='RELOCS/MODULE.LVB', sha256=sha(original), members=[member])
+        spec = dict(method='counted_relocated_members', containers=[container])
+        sources = pipeline.positioned_sources(disc, [spec])
+        self.assertEqual([s['base'] for s in sources], [0x80101010, 0x80102020])
+        self.assertEqual([pipeline.declared_entries(s, disc) for s in sources],
+                         [{0x80101018}, {0x80102028}])
+        self.assertEqual(disc.read('RELOCS/MODULE.LVB'), original)
+        with tempfile.TemporaryDirectory() as directory:
+            disc.binary = Path(directory) / 'source.bin'; disc.binary.write_bytes(original)
+            inventory = pipeline.prepare(dict(game_id='TEST', images=[spec], strict_bounds=True,
+                                              expected_records=2), disc, [], Path(directory))
+        self.assertEqual(inventory['recipe_count'], 2)
+        self.assertEqual([j['required_entries'] for j in inventory['jobs']],
+                         [[0x80101018], [0x80102028]])
+        self.assertEqual(inventory['jobs'][0]['known_ranges'], [(0x80101010, 0x80101020)])
+
+    def test_counted_sources_reject_inventory_and_callback_drift(self):
+        image = struct.pack('<4I', 8, 0, 0x03e00008, 0)
+        original = struct.pack('<4I', 1, 0, 16, 0) + image + struct.pack('<2I', 0, 0xffffffff)
+        disc = FakeDisc({'MODULE.LVB': original})
+        item = dict(index=0, image_size=16, relocation_count=1,
+                    placements=[dict(load_addr='0x80100000')])
+        container = dict(file='MODULE.LVB', sha256=sha(original), members=[item])
+        def sources(c):
+            return pipeline.positioned_sources(disc, [dict(method='counted_relocated_members',
+                                                          containers=[c])])
+        for change, error in ((dict(sha256='0'*64), 'container changed'),
+                              (dict(members=[]), 'missing'),
+                              (dict(members=[{**item, 'relocation_count': 2}]), 'inventory changed'),
+                              (dict(members=[{**item, 'placements': []}]), 'placement'),
+                              (dict(members=[{**item, 'placements': item['placements']*2}]), 'Duplicate')):
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, error):
+                sources({**container, **change})
+        source, = sources(container)
+        for offset in (-4, 1, 16):
+            with self.subTest(offset=offset), self.assertRaisesRegex(ValueError, 'outside image'):
+                pipeline.declared_entries({**source, 'spec': {**source['spec'],
+                                         'entry_pointer_offsets': [offset]}}, disc)
+        source['body'] = struct.pack('<4I', 0x80020000, 0, 0x03e00008, 0)
+        with self.assertRaisesRegex(ValueError, 'Entry outside image'):
+            pipeline.declared_entries({**source, 'spec': {**source['spec'],
+                                     'entry_pointer_offsets': [0]}}, disc)
+
     def test_tagged_relocated_original_file_and_inventory_check(self):
         original = struct.pack('<8I', 16, 8, 0x03e00008, 0, 4, 0xFFFFFFFF, 0, 0)[:24]
         disc = FakeDisc({'MODULE.DLL': original})
