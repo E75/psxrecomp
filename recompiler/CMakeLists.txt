@@ -1223,7 +1223,8 @@ if(BUILD_TESTING)
                 vk_mailbox_policy
                 vk_present_timing
                 vk_present_wait_stage
-                vk_staging_cache)
+                vk_staging_cache
+                wide_overlay_band_scissor)
             add_test(
                 NAME ${_t}
                 COMMAND ${Python3_EXECUTABLE}
