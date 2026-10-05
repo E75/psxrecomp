@@ -242,6 +242,35 @@ uint32_t gl_renderer_pass_leaks(void) { return 0; }
 int gl_renderer_pass_verify_vram(void) { return 1; }
 void gl_renderer_pass_note_cost(uint64_t t) { (void)t; }
 void gl_renderer_pass_service_presents(void) {}
+static uint32_t s_stereo_mask;
+static uint64_t s_stereo_published;
+static int s_capture_fail_eye = -1;
+uint32_t gl_renderer_stereo_unavailable(void) { return s_gl_status; }
+int gl_renderer_stereo_begin(int x, int y, int w, int h, int reuse) {
+    return gl_renderer_pass_begin(x, y, w, h, 0, 0, reuse);
+}
+int gl_renderer_stereo_end(uint32_t eye, int keep) {
+    gl_renderer_pass_end(0, keep);
+    if (keep && (int)eye == s_capture_fail_eye) return 0;
+    if (keep) s_stereo_mask |= 1u << eye;
+    return 1;
+}
+void gl_renderer_stereo_stage_reset(void) { s_stereo_mask = 0; }
+void gl_renderer_stereo_reset(void) { s_stereo_mask = 0; s_stereo_published = 0; }
+int gl_renderer_stereo_set_presentation(uint32_t mode) { return mode <= 1; }
+static int32_t s_view[3];
+void gte_render_view_get(int32_t xyz[3]) { memcpy(xyz, s_view, sizeof s_view); }
+void gte_render_view_set(const int32_t xyz[3]) { memcpy(s_view, xyz, sizeof s_view); }
+static PSXModRenderView s_pose;
+void gte_render_pose_get(PSXModRenderView *v) { *v = s_pose; memcpy(v->translation, s_view, sizeof s_view); }
+void gte_render_pose_set(const PSXModRenderView *v) { s_pose = *v; memcpy(s_view, v->translation, sizeof s_view); }
+int gl_renderer_stereo_publish(uint64_t id, uint64_t cycle, const int32_t view[2][3]) {
+    (void)cycle;
+    (void)view;
+    if (s_stereo_mask != 3u) return 0;
+    s_stereo_published = id;
+    return 1;
+}
 
 /* ---- 1. store policy --------------------------------------------------- */
 static void test_store_policy(void) {
@@ -631,6 +660,63 @@ static void test_journal(void) {
 #undef POLICY
 }
 
+static int s_eye_calls, s_eye_decline = -1;
+static int pair_draw(CPUState *cpu, void *user, uint32_t eye) {
+    (void)user;
+    CHECK(cpu->gpr[8] == 123 && s_ram[0x456] == 0x77,
+          "both eyes start from original CPU and RAM");
+    CHECK(psx_mod_render_stereo_status() == PSX_MOD_RENDER_PASS_BUSY,
+          "nested pair capture is busy");
+    s_eye_calls++;
+    CHECK(s_view[0] == 0, "view offset restored before each eye");
+    CHECK(psx_mod_render_view_offset(eye ? 24 : -24, 0, 0), "scoped view accepted");
+    PSXModRenderView v = {0}; v.struct_size = sizeof v;
+    v.rotation_q12[2] = 4096; v.rotation_q12[4] = 4096; v.rotation_q12[6] = -4096;
+    v.projection = 1; v.fx_q16 = 200 << 16; v.fy_q16 = 100 << 16;
+    v.translation[0] = eye ? 24 : -24;
+    CHECK(psx_mod_render_view(&v), "full scoped pose accepted");
+
+    cpu->gpr[8] = eye + 1; s_ram[0x456] = (uint8_t)eye;
+    psx_advance_cycles(5000u + eye);
+    return (int)eye != s_eye_decline;
+}
+static void test_stereo(void) {
+    CPUState cpu = {0};
+    PSXModStereoFrame f = {sizeof f, 2, 0, 240, 320, 240};
+    RenderStereoStats stats;
+    uint64_t published, cycle;
+    render_pass_reset_session(); s_gl_status = 0; s_begin_ok = 1;
+    cpu.gpr[8] = 123; s_ram[0x456] = 0x77;
+    cycle = psx_cycle_count;
+    CHECK(psx_mod_render_stereo(&cpu, &f, pair_draw, NULL) == 1,
+          "complete pair publishes without a temporal plan");
+    render_stereo_get_stats(&stats);
+    CHECK(stats.pairs == 1 && s_eye_calls == 2 && s_open_passes == 0,
+          "two restored eye transactions form one pair");
+    CHECK(stats.eye_cycle[0] == cycle && stats.eye_cycle[1] == cycle &&
+          stats.eye_hash[0] == stats.eye_hash[1], "same checkpoint identifiers");
+    CHECK(cpu.gpr[8] == 123 && s_ram[0x456] == 0x77 && psx_cycle_count == cycle,
+          "live state restored after the pair");
+    CHECK(s_view[0] == 0 && stats.eye_view[0][0] == -24 && stats.eye_view[1][0] == 24,
+          "producer offsets are recorded and do not escape");
+    CHECK(s_pose.struct_size == 0 && !s_pose.projection, "pose restored after pair");
+    CHECK(!psx_mod_render_view_offset(1, 0, 0), "view rejected outside render callback");
+    published = s_stereo_published;
+    s_eye_decline = 1;
+    CHECK(!psx_mod_render_stereo(&cpu, &f, pair_draw, NULL) &&
+          s_stereo_published == published && s_stereo_mask == 0,
+          "right decline preserves previous complete pair");
+    s_eye_decline = -1; s_capture_fail_eye = 1;
+    CHECK(!psx_mod_render_stereo(&cpu, &f, pair_draw, NULL) &&
+          s_stereo_published == published && s_stereo_mask == 0,
+          "right texture capture failure cannot publish half a pair");
+    s_capture_fail_eye = -1;
+    CHECK(cpu.gpr[8] == 123 && s_ram[0x456] == 0x77 && psx_cycle_count == cycle,
+          "capture failure still restores live state");
+    f.period_vblanks = 0;
+    CHECK(!psx_mod_render_stereo(&cpu, &f, pair_draw, NULL), "invalid cadence refused");
+}
+
 static void test_texture_stream_journal(void) {
     RenderPassJournal j = {0};
     memcpy(s_vram, s_vram0, sizeof s_vram);
@@ -657,6 +743,7 @@ int main(void) {
     test_pass();
     test_ram_8mb();
     test_journal();
+    test_stereo();
     test_texture_stream_journal();
     CHECK(s_prec_open == 0, "precision checkpoints balanced");
     printf(failures ? "FAILED (%d)\n" : "ALL PASS\n", failures);

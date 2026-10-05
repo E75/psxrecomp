@@ -68,6 +68,19 @@ typedef struct RenderPassStats {
 void render_pass_get_stats(RenderPassStats *out);
 /* Clears counters and the sticky fault latch (new mod session). */
 void render_pass_reset_session(void);
+typedef struct RenderStereoStats {
+    uint64_t attempts, pairs, refused, failed, shed;
+    uint64_t last_pair_id, last_guest_cycle, eye_cycle[2];
+    uint64_t eye_hash[2]; /* measured entry state when VERIFY is enabled */
+    int32_t eye_view[2][3]; /* sampled from the actual projection ambient */
+    double last_pair_ms, avg_pair_ms;
+    int last_eye;
+    const char *last_failure;
+    uint64_t last_failed_attempt, retained_pair_id;
+    int last_failed_eye;
+    const char *last_failed_reason; /* latched across later successes */
+} RenderStereoStats;
+void render_stereo_get_stats(RenderStereoStats *out);
 
 #ifdef __cplusplus
 }
