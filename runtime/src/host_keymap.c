@@ -223,10 +223,19 @@ void host_keymap_load(const char *config_ini_path) {
     apply_defaults();
 }
 
+/* Config bindings name modifier families (Alt), while SDL events/state name
+ * the actual keys (left/right Alt). Collapse sides before exact comparison;
+ * extra Ctrl/Alt/Shift families still prevent an accidental chord match. */
+static int modifier_families(int mod) {
+    return ((mod & KMOD_CTRL) ? KMOD_CTRL : 0) |
+           ((mod & KMOD_ALT) ? KMOD_ALT : 0) |
+           ((mod & KMOD_SHIFT) ? KMOD_SHIFT : 0);
+}
+
 int host_keymap_match_event(HostKeymapAction action, int keycode,
                             int scancode, int mod) {
     const HostKeyAction *a;
-    const int relevant = (int)(KMOD_CTRL | KMOD_ALT | KMOD_SHIFT);
+    const int modifiers = modifier_families(mod);
     int i;
     if (action < 0 || action >= HOST_KEYMAP_ACTION_COUNT) return 0;
     a = &s_actions[action];
@@ -234,7 +243,7 @@ int host_keymap_match_event(HostKeymapAction action, int keycode,
         if (a->binds[i].keycode != keycode &&
             (scancode <= 0 || a->binds[i].scancode != scancode))
             continue;
-        if ((mod & relevant) == a->binds[i].mods) return 1;
+        if (modifiers == a->binds[i].mods) return 1;
     }
     return 0;
 }
@@ -245,7 +254,7 @@ int host_keymap_match(HostKeymapAction action, int keycode, int mod) {
 
 int host_keymap_down(HostKeymapAction action, const uint8_t *keys, int mod) {
     const HostKeyAction *a;
-    const int relevant = (int)(KMOD_CTRL | KMOD_ALT | KMOD_SHIFT);
+    const int modifiers = modifier_families(mod);
     int i;
     if (!keys || action < 0 || action >= HOST_KEYMAP_ACTION_COUNT) return 0;
     a = &s_actions[action];
@@ -253,7 +262,7 @@ int host_keymap_down(HostKeymapAction action, const uint8_t *keys, int mod) {
         const int sc = a->binds[i].scancode;
         if (sc <= 0 || sc >= SDL_NUM_SCANCODES) continue;
         if (!keys[sc]) continue;
-        if ((mod & relevant) == a->binds[i].mods) return 1;
+        if (modifiers == a->binds[i].mods) return 1;
     }
     return 0;
 }

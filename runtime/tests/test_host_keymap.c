@@ -30,6 +30,28 @@ int main(int argc, char **argv) {
           "default fullscreen includes Alt+Return");
     check(host_keymap_match(HOST_KEYMAP_FULLSCREEN, (int)SDLK_f, mod_ctrl()),
           "default fullscreen includes Ctrl+F");
+    /* SDL reports the actual side pressed, not the combined binding mask. */
+    check(host_keymap_match(HOST_KEYMAP_FULLSCREEN, (int)SDLK_RETURN, KMOD_LALT),
+          "left Alt+Return toggles fullscreen");
+    check(host_keymap_match_event(HOST_KEYMAP_FULLSCREEN, (int)SDLK_UNKNOWN,
+                                 SDL_SCANCODE_RETURN, KMOD_RALT),
+          "right Alt+Return matches by scancode");
+    check(host_keymap_match(HOST_KEYMAP_FULLSCREEN, (int)SDLK_f, KMOD_LCTRL),
+          "left Ctrl+F toggles fullscreen");
+    check(host_keymap_match(HOST_KEYMAP_FULLSCREEN, (int)SDLK_f, KMOD_RCTRL),
+          "right Ctrl+F toggles fullscreen");
+    check(!host_keymap_match(HOST_KEYMAP_FULLSCREEN, (int)SDLK_RETURN, 0),
+          "plain Return does not toggle fullscreen");
+    check(!host_keymap_match(HOST_KEYMAP_FULLSCREEN, (int)SDLK_RETURN,
+                            KMOD_LALT | KMOD_LSHIFT),
+          "an extra modifier does not match Alt+Return");
+    check(host_keymap_match(HOST_KEYMAP_FULLSCREEN, (int)SDLK_RETURN,
+                           KMOD_LALT | KMOD_CAPS | KMOD_NUM),
+          "lock keys do not interfere with Alt+Return");
+    keys[SDL_SCANCODE_RETURN] = 1;
+    check(host_keymap_down(HOST_KEYMAP_FULLSCREEN, keys, KMOD_LALT),
+          "held hotkey accepts one Alt key");
+    keys[SDL_SCANCODE_RETURN] = 0;
     keys[SDL_SCANCODE_TAB] = 1;
     check(host_keymap_down(HOST_KEYMAP_TURBO, keys, 0),
           "default turbo is held by Tab");
@@ -50,7 +72,7 @@ int main(int argc, char **argv) {
     if (!f) return 1;
     fputs("[KeyMap]\n"
           "Fullscreen = F11\n"
-          "Turbo = Q\n"
+          "Turbo = Ctrl+Alt+Shift+Q\n"
           "VolumeUp = Up\n"
           "VolumeDown = Down\n"
           "DisplayPerf = F10\n",
@@ -68,8 +90,14 @@ int main(int argc, char **argv) {
           "turbo rebind disables Tab fallback");
     keys[SDL_SCANCODE_TAB] = 0;
     keys[SDL_SCANCODE_Q] = 1;
-    check(host_keymap_down(HOST_KEYMAP_TURBO, keys, 0),
-          "turbo rebind uses Q");
+    check(host_keymap_down(HOST_KEYMAP_TURBO, keys,
+                          KMOD_LCTRL | KMOD_RALT | KMOD_LSHIFT),
+          "held rebind accepts mixed modifier sides");
+    check(host_keymap_match(HOST_KEYMAP_TURBO, SDLK_q,
+                           KMOD_RCTRL | KMOD_LALT | KMOD_RSHIFT),
+          "event rebind accepts opposite modifier sides");
+    check(!host_keymap_down(HOST_KEYMAP_TURBO, keys, KMOD_LCTRL | KMOD_RALT),
+          "held rebind requires every modifier");
     check(host_keymap_match(HOST_KEYMAP_VOLUME_UP, (int)SDLK_UP, 0),
           "volume up rebind uses Up");
     check(host_keymap_match(HOST_KEYMAP_VOLUME_DOWN, (int)SDLK_DOWN, 0),
