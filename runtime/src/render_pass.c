@@ -28,6 +28,7 @@
 #include "gpu.h"
 #include "gpu_gl_renderer.h"
 #include "mod_plugins.h"
+#include "mod_runtime.h"
 #include "overlay_loader.h"
 #include "psx_icache.h"
 #include "timers.h"
@@ -115,6 +116,7 @@ typedef struct RenderPassNesting {
     int      ov_active_depth;
     uint32_t ov_inprogress;
     void   (*ov_flush)(void);
+    ModFunctionEntryContext mod_entry;
     uint32_t span_lo, span_hi;       /* open guest span (dirty_ram_run_span) */
 } RenderPassNesting;
 
@@ -133,6 +135,7 @@ static void nesting_save(RenderPassNesting *n) {
     dirty_ram_ld_delay_save(&n->ld_delay);
     overlay_loader_native_nesting(&n->ov_active_depth, &n->ov_inprogress);
     n->ov_flush = g_overlay_flush_pending_cycles;
+    mod_runtime_function_entry_context_save(&n->mod_entry);
     dirty_ram_span_get(&n->span_lo, &n->span_hi);
 }
 
@@ -151,6 +154,7 @@ static void nesting_restore(const RenderPassNesting *n) {
     dirty_ram_ld_delay_restore(&n->ld_delay);
     overlay_loader_set_native_nesting(n->ov_active_depth, n->ov_inprogress);
     g_overlay_flush_pending_cycles = n->ov_flush;
+    mod_runtime_function_entry_context_restore(&n->mod_entry);
     dirty_ram_span_set(n->span_lo, n->span_hi);
 }
 
@@ -169,7 +173,9 @@ static int nesting_balanced(const RenderPassNesting *n) {
            now.precise_mode == n->precise_mode &&
            now.ov_active_depth == n->ov_active_depth &&
            now.ov_flush == n->ov_flush &&
-           now.span_lo == n->span_lo && now.span_hi == n->span_hi;
+           now.span_lo == n->span_lo && now.span_hi == n->span_hi &&
+           now.mod_entry.depth == n->mod_entry.depth &&
+           now.mod_entry.plugin == n->mod_entry.plugin;
 }
 
 /* After a watchdog abort, before the restore: which exits the longjmp
@@ -204,6 +210,9 @@ static int nesting_describe(const RenderPassNesting *n, int bb_defer_ck,
     RP_NOTE(now.exec_phase != n->exec_phase, "exec phase %d->%d",
             now.exec_phase, n->exec_phase);
     RP_NOTE(now.ld_delay.armed != n->ld_delay.armed, "pending load");
+    RP_NOTE(now.mod_entry.depth != n->mod_entry.depth, "mod entries %+d",
+            (int)now.mod_entry.depth - (int)n->mod_entry.depth);
+    RP_NOTE(now.mod_entry.plugin != n->mod_entry.plugin, "mod owner");
     RP_NOTE(now.span_hi != n->span_hi, "guest span");
 #undef RP_NOTE
     return count;
@@ -245,6 +254,17 @@ static uint32_t s_plan_period = 2;
 static uint64_t s_plan_serial, s_restored_plan;
 static uint64_t s_restored_cycle, s_restored_stores;
 static int s_restored_valid;
+static RenderPassFailure s_attempt;
+static const char *s_checkpoint_failure;
+
+static int pass_refuse(const char *reason, uint32_t status) {
+    /* A refusal always carries a reason: last_failure.reason == NULL means
+     * "no failure" to the TCP reader. */
+    s_attempt.reason = reason ? reason : "unspecified";
+    s_attempt.status = status;
+    s_stats.last_failure = s_attempt;
+    return 0;
+}
 
 /* PSX_RENDER_PASS_WATCHDOG=<guest cycles> lowers the cut-off (debug), so a
  * title's rollback path can be exercised on real passes. */
@@ -283,6 +303,7 @@ void render_pass_reset_session(void) {
     memset(g_render_pass_dropped_writes, 0, sizeof g_render_pass_dropped_writes);
     s_open_generation = 0;
     s_restored_valid = 0;
+    memset(&s_attempt, 0, sizeof s_attempt);
     gl_renderer_pass_set_flip_shown(0);
 }
 
@@ -431,17 +452,21 @@ static int checkpoint_save(const CPUState *cpu) {
     /* The whole live RAM: a pass's stores fold through the same geometry
      * (render_pass_store_to), so every byte one can reach is in here. */
     uint32_t ram_bytes = memory_get_ram_bytes();
+    s_checkpoint_failure = NULL;
     if (s_ram_copy_cap < ram_bytes) {
         uint8_t *p = (uint8_t *)realloc(s_ram_copy, ram_bytes);
-        if (!p) return 0;
+        if (!p) { s_checkpoint_failure = "checkpoint_ram"; return 0; }
         s_ram_copy = p;
         s_ram_copy_cap = ram_bytes;
     }
     if (!s_dma_copy) {
         s_dma_copy = (uint8_t *)malloc(dma_len);
-        if (!s_dma_copy) return 0;
+        if (!s_dma_copy) { s_checkpoint_failure = "checkpoint_dma"; return 0; }
     }
-    if (!gpu_pass_checkpoint_save()) return 0;
+    if (!gpu_pass_checkpoint_save()) {
+        s_checkpoint_failure = "checkpoint_gpu";
+        return 0;
+    }
     s_ck.cpu = *cpu;
     s_ck.ram_bytes = ram_bytes;
     memcpy(s_ram_copy, memory_get_ram_ptr(), ram_bytes);
@@ -534,18 +559,39 @@ int psx_mod_render_pass(struct CPUState *cpu, const PSXModRenderPass *pass,
     uint32_t leaks;
     int ok = 0, open, reuse;
     static uint32_t s_leaks_before;
+    uint32_t status;
+
+    memset(&s_attempt, 0, sizeof s_attempt);
+    s_attempt.attempt = ++s_stats.pass_attempts;
+    s_attempt.plan = s_plan_serial;
+    s_attempt.guest_cycle = psx_cycle_count;
+    if (pass) {
+        s_attempt.struct_size = pass->struct_size;
+        if (pass->struct_size >= sizeof *pass) {
+            s_attempt.alpha_q16 = pass->alpha_q16;
+            s_attempt.x = pass->x; s_attempt.y = pass->y;
+            s_attempt.w = pass->w; s_attempt.h = pass->h;
+        }
+    }
 
     if (!cpu || !pass || !fn || pass->struct_size < sizeof *pass ||
         pass->w == 0 || pass->h == 0 || pass->alpha_q16 == 0 ||
-        pass->alpha_q16 >= 65536u)
-        return 0;
-    if (!passes_allowed()) return 0;
+        pass->alpha_q16 >= 65536u) {
+        s_stats.argument_refused++;
+        return pass_refuse("arguments", pass_status());
+    }
+    status = pass_status();
+    if (status != PSX_MOD_RENDER_PASS_READY) {
+        s_stats.status_refused++;
+        return pass_refuse("status", status);
+    }
 
     /* An overlay DLL may still hold cycles it has not published. They belong
      * to the live timeline: publish them now, or the pass's first store would
      * publish them into the frozen clock and the restore would drop them. */
     if (g_overlay_flush_pending_cycles) g_overlay_flush_pending_cycles();
 
+    s_attempt.guest_cycle = psx_cycle_count;
     t0 = gl_renderer_perf_ticks();
     open = s_open_generation;
     {
@@ -558,14 +604,23 @@ int psx_mod_render_pass(struct CPUState *cpu, const PSXModRenderPass *pass,
             s_restored_stores == g_guest_store_count;
     /* Frame N's own image is captured by the first pass after a plan. */
     if (!gl_renderer_pass_begin(pass->x, pass->y, pass->w, pass->h, open,
-                                s_plan_period, reuse))
-        return 0;
+                                s_plan_period, reuse)) {
+        gl_renderer_pass_begin_diag(&s_attempt.gl);
+        s_stats.begin_refused++;
+        return pass_refuse(s_attempt.gl.reason ? s_attempt.gl.reason : "gl_begin",
+                           s_attempt.gl.status);
+    }
     s_open_generation = 0;
     s_leaks_before = gl_renderer_pass_leaks();
 
     if (!checkpoint_save(cpu)) {
+        gl_renderer_pass_begin_diag(&s_attempt.gl);
+        s_stats.checkpoint_refused++;
+        /* Capture the rejection status before rolling the GL transaction back. */
+        status = pass_status();
         gl_renderer_pass_end(0, 0);
-        return 0;
+        return pass_refuse(s_checkpoint_failure ? s_checkpoint_failure
+                                                : "checkpoint", status);
     }
     if (verify_on()) hash_before = state_hash(cpu);
 
@@ -595,6 +650,8 @@ int psx_mod_render_pass(struct CPUState *cpu, const PSXModRenderPass *pass,
         if (nesting_describe(&s_ck.nest, s_freeze.bb_defer, s_abort_detail,
                              sizeof s_abort_detail))
             s_stats.nesting_repairs++;
+        snprintf(s_stats.last_abort_detail, sizeof s_stats.last_abort_detail,
+                 "%s", s_abort_detail);
         ok = 0;
     }
     s_stats.guest_cycles_last = psx_cycle_count - cycles_before;

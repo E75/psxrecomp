@@ -94,6 +94,10 @@ void psx_host_write_word(uint32_t addr, uint32_t val);
 void psx_host_write_half(uint32_t addr, uint16_t val);
 void psx_host_write_byte(uint32_t addr, uint8_t val);
 
+/* Side-effect-free aligned word peek (RAM / scratchpad / BIOS ROM only), for
+ * the debug path. Returns 0 (and leaves *out alone) for anything else. */
+int psx_peek_word(uint32_t addr, uint32_t *out);
+
 #ifdef __cplusplus
 }
 #endif

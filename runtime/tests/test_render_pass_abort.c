@@ -21,8 +21,16 @@
 #include "cpu_state.h"
 #include "dirty_ram_interp.h"
 #include "mod_plugins.h"
+#include "mod_runtime.h"
 #include "psx_cyc.h"
 
+static ModFunctionEntryContext s_mod_entry;
+void mod_runtime_function_entry_context_save(ModFunctionEntryContext *out) {
+    *out = s_mod_entry;
+}
+void mod_runtime_function_entry_context_restore(const ModFunctionEntryContext *in) {
+    s_mod_entry = *in;
+}
 static int failures;
 #define CHECK(c, m) do { if (!(c)) { fprintf(stderr, "FAIL: %s\n", m); failures++; } } while (0)
 
@@ -161,6 +169,9 @@ uint32_t gl_renderer_pass_plan(uint32_t p, uint32_t s, uint32_t *a,
     return 0;
 }
 static int s_open_passes, s_kept;
+void gl_renderer_pass_begin_diag(GLRenderPassBeginDiag *out) {
+    memset(out, 0, sizeof *out);
+}
 void gl_renderer_pass_set_flip_shown(int shown) { (void)shown; }
 int gl_renderer_pass_begin(int x, int y, int w, int h, int open_gen,
                            uint32_t period, int reuse_backup) {
@@ -204,6 +215,9 @@ static void guest_frame(CPUState *cpu, const Frames *f, int level) {
     int prev_ov_depth = s_ov_active_depth;
     uint32_t prev_ov_ip = s_ov_inprogress;
     void (*prev_flush)(void) = g_overlay_flush_pending_cycles;
+    ModFunctionEntryContext prev_mod = s_mod_entry;
+    s_mod_entry.depth++;
+    s_mod_entry.plugin = f;
     (void)guard;
     psx_cyc_bb_defer_begin();
     g_call_unit_depth = prev_unit + 1;          /* overlay_loader_call_native */
@@ -232,6 +246,7 @@ static void guest_frame(CPUState *cpu, const Frames *f, int level) {
         }
     }
 
+    s_mod_entry = prev_mod;
     s_ld.armed = 0;                              /* retired on interpreter exit */
     g_precise_mode = prev_precise;
     g_dirty_interp_active = prev_active;
@@ -281,7 +296,15 @@ static int leaky_pass_fn(struct CPUState *cpu, void *user, uint32_t alpha_q16) {
     return 1;
 }
 
+static int mod_leaky_pass_fn(struct CPUState *cpu, void *user, uint32_t alpha_q16) {
+    (void)cpu; (void)user; (void)alpha_q16;
+    s_mod_entry.depth++;
+    s_mod_entry.plugin = user;
+    return 1;
+}
+
 typedef struct Live {
+    ModFunctionEntryContext mod_entry;
     int bb_defer, unit, dma, host, dma_ch, active, phase, precise, dispatch;
     int ov_depth;
     uint32_t ov_ip, batch, resume, span_lo, span_hi;
@@ -292,6 +315,7 @@ typedef struct Live {
 
 static void snap(Live *l) {
     memset(l, 0, sizeof *l);
+    l->mod_entry = s_mod_entry;
     l->bb_defer = g_psx_cyc_bb_defer;
     l->unit = g_call_unit_depth;
     l->dma = g_dma_exec_depth;
@@ -321,6 +345,8 @@ static void check_live(const Live *a, const char *when) {
 #define SAME(field, what) do { \
         snprintf(m, sizeof m, "%s: %s restored", when, what); \
         CHECK(a->field == b.field, m); } while (0)
+    SAME(mod_entry.depth, "mod callback depth");
+    SAME(mod_entry.plugin, "mod callback owner");
     SAME(bb_defer, "g_psx_cyc_bb_defer");
     SAME(unit, "g_call_unit_depth");
     SAME(dma, "g_dma_exec_depth");
@@ -366,6 +392,8 @@ int main(void) {
     /* The live context the pass interrupts: inside two generated functions
      * (the game's VSync entry hook), a native shard's flush hook installed,
      * the interpreter's resume latch and a pending load of its own. */
+    s_mod_entry.depth = 1;
+    s_mod_entry.plugin = &cpu;
     g_psx_cyc_bb_defer = 2;
     g_psx_cyc_batch = 9;
     g_psx_dispatch_depth = 3;
@@ -390,6 +418,8 @@ int main(void) {
     CHECK(st.watchdog == 1 && st.aborted == 1 && st.passes == 0,
           "the watchdog cut it off once");
     CHECK(st.nesting_repairs == 1, "the landing found and undid skipped exits");
+    CHECK(strstr(st.last_abort_detail, "mod entries +5") &&
+          strstr(st.last_abort_detail, "mod owner"), "TCP abort detail includes skipped mod exits");
     CHECK(!st.disabled, "one fault does not disable passes");
     CHECK(s_open_passes == 0 && s_kept == 0, "the presenter closed the pass, no image");
     CHECK(!g_psx_render_pass_active, "time is live again");
@@ -419,6 +449,12 @@ int main(void) {
     render_pass_get_stats(&st);
     CHECK(st.verify_mismatch == 1, "an unbalanced pass is reported in verify mode");
     check_live(&live, "after an unbalanced pass");
+
+    snap(&live);
+    (void)psx_mod_render_pass(&cpu, &pass, mod_leaky_pass_fn, NULL);
+    render_pass_get_stats(&st);
+    CHECK(st.verify_mismatch == 2, "mod-only imbalance is reported");
+    check_live(&live, "after a mod-only unbalanced pass");
 
     /* 4. A guest span runs only inside a pass. */
     CHECK(psx_mod_run_guest_span(&cpu, 0x800143FCu, 0x8001473Cu) == 0,
