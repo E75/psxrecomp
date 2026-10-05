@@ -14033,6 +14033,8 @@ int main(int argc, char** argv) {
             game_id   = gc.id;
             game_region = gc.region;
             game_players = gc.players;
+            if (gc.runtime.has_multitap_default)
+                multitap_enabled = gc.runtime.multitap_default;
             apply_offline_pad_count(game_players, multitap_enabled);
             game_has_disc_crc = gc.has_disc_crc;
             game_disc_crc     = gc.disc_crc;

@@ -896,6 +896,10 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
             rt.multitap_port = static_cast<int>(n);
             rt.has_multitap_port = true;
         }
+        if (ct.contains("multitap")) {
+            rt.multitap_default = toml::find<bool>(ct, "multitap");
+            rt.has_multitap_default = true;
+        }
         if (ct.contains("multitap_analog")) {
             rt.multitap_analog = toml::find<bool>(ct, "multitap_analog");
             rt.has_multitap_analog = true;
