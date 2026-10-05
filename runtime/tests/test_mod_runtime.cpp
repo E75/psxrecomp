@@ -971,7 +971,11 @@ int main() {
     {
         const auto patched_root = root / "host-reader-patched";
         const auto patched_iso = patched_root / "original.iso";
-        write_bytes(patched_iso, iso);
+        /* A byte past the original 3000-byte extent; a mod that grows the file
+         * through its directory record exposes it. */
+        std::vector<uint8_t> grown_iso = iso;
+        grown_iso[22 * 2048 + 3500] = 0x77;
+        write_bytes(patched_iso, grown_iso);
         write_text(patched_root / "packages/reader.patch/1.0.0/manifest.toml",
             "format_version = 5\n"
             "id = \"reader.patch\"\n"
@@ -979,10 +983,19 @@ int main() {
             "name = \"Reader Patch\"\n"
             "[[target]]\n"
             "game_id = \"READER\"\n"
-            "disc_sha256 = \"" + sha256_hex(iso) + "\"\n"
+            "disc_sha256 = \"" + sha256_hex(grown_iso) + "\"\n"
             "[[feature]]\n"
             "id = \"asset\"\n"
             "name = \"Asset\"\n"
+            "[[feature]]\n"
+            "id = \"grow\"\n"
+            "name = \"Grow\"\n"
+            "[[patch]]\n"
+            "feature = \"grow\"\n"
+            "target = \"disc_user\"\n"
+            "offset = " + std::to_string(21 * 2048 + 10) + "\n"
+            "expected = \"b80b0000\"\n"
+            "replace = \"a00f0000\"\n"
             "[[patch]]\n"
             "feature = \"asset\"\n"
             "target = \"disc_user\"\n"
@@ -994,16 +1007,25 @@ int main() {
             "[[feature]]\n"
             "package_id = \"reader.patch\"\n"
             "id = \"asset\"\n"
+            "enabled = true\n"
+            "[[feature]]\n"
+            "package_id = \"reader.patch\"\n"
+            "id = \"grow\"\n"
             "enabled = true\n");
         check(PSXRecompV4::mod_runtime_initialize(patched_root, "READER", 0, {}, &error),
               "patched reader initialize");
         check(PSXRecompV4::mod_runtime_commit(patched_iso, &error), "patched reader commit");
-        std::vector<uint8_t> effective(3000);
+        check(psx_mod_read_disc_file("S0/LEVEL.NSF", nullptr, 0, &bytes) && bytes == 4000,
+              "host disc reads resolve paths through patched directory records");
+        std::vector<uint8_t> effective(4000);
         check(psx_mod_read_disc_file("S0/LEVEL.NSF", effective.data(),
                                      (uint32_t)effective.size(), &bytes) &&
-                  bytes == 3000 && effective[5] == 0x5a &&
-                  std::equal(effective.begin() + 6, effective.end(), iso.begin() + 22 * 2048 + 6),
+                  bytes == 4000 && effective[5] == 0x5a && effective[3500] == 0x77 &&
+                  std::equal(effective.begin() + 6, effective.begin() + 3000,
+                             iso.begin() + 22 * 2048 + 6),
               "host disc reads apply the committed plan before the drive is enabled");
+        check(!psx_mod_read_disc_file("S0", nullptr, 0, &bytes),
+              "effective lookup still rejects directories");
         std::array<uint8_t, 2048> drive_sector{};
         std::copy_n(iso.begin() + 22 * 2048, 2048, drive_sector.begin());
         mod_runtime_patch_disc_sector(22, 0, drive_sector.data(), (uint32_t)drive_sector.size());

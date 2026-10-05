@@ -1516,6 +1516,79 @@ extern "C" int mod_runtime_read_disc_extent(uint32_t lba, int raw,
 static void patch_committed_disc_sector(uint32_t lba, int raw_sector,
                                         uint8_t* bytes, uint32_t size);
 
+/* One 2048-byte user-data sector of the effective disc: the committed plan's
+ * raw and user-data writes/overlays applied. Form 2 (XA) sectors are refused. */
+static bool read_effective_user_sector(PS1::ISOReader& reader, uint32_t lba,
+                                       uint8_t* sector) {
+    uint8_t raw[2352];
+    if (reader.ReadRawSector(lba, raw)) {
+        if (raw[15] != 1 && (raw[15] != 2 || (raw[18] & 0x20u))) return false;
+        patch_committed_disc_sector(lba, 1, raw, sizeof raw);
+        std::memcpy(sector, raw + (raw[15] == 1 ? 16 : 24), 2048);
+        if (raw[15] == 1) patch_committed_disc_sector(lba, 0, sector, 2048);
+    } else {
+        if (!reader.ReadSector(lba, sector)) return false;
+        patch_committed_disc_sector(lba, 0, sector, 2048);
+    }
+    return !PSXRecompV4::state().disc_guard_failed;
+}
+
+/* ISO 9660 path lookup through the effective directory records. Mods may
+ * relocate or grow a file by patching its directory record (e.g. an archive
+ * extended into the following padding file); the emulated drive serves those
+ * patched records, so host reads must resolve paths through them too. Names
+ * compare case-insensitively without the ";1" version suffix. */
+static bool find_effective_file(PS1::ISOReader& reader, const std::string& path,
+                                uint32_t& lba, uint32_t& bytes, bool& directory) {
+    uint8_t sector[2048];
+    auto le32 = [](const uint8_t* p) {
+        return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+               ((uint32_t)p[3] << 24);
+    };
+    if (!read_effective_user_sector(reader, 16, sector) || sector[0] != 1 ||
+        std::memcmp(sector + 1, "CD001", 5) != 0) return false;
+    lba = le32(sector + 156 + 2);
+    bytes = le32(sector + 156 + 10);
+    directory = true;
+    size_t at = 0;
+    while (at < path.size()) {
+        size_t next = path.find_first_of("/\\", at);
+        if (next == std::string::npos) next = path.size();
+        std::string want = path.substr(at, next - at);
+        at = next + 1;
+        if (want.empty()) continue;
+        if (!directory) return false;
+        std::transform(want.begin(), want.end(), want.begin(),
+                       [](unsigned char c) { return (char)std::toupper(c); });
+        bool found = false;
+        const uint32_t sectors = (bytes + 2047u) / 2048u;
+        for (uint32_t i = 0; i < sectors && !found; ++i) {
+            if (!read_effective_user_sector(reader, lba + i, sector)) return false;
+            for (uint32_t p = 0; p < 2048u && sector[p] && !found;) {
+                const uint32_t length = sector[p];
+                if (length < 34 || p + length > 2048u ||
+                    33u + sector[p + 32] > length) return false;
+                std::string name(reinterpret_cast<const char*>(sector + p + 33),
+                                 sector[p + 32]);
+                name = name.substr(0, name.find(';'));
+                std::transform(name.begin(), name.end(), name.begin(),
+                               [](unsigned char c) { return (char)std::toupper(c); });
+                if (sector[p + 32] == 1 && (sector[p + 33] == 0 || sector[p + 33] == 1))
+                    name.clear();
+                if (!name.empty() && name == want) {
+                    lba = le32(sector + p + 2);
+                    bytes = le32(sector + p + 10);
+                    directory = (sector[p + 25] & 2u) != 0;
+                    found = true;
+                }
+                p += length;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
 extern "C" int psx_mod_read_disc_file(const char* path, void* buffer,
                                       uint32_t capacity, uint32_t* size) {
     using namespace PSXRecompV4;
@@ -1526,29 +1599,21 @@ extern "C" int psx_mod_read_disc_file(const char* path, void* buffer,
         const auto& mount = s.effective_disc_path.empty() ? s.disc_path : s.effective_disc_path;
         if (mount.empty()) return 0;
         PS1::ISOReader reader;
-        PS1::ISOFileEntry entry;
-        if (!reader.Open(mount.string()) || !reader.FindFile(path, entry) ||
-            entry.is_directory || !entry.size || entry.size > 64u * 1024u * 1024u)
+        uint32_t lba = 0, bytes = 0;
+        bool directory = false;
+        if (!reader.Open(mount.string()) ||
+            !find_effective_file(reader, path, lba, bytes, directory) ||
+            directory || !bytes || bytes > 64u * 1024u * 1024u)
             return 0;
-        if (!buffer) { *size = entry.size; return 1; }
-        if (capacity < entry.size) return 0;
-        uint8_t sector[2048], raw[2352];
-        for (uint32_t offset = 0; offset < entry.size; offset += 2048u) {
-            const uint32_t lba = entry.lba + offset / 2048u;
-            if (reader.ReadRawSector(lba, raw)) {
-                if (raw[15] != 1 && (raw[15] != 2 || (raw[18] & 0x20u))) return 0;
-                patch_committed_disc_sector(lba, 1, raw, sizeof raw);
-                std::memcpy(sector, raw + (raw[15] == 1 ? 16 : 24), sizeof sector);
-                if (raw[15] == 1) patch_committed_disc_sector(lba, 0, sector, sizeof sector);
-            } else {
-                if (!reader.ReadSector(lba, sector)) return 0;
-                patch_committed_disc_sector(lba, 0, sector, sizeof sector);
-            }
-            if (state().disc_guard_failed) return 0;
-            const uint32_t count = std::min(2048u, entry.size - offset);
+        if (!buffer) { *size = bytes; return 1; }
+        if (capacity < bytes) return 0;
+        uint8_t sector[2048];
+        for (uint32_t offset = 0; offset < bytes; offset += 2048u) {
+            if (!read_effective_user_sector(reader, lba + offset / 2048u, sector)) return 0;
+            const uint32_t count = std::min(2048u, bytes - offset);
             std::memcpy(static_cast<uint8_t*>(buffer) + offset, sector, count);
         }
-        *size = entry.size;
+        *size = bytes;
         return 1;
     } catch (...) { return 0; }
 }
