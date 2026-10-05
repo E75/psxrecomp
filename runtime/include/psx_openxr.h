@@ -35,6 +35,10 @@ int psx_openxr_end(int keep,PSXOpenXRCopy copy);
 int psx_openxr_quad(double distance_m,double width_m,double height_m);
 void psx_openxr_pair_metadata(uint64_t pair_id,uint64_t cycle);
 void psx_openxr_native_metadata(uint64_t frame);
+/* Pure gate: presentation-side frame interpolation must be OFF while a headset
+ * session is running (the compositor reprojects). 0 for every non-XR state. */
+int psx_openxr_interp_gate(uint32_t compiled,uint32_t enabled,uint32_t initialized,uint32_t running);
+int psx_openxr_session_active(void); /* gate applied to the live state */
 void psx_openxr_shutdown(void);
 void psx_openxr_recenter(void);
 void psx_openxr_stats(PSXOpenXRStats *out);

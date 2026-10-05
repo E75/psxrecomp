@@ -393,6 +393,12 @@ int psx_openxr_hands(PSXModOpenXRHands *out) {
 #endif
     return 1;
 }
+int psx_openxr_interp_gate(uint32_t compiled,uint32_t enabled,uint32_t initialized,uint32_t running) {
+    return compiled && enabled && initialized && running;
+}
+int psx_openxr_session_active(void) {
+    return psx_openxr_interp_gate(s_stats.compiled,s_stats.enabled,s_stats.initialized,s_stats.running);
+}
 void psx_openxr_stats(PSXOpenXRStats *out) {
     if(out){*out=s_stats;
 #if defined(PSX_OPENXR)

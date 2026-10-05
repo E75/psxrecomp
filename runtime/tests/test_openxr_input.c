@@ -9,6 +9,12 @@
     } \
 } while (0)
 int main(void) {
+    /* Interpolation gate: only a compiled, enabled, initialized, RUNNING session
+     * suspends presentation interpolation; every other state is a no-op. */
+    CHECK(psx_openxr_interp_gate(1,1,1,1));
+    for(unsigned m=0;m<15;m++)
+        CHECK(!psx_openxr_interp_gate(m&1,(m>>1)&1,(m>>2)&1,(m>>3)&1));
+    CHECK(!psx_openxr_session_active()); /* nothing enabled in this process */
     /* UI requests require a live tracked frame. Off/unavailable requests
      * must leave submission state neutral, including invalid dimensions. */
     CHECK(!psx_openxr_quad(2,2,1.5));

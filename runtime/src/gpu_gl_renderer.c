@@ -295,7 +295,6 @@ static int load_modern_gl(void) {
     LOAD(p_glCreateShader, "glCreateShader");   LOAD(p_glShaderSource, "glShaderSource");
     LOAD(p_glCompileShader, "glCompileShader"); LOAD(p_glGetShaderiv, "glGetShaderiv");
     LOAD(p_glGetShaderInfoLog, "glGetShaderInfoLog"); LOAD(p_glDeleteShader, "glDeleteShader");
-    LOAD(p_glDeleteProgram, "glDeleteProgram");
     LOAD(p_glCreateProgram, "glCreateProgram"); LOAD(p_glAttachShader, "glAttachShader");
     LOAD(p_glLinkProgram, "glLinkProgram");     LOAD(p_glGetProgramiv, "glGetProgramiv");
     LOAD(p_glGetProgramInfoLog, "glGetProgramInfoLog"); LOAD(p_glUseProgram, "glUseProgram");
@@ -332,6 +331,8 @@ static int load_modern_gl(void) {
     p_glGetQueryObjectui64v = (void *)SDL_GL_GetProcAddress("glGetQueryObjectui64v");
     p_glGetQueryObjectiv    = (void *)SDL_GL_GetProcAddress("glGetQueryObjectiv");
     p_glQueryCounter        = (void *)SDL_GL_GetProcAddress("glQueryCounter");
+    /* Optional (XR colour program cleanup only): never fails modern-GL init. */
+    p_glDeleteProgram       = (void *)SDL_GL_GetProcAddress("glDeleteProgram");
     /* Optional: only the debug presented-image ring maps pack buffers. */
     p_glMapBuffer           = (void *)SDL_GL_GetProcAddress("glMapBuffer");
     p_glUnmapBuffer         = (void *)SDL_GL_GetProcAddress("glUnmapBuffer");
@@ -5712,8 +5713,19 @@ void gl_renderer_interpolation_source_diag(int *source, uint32_t *flip_period,
     if (duplicates) *duplicates = s_interp_duplicates;
 }
 
+/* Host suspension OR a running OpenXR session: every XR present would otherwise
+ * wait/begin/submit a frame per interpolated sub-present. The compositor
+ * reprojects instead. Constant 0 contribution without an active XR session;
+ * history is reset on each transition like the FMV suspension. */
+static int s_interp_xr_gated;
+static int interp_suspended_now(void) {
+    int xr = psx_openxr_session_active();
+    if (xr != s_interp_xr_gated) { s_interp_xr_gated = xr; interp_reset_history_unlocked(); }
+    return s_interp_suspended || xr;
+}
+
 int gl_renderer_interpolation_owns_cadence(void) {
-    return s_ctx && s_interp_enabled && !s_interp_suspended;
+    return s_ctx && s_interp_enabled && !interp_suspended_now();
 }
 
 void gl_renderer_interpolation_diag(int *enabled, int *suspended,
@@ -5733,7 +5745,7 @@ void gl_renderer_interpolation_diag(int *enabled, int *suspended,
 static int interp_capture(GLuint fbo, int x, int y, int w, int h,
                           int linear, int force_4_3, int source_path,
                           int origin_x, int origin_y, int redrawn) {
-    if (!s_interp_enabled || s_interp_suspended || !fbo || w <= 0 || h <= 0) return 0;
+    if (!s_interp_enabled || interp_suspended_now() || !fbo || w <= 0 || h <= 0) return 0;
     int sw = w * s_out_scale, sh = h * s_out_scale, pw, ph;
     hiw_capture_size(sw, sh, force_4_3, &pw, &ph);
     int geometry_changed =
@@ -5839,7 +5851,7 @@ static void interp_draw_textures(GLuint prev_tex, GLuint curr_tex, float alpha,
 
 static uint64_t s_present_ticks_accum_fwd(uint64_t add);
 static int interp_present_pair(GLuint a, GLuint b, float t, int blend_mode) {
-    if (!s_ctx || !s_interp_enabled || s_interp_suspended || s_interp_valid < 1)
+    if (!s_ctx || !s_interp_enabled || interp_suspended_now() || s_interp_valid < 1)
         return 0;
     uint64_t present_t0 = SDL_GetPerformanceCounter();
     int ww = 0, wh = 0; SDL_GL_GetDrawableSize(s_win, &ww, &wh);
@@ -6357,7 +6369,7 @@ static void pass_free_color_fbo(GLuint *tex, GLuint *rb, GLuint *fbo,
 static void pass_resources_release(void) {
     psx_openxr_shutdown();
     if(s_ctx) {
-        if(s_xr_color_prog) p_glDeleteProgram(s_xr_color_prog);
+        if(s_xr_color_prog && p_glDeleteProgram) p_glDeleteProgram(s_xr_color_prog);
         if(s_xr_native_tex) glDeleteTextures(1,&s_xr_native_tex);
     }
     s_xr_color_prog=s_xr_native_tex=0;

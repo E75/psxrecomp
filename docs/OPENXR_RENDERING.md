@@ -139,3 +139,6 @@ and shader against source-owned RGB/grayscale ramps in hidden real GL. Eight
 format/gamma/incoming-sRGB-state combinations pass for gameplay and native
 copies, including vertical orientation, alpha and GL state restoration.
 
+## Frame interpolation is off while a session runs
+
+With frame interpolation on, each interpolated sub-present reaches gl_swap_with_osd and, with a native surface enabled, openxr_present_native -> psx_openxr_begin -> xrWaitFrame. XR would then run several times per guest frame (stacked waits, per-eye ghosting). So presentation-side interpolation is suspended whenever psx_openxr_session_active() is true (compiled, enabled, initialized and running; pure decision: psx_openxr_interp_gate). The compositor reprojects instead. History is reset on every transition and interpolation resumes when the session stops. In a default build, or when XR is not enabled or no session is running, the gate is constant false and interpolation is unchanged.
