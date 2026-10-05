@@ -20,6 +20,7 @@ static std::array<uint8_t, 2 * 1024 * 1024> ram;
 static int failures;
 static int activation_calls;
 static int plugin_calls;
+static int restore_calls;
 
 extern "C" uint8_t psx_read_byte(uint32_t address) {
     return ram[address & 0x1fffffu];
@@ -61,6 +62,9 @@ extern "C" uint32_t psx_mod_gpu_dma_memory_alloc(uint32_t, uint32_t) {
     return 0;
 }
 extern "C" int psx_ws_x_margin(void) { return 0; }
+extern "C" void gpu_ws_tag_hud_primitive(uint32_t, int) {}
+extern "C" void gpu_ws_tag_world_primitive(uint32_t, int) {}
+extern "C" void gpu_ws_set_adaptive_backdrop_preload(int) {}
 
 /* Stand-in for the GPU's display geometry. psx_mod_display_width/height must
  * report exactly what the presenter reports -- a plugin drawing an overlay
@@ -80,6 +84,11 @@ static void test_vblank_plugin(void) {
 
 static void test_activation_plugin(void) {
     activation_calls++;
+}
+
+static void test_restore_plugin(void) {
+    restore_calls++;
+    if (ram[0x1000] != 0xa1) failures++; /* main plan must be reapplied first */
 }
 
 static void check(bool value, const char* message) {
@@ -308,6 +317,10 @@ int main() {
     check(PSXRecompV4::mod_register_vblank_plugin(
               "runtime.test-vblank", test_vblank_plugin),
           "runtime test plugin must register");
+    check(psx_mod_register_savestate_plugin("runtime.test-vblank", test_restore_plugin),
+          "restore callback must register through the C API");
+    check(!psx_mod_register_savestate_plugin("runtime.test-vblank", test_restore_plugin),
+          "duplicate restore callback must be rejected");
     check(PSXRecompV4::mod_runtime_initialize(
               root, "SLUS-RUNTIME", 0x80002000, {}, &error),
           error.c_str());
@@ -347,6 +360,8 @@ int main() {
     ram[0x1200] = 2; ram[0x1201] = 0;
     ram[0x1202] = 1; ram[0x1203] = 0x32;
     mod_runtime_on_savestate_loaded();
+    check(restore_calls == 1 && activation_calls == 1 && plugin_calls == 1,
+          "restore must rebind hooks without activation or a gameplay VBlank");
     check(ram[0x1000] == 0xa1 && ram[0x1003] == 0xa4 &&
               ram[0x1100] == 42 && ram[0x1102] == 43 &&
               ram[0x1200] == 1 && ram[0x1201] == 0x42 &&

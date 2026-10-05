@@ -21,6 +21,10 @@ int psx_mod_register_activation_plugin(const char* id,
                                        PSXModActivationCallback callback);
 int psx_mod_register_vblank_plugin(const char* id,
                                    PSXModVBlankCallback callback);
+/* Runs after successful guest-state restore, before the restored PC resumes.
+ * Rebind host hooks here; do not advance guest gameplay as a VBlank would. */
+int psx_mod_register_savestate_plugin(const char* id,
+                                      PSXModActivationCallback callback);
 int psx_mod_register_function_entry_plugin(
     const char* id, uint32_t address, PSXModFunctionEntryCallback callback);
 /* Called only from generated functions explicitly listed by the game config. */

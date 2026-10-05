@@ -89,6 +89,9 @@ void fntrace_record(CPUState* cpu, uint32_t target);
  * First dispatch into [lo, hi) calls cdrom_notify_game_started(). */
 void fntrace_set_game_range(uint32_t lo, uint32_t hi);
 int  fntrace_is_game_started(void);
+/* Restore the handoff latch without repeating boot-only RAM/CD mutations.
+ * -1 infers legacy snapshots from the registered entry's live bytes. */
+void fntrace_restore_game_started(int started);
 /* One-shot game-start handoff. Idempotent — safe to call from any path
  * (compiled dispatch, dirty-RAM interpreter, generated entry function).
  * Performs dirty-image baseline clear, low-boot scratch clear, CD speed

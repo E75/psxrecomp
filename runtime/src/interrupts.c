@@ -632,6 +632,13 @@ int psx_irq_resume_context_snapshot_site(void)
     return g_cosim_dirty_pump_site;
 }
 
+static unsigned s_snapshot_host_call_depth;
+void psx_snapshot_host_call_begin(void) { ++s_snapshot_host_call_depth; }
+void psx_snapshot_host_call_end(void) {
+    if (s_snapshot_host_call_depth) --s_snapshot_host_call_depth;
+}
+void psx_snapshot_host_call_reset(void) { s_snapshot_host_call_depth = 0; }
+
 uint32_t psx_irq_resume_context_snapshot_pc(void)
 {
     return g_dirty_safe_resume_pc;
@@ -639,6 +646,7 @@ uint32_t psx_irq_resume_context_snapshot_pc(void)
 
 int psx_irq_resume_context_snapshot_safe_at(uint32_t resume_pc)
 {
+    if (s_snapshot_host_call_depth) return 0;
     if (g_cosim_dirty_pump_site == 0)
         return 1;
 

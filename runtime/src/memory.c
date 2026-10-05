@@ -522,6 +522,16 @@ void dirty_ram_register_text_image(uint32_t phys_lo, const uint8_t *bytes,
 
 int dirty_ram_text_image_registered(void) { return text_ref_image != NULL; }
 
+/* Cold legacy restores have no serialized handoff latch. Check live bytes
+ * directly: the page-clean shortcut is not evidence of a loaded game after
+ * RAM/dirty-bit replacement, and a warm session's latch is not evidence either. */
+int dirty_ram_text_image_matches(uint32_t phys, uint32_t len) {
+    phys &= 0x1FFFFFFFu;
+    return text_ref_image && len && phys >= text_ref_lo && phys < text_ref_hi &&
+           len <= text_ref_hi - phys &&
+           memcmp(ram + phys, text_ref_image + phys - text_ref_lo, len) == 0;
+}
+
 static inline void text_guard_note_write(uint32_t phys, uint32_t val, int size) {
     if (!text_ref_image) return;
     if (phys < text_ref_lo || phys + (uint32_t)size > text_ref_hi) return;

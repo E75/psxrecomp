@@ -7,6 +7,7 @@
 #include "gpu_vram_dirty.h"
 #include "cpu_state.h"     /* gte_canonicalize_cpu_state after CPU wire restore   */
 #include "interrupts.h"
+#include "fntrace.h"
 #include "psx_cycles.h"
 #include "psx_icache.h"    /* g_psx_icache_tv — fetch-cost tags in BS_SEC_ICACHE */
 #include "pst_wire.h"
@@ -372,11 +373,18 @@ static int boot_state_save_to(BsOut* o, const CPUState* cpu,
     h.codegen_hash  = (uint32_t)PSX_OVERLAY_CODEGEN_HASH;
     h.abi_tag       = (int32_t)PSX_OVERLAY_ABI_TAG;
     h.codegen_ver   = (uint32_t)PSX_OVERLAY_CODEGEN_VER;
-    h.section_count = 16 + (psx_mod_memory_snapshot_bytes() ? 1u : 0u);
+    h.section_count = 17 + (psx_mod_memory_snapshot_bytes() ? 1u : 0u);
 
     ok = write_header_le(o, &h);
 
     if (ok) ok = write_cpu_section(o, cpu);
+    if (ok) {
+        uint8_t phase[4];
+        PstW w;
+        pst_w_init(&w, phase, sizeof phase);
+        ok = pst_w_u32(&w, (uint32_t)fntrace_is_game_started()) &&
+             write_section(o, BS_SEC_HANDOFF, phase, sizeof phase);
+    }
     if (ok) ok = write_section(o, BS_SEC_RAM,  memory_get_ram_ptr(),        RAM_SIZE);
     if (ok) ok = write_section(o, BS_SEC_SPAD, memory_get_scratchpad_ptr(), SPAD_SIZE);
     if (ok && psx_mod_memory_snapshot_bytes())
@@ -816,6 +824,7 @@ int boot_state_load_buffer(const uint8_t* file, size_t file_len,
         (1u<<BS_SEC_SIO)|(1u<<BS_SEC_MDEC)|(1u<<BS_SEC_DIRTY)|
         (psx_mod_memory_snapshot_bytes() ? (1u<<BS_SEC_MODMEM) : 0u);
     uint32_t seen = 0;
+    int game_started = -1;
     int ok = 1;
     const double t0 = boot_state_mono_ms();
     double inflate_ms = 0.0;
@@ -894,7 +903,14 @@ int boot_state_load_buffer(const uint8_t* file, size_t file_len,
         }
 
         t_sec = boot_state_mono_ms();
-        if (!apply_section(tag, apply_ptr, apply_len, cpu, entry_pc)) ok = 0;
+        if (tag == BS_SEC_HANDOFF) {
+            PstR r;
+            uint32_t phase = 0;
+            pst_r_init(&r, apply_ptr, apply_len);
+            if (apply_len != 4 || !pst_r_u32(&r, &phase) || phase > 1) ok = 0;
+            else game_started = (int)phase;
+        }
+        else if (!apply_section(tag, apply_ptr, apply_len, cpu, entry_pc)) ok = 0;
         else if (tag < 32) seen |= (1u << tag);
         {
             double dt = boot_state_mono_ms() - t_sec;
@@ -908,6 +924,11 @@ int boot_state_load_buffer(const uint8_t* file, size_t file_len,
 
     if (!ok || (seen & required) != required)
         return 0;
+
+    /* Re-running the normal handoff after a cold gameplay restore clears the
+     * restored low kernel scratch and dirtiness baseline, then captures a
+     * bogus boot state. CD speed is already in the CD-ROM section. */
+    fntrace_restore_game_started(game_started);
 
     /* RAM was memcpy'd; force overlay revalidation before resume. */
     overlay_watch_invalidate_after_ram_restore();
