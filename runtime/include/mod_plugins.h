@@ -89,6 +89,9 @@ int psx_mod_game_started(void);
  * otherwise capacity must hold the entire file. Active sector mods apply. */
 int psx_mod_read_disc_file(const char* path, void* buffer, uint32_t capacity,
                            uint32_t* size);
+/* Effective-disc LBA and byte size of a file (directory records patched by
+ * active mods apply, so a relocated file reports its new extent). */
+int psx_mod_disc_file_extent(const char* path, uint32_t* lba, uint32_t* size);
 /* Experimental retained-texture service (currently OpenGL only). IDs are
  * nonzero, stable game-owned identities, NOT GL names. Banks are immutable
  * 16-bit PS1 texels/indices with a caller-selected row pitch (width).
@@ -125,6 +128,41 @@ void psx_mod_write_word(uint32_t address, uint32_t value);
  * restored save state cannot leave the compiled instruction stale.
  */
 void psx_mod_write_code_word(uint32_t address, uint32_t value);
+
+/*
+ * Services shared by seamless-loading adapters (resident disc data: see
+ * mod_resident.h). Emulation-thread callbacks only.
+ *
+ * Run a guest function to completion from a hook: a0..a3 and $ra are set,
+ * control returns when the guest reaches return_address, and the caller's
+ * GPRs, PC, HI and LO are restored. COP0, GTE and timing deadlines keep the
+ * callee's effects, as they would after an ordinary call. Snapshots wait
+ * until the call returns (the host stack holds the continuation). Returns v0.
+ */
+uint32_t psx_mod_call_guest(struct CPUState* cpu, uint32_t function,
+                            uint32_t return_address, uint32_t a0, uint32_t a1,
+                            uint32_t a2, uint32_t a3);
+/* Deliver disc sectors into RAM exactly as a completed CD-ROM DMA would
+ * (overlay capture, executable-page invalidation, CD DMA log when lba >= 0).
+ * Word-aligned address and length. Returns 0 when the span leaves RAM. */
+int psx_mod_dma_write_ram(uint32_t address, const void* data, uint32_t bytes,
+                          int lba);
+/* Store bytes through the CPU store path (any alignment): for data the
+ * original code produces with CPU stores, e.g. a decompressor's output. */
+int psx_mod_host_write_ram(uint32_t address, const void* data, uint32_t bytes);
+/* PsyQ SpuWrite by DMA, completed synchronously: transfer address, DMA-write
+ * transfer mode, the words through the SPU's DMA write path (address
+ * advance and sample-IRQ checks), then transfer mode stop when stop_after.
+ * spu_address 8-aligned, guest_source/bytes word aligned, within SPU RAM.
+ * Library bookkeeping (transfer callbacks, busy flags) stays the caller's. */
+int psx_mod_spu_upload(uint32_t spu_address, uint32_t guest_source,
+                       uint32_t bytes, int stop_after);
+/* PsyQ LoadImage completed synchronously: texture-cache flush, GP0 A0h
+ * rectangle copy of w*h 16-bit pixels from guest RAM (provenance attributed
+ * per word), then GP1(04h) DMA direction CPU->GP0 for uploads the library
+ * would DMA (16 words or more). Caller drains earlier GPU work first. */
+int psx_mod_psyq_load_image(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                            uint32_t guest_source);
 
 /*
  * Allocate opt-in enhancement memory from Expansion 1. Until the first

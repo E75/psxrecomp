@@ -7951,6 +7951,33 @@ static void handle_mod_counters(int id, const char *json)
     free(buf);
 }
 
+/* Resident disc packs prepared by seamless-loading adapters (mod_resident.h):
+ *   {"cmd":"resident_status"}
+ * -> packs: [{title, format, state, error, path, files, modified, derived,
+ *            blobs, bytes, ms}] */
+static void handle_resident_status(int id, const char *json)
+{
+    extern int psx_resident_status_json(char *out, uint32_t capacity);
+    (void)json;
+    for (uint32_t cap = 4096u; cap <= (1u << 22); cap *= 4u) {
+        char *packs = (char *)malloc(cap);
+        if (!packs) break;
+        if (psx_resident_status_json(packs, cap)) {
+            char *buf = (char *)malloc(cap + 64u);
+            if (buf) {
+                snprintf(buf, cap + 64u, "{\"id\":%d,\"ok\":true,\"packs\":%s}", id, packs);
+                debug_server_send_line(buf);
+                free(buf);
+            }
+            free(packs);
+            if (!buf) send_err(id, "alloc failed");
+            return;
+        }
+        free(packs);
+    }
+    send_err(id, "resident status too large");
+}
+
 static void handle_ws_hud_mode(int id, const char *json)
 {
     int v = json_get_int(json, "tag_rects", -1);
@@ -14500,6 +14527,7 @@ static const CmdEntry s_commands[] = {
     { "ws_hud_mode",       handle_ws_hud_mode },
     { "ws_tag_stats",      handle_ws_tag_stats },
     { "mod_counters",      handle_mod_counters },
+    { "resident_status",   handle_resident_status },
     { "capture_mark",      handle_capture_mark },
     { "present_image_ring_stats", handle_present_image_ring_stats },
     { "present_image_ring_get",   handle_present_image_ring_get },

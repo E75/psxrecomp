@@ -5,6 +5,7 @@
 #ifdef __cplusplus
 #include <filesystem>
 #include <string>
+#include <vector>
 #if defined(RECOMP_LAUNCHER)
 #include "recomp_launcher.h"
 #endif
@@ -24,6 +25,11 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path = {},
 bool mod_runtime_clear_for_netplay(std::string* error = nullptr);
 const std::string& mod_runtime_fingerprint();
 const std::filesystem::path& mod_runtime_effective_disc_path();
+/* Read an effective-disc file as whole sectors (true end-of-file tail bytes
+ * included). max_bytes = 0 allows a full CD. Emulation-thread only. */
+bool mod_runtime_read_disc_file_sectors(const std::string& path, uint32_t max_bytes,
+                                        std::vector<uint8_t>& padded, uint32_t& lba,
+                                        uint32_t& size, std::string* error = nullptr);
 
 #if defined(RECOMP_LAUNCHER)
 const ::RecompLauncherCModProvider* mod_runtime_launcher_provider();
