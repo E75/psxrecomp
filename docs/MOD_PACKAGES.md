@@ -755,6 +755,13 @@ some selections of one feature is a `[[requirement]]`, not a dependency.
 
 ## Implicit requirements across packages
 
+The shared PGXP plugin uses `psx_mod_set_pgxp_precision(enabled, cpu_mode)`.
+This stores a session selection as well as setting live correction flags, so
+later renderer initialization cannot erase mod activation with the base video
+settings. Session start clears the selection before activating the new plan;
+the player's persistent settings remain unchanged. Explicit validation
+environment overrides still take precedence at renderer initialization.
+
 Package format 7 lets a feature, while a condition on its own options holds,
 need a feature of **another** package:
 
@@ -896,6 +903,27 @@ reader uses the actual first-track boundary from the TOC or single-track image
 length. An audio-first disc or a nonzero first-track start is rejected. Use a
 CUE for a raw image containing multiple tracks. Declared volume metadata must
 have matching byte orders and 2048-byte logical sectors.
+
+The resolved plan owns an immutable canonical snapshot. During its callbacks,
+a trusted plugin calls `psx_mod_current_resource_bytes(id, &bytes, &size)` to
+obtain a read-only view scoped to its own package and feature. Ordinary
+unverified resources cannot supply bytes through this API. The pointer remains
+valid until the committed plan is replaced or cleared. Decode into host or
+enhancement memory and rebuild derived data when activation changes; never
+reopen the owner path as a substitute for the verified snapshot.
+
+An activation callback can mount a slice of its verified resource for native CD
+streaming with `psx_mod_append_disc_extent(id, byte_offset, sector_count, &lba)`.
+The slice contains 2336-byte Mode-2 sectors beginning at the duplicated XA
+subheader. The runtime appends extents after the mounted disc, synthesizes raw
+sector headers and a data-track TOC/subchannel entry, and retains the original
+CD-ROM/XA decoder, interrupts and timing. The returned LBAs are deterministic
+for the same activation order. Registration rejects missing/unowned resources,
+invalid ranges/subheaders, late calls and addresses beyond the CD MSF limit.
+Plan replacement or netplay clearing removes the extents; base sectors remain
+unchanged. The game plugin supplies its own file lookup, names and stream
+selection. Donor bytes remain external and are covered by the resource fingerprint.
+
 
 Verified resource fingerprints include format, canonical size and SHA-256,
 rather than the selected path, so moving identical media or changing N64 byte

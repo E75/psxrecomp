@@ -2668,6 +2668,14 @@ static void init_callbacks(void) {
             extern uint32_t psx_ws_angle_widen(uint32_t vanilla);
             s_callbacks.ws_angle_widen = psx_ws_angle_widen;
         }
+        {
+            extern int32_t psx_ws_cull_scale(int32_t bound, int32_t half_extent);
+            s_callbacks.ws_cull_scale = psx_ws_cull_scale;
+        }
+        {
+            extern int32_t gte_nclip_exact_sign(int32_t native_mac0, uint32_t pc);
+            s_callbacks.nclip_exact_sign = gte_nclip_exact_sign;
+        }
         /* PGXP dataflow-shadowing hook table (pgxp_hooks.h, appended last).
          * Referenced only by pgxp-flavour shards; the flavor half of the ABI
          * tag already rejects any host/DLL flavor mix, and a NULL table on an

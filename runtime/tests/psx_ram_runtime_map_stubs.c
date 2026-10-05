@@ -57,6 +57,7 @@ uint32_t ls_read_hook(uint32_t a, int s, uint32_t v) { (void)a; (void)s; return 
 void ls_write_hook(uint32_t a, int s, uint32_t v) { (void)a; (void)s; (void)v; }
 void ls_shadow_record_unreplayable(void) {}
 int  fntrace_is_game_started(void) { return 0; }
+void fntrace_restore_game_started(int started) { (void)started; }
 void overlay_loader_note_code_write(void) {}
 void overlay_loader_resync_validation_after_restore(void) {}
 void gte_canonicalize_cpu_state(CPUState *cpu) { (void)cpu; }

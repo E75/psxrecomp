@@ -2,6 +2,7 @@
 #include "cpu_state.h"
 #include "nd_intro_ot.h"
 #include "pgxp.h"
+#include "gte_nclip_stats.h"
 #include "render_pass_projection.h"
 #include <algorithm>
 #include <cstdlib>
@@ -14,6 +15,8 @@ extern "C" int gpu_ws_precise_nclip_enabled(void);
 /* overlay_loader.c: nonzero while an overlay shadow diff (interpreter record
  * plus native replay of one candidate) is running. */
 extern "C" int psx_overlay_shadow_diff_active(void);
+extern "C" uint64_t s_frame_count;            /* debug_server.c */
+extern "C" uint32_t g_debug_last_store_pc;     /* debug_server.c */
 extern "C" { int (*g_psx_projection_command)(CPUState*, uint32_t) = nullptr; }
 
 namespace PSXRecomp {
@@ -1119,10 +1122,63 @@ extern "C" void gte_nclip_precise_stats(uint64_t *hits, uint64_t *fallbacks,
     if (fallbacks) *fallbacks = s_nclip_fallbacks;
     if (disagreements) *disagreements = s_nclip_disagreements;
 }
-extern "C" int gte_nclip_precise_bltz(int32_t native_mac0) {
-    if (!s_nclip_last_precise_valid || native_mac0 != s_nclip_last_native)
-        return native_mac0 < 0;
-    return s_nclip_last_precise_sign < 0;
+/* Always-on attribution tables (gte_nclip_stats.h): producers by guest
+ * function, consumers by branch PC. Open addressing; a full table drops new
+ * keys (counted in s_nclip_*_dropped) rather than evicting. */
+static GteNclipFuncStat s_nclip_func[GTE_NCLIP_STAT_CAP];  /* key 1 = unknown */
+static GteNclipSiteStat s_nclip_site[GTE_NCLIP_STAT_CAP];
+static uint32_t s_nclip_func_dropped = 0, s_nclip_site_dropped = 0;
+static inline uint32_t nclip_slot(uint32_t key) {
+    return (key * 2654435761u) >> 24;   /* GTE_NCLIP_STAT_CAP == 256 */
+}
+template <typename T>
+static T *nclip_find(T *table, uint32_t key, uint32_t T::*field,
+                     uint32_t *dropped) {
+    for (uint32_t i = 0, s = nclip_slot(key); i < GTE_NCLIP_STAT_CAP;
+         ++i, s = (s + 1) & (GTE_NCLIP_STAT_CAP - 1)) {
+        T *e = &table[s];
+        if (e->*field == key) return e;
+        if (e->*field == 0) { e->*field = key; return e; }
+    }
+    ++*dropped;
+    return nullptr;
+}
+extern "C" int gte_nclip_func_stats(GteNclipFuncStat *out, int max) {
+    int n = 0;
+    for (int i = 0; i < GTE_NCLIP_STAT_CAP && n < max; ++i)
+        if (s_nclip_func[i].func) out[n++] = s_nclip_func[i];
+    return n;
+}
+extern "C" int gte_nclip_site_stats(GteNclipSiteStat *out, int max) {
+    int n = 0;
+    for (int i = 0; i < GTE_NCLIP_STAT_CAP && n < max; ++i)
+        if (s_nclip_site[i].pc) out[n++] = s_nclip_site[i];
+    return n;
+}
+extern "C" void gte_nclip_stats_reset(void) {
+    memset(s_nclip_func, 0, sizeof s_nclip_func);
+    memset(s_nclip_site, 0, sizeof s_nclip_site);
+    s_nclip_func_dropped = s_nclip_site_dropped = 0;
+}
+static int s_nclip_exact_enabled = 1;
+extern "C" void gte_nclip_exact_set_enabled(int on) { s_nclip_exact_enabled = on ? 1 : 0; }
+extern "C" int gte_nclip_exact_enabled(void) { return s_nclip_exact_enabled; }
+extern "C" int32_t gte_nclip_exact_sign(int32_t native_mac0, uint32_t pc) {
+    const int32_t native = native_mac0 < 0 ? -1 : (native_mac0 > 0 ? 1 : 0);
+    const bool usable = s_nclip_exact_enabled && s_nclip_last_precise_valid &&
+                        native_mac0 == s_nclip_last_native;
+    const int32_t sign = usable ? s_nclip_last_precise_sign : native;
+    if (!s_gte_replay_sandbox && s_speculative_depth == 0) {
+        if (GteNclipSiteStat *e = nclip_find(s_nclip_site, pc,
+                                             &GteNclipSiteStat::pc,
+                                             &s_nclip_site_dropped)) {
+            e->evals++;
+            if (!usable) e->fallbacks++;
+            else if (sign != native) e->flips++;
+            e->last_frame = (uint32_t)s_frame_count;
+        }
+    }
+    return sign;
 }
 extern "C" int gte_nclip_native_wide_sign(int32_t native_mac0, int* sign) {
     if (!s_nclip_last_precise_valid || !s_nclip_last_horizontal_saturated ||
@@ -1228,8 +1284,24 @@ void gte_nclip(GTEState* gte, uint32_t instr) {
             else checked &= x == raw_x[i];
         }
         s_nclip_last_horizontal_saturated = checked && saturated;
-        if ((cross > 0 && out <= 0) || (cross < 0 && out >= 0))
+        const bool disagree = (cross > 0 && out <= 0) || (cross < 0 && out >= 0);
+        if (disagree)
             s_nclip_disagreements++;
+        /* Last guest store before this NCLIP: codegen stamps it on every
+         * store, so it lands inside the emitter that issued the NCLIP (the
+         * function stamp is not maintained for static code). */
+        const uint32_t key = g_debug_last_store_pc ? g_debug_last_store_pc : 1u;
+        if (GteNclipFuncStat *e = nclip_find(s_nclip_func, key,
+                                             &GteNclipFuncStat::func,
+                                             &s_nclip_func_dropped)) {
+            e->nclips++;
+            if (disagree) e->disagree++;
+            if (sx0 == -0x400 || sx0 == 0x3FF || sy0 == -0x400 || sy0 == 0x3FF ||
+                sx1 == -0x400 || sx1 == 0x3FF || sy1 == -0x400 || sy1 == 0x3FF ||
+                sx2 == -0x400 || sx2 == 0x3FF || sy2 == -0x400 || sy2 == 0x3FF)
+                e->saturated++;
+            e->last_frame = (uint32_t)s_frame_count;
+        }
     } else if (gpu_ws_precise_nclip_enabled() &&
                !s_gte_replay_sandbox && s_speculative_depth == 0) {
         s_nclip_fallbacks++;
@@ -2316,10 +2388,10 @@ extern "C" void gte_write_data(CPUState* cpu, uint8_t reg, uint32_t val) {
                 cpu->gte_data[29] = packed;
             }
             break;
-        /* Guest writes to the SXY FIFO drop the affected register shadows:
-         * we never model FIFO side effects on shadows — the shifted regs 12/13
-         * now describe words their shadows no longer match, and validation
-         * drops those on next use. */
+        /* Guest writes to the SXY FIFO: regs 12/13 overwrite their shadow, a
+         * reg 14 write overwrites SXY2 and its SXYP mirror, and a reg 15
+         * write is the FIFO push, which pgxp_gte_reg_written applies to the
+         * shadows exactly as the registers move. */
         case 12: case 13:
             cpu->gte_data[reg] = val;
             if (!PSXRecomp::GTE::s_gte_replay_sandbox)
@@ -2328,20 +2400,16 @@ extern "C" void gte_write_data(CPUState* cpu, uint8_t reg, uint32_t val) {
         case 14:
             cpu->gte_data[14] = val;
             cpu->gte_data[15] = val;
-            if (!PSXRecomp::GTE::s_gte_replay_sandbox) {
-                pgxp_gte_reg_written(14, val);
-                pgxp_gte_reg_written(15, val);
-            }
+            if (!PSXRecomp::GTE::s_gte_replay_sandbox)
+                pgxp_gte_reg_written(14, val);   /* resets the SXYP mirror too */
             break;
         case 15:
             cpu->gte_data[12] = cpu->gte_data[13];
             cpu->gte_data[13] = cpu->gte_data[14];
             cpu->gte_data[14] = val;
             cpu->gte_data[15] = val;
-            if (!PSXRecomp::GTE::s_gte_replay_sandbox) {
-                pgxp_gte_reg_written(14, val);
-                pgxp_gte_reg_written(15, val);
-            }
+            if (!PSXRecomp::GTE::s_gte_replay_sandbox)
+                pgxp_gte_reg_written(15, val);   /* FIFO push on the shadows */
             break;
         case 28: {
             cpu->gte_data[9] = (val & 0x1Fu) << 7;

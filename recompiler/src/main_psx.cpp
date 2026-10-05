@@ -243,6 +243,7 @@ static int psxrecomp_game_main(int argc, char** argv) {
     std::set<uint32_t>    ws_cull_clip_edge_x_load; // [widescreen.cull] clip_edge_x_load_sites
     uint32_t              ws_cull_clip_edge_width = 0; // [widescreen.cull] clip_edge_width
     std::vector<PSXRecompV4::WidescreenCullKeepSite> ws_cull_keep;
+    std::vector<PSXRecompV4::WidescreenCullScaleSite> ws_cull_scale;
     std::vector<PSXRecompV4::WidescreenAngleSite> ws_cull_angle;
     std::vector<PSXRecompV4::DrawDistanceClampSite> draw_distance_clamps; // [[draw_distance.clamp]]
     PSXRecompV4::WidescreenAspectConeConfig ws_aspect_cone;
@@ -320,6 +321,7 @@ static int psxrecomp_game_main(int argc, char** argv) {
             ws_cull_clip_edge_width = PSXRecompV4::ws_cull_clip_edge_width(cfg);
         ws_cull_keep = cfg.ws_cull_keep_sites;
         ws_cull_masked_reject = cfg.ws_cull_masked_reject_sites;
+        ws_cull_scale = cfg.ws_cull_scale_sites;
         ws_cull_angle = cfg.ws_cull_angle_sites;
         draw_distance_clamps = cfg.draw_distance_clamp_sites;
         ws_aspect_cone = cfg.ws_aspect_cone;
@@ -427,6 +429,7 @@ static int psxrecomp_game_main(int argc, char** argv) {
             ws_cull_clip_edge_width = PSXRecompV4::ws_cull_clip_edge_width(wscfg);
         if (ws_cull_keep.empty()) ws_cull_keep = wscfg.ws_cull_keep_sites;
         if (ws_cull_masked_reject.empty()) ws_cull_masked_reject = wscfg.ws_cull_masked_reject_sites;
+        if (ws_cull_scale.empty()) ws_cull_scale = wscfg.ws_cull_scale_sites;
         if (ws_cull_angle.empty()) ws_cull_angle = wscfg.ws_cull_angle_sites;
         if (ws_aspect_cone.sites.empty())
             ws_aspect_cone = wscfg.ws_aspect_cone;
@@ -1497,6 +1500,7 @@ static int psxrecomp_game_main(int argc, char** argv) {
     else if (!ws_cull_w_imms.empty())
         codegen_config.ws_cull_clip_edge_width = ws_cull_w_imms.front();
     codegen_config.ws_cull_keep_sites = ws_cull_keep;
+    codegen_config.ws_cull_scale_sites = ws_cull_scale;
     codegen_config.ws_cull_angle_sites = ws_cull_angle;
     codegen_config.draw_distance_clamp_sites = draw_distance_clamps;
     codegen_config.ws_aspect_cone = ws_aspect_cone;
