@@ -1513,6 +1513,9 @@ extern "C" int mod_runtime_read_disc_extent(uint32_t lba, int raw,
     return 0;
 }
 
+static void patch_committed_disc_sector(uint32_t lba, int raw_sector,
+                                        uint8_t* bytes, uint32_t size);
+
 extern "C" int psx_mod_read_disc_file(const char* path, void* buffer,
                                       uint32_t capacity, uint32_t* size) {
     using namespace PSXRecompV4;
@@ -1534,12 +1537,12 @@ extern "C" int psx_mod_read_disc_file(const char* path, void* buffer,
             const uint32_t lba = entry.lba + offset / 2048u;
             if (reader.ReadRawSector(lba, raw)) {
                 if (raw[15] != 1 && (raw[15] != 2 || (raw[18] & 0x20u))) return 0;
-                mod_runtime_patch_disc_sector(lba, 1, raw, sizeof raw);
+                patch_committed_disc_sector(lba, 1, raw, sizeof raw);
                 std::memcpy(sector, raw + (raw[15] == 1 ? 16 : 24), sizeof sector);
-                if (raw[15] == 1) mod_runtime_patch_disc_sector(lba, 0, sector, sizeof sector);
+                if (raw[15] == 1) patch_committed_disc_sector(lba, 0, sector, sizeof sector);
             } else {
                 if (!reader.ReadSector(lba, sector)) return 0;
-                mod_runtime_patch_disc_sector(lba, 0, sector, sizeof sector);
+                patch_committed_disc_sector(lba, 0, sector, sizeof sector);
             }
             if (state().disc_guard_failed) return 0;
             const uint32_t count = std::min(2048u, entry.size - offset);
@@ -1865,12 +1868,16 @@ extern "C" int psx_mod_function_entry_active(void) {
     return PSXRecompV4::function_entry_depth != 0;
 }
 
-extern "C" void mod_runtime_patch_disc_sector(uint32_t lba, int raw_sector,
-                                               uint8_t* bytes, uint32_t size) {
+/* Apply the committed plan's disc writes and overlays to one sector. The
+ * emulated drive reaches this only after mod_runtime_enable_disc_patches()
+ * (reference reads before then must see the original image); host-side
+ * preparation through psx_mod_read_disc_file() always sees the effective disc,
+ * including during plugin activation, which runs before the drive is enabled. */
+static void patch_committed_disc_sector(uint32_t lba, int raw_sector,
+                                        uint8_t* bytes, uint32_t size) {
     using namespace PSXRecompV4;
     RuntimeMods& s = state();
-    if (!s.initialized || !s.disc_enabled || s.disc_guard_failed ||
-        !bytes || size == 0) return;
+    if (!s.initialized || s.disc_guard_failed || !bytes || size == 0) return;
     /* Raw Mode2 Form1 reads are also the source of the 2048-byte logical
      * stream consumed by the emulated CD controller. Apply raw claims to the
      * complete sector, then user-data claims to its payload window. Form2/XA
@@ -1889,7 +1896,7 @@ extern "C" void mod_runtime_patch_disc_sector(uint32_t lba, int raw_sector,
     const auto overlay_sector = overlay_index.find(lba);
     if (sector == index.end() && overlay_sector == overlay_index.end()) {
         if (has_mode2_form1_user_data)
-            mod_runtime_patch_disc_sector(lba, 0, bytes + 24, 2048);
+            patch_committed_disc_sector(lba, 0, bytes + 24, 2048);
         return;
     }
     if (sector != index.end()) {
@@ -1944,5 +1951,11 @@ extern "C" void mod_runtime_patch_disc_sector(uint32_t lba, int raw_sector,
         }
     }
     if (has_mode2_form1_user_data && !s.disc_guard_failed)
-        mod_runtime_patch_disc_sector(lba, 0, bytes + 24, 2048);
+        patch_committed_disc_sector(lba, 0, bytes + 24, 2048);
+}
+
+extern "C" void mod_runtime_patch_disc_sector(uint32_t lba, int raw_sector,
+                                               uint8_t* bytes, uint32_t size) {
+    if (!PSXRecompV4::state().disc_enabled) return;
+    patch_committed_disc_sector(lba, raw_sector, bytes, size);
 }

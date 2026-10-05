@@ -964,6 +964,55 @@ int main() {
     check(PSXRecompV4::mod_runtime_commit(raw_path,&error),"reader mount raw disc");
     check(psx_mod_read_disc_file("S0/LEVEL.NSF",result.data(),(uint32_t)result.size(),&bytes) &&
           std::equal(result.begin(),result.end(),iso.begin()+22*2048),"raw and ISO reads identical");
+    /* Plugin activation (native asset preparation) runs before the emulated
+     * drive's disc patches are enabled. Host reads must already return the
+     * committed plan's effective bytes, or a prepared cache would silently
+     * serve original assets under a modded plan. The drive path stays gated. */
+    {
+        const auto patched_root = root / "host-reader-patched";
+        const auto patched_iso = patched_root / "original.iso";
+        write_bytes(patched_iso, iso);
+        write_text(patched_root / "packages/reader.patch/1.0.0/manifest.toml",
+            "format_version = 5\n"
+            "id = \"reader.patch\"\n"
+            "version = \"1.0.0\"\n"
+            "name = \"Reader Patch\"\n"
+            "[[target]]\n"
+            "game_id = \"READER\"\n"
+            "disc_sha256 = \"" + sha256_hex(iso) + "\"\n"
+            "[[feature]]\n"
+            "id = \"asset\"\n"
+            "name = \"Asset\"\n"
+            "[[patch]]\n"
+            "feature = \"asset\"\n"
+            "target = \"disc_user\"\n"
+            "offset = " + std::to_string(22 * 2048 + 5) + "\n"
+            "expected = \"23\"\n"
+            "replace = \"5a\"\n");
+        write_text(patched_root / "state.toml",
+            "format_version = 2\n"
+            "[[feature]]\n"
+            "package_id = \"reader.patch\"\n"
+            "id = \"asset\"\n"
+            "enabled = true\n");
+        check(PSXRecompV4::mod_runtime_initialize(patched_root, "READER", 0, {}, &error),
+              "patched reader initialize");
+        check(PSXRecompV4::mod_runtime_commit(patched_iso, &error), "patched reader commit");
+        std::vector<uint8_t> effective(3000);
+        check(psx_mod_read_disc_file("S0/LEVEL.NSF", effective.data(),
+                                     (uint32_t)effective.size(), &bytes) &&
+                  bytes == 3000 && effective[5] == 0x5a &&
+                  std::equal(effective.begin() + 6, effective.end(), iso.begin() + 22 * 2048 + 6),
+              "host disc reads apply the committed plan before the drive is enabled");
+        std::array<uint8_t, 2048> drive_sector{};
+        std::copy_n(iso.begin() + 22 * 2048, 2048, drive_sector.begin());
+        mod_runtime_patch_disc_sector(22, 0, drive_sector.data(), (uint32_t)drive_sector.size());
+        check(drive_sector[5] == 0x23,
+              "the emulated drive path stays original until disc patches are enabled");
+        mod_runtime_enable_disc_patches();
+        mod_runtime_patch_disc_sector(22, 0, drive_sector.data(), (uint32_t)drive_sector.size());
+        check(drive_sector[5] == 0x5a, "enabled drive path applies the same plan");
+    }
     /* Verified bytes are scoped to the committed feature, and do not depend
      * on reopening an owner file after launch. No launcher is needed here. */
     const auto media_root = root / "verified-media";
