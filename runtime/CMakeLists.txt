@@ -1018,6 +1018,10 @@ if(BUILD_TESTING)
     target_include_directories(gpu_sw_edges_test PRIVATE src)
     add_test(NAME gpu_sw_edges_test COMMAND gpu_sw_edges_test)
 
+    add_executable(gpu_uv_test tests/test_gpu_uv.c)
+    target_include_directories(gpu_uv_test PRIVATE src)
+    add_test(NAME gpu_uv_test COMMAND gpu_uv_test)
+
     add_executable(gpu_vk_upload_alignment_test
         tests/test_gpu_vk_upload_alignment.c)
     target_include_directories(gpu_vk_upload_alignment_test PRIVATE src)

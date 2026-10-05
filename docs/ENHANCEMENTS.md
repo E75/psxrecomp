@@ -477,6 +477,16 @@ Save states and speculative native-validation passes drop host-only provenance
 (`gte_precision_timeline_invalidate`, `gte_precision_speculative_begin/end`) so
 a rewind can never resurrect a stale projection.
 
+Perspective-correct world polygons retain their authored UV coordinates and
+inclusive atlas bounds. The shared `gpu_uv.h` sampling policy applies mirrored
+sprite compensation only to affine primitives. Integer screen rounding can
+otherwise make one half of a world quad appear axis-aligned and shift its UVs
+by one texel while the other half stays put. This caused diagonal breaks and
+camera-dependent flicker in MediEvil II's Museum doorway trim. OpenGL/Vulkan
+use the shared policy; software uses the same stable world bounds. The
+`gpu_uv_test` fixture covers the captured doorway packets, camera rounding,
+shared edges, mirrored/forward sprites and texture-page wrapping.
+
 ### Validation story
 
 By construction this feature *diverges* from stock hardware output, so the
