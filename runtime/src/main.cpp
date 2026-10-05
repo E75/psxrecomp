@@ -6,6 +6,9 @@
  */
 
 #include "cpu_state.h"
+#include "projection_scale.hpp"
+#include "projection_scale_config.hpp"
+#include "mod_controller_source.h"
 #include "window_size.h"     /* default game-window size */
 #include "internal_resolution.h" /* Settings -> Display -> Internal resolution */
 #include "psx_scheduler.h"   /* psx_scheduler_run — deterministic TCB scheduler */
@@ -29,6 +32,8 @@
 #include "psx_rewind.h"
 #include "psx_savestate_menu.h"
 #include "host_osd.h"
+#include "local_mouse_sdl.h"
+#include "pad_external_input.h"
 #include "host_keymap.h"
 #include "png_write.h"       /* png_write_rgb — present_shot readback */
 #include "overlay_capture.h"
@@ -1052,6 +1057,7 @@ extern "C" void psx_frontend_on_savestate_refused(int is_load, int slot,
 
 extern "C" void psx_frontend_on_savestate_loaded(void) {
     psx_projection_reset_session();
+    psx_local_mouse_reset();
     mod_runtime_on_savestate_loaded();
 #ifndef PSX_NO_DEBUG_TOOLS
     debug_server_note_savestate_loaded();
@@ -1448,6 +1454,9 @@ extern "C" void debug_get_fmv_config(int *auto_skip, uint32_t *total_table,
 static int           g_video_depth24_trailing_margin = 8;
 static int           g_video_aspect_num = 4;
 static int           g_video_aspect_den = 3;
+/* [video] fov_scale — VR perspective multiplier on the GTE projection distance
+ * H (1.0 = faithful). env PSX_GTE_FOV_SCALE overrides it. */
+static double        g_fov_scale = 1.0;
 /* Resize-driven widescreen. The user's fixed aspect is still used to shape the
  * initial window; after the game window exists these values follow its live
  * aspect, clamped to 4:3..the widest mode offered by the title. */
@@ -1552,6 +1561,7 @@ extern "C" int psx_mod_set_adaptive_display_aspect(
 static PSXModSessionBaseline g_mod_owned_baseline;
 
 static void reset_mod_owned_presentation(void) {
+    psx_local_mouse_clear();
     PSXModSessionScalars live;
     live.video_vsync = g_video_vsync;
     live.frame_interpolation = g_frame_interpolation;
@@ -1918,6 +1928,8 @@ static void netplay_local_viewport_projection_aspect(
 static int g_ws_projection_num = 4;
 static int g_ws_projection_den = 3;
 static int g_ws_projection_mode = -1;
+extern "C" void gte_set_fov_scale(int num, int den);
+
 static void refresh_widescreen_projection() {
     if (g_ws_engaged && !fntrace_is_game_started()) {
         g_ws_engaged = false;
@@ -1925,6 +1937,12 @@ static void refresh_widescreen_projection() {
         gte_set_display_aspect(4, 3);
         gpu_ws_configure(4, 3, g_ws_anchor_addr, 0, 0);
     }
+    /* VR FOV: scale the GTE projection distance H (fov = 2*atan(w/(2H))).
+     * Independent of the widescreen squash; identity by default. */
+    if (g_fov_scale > 0.0 && g_fov_scale != 1.0)
+        gte_set_fov_scale(1000, psx_projection_scale_denominator(g_fov_scale));
+    else
+        gte_set_fov_scale(1, 1);
     if (!g_ws_engaged) return;
 
     const bool wide = g_video_aspect_num * 3 != g_video_aspect_den * 4;
@@ -2012,8 +2030,33 @@ static void update_adaptive_widescreen() {
  * teardown resets them and macOS otherwise supplies a legacy 2.1 context. */
 static void configure_core_gl_context_attributes() {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    int major = 3, minor = 3;
+#if defined(PSX_OPENXR)
+    /* Opt-in headset context (docs/OPENXR_RENDERING.md). Ordinary GL launches
+     * keep the historic 3.3. The environment variable is PSX_OPENXR_ENABLE;
+     * the bare PSX_OPENXR spelling collides with the CMake option of the same
+     * name, so it is deprecated (still honoured, with a note). */
+    const char *xr = std::getenv("PSX_OPENXR_ENABLE");
+    const char *xr_old = std::getenv("PSX_OPENXR");
+    const bool xr_on = xr && xr[0] && xr[0] != '0';
+    const bool xr_old_on = xr_old && xr_old[0] && xr_old[0] != '0';
+    static bool s_xr_ctx_logged = false;
+    if (xr_on || xr_old_on) {
+        major = 4; minor = 6;
+        if (!s_xr_ctx_logged) {
+            s_xr_ctx_logged = true;
+            std::fprintf(stderr,
+                "psxrecomp: OpenXR build: %s requests an OpenGL 4.6 core context "
+                "(default is 3.3)\n", xr_on ? "PSX_OPENXR_ENABLE" : "PSX_OPENXR");
+            if (!xr_on)
+                std::fprintf(stderr,
+                    "psxrecomp: environment variable PSX_OPENXR is deprecated "
+                    "(it shares its name with the CMake option); use PSX_OPENXR_ENABLE\n");
+        }
+    }
+#endif
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, major);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, minor);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
 }
@@ -3672,6 +3715,7 @@ static const char* netplay_start_failure(int nrc, const PsxNetplayConfig& cfg) {
 }
 
 static void shutdown_runtime(void) {
+    psx_local_mouse_clear();
     /* (sljit removed 2026-07-15: overlay_compile_worker_stop joined the
      * off-thread JIT worker here; the worker no longer exists.) */
     psx_netplay_shutdown();
@@ -5018,33 +5062,43 @@ static int effective_player_mode_for_sio(const PlayerInput& p, int sio_slot) {
     return effective_player_mode(p);
 }
 
+/* Assert one slot's real SIO profile (connection, config capability) from its
+ * device/mode/policy and return the pad mode to present at boot. Used by
+ * refresh_player_devices and to restore a port once a mod controller source
+ * detaches. dev_here: dev-any-input keeps P1 connected without a device. */
+static int assert_sio_pad_profile(int s, bool dev_here) {
+    const PlayerInput& p = g_players[s];
+    const int mode = effective_player_mode_for_sio(p, s);
+    const ModControllerPresentationPolicy& policy = g_mod_controller_policy[s];
+    const int boot_mode = policy.callback ? policy.initial_mode : mode;
+    sio_set_pad_connected(s, (p.kind != 0 || dev_here) ? 1 : 0);
+    /* DIGITAL mode == a plain digital controller that ignores the DualShock
+     * config-mode commands (real SCPH-1080 behaviour); ANALOG or an
+     * explicitly config-capable mod policy == a config-capable DualShock.
+     * A digital pad that wrongly answered 0x43 sent Tomba 2's pad driver
+     * down the config path -> phantom 0x00 reads.
+     * Multitap taps are always digital (see sio_pad_on_multitap). */
+    sio_set_pad_config_capable(
+        s, policy.callback ? policy.config_capable
+                           : mode != PSXRecompV4::PAD_MODE_DIGITAL);
+    return boot_mode;
+}
+
 /* Open/close SDL handles so they match g_players, and (re)assert each slot's
  * PSX connection + pad type. Safe to call repeatedly (hotplug, boot).
  * While delay-sync netplay is active, SIO connection/type are owned by
  * psx_netplay (session slots stay plugged); only refresh host SDL handles. */
 static void refresh_player_devices(void) {
+    psx_local_mouse_reset();
     const int netplay = psx_netplay_active();
     for (int s = 0; s < PSX_MAX_PLAYERS; s++) {
         PlayerInput& p = g_players[s];
         if (p.kind != 2) close_player(p);           /* keyboard/none: no handle */
         else open_player(p, s);
         if (netplay) continue;
-        const int mode = effective_player_mode_for_sio(p, s);
-        const ModControllerPresentationPolicy& policy =
-            g_mod_controller_policy[s];
-        const int boot_mode = policy.callback ? policy.initial_mode : mode;
-        sio_set_pad_connected(s, p.kind != 0 ? 1 : 0);
+        const int boot_mode = assert_sio_pad_profile(s, false);
         sio_set_pad_analog(s, pad_mode_boot_analog(boot_mode),
                            0x80, 0x80, 0x80, 0x80);
-        /* DIGITAL mode == a plain digital controller that ignores the DualShock
-         * config-mode commands (real SCPH-1080 behaviour); ANALOG or an
-         * explicitly config-capable mod policy == a config-capable DualShock.
-         * A digital pad that wrongly answered 0x43 sent Tomba 2's pad driver
-         * down the config path -> phantom 0x00 reads.
-         * Multitap taps are always digital (see sio_pad_on_multitap). */
-        sio_set_pad_config_capable(
-            s, policy.callback ? policy.config_capable
-                               : mode != PSXRecompV4::PAD_MODE_DIGITAL);
     }
 }
 
@@ -5536,6 +5590,7 @@ static void dev_any_controller_sticks(uint8_t st[4]) {
 }
 
 static void savestate_input_guard_arm(void) {
+    psx_local_mouse_reset();
     uint32_t now = (uint32_t)SDL_GetTicks();
     g_savestate_input_guard_min_until = now + 90u;
     g_savestate_input_guard_max_until = now + 700u;
@@ -5690,9 +5745,12 @@ extern "C" int psx_mod_read_local_pad_sticks(uint32_t player,
     return 1;
 }
 
-/* Capture one SIO slot's host pad into a netplay/local blob. Returns 1 if a
- * device (or dev-any P1) is present; 0 leaves *out as released/disconnected. */
-static int capture_pad_slot(int s, PsxNetPad* out) {
+/* Capture one SIO slot's PHYSICAL host pad into a netplay/local blob. Returns
+ * 1 if a device (or dev-any P1) is present; 0 leaves *out as released/
+ * disconnected. `guarded` (savestate input guard) delivers neutral buttons and
+ * sticks but still resolves presence/type. No mouse or source side effects:
+ * those are layered on top by pad_ext_resolve(). */
+static int capture_pad_slot(int s, PsxNetPad* out, bool guarded) {
     if (!out) return 0;
     out->buttons = 0xFFFFu;
     out->lx = out->ly = out->rx = out->ry = 0x80u;
@@ -5729,7 +5787,7 @@ static int capture_pad_slot(int s, PsxNetPad* out) {
         s, player, mode, src, p, policy_buttons, st);
     const int eff_analog =
         effective_mode == PSXRecompV4::PAD_MODE_ANALOG ? 1 : 0;
-    if (savestate_input_guard_active()) {
+    if (guarded) {
         out->buttons = 0xFFFFu;
         out->lx = out->ly = out->rx = out->ry = 0x80u;
         out->analog = eff_analog ? 1u : 0u;
@@ -6294,6 +6352,80 @@ done:
     freeze_heartbeat_set_paused(0);
 }
 
+/* Main-thread implementation of the PadExtHooks seams (see
+ * pad_external_input.h for the resolution order and precedence rule). */
+static int pad_ext_guard_active(void*) { return savestate_input_guard_active(); }
+static int pad_ext_capture_local(void*, int s, PsxNetPad* out, int guarded) {
+    return capture_pad_slot(s, out, guarded != 0);
+}
+static int pad_ext_source_sample(void*, int s, PSXModControllerState* st, int* released) {
+    return mod_controller_source_sample((uint32_t)s, st, released);
+}
+static void pad_ext_source_release(void*, int s, PsxNetPad* pad) {
+    /* Source detached/reset: deliver one neutral frame (even on a port with no
+     * device) and give the port back its real SIO connection/config state; a
+     * device resumes next frame. */
+    const bool dev_here = (dev_any_input_enabled() && s == 0);
+    const int boot_mode = assert_sio_pad_profile(s, dev_here);
+    pad->buttons = 0xffff;
+    pad->lx = pad->ly = pad->rx = pad->ry = 128;
+    pad->analog = pad_mode_boot_analog(boot_mode) ? 1 : 0;
+    pad->connected = 1;
+}
+static void pad_ext_source_resolve(void*, int s, const PSXModControllerState* source,
+                                   int guarded, PsxNetPad* pad) {
+    const bool dev_here = (dev_any_input_enabled() && s == 0);
+    pad->lx = (uint8_t)source->lx; pad->ly = (uint8_t)source->ly;
+    pad->rx = (uint8_t)source->rx; pad->ry = (uint8_t)source->ry;
+    pad->connected = 1;
+    /* Presentation goes through the same resolution as a physical pad: the
+     * source's `analog` is the device capability, then mod mode override,
+     * multitap rule and presentation policy. */
+    const PlayerInput& p = g_players[s];
+    int mode = effective_player_mode_for_sio(p, s);
+    if (g_mod_controller_mode_override[s] >= 0 &&
+        !(sio_pad_on_multitap(s) && !sio_get_multitap_analog()))
+        mode = g_mod_controller_mode_override[s];
+    if (!source->analog) mode = PSXRecompV4::PAD_MODE_DIGITAL;
+    uint8_t st[4] = { pad->lx, pad->ly, pad->rx, pad->ry };
+    int eff_mode = controller_policy_resolve_mode(
+        s, s + 1, mode, pad_sources_for(p, dev_here), p, pad->buttons, st);
+    if (!source->analog ||
+        (sio_pad_on_multitap(s) && !sio_get_multitap_analog()))
+        eff_mode = PSXRecompV4::PAD_MODE_DIGITAL;
+    pad->analog = eff_mode == PSXRecompV4::PAD_MODE_ANALOG ? 1 : 0;
+    if (!pad->analog)
+        pad->lx = pad->ly = pad->rx = pad->ry = 128;
+    if (guarded) {
+        pad->buttons = 0xffff;
+        pad->lx = pad->ly = pad->rx = pad->ry = 128;
+    }
+    /* The source occupies the port; config capability follows the same rule
+     * as a physical pad (apply_pad_slot_to_sio and the SIO layer keep multitap
+     * taps digital). */
+    const ModControllerPresentationPolicy& policy = g_mod_controller_policy[s];
+    sio_set_pad_connected(s, 1);
+    sio_set_pad_config_capable(
+        s, policy.callback ? policy.config_capable
+                           : mode != PSXRecompV4::PAD_MODE_DIGITAL);
+}
+static void pad_ext_mouse_reset(void*) { psx_local_mouse_reset(); }
+static void pad_ext_mouse_fold(void*, int connected, int analog, uint16_t buttons,
+                               uint8_t* rx, uint8_t* ry) {
+    psx_local_mouse_pad(connected != 0, analog != 0, buttons, *rx, *ry);
+}
+static PadExtHooks pad_ext_main_hooks(void) {
+    PadExtHooks h{};
+    h.guard_active = pad_ext_guard_active;
+    h.capture_local = pad_ext_capture_local;
+    h.source_sample = pad_ext_source_sample;
+    h.source_release = pad_ext_source_release;
+    h.source_resolve = pad_ext_source_resolve;
+    h.mouse_reset = pad_ext_mouse_reset;
+    h.mouse_fold = pad_ext_mouse_fold;
+    return h;
+}
+
 static void sample_pad_into_sio(int override) {
     /* Selfcheck fighter mash owns P1 when enabled (headless-safe). */
     if (override < 0) {
@@ -6302,6 +6434,7 @@ static void sample_pad_into_sio(int override) {
             override = (int)mash;
     }
     if (override >= 0) {
+        psx_local_mouse_reset();
         apply_input_override_to_sio(override);
         return;
     }
@@ -6310,9 +6443,10 @@ static void sample_pad_into_sio(int override) {
     if (n > PSX_MAX_PLAYERS) n = PSX_MAX_PLAYERS;
     const uint32_t consumer_sim =
         psx_start_consumer_enabled() ? psx_start_consumer_offline_frame() : 0u;
+    PadExtHooks hooks = pad_ext_main_hooks();
     for (int s = 0; s < n; s++) {
         PsxNetPad pad;
-        if (!capture_pad_slot(s, &pad)) continue;  /* no device in this port */
+        if (!pad_ext_resolve(&hooks, s, &pad)) continue;  /* no device in this port */
         /* Push sticks every frame; request the pad type (digital/analog) through
          * the coherent channel so a policy switch is applied only at an idle,
          * non-config bus boundary (never mid-poll / mid-handshake). This is the
@@ -6782,6 +6916,7 @@ static void savestate_menu_close(void) {
 }
 
 static void savestate_menu_toggle(SDL_Keycode opened_by_key) {
+    psx_local_mouse_reset();
     if (psx_rewind_is_open())
         return;
     if (savestate_menu_open) {
@@ -6945,8 +7080,10 @@ static int rewind_toggle_buttons_down(void) {
 static void rewind_poll_toggle_buttons(void) {
     static int was_down;
     int down = rewind_toggle_buttons_down();
-    if (down && !was_down && !psx_rewind_is_open())
+    if (down && !was_down && !psx_rewind_is_open()) {
+        psx_local_mouse_reset();
         psx_rewind_toggle();
+    }
     was_down = down;
 }
 
@@ -7051,10 +7188,13 @@ static void rewind_pause_present(void) {
 
 /* Freeze guest in vblank present while the rewind filmstrip is open. */
 static void rewind_host_pause_loop(void) {
+    psx_local_mouse_begin(sdl_window, false);
+    psx_local_mouse_reset();
     freeze_heartbeat_set_paused(1);
     while (psx_rewind_is_open()) {
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
+            (void)psx_local_mouse_event(ev);
             if (ev.type == SDL_QUIT) {
                 psx_crash_trace_set_exit_origin("sdl_window_close");
                 shutdown_runtime();
@@ -7095,10 +7235,13 @@ static void rewind_host_pause_loop(void) {
 
 /* Freeze guest in vblank present while the save-state slot menu is open. */
 static void savestate_menu_host_pause_loop(void) {
+    psx_local_mouse_begin(sdl_window, false);
+    psx_local_mouse_reset();
     freeze_heartbeat_set_paused(1);
     while (savestate_menu_open) {
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
+            (void)psx_local_mouse_event(ev);
             if (ev.type == SDL_QUIT) {
                 psx_crash_trace_set_exit_origin("sdl_window_close");
                 shutdown_runtime();
@@ -7191,6 +7334,154 @@ static void headless_present_image_ring_capture(void) {
     present_image_ring_push_argb((uint32_t)s_frame_count, buf.data(), w, h, w);
 }
 #endif
+// Shared by early and post-pacer sampling: do not PumpEvents without draining
+// ordered motion/control events and the existing hotkeys before folding binds.
+static bool drain_host_events() {
+    SDL_Event ev;
+    while (SDL_PollEvent(&ev)) {
+        if (psx_local_mouse_event(ev)) continue;
+        if (ev.type == SDL_QUIT) {
+            if (psx_netplay_active()) {
+                netplay_soft_exit("sdl_window_close");
+                return false;
+            }
+            psx_crash_trace_set_exit_origin("sdl_window_close");
+            shutdown_runtime();
+            std::exit(0);
+        } else if (ev.type == SDL_CONTROLLERDEVICEADDED) {
+            refresh_player_devices();
+        } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
+            bool ours = false;
+            for (int s = 0; s < PSX_MAX_PLAYERS; s++) {
+#if defined(PSX_SDL3)
+                if (ev.gdevice.which == g_players[s].instance) { ours = true; break; }
+#else
+                if (ev.cdevice.which == g_players[s].instance) { ours = true; break; }
+#endif
+            }
+            if (ours) {
+                close_controller();
+                refresh_player_devices();
+            }
+        } else if (ev.type == SDL_KEYDOWN) {
+#if defined(PSX_SDL3)
+            const SDL_Keymod mod = ev.key.mod;
+            const SDL_Keycode key = ev.key.key;
+            const SDL_Scancode scancode = ev.key.scancode;
+            const int key_repeat = ev.key.repeat ? 1 : 0;
+#else
+            const Uint16 mod = ev.key.keysym.mod;
+            const SDL_Keycode key = ev.key.keysym.sym;
+            const SDL_Scancode scancode = ev.key.keysym.scancode;
+            const int key_repeat = ev.key.repeat ? 1 : 0;
+#endif
+            if (key == SDLK_ESCAPE && psx_netplay_active()) {
+                netplay_soft_exit("netplay_escape");
+                return false;
+            }
+            if (!key_repeat &&
+                host_keymap_match_event(HOST_KEYMAP_REWIND, (int)key,
+                                        (int)scancode, (int)mod)) {
+                psx_local_mouse_reset();
+                psx_rewind_toggle();
+            }
+            else if (!key_repeat &&
+                     host_keymap_match_event(HOST_KEYMAP_SAVE_STATE_MENU,
+                                             (int)key, (int)scancode,
+                                             (int)mod)) {
+                psx_local_mouse_reset();
+                savestate_menu_toggle(key);
+            }
+            else if (key == SDLK_c && (mod & KMOD_CTRL)) {
+                std::fprintf(stdout, "[DEBUG] Forzando reinserción de CD...\n");
+                debug_force_cd_reinsert();
+                host_osd_push("CD reinsert", 1500);
+            }
+            else if (!key_repeat &&
+                     host_keymap_match_event(HOST_KEYMAP_TURBO_TOGGLE,
+                                             (int)key, (int)scancode,
+                                             (int)mod)) {
+                fast_forward_toggle_flip();
+            }
+            else if (!key_repeat &&
+                     host_keymap_match_event(HOST_KEYMAP_CAPTURE_MARK,
+                                             (int)key, (int)scancode,
+                                             (int)mod)) {
+#ifndef PSX_NO_DEBUG_TOOLS
+                debug_server_capture_mark();
+                host_osd_push("Capture marked (debug rings frozen)", 2000);
+#else
+                host_osd_push("Capture mark needs a debug-tools build", 2000);
+#endif
+            }
+            else if (!key_repeat &&
+                     host_keymap_match_event(HOST_KEYMAP_DISPLAY_PERF,
+                                             (int)key, (int)scancode,
+                                             (int)mod)) {
+                fps_telemetry_toggle();
+            }
+            else if (!key_repeat &&
+                     host_keymap_match_event(HOST_KEYMAP_SCANLINES,
+                                             (int)key, (int)scancode,
+                                             (int)mod)) {
+                psx_video_set_scanlines(g_video_scanlines ? 0 : 1,
+                                        g_video_scanline_strength);
+                char msg[48];
+                std::snprintf(msg, sizeof(msg), "Scanlines %s",
+                              g_video_scanlines ? "on" : "off");
+                host_osd_push(msg, 1200);
+            }
+            /* Host volume: config.ini [KeyMap] VolumeUp/VolumeDown
+             * (defaults: keypad +/-). 5% steps; shows right-side bar. */
+            else if (host_keymap_match_event(HOST_KEYMAP_VOLUME_UP,
+                                              (int)key, (int)scancode,
+                                              (int)mod)) {
+                host_volume_adjust(+5);
+            } else if (host_keymap_match_event(HOST_KEYMAP_VOLUME_DOWN,
+                                                (int)key, (int)scancode,
+                                                (int)mod)) {
+                host_volume_adjust(-5);
+            }
+            /* Fullscreen toggle: Alt+Enter or Cmd/Ctrl+F. Toggles between
+             * windowed and the CONFIGURED tri-state mode (g_fullscreen: 1
+             * borderless desktop fullscreen keeping the desktop resolution
+             * and letterboxing the image, or 2 exclusive fullscreen — a
+             * real display-mode change). Track the selected live mode:
+             * borderless deliberately leaves SDL's fullscreen bit clear. */
+            else if (!key_repeat &&
+                     host_keymap_match_event(HOST_KEYMAP_FULLSCREEN,
+                                             (int)key, (int)scancode,
+                                             (int)mod)) {
+                const int target = s_window_fullscreen.mode ? 0 :
+                                   (g_fullscreen ? g_fullscreen : 1);
+                if (psx_window_fullscreen_set(sdl_window, &s_window_fullscreen, target) == 0)
+                    host_osd_push(target ? "Fullscreen" : "Windowed", 1500);
+                else
+                    host_osd_push("Fullscreen change failed", 1500);
+            }
+        }
+    }
+    return true;
+}
+
+static bool local_mouse_live(int override_word) {
+    PadExtGate g{};
+    g.injected_input = override_word >= 0;
+#ifndef PSX_NO_DEBUG_TOOLS
+    uint8_t axes[4];
+    g.injected_input = g.injected_input || debug_server_get_axis_override(axes) != 0;
+#endif
+    g.headless = g_headless;
+    g.netplay_active = psx_netplay_active();
+    g.netplay_resim = psx_netplay_is_resimulating();
+    g.selfcheck_locked = psx_selfcheck_input_locked();
+    g.selfcheck_resim = psx_selfcheck_resim_active();
+    g.render_pass = g_psx_render_pass_active;
+    g.savestate_menu_open = savestate_menu_open;
+    g.rewind_open = psx_rewind_is_open();
+    g.input_guard = savestate_input_guard_active();
+    return pad_ext_live(&g) != 0;
+}
 
 static NetplayVblankEpilogue sdl_vblank_present_body(void) {
     NetplayVblankEpilogue ep{};
@@ -7226,6 +7517,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
     int override = -1;
 #endif
 
+    psx_local_mouse_begin(sdl_window, local_mouse_live(override));
     {
         /* Outside every debug guard on purpose: production must be measurable. */
         extern uint64_t s_frame_count;
@@ -7348,127 +7640,8 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
 
     if (!g_headless) {
         /* Pump SDL events to prevent window freeze. */
-        SDL_Event ev;
-        while (SDL_PollEvent(&ev)) {
-            if (ev.type == SDL_QUIT) {
-                if (psx_netplay_active()) {
-                    netplay_soft_exit("sdl_window_close");
-                    return ep;
-                }
-                psx_crash_trace_set_exit_origin("sdl_window_close");
-                shutdown_runtime();
-                std::exit(0);
-            } else if (ev.type == SDL_CONTROLLERDEVICEADDED) {
-                refresh_player_devices();
-            } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
-                bool ours = false;
-                for (int s = 0; s < PSX_MAX_PLAYERS; s++) {
-#if defined(PSX_SDL3)
-                    if (ev.gdevice.which == g_players[s].instance) { ours = true; break; }
-#else
-                    if (ev.cdevice.which == g_players[s].instance) { ours = true; break; }
-#endif
-                }
-                if (ours) {
-                    close_controller();
-                    refresh_player_devices();
-                }
-            } else if (ev.type == SDL_KEYDOWN) {
-#if defined(PSX_SDL3)
-                const SDL_Keymod mod = ev.key.mod;
-                const SDL_Keycode key = ev.key.key;
-                const SDL_Scancode scancode = ev.key.scancode;
-                const int key_repeat = ev.key.repeat ? 1 : 0;
-#else
-                const Uint16 mod = ev.key.keysym.mod;
-                const SDL_Keycode key = ev.key.keysym.sym;
-                const SDL_Scancode scancode = ev.key.keysym.scancode;
-                const int key_repeat = ev.key.repeat ? 1 : 0;
-#endif
-                if (key == SDLK_ESCAPE && psx_netplay_active()) {
-                    netplay_soft_exit("netplay_escape");
-                    return ep;
-                }
-                if (!key_repeat &&
-                    host_keymap_match_event(HOST_KEYMAP_REWIND, (int)key,
-                                            (int)scancode, (int)mod)) {
-                    psx_rewind_toggle();
-                }
-                else if (!key_repeat &&
-                         host_keymap_match_event(HOST_KEYMAP_SAVE_STATE_MENU,
-                                                 (int)key, (int)scancode,
-                                                 (int)mod)) {
-                    savestate_menu_toggle(key);
-                }
-                else if (key == SDLK_c && (mod & KMOD_CTRL)) {
-                    std::fprintf(stdout, "[DEBUG] Forzando reinserción de CD...\n");
-                    debug_force_cd_reinsert();
-                    host_osd_push("CD reinsert", 1500);
-                }
-                else if (!key_repeat &&
-                         host_keymap_match_event(HOST_KEYMAP_TURBO_TOGGLE,
-                                                 (int)key, (int)scancode,
-                                                 (int)mod)) {
-                    fast_forward_toggle_flip();
-                }
-                else if (!key_repeat &&
-                         host_keymap_match_event(HOST_KEYMAP_CAPTURE_MARK,
-                                                 (int)key, (int)scancode,
-                                                 (int)mod)) {
-#ifndef PSX_NO_DEBUG_TOOLS
-                    debug_server_capture_mark();
-                    host_osd_push("Capture marked (debug rings frozen)", 2000);
-#else
-                    host_osd_push("Capture mark needs a debug-tools build", 2000);
-#endif
-                }
-                else if (!key_repeat &&
-                         host_keymap_match_event(HOST_KEYMAP_DISPLAY_PERF,
-                                                 (int)key, (int)scancode,
-                                                 (int)mod)) {
-                    fps_telemetry_toggle();
-                }
-                else if (!key_repeat &&
-                         host_keymap_match_event(HOST_KEYMAP_SCANLINES,
-                                                 (int)key, (int)scancode,
-                                                 (int)mod)) {
-                    psx_video_set_scanlines(g_video_scanlines ? 0 : 1,
-                                            g_video_scanline_strength);
-                    char msg[48];
-                    std::snprintf(msg, sizeof(msg), "Scanlines %s",
-                                  g_video_scanlines ? "on" : "off");
-                    host_osd_push(msg, 1200);
-                }
-                /* Host volume: config.ini [KeyMap] VolumeUp/VolumeDown
-                 * (defaults: keypad +/-). 5% steps; shows right-side bar. */
-                else if (host_keymap_match_event(HOST_KEYMAP_VOLUME_UP,
-                                                  (int)key, (int)scancode,
-                                                  (int)mod)) {
-                    host_volume_adjust(+5);
-                } else if (host_keymap_match_event(HOST_KEYMAP_VOLUME_DOWN,
-                                                    (int)key, (int)scancode,
-                                                    (int)mod)) {
-                    host_volume_adjust(-5);
-                }
-                /* Fullscreen toggle: Alt+Enter or Cmd/Ctrl+F. Toggles between
-                 * windowed and the CONFIGURED tri-state mode (g_fullscreen: 1
-                 * borderless desktop fullscreen keeping the desktop resolution
-                 * and letterboxing the image, or 2 exclusive fullscreen — a
-                 * real display-mode change). Track the selected live mode:
-                 * borderless deliberately leaves SDL's fullscreen bit clear. */
-                else if (!key_repeat &&
-                         host_keymap_match_event(HOST_KEYMAP_FULLSCREEN,
-                                                 (int)key, (int)scancode,
-                                                 (int)mod)) {
-                    const int target = s_window_fullscreen.mode ? 0 :
-                                       (g_fullscreen ? g_fullscreen : 1);
-                    if (psx_window_fullscreen_set(sdl_window, &s_window_fullscreen, target) == 0)
-                        host_osd_push(target ? "Fullscreen" : "Windowed", 1500);
-                    else
-                        host_osd_push("Fullscreen change failed", 1500);
-                }
-            }
-        }
+        psx_local_mouse_begin(sdl_window, local_mouse_live(override));
+        if (!drain_host_events()) return ep;
         savestate_menu_poll_toggle_buttons();
         rewind_poll_toggle_buttons();
         fast_forward_toggle_poll_buttons();
@@ -7517,6 +7690,9 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
         }
         /* Solo resim self-check replay republishes the recorded rows itself —
          * live sampling must not touch SIO during the replay window. */
+        /* New frame: the low-latency re-sample later this frame reuses this
+         * frame's mod controller source sample (callback runs once). */
+        mod_controller_source_begin_frame();
         if (!psx_selfcheck_replay_input()) {
             if (g_headless)
                 sample_headless_pad_into_sio(override);
@@ -7705,8 +7881,10 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
          * Rewind / Save states so the launcher's binding editor covers it.
          * g_manual_turbo_latched is the press-to-lock twin (TurboToggle /
          * fast_forward_toggle_pad) and drives the same path. */
+        uint8_t host_keys[SDL_NUM_SCANCODES];
+        psx_keybinds_host_keys(keys, host_keys);
         const bool kb_turbo = host_hotkey_input_focused() &&
-            host_keymap_down(HOST_KEYMAP_TURBO, keys, (int)SDL_GetModState());
+            host_keymap_down(HOST_KEYMAP_TURBO, host_keys, (int)SDL_GetModState());
         if (kb_turbo || g_manual_turbo_latched ||
             hotkey_pad_binding_down(g_hotkey_pad_fast_forward)) {
             const int mult = manual_fast_forward_multiplier();
@@ -7836,7 +8014,16 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
          * semantics) — the mid-frame re-sample would fork the resim. */
         if (g_low_latency_input && !psx_selfcheck_input_locked()) {
             SDL_GameControllerUpdate();  /* refresh pad state after the wait */
-            SDL_PumpEvents();            /* refresh keyboard state */
+            if (psx_local_mouse_installed()) {
+                psx_local_mouse_begin(sdl_window, local_mouse_live(override));
+                if (!drain_host_events()) return ep;
+                // A hotkey acquired during pacing may open a host menu.
+                if (savestate_menu_open) savestate_menu_host_pause_loop();
+                if (psx_rewind_is_open()) rewind_host_pause_loop();
+                psx_local_mouse_begin(sdl_window, local_mouse_live(override));
+            } else {
+                SDL_PumpEvents(); // retain native timing when no policy exists
+            }
             sample_pad_into_sio(override);
             latency_ring_restamp_input();
         }
@@ -14015,6 +14202,7 @@ int main(int argc, char** argv) {
                 (float)gc.runtime.video_scanline_strength;
             g_video_aspect_num = gc.runtime.video_aspect_num;
             g_video_aspect_den = gc.runtime.video_aspect_den;
+            g_fov_scale = psx_projection_scale_load_config(game_config_path);
             g_low_latency_input = gc.runtime.video_low_latency_input ? 1 : 0;
             gl_renderer_set_texture_window_batching(
                 gc.runtime.video_texture_window_batching ? 1 : 0);
@@ -14462,6 +14650,19 @@ int main(int argc, char** argv) {
         if (us.has_scanlines)      g_video_scanlines = us.scanlines;
         if (us.has_scanline_strength)
             g_video_scanline_strength = (float)us.scanline_strength;
+        /* fov_scale precedence: game.toml < settings.toml < PSX_GTE_FOV_SCALE.
+         * Bad values warn and leave the lower layer's value in place. */
+        if (us.has_fov_scale) {
+            if (psx_projection_scale_valid(us.fov_scale)) g_fov_scale = us.fov_scale;
+            else std::fprintf(stderr, "psxrecomp: settings.toml [video] fov_scale %g ignored "
+                                      "(must be > 0 and <= 8)\n", us.fov_scale);
+        }
+        if (const char* fov_env = std::getenv("PSX_GTE_FOV_SCALE")) {
+            double value;
+            if (psx_projection_scale_parse(fov_env, &value)) g_fov_scale = value;
+            else std::fprintf(stderr, "psxrecomp: PSX_GTE_FOV_SCALE=\"%s\" ignored "
+                                      "(must be a number > 0 and <= 8)\n", fov_env);
+        }
         if (us.has_auto_skip_fmv)  g_auto_skip_fmv   = us.auto_skip_fmv ? 1 : 0;
         /* turbo_loads is deliberately NOT restored from settings.toml. It is a
          * write-only latch: the launcher stopped drawing a Turbo loads row when
@@ -15960,6 +16161,7 @@ int main(int argc, char** argv) {
          * choices first so disabling a package cannot leave its prior state
          * latched across a soft return. */
         g_mod_controller_mode_override.fill(-1);
+        mod_controller_source_reset();
         for (auto& policy : g_mod_controller_policy)
             policy = ModControllerPresentationPolicy{};
         g_mod_load_wall_multiplier = -1;

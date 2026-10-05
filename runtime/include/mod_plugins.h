@@ -9,6 +9,8 @@ extern "C" {
 typedef void (*PSXModVBlankCallback)(void);
 typedef void (*PSXModActivationCallback)(void);
 struct CPUState;
+/* A callback that runs guest code inside psx_mod_render_pass() can be
+ * abandoned by a watchdog longjmp; see the note at psx_mod_render_pass(). */
 typedef void (*PSXModFunctionEntryCallback)(struct CPUState* cpu,
                                             uint32_t address);
 /* Return nonzero to finish this opt-in function with the callback's return
@@ -454,7 +456,14 @@ uint32_t psx_mod_render_pass_plan(uint32_t period_vblanks,
                                   uint32_t shown_after_vblanks,
                                   uint32_t* alpha_q16, uint32_t max);
 /* Returns 1 when the pass ran and its image was queued, 0 when it was refused
- * or rolled back (state is restored either way). */
+ * or rolled back (state is restored either way).
+ * A watchdog abort rolls the pass back by longjmp, past every frame between
+ * the watchdog and psx_mod_render_pass(): plugin callbacks, guest functions
+ * and function-entry hooks they called. Runtime nesting state (including the
+ * function-entry context) is restored, but plugin-owned state, held locks and
+ * C++ destructors in those frames are NOT unwound. A callback run inside a
+ * pass must keep nothing that needs cleanup (no locks, no RAII objects, no
+ * partially updated plugin state) across guest code, or tolerate the abort. */
 int psx_mod_render_pass(struct CPUState* cpu, const PSXModRenderPass* pass,
                         PSXModRenderPassFn fn, void* user);
 /*
@@ -482,6 +491,108 @@ enum {
     PSX_MOD_RENDER_PASS_BUSY = 6
 };
 uint32_t psx_mod_render_pass_status(void);
+/* Simultaneous stereo capture, independent of temporal interpolation. Each
+ * eye starts from the same guest state; CPU/RAM/devices/VRAM are restored
+ * before the other eye and on failure. Publish only after both succeed.
+ * The caller provides a draw-only callback at a main-thread frame boundary.
+ * period_vblanks (1..8) describes the game's draw cadence for whole-pair cost
+ * shedding. No alpha/time phase is used. Returns 1 for a published pair. */
+enum { PSX_MOD_EYE_LEFT = 0, PSX_MOD_EYE_RIGHT = 1 };
+typedef struct PSXModStereoFrame {
+    uint32_t struct_size;
+    uint32_t period_vblanks;
+    uint16_t x, y, w, h;
+} PSXModStereoFrame;
+typedef int (*PSXModStereoFn)(struct CPUState*, void*, uint32_t eye);
+int psx_mod_render_stereo(struct CPUState *cpu, const PSXModStereoFrame *frame,
+                          PSXModStereoFn fn, void *user);
+uint32_t psx_mod_render_stereo_status(void);
+/* 0 disables stereo output; 1 shows a complete pair side by side. Capture
+ * itself does not enable presentation. Default 0; applies to this session. */
+int psx_mod_set_stereo_presentation(uint32_t mode);
+/* Camera-space addition to RT*V+TR before RTPS/RTPT perspective division.
+ * Valid only inside a render callback. Replaces (never accumulates) the host
+ * offset and is restored automatically on completion or watchdog abort.
+ * Units are the game's GTE camera units; IPD/world-scale calibration is game
+ * specific. Zero is faithful. Guest TR registers are not modified. */
+int psx_mod_render_view_offset(int32_t x, int32_t y, int32_t z);
+/* Rigid camera transform after guest RT*V+TR, before division. Rotation is
+ * row-major Q12; translation uses camera units. Optional projection supplies
+ * focal lengths and centre deltas from guest OFX/OFY in Q16 pixel units.
+ * Identity rotation with projection=0 preserves the architectural path.
+ * projection=1 REPLACES the guest X/Y projection (guest H, widescreen squash and
+ * [video] fov_scale do not apply); projection_h_ref != 0 scales the focal lengths
+ * by (fov-scaled guest H)/ref. Valid only inside a render callback; restored with it. */
+typedef struct PSXModRenderView {
+    uint32_t struct_size;
+    int32_t rotation_q12[9], translation[3];
+    uint32_t projection;
+    uint32_t projection_h_ref; /* 0 absolute FOV; otherwise scale focal lengths by guest H/ref */
+    int32_t fx_q16, fy_q16, cx_delta_q16, cy_delta_q16;
+} PSXModRenderView;
+int psx_mod_render_view(const PSXModRenderView *view);
+/* Begin locates both views at one predicted time. End submits only a fresh
+ * complete pair; failed/shed redraws submit zero layers. */
+int psx_mod_openxr_enable(int enabled);
+int psx_mod_openxr_begin(uint32_t width, uint32_t height, double units_per_meter);
+int psx_mod_openxr_view(uint32_t eye, PSXModRenderView *view);
+int psx_mod_openxr_end(int pair_rendered);
+/* Frame-local UI surface: the fresh pair's left image is shown to both eyes
+ * on a head-relative quad. Call after begin, outside the draw transaction.
+ * Dimensions and distance are meters; zero distance restores projection.
+ * Requests reset at begin/end and never affect faithful guest rendering. */
+int psx_mod_openxr_quad(double distance_m, double width_m, double height_m);
+/* Opt-in native presentation surface for boot, videos and menus. Copies the
+ * freshly drawn desktop content before host overlays, without guest replay.
+ * Zero distance disables it. Applications disable it before scene begin and
+ * re-enable when their scene renderer is inactive. Dimensions are meters;
+ * height follows the presented content aspect. No retained stereo substitution. */
+int psx_mod_openxr_native_surface(double distance_m, double width_m,
+                                  double units_per_meter);
+void psx_mod_openxr_recenter(void);
+/* Fresh action sample at the offline input boundary, never in an eye replay.
+ * Positive Y is forward/up in XR. active[] refers only to thumbsticks;
+ * other actions have independent activity. Unavailable/unfocused actions
+ * return zero values. Click masks are active-high, unrelated to PSX pad bits. */
+#define PSX_MOD_XR_PRIMARY   1u /* left X / right A */
+#define PSX_MOD_XR_SECONDARY 2u /* left Y / right B */
+#define PSX_MOD_XR_MENU      4u /* Touch left Menu */
+#define PSX_MOD_XR_STICK     8u /* thumbstick click */
+#define PSX_MOD_XR_CLICKS   15u
+typedef struct PSXModOpenXRInput {
+    uint32_t struct_size, focused, active[2], synthetic;
+    float stick[2][2];
+    uint64_t sequence;
+    float trigger[2], squeeze[2]; /* [0,1] */
+    uint32_t trigger_active[2], squeeze_active[2];
+    uint32_t buttons[2], buttons_active[2]; /* PSX_MOD_XR_* masks */
+} PSXModOpenXRInput;
+int psx_mod_openxr_input(PSXModOpenXRInput *input);
+
+/* Read-only controller snapshot from the latest located XR frame. Grip and aim
+ * share the eye poses' predicted time and LOCAL space; no action sync or locate
+ * occurs here, including during eye replay. Positions are meters; quaternions
+ * are x,y,z,w. The origin matches the rendered view's recenter basis. Consumers
+ * must check focus, activity, validity and age before using a cached pose. */
+enum { PSX_MOD_XR_GRIP_POSE = 0, PSX_MOD_XR_AIM_POSE = 1 };
+#define PSX_MOD_XR_ORIENTATION_VALID   1u
+#define PSX_MOD_XR_POSITION_VALID      2u
+#define PSX_MOD_XR_ORIENTATION_TRACKED 4u
+#define PSX_MOD_XR_POSITION_TRACKED    8u
+typedef struct PSXModTrackedPose {
+    uint32_t active, flags;
+    float position_m[3], orientation_xyzw[4];
+} PSXModTrackedPose;
+typedef struct PSXModOpenXRHands {
+    uint32_t struct_size, focused, synthetic, origin_valid;
+    uint64_t sequence, predicted_time;
+    uint32_t age_ms; /* UINT32_MAX when no real frame has been located */
+    double origin_position_m[3], origin_orientation_xyzw[4];
+    PSXModTrackedPose pose[2][2]; /* [left/right][grip/aim] */
+} PSXModOpenXRHands;
+int psx_mod_openxr_hands(PSXModOpenXRHands *hands);
+
+
 
 /*
  * When the game flips relative to the pass point. PENDING (default, reset at
@@ -652,6 +763,86 @@ int psx_mod_set_controller_presentation_policy(
     PSXModControllerPresentationCallback callback,
     uint32_t initial_mode,
     int config_capable);
+
+/* ---- External offline input: ONE ordered resolution per player ----------
+ * Two optional, mod-supplied inputs can act on an offline player's pad. The
+ * runtime resolves them in a fixed order in pad_external_input.h:
+ *   1. physical/local capture (keyboard, controllers: buttons, sticks, type)
+ *   2. offline controller source (psx_mod_set_controller_source): buttons =
+ *      source AND physical; sticks/type come from the source, through the
+ *      same mode override / multitap rule / presentation policy as a physical
+ *      pad. A declined/invalid sample delivers neutral, not the last input.
+ *   3. local mouse policy (psx_mod_set_local_mouse_policy), P1 only: may
+ *      override ONLY the right analog axes of the pad resolved by 1-2. It sees
+ *      the final buttons/analog flag/right stick, so it composes with a
+ *      source (a source never suppresses it) and no capture is taken to be
+ *      discarded. A deflected source right stick, a digital pad, or Start
+ *      held disables it exactly as for a physical pad; a source release,
+ *      no device, or an armed input guard resets (releases) the capture.
+ * Gating. Neither input reaches the guest under netplay or rollback resim,
+ * selfcheck replay, headless, or a debug-server input override (which wins and
+ * is never mixed with external input). The mouse policy is additionally live
+ * only outside selfcheck input lock/resim, render passes, rewind, the
+ * savestate menu and the savestate input guard (pad_ext_live). A source is
+ * still sampled while the input guard is armed but its output is discarded
+ * (neutral). With no source and no mouse policy registered, pad bytes and
+ * host event handling are exactly the faithful defaults.
+ *
+ * ONE registration rule for both: call only on the main (emulation) thread;
+ * struct arguments are validated at registration (struct_size) and a bad one
+ * is rejected (return 0, logged to stderr); results of each callback are
+ * validated per use and fall back to neutral. These are mod-trusted APIs --
+ * arbitrary native code, no caller check -- not launcher settings. A source
+ * is per player (NULL detaches, with one neutral release frame); the mouse
+ * policy is one per session (a second registration returns 0). Callbacks run
+ * on the main thread only: sources once per frame, in the normal offline
+ * sampler.
+ * The source's `analog` is the pad capability; the final type still goes
+ * through the multitap rule, mod mode override and presentation policy.
+ */
+typedef struct PSXModControllerState {
+    uint32_t struct_size, buttons, lx, ly, rx, ry, analog;
+} PSXModControllerState;
+typedef int (*PSXModControllerSource)(PSXModControllerState *state);
+int psx_mod_set_controller_source(uint32_t player, PSXModControllerSource source);
+
+/* Local P1 mouse policy. The runtime delivers ordered events on the SDL owner
+ * (main) thread, owns relative capture and folds the resulting right-stick
+ * bytes after native input/presentation (and after any controller source),
+ * before normal SIO delivery. No SDL type, guest address, gesture, or game
+ * setting belongs in this interface. */
+enum {
+    PSX_MOD_MOUSE_HOLD_NONE = 0,
+    PSX_MOD_MOUSE_HOLD_RIGHT = 1, /* Mouse3 in keybinds.ini */
+    PSX_MOD_MOUSE_HOLD_LEFT_ALT = 2,
+    PSX_MOD_MOUSE_RESET = 0,
+    PSX_MOD_MOUSE_ACQUIRED = 1,
+    PSX_MOD_MOUSE_MOTION = 2,
+    PSX_MOD_MOUSE_HOLD_PRESS = 3,
+    PSX_MOD_MOUSE_HOLD_RELEASE = 4
+};
+typedef struct PSXModMouseEvent {
+    uint32_t struct_size;
+    uint32_t type;
+    uint64_t time_ns;
+    double dx, dy;
+} PSXModMouseEvent;
+typedef struct PSXModMouseOutput {
+    uint32_t struct_size;
+    uint32_t override_right;
+    uint32_t rx, ry;
+} PSXModMouseOutput;
+typedef struct PSXModMousePolicy {
+    uint32_t struct_size;
+    uint32_t hold_control;
+    /* Re-read persistent guest context, including pause/menus, on every event
+     * and local sample. Must not infer it from a host Start toggle. */
+    int (*eligible)(uint32_t native_buttons);
+    void (*event)(const PSXModMouseEvent* event);
+    /* A query: must not consume motion, change the event anchor or deadlines. */
+    void (*sample)(uint64_t now_ns, PSXModMouseOutput* output);
+} PSXModMousePolicy;
+int psx_mod_set_local_mouse_policy(const PSXModMousePolicy* policy);
 
 /*
  * Register a C plugin before main() on the compilers supported by the runtime.

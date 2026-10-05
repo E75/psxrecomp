@@ -26,7 +26,12 @@
 #include "code_provider.h"
 #include "overlay_backend.h"
 #include "cpu_state.h"
+#include "psx_openxr.h"
+#include "mod_controller_source.h"
 #include "pgxp.h"
+#ifndef PSX_NO_DEBUG_TOOLS
+#include "psx_disasm.h"
+#endif
 #include "dma.h"
 #include "gpu.h"
 #include "gpu_render.h"   /* gr_scale + gr_render_display_hires (screenshot_hires) */
@@ -5185,6 +5190,60 @@ static void handle_get_registers(int id, const char *json)
     free(buf);
 }
 
+/* disasm: disassemble guest instructions. {"cmd":"disasm","addr":"0x8001121C",
+ * "count":32}. Reads live guest memory, so it works on EXE code and on
+ * RAM-installed/overlay code alike. Uses the recompiler's MIPS decoder.
+ * Reads go through psx_peek_word (main RAM / scratchpad / BIOS ROM only, no
+ * device reads, no read hooks); a word outside those comes back as
+ * {"word":null,"text":"<unreadable>"}. Compiled only with the debug tools,
+ * like the sources it needs (runtime.cmake). */
+#ifndef PSX_NO_DEBUG_TOOLS
+static void handle_disasm(int id, const char *json)
+{
+    char addr_str[32];
+    if (!json_get_str(json, "addr", addr_str, sizeof(addr_str))) {
+        send_err(id, "missing addr"); return;
+    }
+    const char *hex = addr_str;
+    if (hex[0] == '0' && (hex[1] == 'x' || hex[1] == 'X')) hex += 2;
+    char *hex_end = NULL;
+    unsigned long long addr_val = strtoull(hex, &hex_end, 16);
+    if (hex_end == hex || *hex_end != '\0' || addr_val > 0xFFFFFFFFull) {
+        send_err(id, "bad addr"); return;
+    }
+    uint32_t addr = (uint32_t)addr_val & ~3u;
+    int count = json_get_int(json, "count", 16);
+    if (count < 1) count = 1;
+    if (count > 256) count = 256;
+
+    size_t bufsz = 512u + (size_t)count * 160u;
+    char *out = (char *)malloc(bufsz);
+    if (!out) { send_err(id, "oom"); return; }
+    int pos = snprintf(out, bufsz,
+                       "{\"id\":%d,\"ok\":true,\"addr\":\"0x%08X\",\"count\":%d,\"lines\":[",
+                       id, addr, count);
+    char text[128];
+    for (int i = 0; i < count; i++) {
+        uint32_t a = addr + (uint32_t)i * 4u;
+        uint32_t w = 0;
+        if (!psx_peek_word(a, &w)) {
+            pos += snprintf(out + pos, bufsz - (size_t)pos,
+                            "%s{\"addr\":\"0x%08X\",\"word\":null,\"text\":\"<unreadable>\"}",
+                            i ? "," : "", a);
+            continue;
+        }
+        text[0] = '\0';
+        (void)psx_disasm_one(w, a, text, (int)sizeof(text));
+        pos += snprintf(out + pos, bufsz - (size_t)pos,
+                        "%s{\"addr\":\"0x%08X\",\"word\":\"0x%08X\",\"text\":\"%s\"}",
+                        i ? "," : "", a, w, text);
+    }
+    pos += snprintf(out + pos, bufsz - (size_t)pos, "]}");
+    debug_server_send_line(out);
+    free(out);
+}
+#endif /* !PSX_NO_DEBUG_TOOLS */
+
 static void handle_read_ram(int id, const char *json)
 {
     char addr_str[32];
@@ -6479,10 +6538,10 @@ static void handle_gte_ring_dump(int id, const char *json)
 {
     extern unsigned long long gte_rtp_ring_total(void);
     extern int gte_rtp_ring_dump_json(char *out, int outsz, int max_count,
-                                      int newest_first, long frame_filter);
+                                      int newest_first, long frame_filter, int offset, int render_filter);
     int count = json_get_int(json, "count", 64);
     if (count < 1) count = 1;
-    if (count > 512) count = 512;
+    if (count > 4096) count = 4096;
     int newest = json_get_int(json, "newest", 1) != 0;
     long frame = (long)json_get_int(json, "frame", -1);
 
@@ -6490,7 +6549,11 @@ static void handle_gte_ring_dump(int id, const char *json)
     char *entries = (char *)malloc(BUF_SZ);
     char *reply   = (char *)malloc(BUF_SZ + 256u);
     if (!entries || !reply) { free(entries); free(reply); send_err(id, "oom"); return; }
-    int n = gte_rtp_ring_dump_json(entries, (int)BUF_SZ, count, newest, frame);
+    int offset = json_get_int(json,"offset",0);
+    if (offset < 0) offset=0;
+    int render_filter = json_get_int(json,"render",-1);
+    if (render_filter != 0 && render_filter != 1) render_filter=-1;
+    int n = gte_rtp_ring_dump_json(entries, (int)BUF_SZ, count, newest, frame, offset, render_filter);
     snprintf(reply, BUF_SZ + 256u,
              "{\"id\":%d,\"ok\":true,\"total\":%llu,\"emitted\":%d,\"entries\":[%s]}",
              id, gte_rtp_ring_total(), n, entries);
@@ -8163,9 +8226,39 @@ static void handle_render_pass_stats(int id, const char *json)
     RenderPassStats st;
     uint64_t gd[10], image_bytes = 0;
     uint32_t image_textures;
+    char failure_json[2048];
+    char abort_detail_json[sizeof st.last_abort_detail * 6 + 1];
     DirtyRamSpanFailure sf;
     render_pass_get_stats(&st);
     dirty_ram_span_last_failure(&sf);
+    json_escape_string(abort_detail_json, sizeof abort_detail_json,
+                       st.last_abort_detail);
+    const RenderPassFailure *f = &st.last_failure;
+    const GLRenderPassBeginDiag *b = &f->gl;
+    if (!f->reason) {
+        strcpy(failure_json, "null");
+    } else {
+        snprintf(failure_json, sizeof failure_json,
+                 "{\"reason\":\"%s\",\"attempt\":%llu,\"plan\":%llu,"
+                 "\"guest_cycle\":%llu,\"status\":%u,\"alpha_q16\":%u,"
+                 "\"struct_size\":%u,\"rect\":{\"x\":%u,\"y\":%u,\"w\":%u,\"h\":%u},"
+                 "\"gl\":{\"reason\":\"%s\",\"resource\":\"%s\",\"status\":%u,"
+                 "\"active\":%d,\"open_gen\":%d,\"generation\":%d,"
+                 "\"valid\":%d,\"promoted\":%d,\"hr_scale\":%d,\"out_scale\":%d,"
+                 "\"source_path\":%d,\"wide\":%d,"
+                 "\"requested_w\":%d,\"requested_h\":%d,\"capture_w\":%d,\"capture_h\":%d,"
+                 "\"generation_rect\":{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d},"
+                 "\"fbo_status\":%u,\"gl_error_before\":%u,\"gl_error\":%u}}",
+                 f->reason, (unsigned long long)f->attempt, (unsigned long long)f->plan,
+                 (unsigned long long)f->guest_cycle, f->status, f->alpha_q16,
+                 f->struct_size, (unsigned)f->x, (unsigned)f->y, (unsigned)f->w, (unsigned)f->h,
+                 b->reason ? b->reason : "", b->resource ? b->resource : "", b->status,
+                 b->active, b->open_gen, b->generation, b->valid, b->promoted,
+                 b->hr_scale, b->out_scale, b->source_path, b->wide,
+                 b->requested_w, b->requested_h, b->capture_w, b->capture_h,
+                 b->generation_x, b->generation_y, b->generation_w, b->generation_h,
+                 b->fbo_status, b->gl_error_before, b->gl_error);
+    }
     gl_renderer_pass_diag(gd);
     image_textures = gl_renderer_pass_image_textures(&image_bytes);
     send_fmt("{\"id\":%d,\"ok\":true,\"plans\":%llu,\"planned\":%llu,"
@@ -8185,7 +8278,11 @@ static void handle_render_pass_stats(int id, const char *json)
              "\"cost_us\":%llu,\"cost_rewarms\":%llu,\"frame_images\":%llu,"
              "\"journaled\":%llu,"
              "\"image_textures\":%u,\"image_bytes\":%llu,\"status\":%u,"
-             "\"backups_reused\":%llu,\"spans\":%llu,\"span_failures\":%llu,"
+             "\"backups_reused\":%llu,\"pass_attempts\":%llu,"
+             "\"argument_refused\":%llu,\"status_refused\":%llu,"
+             "\"begin_refused\":%llu,\"checkpoint_refused\":%llu,"
+             "\"spans\":%llu,\"span_failures\":%llu,"
+             "\"last_failure\":%s,\"last_abort_detail\":\"%s\","
              "\"span_fail\":{\"reason\":%u,\"pc\":\"0x%08X\",\"start\":\"0x%08X\","
              "\"stop\":\"0x%08X\",\"ra\":\"0x%08X\",\"after\":\"0x%08X\","
              "\"insns\":%llu}}",
@@ -8215,7 +8312,11 @@ static void handle_render_pass_stats(int id, const char *json)
              (unsigned)image_textures, (unsigned long long)image_bytes,
              (unsigned)psx_mod_render_pass_status(),
              (unsigned long long)gl_renderer_pass_backups_reused(),
+             (unsigned long long)st.pass_attempts,
+             (unsigned long long)st.argument_refused, (unsigned long long)st.status_refused,
+             (unsigned long long)st.begin_refused, (unsigned long long)st.checkpoint_refused,
              (unsigned long long)st.spans, (unsigned long long)st.span_failures,
+             failure_json, abort_detail_json,
              (unsigned)sf.reason, (unsigned)sf.pc, (unsigned)sf.start_pc,
              (unsigned)sf.stop_pc, (unsigned)sf.ra, (unsigned)sf.after,
              (unsigned long long)sf.insns);
@@ -8230,6 +8331,244 @@ static void handle_render_pass_refuse(int id, const char *json)
     gl_renderer_pass_force_refuse(on);
     send_fmt("{\"id\":%d,\"ok\":true,\"on\":%d,\"status\":%u}", id, on ? 1 : 0,
              (unsigned)psx_mod_render_pass_status());
+}
+
+static void handle_openxr_stats(int id, const char *json) {
+    PSXOpenXRStats s; (void)json; psx_openxr_stats(&s);
+    send_fmt("{\"id\":%d,\"ok\":true,\"compiled\":%u,\"enabled\":%u,"
+             "\"initialized\":%u,\"running\":%u,\"state\":%u,\"tracking\":%u,"
+             "\"frame_open\":%u,\"result\":%d,\"stage\":\"%s\",\"runtime\":\"%s\","
+             "\"last_failure\":\"%s\",\"last_failure_result\":%d,\"view_flags\":%llu,"
+             "\"waits\":%llu,\"submitted\":%llu,\"empty\":%llu,\"failures\":%llu,"
+             "\"predicted_time\":%llu,\"ipd_m\":%.6f,\"units_per_meter\":%.6f,"
+             "\"gl_version\":%llu,\"min_gl_version\":%llu,\"max_gl_version\":%llu,\"swapchain_format\":%lld,"
+             "\"submitted_layer\":%u,\"quad_submitted\":%llu,"
+             "\"submitted_source\":%u,\"native_submitted\":%llu,\"submitted_native_frame\":%llu,"
+             "\"quad_distance_m\":%.6f,\"quad_width_m\":%.6f,\"quad_height_m\":%.6f,\"losses\":%llu}", id,s.compiled,s.enabled,
+             s.initialized,s.running,s.state,s.tracking,s.frame_open,s.result,
+             s.stage?s.stage:"off",s.runtime,s.last_failure?s.last_failure:"",s.last_failure_result,
+             (unsigned long long)s.view_flags,(unsigned long long)s.waits,
+             (unsigned long long)s.submitted,(unsigned long long)s.empty,
+             (unsigned long long)s.failures,(unsigned long long)s.predicted_time,s.ipd_m,s.units_per_meter,
+             (unsigned long long)s.gl_version,(unsigned long long)s.min_gl_version,
+             (unsigned long long)s.max_gl_version,(long long)s.swapchain_format,s.submitted_layer,
+             (unsigned long long)s.quad_submitted,s.submitted_source,
+             (unsigned long long)s.native_submitted,(unsigned long long)s.submitted_native_frame,
+             s.quad_distance_m,s.quad_width_m,s.quad_height_m,(unsigned long long)s.losses);
+}
+static void handle_openxr_views(int id,const char *json) {
+    PSXOpenXRStats s; (void)json;psx_openxr_stats(&s);
+    send_fmt("{\"id\":%d,\"ok\":true,\"predicted_time\":%llu,"
+             "\"submitted_pair_id\":%llu,\"submitted_guest_cycle\":%llu,"
+             "\"submitted_predicted_time\":%llu,\"eyes\":[",id,
+             (unsigned long long)s.predicted_time,(unsigned long long)s.submitted_pair_id,
+             (unsigned long long)s.submitted_guest_cycle,(unsigned long long)s.submitted_predicted_time);
+    for(int e=0;e<2;e++) {
+        PSXModRenderView *v=&s.view[e];
+        send_fmt("%s{\"eye\":%d,\"position_m\":[%.6f,%.6f,%.6f],"
+                 "\"orientation_xyzw\":[%.6f,%.6f,%.6f,%.6f],"
+                 "\"fov_lrud\":[%.6f,%.6f,%.6f,%.6f],"
+                 "\"rotation_q12\":[%d,%d,%d,%d,%d,%d,%d,%d,%d],"
+                 "\"translation\":[%d,%d,%d],\"projection_q16\":[%d,%d,%d,%d]}",
+                 e?",":"",e,s.pose[e][0],s.pose[e][1],s.pose[e][2],s.pose[e][3],s.pose[e][4],s.pose[e][5],s.pose[e][6],
+                 s.fov[e][0],s.fov[e][1],s.fov[e][2],s.fov[e][3],
+                 v->rotation_q12[0],v->rotation_q12[1],v->rotation_q12[2],v->rotation_q12[3],v->rotation_q12[4],
+                 v->rotation_q12[5],v->rotation_q12[6],v->rotation_q12[7],v->rotation_q12[8],
+                 v->translation[0],v->translation[1],v->translation[2],
+                 v->fx_q16,v->fy_q16,v->cx_delta_q16,v->cy_delta_q16);
+    }
+    send_fmt("]}");
+}
+
+static void handle_openxr_control(int id,const char *json) {
+    if (json_get_int(json,"recenter",0)) psx_mod_openxr_recenter();
+    int enable=json_get_int(json,"enable",-1);
+    if (enable>=0 && !psx_mod_openxr_enable(enable!=0)) { send_err(id,"OpenXR enable refused (not compiled or rendering)");return; }
+    handle_openxr_stats(id,json);
+}
+
+/* Snapshot only: querying never syncs actions or consumes a controller sample. */
+static void handle_openxr_input(int id,const char *json) {
+    (void)json;
+    PSXModOpenXRInput s; psx_openxr_input_snapshot(&s);
+    send_fmt("{\"id\":%d,\"ok\":true,\"sequence\":%llu,\"synthetic\":%u,"
+             "\"focused\":%u,\"active\":[%u,%u],\"stick\":[[%.6f,%.6f],[%.6f,%.6f]],"
+             "\"trigger\":[%.6f,%.6f],\"squeeze\":[%.6f,%.6f],"
+             "\"trigger_active\":[%u,%u],\"squeeze_active\":[%u,%u],"
+             "\"buttons\":[%u,%u],\"buttons_active\":[%u,%u],"
+             "\"p1_source\":%d}",id,(unsigned long long)s.sequence,s.synthetic,s.focused,
+             s.active[0],s.active[1],s.stick[0][0],s.stick[0][1],s.stick[1][0],s.stick[1][1],
+             s.trigger[0],s.trigger[1],s.squeeze[0],s.squeeze[1],
+             s.trigger_active[0],s.trigger_active[1],s.squeeze_active[0],s.squeeze_active[1],
+             s.buttons[0],s.buttons[1],s.buttons_active[0],s.buttons_active[1],
+             mod_controller_source_present(0));
+}
+/* Read-only controller poses from the eye frame's predicted time. */
+static void handle_openxr_hands(int id,const char *json) {
+    (void)json;PSXModOpenXRHands s={0};s.struct_size=sizeof s;
+    if(!psx_openxr_hands(&s)){send_err(id,"hand snapshot unavailable");return;}
+    char buf[4096];size_t pos=0;
+    pos+=(size_t)snprintf(buf+pos,sizeof buf-pos,
+        "{\"id\":%d,\"ok\":true,\"sequence\":%llu,\"synthetic\":%u,\"focused\":%u,"
+        "\"origin_valid\":%u,\"predicted_time\":%llu,\"age_ms\":%u,"
+        "\"origin_position_m\":[%.9f,%.9f,%.9f],\"origin_orientation_xyzw\":[%.9f,%.9f,%.9f,%.9f],\"pose\":[",
+        id,(unsigned long long)s.sequence,s.synthetic,s.focused,s.origin_valid,
+        (unsigned long long)s.predicted_time,s.age_ms,
+        s.origin_position_m[0],s.origin_position_m[1],s.origin_position_m[2],
+        s.origin_orientation_xyzw[0],s.origin_orientation_xyzw[1],
+        s.origin_orientation_xyzw[2],s.origin_orientation_xyzw[3]);
+    for(int e=0;e<2;e++) {
+        pos+=(size_t)snprintf(buf+pos,sizeof buf-pos,"%s[",e?",":"");
+        for(int k=0;k<2;k++) {
+            const PSXModTrackedPose *v=&s.pose[e][k];
+            pos+=(size_t)snprintf(buf+pos,sizeof buf-pos,
+                "%s{\"active\":%u,\"flags\":%u,\"position_m\":[%.9f,%.9f,%.9f],"
+                "\"orientation_xyzw\":[%.9f,%.9f,%.9f,%.9f]}",k?",":"",v->active,v->flags,
+                v->position_m[0],v->position_m[1],v->position_m[2],
+                v->orientation_xyzw[0],v->orientation_xyzw[1],v->orientation_xyzw[2],v->orientation_xyzw[3]);
+        }
+        pos+=(size_t)snprintf(buf+pos,sizeof buf-pos,"]");
+    }
+    (void)snprintf(buf+pos,sizeof buf-pos,"]}");debug_server_send_line(buf);
+}
+#ifndef PSX_NO_DEBUG_TOOLS
+static void handle_openxr_hands_override(int id,const char *json) {
+    if(json_get_int(json,"clear",0)){psx_openxr_hands_override(NULL);handle_openxr_hands(id,json);return;}
+    char hand[16],pose[16];
+    if(!json_get_str(json,"hand",hand,sizeof hand) || !json_get_str(json,"pose",pose,sizeof pose)) {
+        send_err(id,"hand=left|right and pose=grip|aim required");return;
+    }
+    int e=!strcmp(hand,"left")?0:!strcmp(hand,"right")?1:-1;
+    int k=!strcmp(pose,"grip")?0:!strcmp(pose,"aim")?1:-1;
+    int active=json_get_int(json,"active",1),focused=json_get_int(json,"focused",1),flags=json_get_int(json,"flags",15);
+    if(e<0 || k<0 || active<0 || active>1 || focused<0 || focused>1 || flags<0 || flags>15) {
+        send_err(id,"invalid hand, pose, focus, activity or flags");return;
+    }
+    PSXModOpenXRHands s={0};s.struct_size=sizeof s;(void)psx_openxr_hands(&s);
+    if(!s.synthetic){memset(&s,0,sizeof s);s.struct_size=sizeof s;s.origin_valid=1;s.origin_orientation_xyzw[3]=1;}
+    s.focused=(uint32_t)focused;s.predicted_time=0;
+    PSXModTrackedPose *v=&s.pose[e][k];memset(v,0,sizeof *v);
+    v->active=(uint32_t)active;v->flags=(uint32_t)flags;
+    const char *pn[3]={"px_mm","py_mm","pz_mm"},*qn[4]={"qx","qy","qz","qw"};
+    for(int i=0;i<3;i++) {
+        int value=json_get_int(json,pn[i],0);
+        if(value < -100000 || value > 100000){send_err(id,"position must be -100000..100000 mm");return;}
+        v->position_m[i]=(float)value/1000;
+    }
+    for(int i=0;i<4;i++) {
+        int value=json_get_int(json,qn[i],i==3?1000000:0);
+        if(value < -1000000 || value > 1000000){send_err(id,"quaternion components must be -1000000..1000000");return;}
+        v->orientation_xyzw[i]=(float)value/1000000;
+    }
+    if(!psx_openxr_hands_override(&s)){send_err(id,"invalid synthetic pose numbers");return;}
+    handle_openxr_hands(id,json);
+}
+#endif
+
+/* Debug-only synthetic action sample; axes are signed thousandths [-1000,1000].
+ * Explicitly tagged so desktop controls cannot be mistaken for device evidence. */
+#ifndef PSX_NO_DEBUG_TOOLS
+static void handle_openxr_input_override(int id,const char *json) {
+    if(json_get_int(json,"clear",0)) psx_openxr_input_override(NULL);
+    else {
+        PSXModOpenXRInput s; memset(&s,0,sizeof s);s.struct_size=sizeof s;
+        int focused=json_get_int(json,"focused",1);
+        int left=json_get_int(json,"left_active",1),right=json_get_int(json,"right_active",1);
+        if(focused<0 || focused>1 || left<0 || left>1 || right<0 || right>1) {
+            send_err(id,"focused/active must be 0 or 1");return;
+        }
+        s.focused=(uint32_t)focused;s.active[0]=(uint32_t)left;s.active[1]=(uint32_t)right;
+        int a[4]={json_get_int(json,"lx",0),json_get_int(json,"ly",0),
+                  json_get_int(json,"rx",0),json_get_int(json,"ry",0)};
+        for(int i=0;i<4;i++) {
+            if(a[i]<-1000 || a[i]>1000) { send_err(id,"axis must be -1000..1000");return; }
+            s.stick[i/2][i%2]=(float)a[i]/1000;
+        }
+        const char *t[2]={"left_trigger","right_trigger"}, *g[2]={"left_squeeze","right_squeeze"};
+        const char *ta[2]={"left_trigger_active","right_trigger_active"};
+        const char *ga[2]={"left_squeeze_active","right_squeeze_active"};
+        const char *b[2]={"left_buttons","right_buttons"};
+        const char *ba[2]={"left_buttons_active","right_buttons_active"};
+        for(int e=0;e<2;e++) {
+            int trigger=json_get_int(json,t[e],0),squeeze=json_get_int(json,g[e],0);
+            int trigger_active=json_get_int(json,ta[e],1),squeeze_active=json_get_int(json,ga[e],1);
+            int buttons=json_get_int(json,b[e],0),buttons_active=json_get_int(json,ba[e],15);
+            if(trigger<0 || trigger>1000 || squeeze<0 || squeeze>1000 ||
+               trigger_active<0 || trigger_active>1 || squeeze_active<0 || squeeze_active>1 ||
+               buttons<0 || buttons>15 || buttons_active<0 || buttons_active>15) {
+                send_err(id,"trigger/squeeze must be 0..1000, activity 0|1, click masks 0..15");return;
+            }
+            s.trigger[e]=(float)trigger/1000;s.squeeze[e]=(float)squeeze/1000;
+            s.trigger_active[e]=(uint32_t)trigger_active;s.squeeze_active[e]=(uint32_t)squeeze_active;
+            s.buttons[e]=(uint32_t)buttons;s.buttons_active[e]=(uint32_t)buttons_active;
+        }
+        if(!psx_openxr_input_override(&s)) { send_err(id,"invalid synthetic input");return; }
+    }
+    handle_openxr_input(id,json);
+}
+#endif
+
+
+static void handle_stereo_stats(int id, const char *json) {
+    RenderStereoStats s;
+    GLRenderStereoDiag g;
+    (void)json;
+    GLRenderStereoCapture records[100];
+    char captures[32768];
+    size_t pos = 0;
+    uint32_t count = gl_renderer_stereo_capture_records(records, 100);
+    captures[pos++] = '[';
+    for (uint32_t i = 0; i < count; ++i) {
+        const GLRenderStereoCapture *r = &records[i];
+        int written = snprintf(captures + pos, sizeof captures - pos,
+            "%s{\"pair_id\":%llu,\"guest_cycle\":%llu,\"width\":%u,\"height\":%u,"
+            "\"left_eye\":0,\"right_eye\":1,\"view_offset\":[[%d,%d,%d],[%d,%d,%d]]}",
+            i ? "," : "", (unsigned long long)r->pair_id,
+            (unsigned long long)r->guest_cycle, r->width, r->height,
+            r->view_offset[0][0], r->view_offset[0][1], r->view_offset[0][2],
+            r->view_offset[1][0], r->view_offset[1][1], r->view_offset[1][2]);
+        if (written < 0 || (size_t)written >= sizeof captures - pos - 2) {
+            send_err(id, "capture metadata response overflow"); return;
+        }
+        pos += (size_t)written;
+    }
+    captures[pos++] = ']'; captures[pos] = '\0';
+    render_stereo_get_stats(&s); gl_renderer_stereo_diag(&g);
+    send_fmt("{\"id\":%d,\"ok\":true,\"attempts\":%llu,\"pairs\":%llu,"
+             "\"refused\":%llu,\"failed\":%llu,\"shed\":%llu,\"status\":%u,"
+             "\"last_pair_id\":%llu,\"last_guest_cycle\":%llu,"
+             "\"eye_cycles\":[%llu,%llu],\"eye_hashes\":[\"%016llx\",\"%016llx\"],"
+             "\"eye_view\":[[%d,%d,%d],[%d,%d,%d]],"
+             "\"last_eye\":%d,\"last_failure\":\"%s\","
+             "\"last_failed_attempt\":%llu,\"last_failed_eye\":%d,"
+             "\"last_failed_reason\":\"%s\",\"retained_pair_id\":%llu,"
+             "\"last_pair_ms\":%.3f,\"avg_pair_ms\":%.3f,"
+             "\"published\":{\"valid\":%u,\"pair_id\":%llu,\"guest_cycle\":%llu,"
+             "\"width\":%u,\"height\":%u,\"staged_mask\":%u,\"mode\":%u,\"presents\":%llu},\"captures\":%s}",
+             id, (unsigned long long)s.attempts, (unsigned long long)s.pairs,
+             (unsigned long long)s.refused, (unsigned long long)s.failed,
+             (unsigned long long)s.shed, psx_mod_render_stereo_status(),
+             (unsigned long long)s.last_pair_id, (unsigned long long)s.last_guest_cycle,
+             (unsigned long long)s.eye_cycle[0], (unsigned long long)s.eye_cycle[1],
+             (unsigned long long)s.eye_hash[0], (unsigned long long)s.eye_hash[1],
+             s.eye_view[0][0], s.eye_view[0][1], s.eye_view[0][2],
+             s.eye_view[1][0], s.eye_view[1][1], s.eye_view[1][2],
+             s.last_eye, s.last_failure ? s.last_failure : "",
+             (unsigned long long)s.last_failed_attempt, s.last_failed_eye,
+             s.last_failed_reason ? s.last_failed_reason : "",
+             (unsigned long long)s.retained_pair_id,
+             s.last_pair_ms, s.avg_pair_ms, g.valid, (unsigned long long)g.pair_id,
+             (unsigned long long)g.guest_cycle, g.width, g.height, g.staged_mask,
+             g.mode, (unsigned long long)g.presents, captures);
+}
+/* Bounded PNG evidence capture. Pair metadata stays on the TCP surface. */
+static void handle_stereo_dump(int id, const char *json) {
+    char dir[400];
+    int count = json_get_int(json, "count", 1);
+    if (!json_get_str(json, "path", dir, sizeof dir)) { send_err(id, "missing path"); return; }
+    if (count < 1 || count > 100) { send_err(id, "count must be 1..100"); return; }
+    gl_renderer_stereo_dump_arm(dir, count);
+    send_fmt("{\"id\":%d,\"ok\":true,\"count\":%d}", id, count);
 }
 
 /* render_pass_dump path=<dir> count=<n>: write the images (the game's own
@@ -9332,6 +9671,7 @@ static void handle_video_info(int id, const char *json)
     send_fmt("{\"id\":%d,\"ok\":true,\"backend\":\"%s\",\"preset\":%d,"
              "\"reference_lines\":%d,\"requested_scale\":%d,\"effective_scale\":%d,\"texture_filter\":%d,"
              "\"internal_lines\":%u,\"gl\":%d,\"gl_max_dim\":%d,\"gl_max_scale\":%d,"
+             "\"gl_swap_interval\":%d,"
              "\"gl_clamp_reason\":%d,\"gl_alloc_retries\":%d,\"gl_budget_mib\":%d,"
              "\"fbo_w\":%d,\"fbo_h\":%d,\"hidpi_window\":%d,\"window_w\":%d,"
              "\"window_h\":%d,\"drawable_w\":%d,\"drawable_h\":%d,"
@@ -9343,7 +9683,7 @@ static void handle_video_info(int id, const char *json)
              id, gr_backend() == GR_BACKEND_OPENGL ? "opengl"
                  : gr_backend() == GR_BACKEND_VULKAN ? "vulkan" : "software",
              preset, ref, req, eff, gr_texture_filter(), di.height * (unsigned)(eff > 0 ? eff : 1), gl,
-             si.max_dim, si.max_scale, si.clamp_reason, si.alloc_retries, si.budget_mib,
+             si.max_dim, si.max_scale, gl_renderer_get_swap_interval(), si.clamp_reason, si.alloc_retries, si.budget_mib,
              si.fbo_w, si.fbo_h, hidpi, ww, wh, pw, ph, di.display_x, di.display_y,
              di.width, di.height,
              si.hr_scale, si.windowed, si.window_x, si.window_w, si.window_fbo_w,
@@ -9859,7 +10199,7 @@ extern uint64_t gl_renderer_pres_total(void);
 
 static void handle_gl_present_ring(int id, const char *json)
 {
-    static const char *path_name[5] = { "vram", "wide", "cpu", "blank", "interp" };
+    static const char *path_name[6] = { "vram", "wide", "cpu", "blank", "interp", "stereo" };
     int n = json_get_int(json, "n", 300);
     if (n < 1) n = 1;
     if (n > 4096) n = 4096;
@@ -9878,7 +10218,7 @@ static void handle_gl_present_ring(int id, const char *json)
         pos += snprintf(buf + pos, bufsz - pos,
                         "%s[%llu,%u,\"%s\",%u,[%d,%d,%d,%d],[%d,%d,%d,%d],[%u,%u,%u],%u,[%u,%u,%u,%u]]",
                         first ? "" : ",", (unsigned long long)s, e.frame,
-                        e.path < 5 ? path_name[e.path] : "?", e.t_ms,
+                        e.path < 6 ? path_name[e.path] : "?", e.t_ms,
                         e.dx, e.dy, e.w, e.h, e.lx, e.ly, e.lw, e.lh,
                         e.px_r, e.px_g, e.px_b, e.glerr,
                         e.src_r, e.src_g, e.src_b, e.src_valid);
@@ -10035,7 +10375,7 @@ static void wtrace_fill_entry(WriteTraceEntry *e, uint64_t seq,
      * instead of the stale last-CPU-store PC (which is meaningless mid-DMA). */
     if (g_dma_exec_depth > 0) {
         e->dma_ch = (int8_t)g_dma_cur_ch;
-        if (g_dma_initiator_pc) e->pc = g_dma_initiator_pc;
+        e->pc = g_dma_initiator_pc; /* 0 = unknown; never a stale CPU store PC */
     } else {
         e->dma_ch = -1;
     }
@@ -11642,6 +11982,22 @@ static void handle_wtrace_dump(int id, const char *json)
     if (json_get_str(json, "addr_hi", hi_str, sizeof(hi_str)))
         filter_hi = hex_to_u32(hi_str) & 0x1FFFFFFFu;
 
+    /* Filter the recorded producer PC, segment-masked like the address filter
+     * (KSEG0/KSEG1/KUSEG alias). DMA entries use the initiator PC stored by
+     * wtrace_fill_entry; an unknown (0) initiator matches only when no PC
+     * bound is given. Post-hoc only: recording, fingerprints and guest
+     * execution are unchanged. pc_lo/pc_hi echo the raw request. */
+    uint32_t pc_lo = 0, pc_hi = 0xFFFFFFFFu;
+    int pc_filtered = 0;
+    /* Default upper bound sits above every masked PC so no entry is excluded. */
+    uint32_t pc_lo_m = 0, pc_hi_m = 0x20000000u;
+    if (json_get_str(json, "pc_lo", lo_str, sizeof(lo_str))) {
+        pc_lo = hex_to_u32(lo_str); pc_lo_m = pc_lo & 0x1FFFFFFFu; pc_filtered = 1;
+    }
+    if (json_get_str(json, "pc_hi", hi_str, sizeof(hi_str))) {
+        pc_hi = hex_to_u32(hi_str); pc_hi_m = pc_hi & 0x1FFFFFFFu; pc_filtered = 1;
+    }
+
     /* Optional frame-window filter — the "query the ring for the window of
      * interest" primitive.  Lets a caller reach entries in the MIDDLE of a deep,
      * high-traffic ring (which oldest-N / newest-N paging cannot). -1 = unbounded. */
@@ -11665,8 +12021,9 @@ static void handle_wtrace_dump(int id, const char *json)
     size_t pos = 0;
     uint32_t emitted = 0;
     pos += snprintf(buf + pos, BUF_SZ - pos,
-                    "{\"id\":%d,\"ok\":true,\"total\":%llu,\"available\":%u,\"entries\":[",
-                    id, (unsigned long long)total, avail);
+                    "{\"id\":%d,\"ok\":true,\"total\":%llu,\"available\":%u,"
+                    "\"pc_lo\":\"0x%08X\",\"pc_hi\":\"0x%08X\",\"entries\":[",
+                    id, (unsigned long long)total, avail, pc_lo, pc_hi);
     for (uint32_t i = 0; i < avail && emitted < MAX_OUT && pos < BUF_SZ - 256; i++) {
         uint32_t idx;
         if (newest_first) {
@@ -11677,6 +12034,10 @@ static void handle_wtrace_dump(int id, const char *json)
         }
         WriteTraceEntry *e = &s_wtrace[idx];
         if (e->addr < filter_lo || e->addr >= filter_hi) continue;
+        if (pc_filtered) {
+            uint32_t epc = e->pc & 0x1FFFFFFFu;
+            if (e->pc == 0 || epc < pc_lo_m || epc >= pc_hi_m) continue;
+        }
         if (frame_lo >= 0 && (int)e->frame < frame_lo) continue;
         if (frame_hi >= 0 && (int)e->frame > frame_hi) continue;
         pos += snprintf(buf + pos, BUF_SZ - pos,
@@ -14558,6 +14919,19 @@ static const CmdEntry s_commands[] = {
     { "gl_ws_ablate",      handle_gl_ws_ablate },
     { "gl_interp",         handle_gl_interp },
     { "render_pass_stats", handle_render_pass_stats },
+    { "openxr_stats", handle_openxr_stats },
+    { "openxr_views", handle_openxr_views },
+    { "openxr_control", handle_openxr_control },
+    { "openxr_input", handle_openxr_input },
+#ifndef PSX_NO_DEBUG_TOOLS
+    { "openxr_input_override", handle_openxr_input_override },
+#endif
+    { "openxr_hands", handle_openxr_hands },
+#ifndef PSX_NO_DEBUG_TOOLS
+    { "openxr_hands_override", handle_openxr_hands_override },
+#endif
+    { "stereo_stats", handle_stereo_stats },
+    { "stereo_dump", handle_stereo_dump },
     { "render_pass_dump",  handle_render_pass_dump },
     { "render_pass_refuse", handle_render_pass_refuse },
     { "gl_wide_fast",      handle_gl_wide_fast },
@@ -14751,6 +15125,9 @@ static const CmdEntry s_commands[] = {
     { "c0_history",        handle_c0_history },
     { "capture_quads",     handle_capture_quads },
     { "get_quads",         handle_get_quads },
+#ifndef PSX_NO_DEBUG_TOOLS
+    { "disasm",            handle_disasm },
+#endif
     { "gte_state",         handle_gte_state },
     { "gte_ring_dump",     handle_gte_ring_dump },
     { "gte_intpl_dump",    handle_gte_intpl_dump },

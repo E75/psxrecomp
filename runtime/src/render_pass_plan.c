@@ -315,3 +315,10 @@ void render_pass_journal_free(RenderPassJournal *j) {
     }
     j->n = 0;
 }
+
+int render_pass_stereo_pair_fresh(uint64_t pair_cycle, uint64_t now_cycle,
+                                  uint32_t vblank_cycles) {
+    if (now_cycle < pair_cycle) return 0;
+    return now_cycle - pair_cycle <=
+           (uint64_t)RENDER_PASS_STEREO_MAX_AGE_VBLANKS * vblank_cycles;
+}
