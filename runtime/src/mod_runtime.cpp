@@ -5,6 +5,7 @@
 #include "iso_reader.h"
 #include "mod_packages.h"
 #include "mod_plugins.h"
+#include "psx_netplay.h"
 #include "gpu.h"
 #include "psx_memory.h"
 #include "render_pass_projection.h"
@@ -163,9 +164,22 @@ inline uint32_t function_entry_key(uint32_t address) {
     return address & 0x1FFFFFFFu;
 }
 
+/* Game-owned netplay hooks are compiled into the executable. Keep them apart
+ * from the user mod plan, which every online match clears, so clearing that
+ * plan cannot disable the game's own netplay support. */
+std::vector<ActiveFunctionEntryHook>& game_netplay_entry_hooks() {
+    static std::vector<ActiveFunctionEntryHook> value;
+    return value;
+}
+
+void update_function_entry_count() {
+    g_psx_mod_function_entry_hooks = (uint32_t)(
+        active_function_entry_hooks().size() + game_netplay_entry_hooks().size());
+}
+
 void clear_function_entry_hooks() {
     active_function_entry_hooks().clear();
-    g_psx_mod_function_entry_hooks = 0;
+    update_function_entry_count();
     active_guest_functions().clear();
     g_psx_mod_guest_functions = 0;
     active_instruction_hooks().clear();
@@ -184,7 +198,7 @@ void build_function_entry_hooks(const RuntimeMods& s) {
     std::stable_sort(table.begin(), table.end(),
                      [](const ActiveFunctionEntryHook& a,
                         const ActiveFunctionEntryHook& b) { return a.key < b.key; });
-    g_psx_mod_function_entry_hooks = (uint32_t)table.size();
+    update_function_entry_count();
     auto& functions = active_guest_functions();
     for (const auto& plugin : s.plan.plugins)
         for (const auto& function : mod_guest_functions(plugin.id))
@@ -1983,6 +1997,8 @@ extern "C" void psx_mod_instruction(CPUState* cpu, uint32_t address, uint32_t in
     }
 }
 
+static int game_netplay_function_entry(CPUState* cpu, uint32_t address);
+
 extern "C" int psx_mod_function_entry(CPUState* cpu, uint32_t address) {
     using namespace PSXRecompV4;
     if (!g_psx_mod_function_entry_hooks || !cpu) return 0;
@@ -2002,6 +2018,62 @@ extern "C" int psx_mod_function_entry(CPUState* cpu, uint32_t address) {
             (it->filter && it->filter(cpu, address));
         --function_entry_depth;
         if (handled) {
+            cpu->pc = cpu->gpr[31];
+            return 1;
+        }
+    }
+    return game_netplay_function_entry(cpu, address);
+}
+
+static int register_game_netplay_hook(uint32_t address,
+                                      PSXModFunctionEntryCallback callback,
+                                      PSXModFunctionFilterCallback filter) {
+    using namespace PSXRecompV4;
+    if (!address || (!callback && !filter)) return 0;
+    auto& table = game_netplay_entry_hooks();
+    const uint32_t key = function_entry_key(address);
+    for (const auto& hook : table)
+        if (hook.key == key && hook.callback == callback && hook.filter == filter) return 1;
+    table.push_back({key, callback, filter, nullptr});
+    std::stable_sort(table.begin(), table.end(),
+                     [](const ActiveFunctionEntryHook& a,
+                        const ActiveFunctionEntryHook& b) { return a.key < b.key; });
+    update_function_entry_count();
+    return 1;
+}
+
+extern "C" int psx_game_register_netplay_function_entry(
+    uint32_t address, PSXModFunctionEntryCallback callback) {
+    return callback ? register_game_netplay_hook(address, callback, nullptr) : 0;
+}
+
+extern "C" int psx_game_register_netplay_function_filter(
+    uint32_t address, PSXModFunctionFilterCallback filter) {
+    return filter ? register_game_netplay_hook(address, nullptr, filter) : 0;
+}
+
+/* Game netplay hooks run only in a netplay session, after the mod plan's
+ * hooks (which a match clears). PSX_GAME_FILTER_OFFLINE_PROBE=1 runs them
+ * offline too, to test a title's netplay path without opening a session. */
+static int game_netplay_function_entry(CPUState* cpu, uint32_t address) {
+    using namespace PSXRecompV4;
+    const auto& table = game_netplay_entry_hooks();
+    if (table.empty()) return 0;
+    if (!psx_netplay_active()) {
+        static int offline_probe = -1;
+        if (offline_probe < 0) {
+            const char* e = std::getenv("PSX_GAME_FILTER_OFFLINE_PROBE");
+            offline_probe = (e && std::strcmp(e, "1") == 0) ? 1 : 0;
+        }
+        if (!offline_probe) return 0;
+    }
+    const uint32_t key = function_entry_key(address);
+    auto it = std::lower_bound(
+        table.begin(), table.end(), key,
+        [](const ActiveFunctionEntryHook& hook, uint32_t k) { return hook.key < k; });
+    for (; it != table.end() && it->key == key; ++it) {
+        if (it->callback) it->callback(cpu, address);
+        if (it->filter && it->filter(cpu, address)) {
             cpu->pc = cpu->gpr[31];
             return 1;
         }

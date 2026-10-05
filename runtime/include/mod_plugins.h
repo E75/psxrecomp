@@ -60,6 +60,15 @@ extern uint32_t g_psx_mod_instruction_hooks;
 int psx_mod_register_function_filter_plugin(
     const char* id, uint32_t address, PSXModFunctionFilterCallback callback);
 int psx_mod_function_entry(struct CPUState* cpu, uint32_t address);
+/* Trusted game code (not a mod package) may hook guest functions for netplay
+ * only. These are independent of the mod package plan, which every online
+ * match clears, and run only while netplay is active; offline execution stays
+ * stock. A filter returning nonzero consumes the whole call (PC <- $ra); it
+ * must supply any guest-visible side effects itself. */
+int psx_game_register_netplay_function_entry(
+    uint32_t address, PSXModFunctionEntryCallback callback);
+int psx_game_register_netplay_function_filter(
+    uint32_t address, PSXModFunctionFilterCallback filter);
 /* Complete a guest function from its trusted entry callback after supplying
  * its full result. Valid only for that callback's CPU. Publishes pc=$ra and
  * prevents the original body from executing. Nested callbacks have separate

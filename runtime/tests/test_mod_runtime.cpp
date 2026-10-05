@@ -23,6 +23,18 @@ static int failures;
 static int activation_calls;
 static int plugin_calls;
 static int restore_calls;
+static int game_netplay_entry_hits;
+static int game_netplay_filter_hits;
+static int test_netplay_active;
+extern "C" int psx_netplay_active(void) { return test_netplay_active; }
+static void test_game_netplay_entry(CPUState*, uint32_t) {
+    game_netplay_entry_hits++;
+}
+static int test_game_netplay_filter(CPUState* cpu, uint32_t) {
+    game_netplay_filter_hits++;
+    cpu->gpr[2] = 0x1234u;
+    return 1;
+}
 
 extern "C" uint8_t psx_read_byte(uint32_t address) {
     return ram[address & 0x1fffffu];
@@ -1141,6 +1153,42 @@ int main() {
         check(psx_mod_read_disc_file("S0/LEVEL.NSF", nullptr, 0, &bytes) && bytes == 69400576u,
               "files grown past 64 MiB keep their effective size");
     }
+    /* A compiled game hook survives mod-plan clearing, but runs only online. */
+    check(psx_game_register_netplay_function_entry(
+              0x80004000u, test_game_netplay_entry) == 1,
+          "trusted game netplay entry must register");
+    check(psx_game_register_netplay_function_entry(
+              0x80004000u, test_game_netplay_entry) == 1,
+          "duplicate game netplay registration must be idempotent");
+    check(psx_game_register_netplay_function_filter(
+              0x80005000u, test_game_netplay_filter) == 1,
+          "trusted game netplay filter must register");
+    CPUState game_cpu{};
+    psx_mod_function_entry(&game_cpu, 0x80004000u);
+    game_cpu.gpr[31] = 0x80006000u;
+    check(!psx_mod_function_entry(&game_cpu, 0x80005000u),
+          "game netplay filter must not consume offline function");
+    check(game_netplay_entry_hits == 0,
+          "game netplay hook must not run offline");
+    check(PSXRecompV4::mod_runtime_clear_for_netplay(&error), error.c_str());
+    test_netplay_active = 1;
+    psx_mod_function_entry(&game_cpu, 0xA0004000u);
+    check(game_netplay_entry_hits == 1 && g_psx_mod_function_entry_hooks == 2,
+          "game hook must survive netplay mod clear and match code aliases");
+    check(psx_mod_function_entry(&game_cpu, 0xA0005000u) == 1 &&
+              game_cpu.pc == 0x80006000u && game_cpu.gpr[2] == 0x1234u &&
+              game_netplay_filter_hits == 1,
+          "game netplay filter must consume call and resume at return PC");
+    psx_mod_function_entry(&game_cpu, 0x80004004u);
+    check(game_netplay_entry_hits == 1,
+          "game hook must ignore other addresses");
+    test_netplay_active = 0;
+    psx_mod_function_entry(&game_cpu, 0x80004000u);
+    check(game_netplay_entry_hits == 1,
+          "game hook must disarm when netplay stops");
+    check(!psx_mod_function_entry(&game_cpu, 0x80005000u) &&
+              game_netplay_filter_hits == 1,
+          "game filter must disarm when netplay stops");
     fs::remove_all(root, ec);
     if (failures) return 1;
     std::cout << "mod runtime tests passed\n";
