@@ -9,6 +9,8 @@ extern "C" {
 typedef void (*PSXModVBlankCallback)(void);
 typedef void (*PSXModActivationCallback)(void);
 struct CPUState;
+/* A callback that runs guest code inside psx_mod_render_pass() can be
+ * abandoned by a watchdog longjmp; see the note at psx_mod_render_pass(). */
 typedef void (*PSXModFunctionEntryCallback)(struct CPUState* cpu,
                                             uint32_t address);
 /* Return nonzero to finish this opt-in function with the callback's return
@@ -454,7 +456,14 @@ uint32_t psx_mod_render_pass_plan(uint32_t period_vblanks,
                                   uint32_t shown_after_vblanks,
                                   uint32_t* alpha_q16, uint32_t max);
 /* Returns 1 when the pass ran and its image was queued, 0 when it was refused
- * or rolled back (state is restored either way). */
+ * or rolled back (state is restored either way).
+ * A watchdog abort rolls the pass back by longjmp, past every frame between
+ * the watchdog and psx_mod_render_pass(): plugin callbacks, guest functions
+ * and function-entry hooks they called. Runtime nesting state (including the
+ * function-entry context) is restored, but plugin-owned state, held locks and
+ * C++ destructors in those frames are NOT unwound. A callback run inside a
+ * pass must keep nothing that needs cleanup (no locks, no RAII objects, no
+ * partially updated plugin state) across guest code, or tolerate the abort. */
 int psx_mod_render_pass(struct CPUState* cpu, const PSXModRenderPass* pass,
                         PSXModRenderPassFn fn, void* user);
 /*

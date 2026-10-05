@@ -2013,6 +2013,17 @@ extern "C" int psx_mod_function_entry_active(void) {
     return PSXRecompV4::function_entry_depth != 0;
 }
 
+extern "C" void mod_runtime_function_entry_context_save(ModFunctionEntryContext *out) {
+    out->depth = PSXRecompV4::function_entry_depth;
+    out->plugin = PSXRecompV4::state().current_plugin;
+}
+
+extern "C" void mod_runtime_function_entry_context_restore(const ModFunctionEntryContext *in) {
+    PSXRecompV4::function_entry_depth = in->depth;
+    PSXRecompV4::state().current_plugin =
+        static_cast<const PSXRecompV4::ModResolution::Plugin *>(in->plugin);
+}
+
 /* Apply the committed plan's disc writes and overlays to one sector. The
  * emulated drive reaches this only after mod_runtime_enable_disc_patches()
  * (reference reads before then must see the original image); host-side

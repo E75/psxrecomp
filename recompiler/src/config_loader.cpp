@@ -2672,6 +2672,13 @@ UserSettings load_user_settings(const fs::path& path) {
             if (d > 1.0) d = 1.0;
             s.scanline_strength = d; s.has_scanline_strength = true;
         });
+        if (v.contains("fov_scale")) try_get([&]{
+            const auto& n = toml::find(v, "fov_scale");
+            if (n.is_floating())     s.fov_scale = n.as_floating();
+            else if (n.is_integer()) s.fov_scale = static_cast<double>(n.as_integer());
+            else return;
+            s.has_fov_scale = true;
+        });
         if (v.contains("auto_skip_fmv")) try_get([&]{
             s.auto_skip_fmv = toml::find<bool>(v, "auto_skip_fmv"); s.has_auto_skip_fmv = true;
         });
@@ -3034,6 +3041,8 @@ bool save_user_settings(const fs::path& path, const UserSettings& s) {
         f << "scanlines         = " << (s.scanlines ? "true" : "false") << "\n";
     if (s.has_scanline_strength)
         f << "scanline_strength = " << s.scanline_strength << "\n";
+    if (s.has_fov_scale)
+        f << "fov_scale         = " << s.fov_scale << "\n";
     if (s.has_auto_skip_fmv)
         f << "auto_skip_fmv     = " << (s.auto_skip_fmv ? "true" : "false") << "\n";
     /* turbo_loads is deliberately NOT written back: it is deprecated and no
