@@ -31,6 +31,8 @@ def main():
     sources=[('probe',args.fixture or fw/'runtime/tests/test_gl_texture_filter.c'),
              ('sw',fw/'runtime/src/gpu_sw_renderer.c'),('fi',fw/'runtime/src/frame_interpolation.c'),
              ('rp',fw/'runtime/src/render_pass_plan.c')]
+    if (fw/'runtime/src/psx_openxr.c').exists():
+        sources.append(('xr',fw/'runtime/src/psx_openxr.c'))
     objects=[]
     for name,source in sources:
         obj=out/(name+'.o'); run([args.cc,*flags,'-c',source,'-o',obj]); objects.append(obj)

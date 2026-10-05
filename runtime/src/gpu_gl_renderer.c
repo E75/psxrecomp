@@ -91,6 +91,8 @@
 #include "gpu_timeline.h"
 #include "frame_pacing.h"
 #include "psx_rewind.h"
+#include "psx_openxr.h"
+#include "openxr_color.h"
 
 #include "psx_sdl.h"
 #if defined(PSX_SDL3)
@@ -163,6 +165,7 @@ typedef void   (APIENTRY *PFN_glCompileShader)(GLuint);
 typedef void   (APIENTRY *PFN_glGetShaderiv)(GLuint, GLenum, GLint *);
 typedef void   (APIENTRY *PFN_glGetShaderInfoLog)(GLuint, GLsizei, GLsizei *, char *);
 typedef void   (APIENTRY *PFN_glDeleteShader)(GLuint);
+typedef void   (APIENTRY *PFN_glDeleteProgram)(GLuint);
 typedef GLuint (APIENTRY *PFN_glCreateProgram)(void);
 typedef void   (APIENTRY *PFN_glAttachShader)(GLuint, GLuint);
 typedef void   (APIENTRY *PFN_glLinkProgram)(GLuint);
@@ -231,6 +234,7 @@ static PFN_glCompileShader     p_glCompileShader;
 static PFN_glGetShaderiv       p_glGetShaderiv;
 static PFN_glGetShaderInfoLog  p_glGetShaderInfoLog;
 static PFN_glDeleteShader      p_glDeleteShader;
+static PFN_glDeleteProgram     p_glDeleteProgram;
 static PFN_glCreateProgram     p_glCreateProgram;
 static PFN_glAttachShader      p_glAttachShader;
 static PFN_glLinkProgram       p_glLinkProgram;
@@ -327,6 +331,8 @@ static int load_modern_gl(void) {
     p_glGetQueryObjectui64v = (void *)SDL_GL_GetProcAddress("glGetQueryObjectui64v");
     p_glGetQueryObjectiv    = (void *)SDL_GL_GetProcAddress("glGetQueryObjectiv");
     p_glQueryCounter        = (void *)SDL_GL_GetProcAddress("glQueryCounter");
+    /* Optional (XR colour program cleanup only): never fails modern-GL init. */
+    p_glDeleteProgram       = (void *)SDL_GL_GetProcAddress("glDeleteProgram");
     /* Optional: only the debug presented-image ring maps pack buffers. */
     p_glMapBuffer           = (void *)SDL_GL_GetProcAddress("glMapBuffer");
     p_glUnmapBuffer         = (void *)SDL_GL_GetProcAddress("glUnmapBuffer");
@@ -424,7 +430,12 @@ static int           s_present_w = 0, s_present_h = 0;
 static GLuint        s_osd_tex = 0;
 static int           s_osd_tw = 0, s_osd_th = 0;
 static GLuint        s_present_prog = 0, s_present_vao = 0;
+static GLuint        s_xr_color_prog = 0, s_xr_native_tex = 0;
 static void          gl_swap_with_osd(void);
+static int s_native_surface_enabled, s_native_surface_pending;
+static int s_native_surface_rect[4]; /* Fresh native backbuffer content, GL coordinates. */
+static double s_native_surface_distance, s_native_surface_width, s_native_surface_units;
+static void openxr_present_native(void);
 static GLint         s_present_uTex = -1, s_present_uUvRect = -1;
 static GLint         s_present_uTexSize = -1, s_present_uSharpScale = -1;
 static GLint         s_present_uSharp = -1;
@@ -1042,6 +1053,10 @@ static uint64_t    s_pres_seq = 0;
 
 static void pres_record(int path, int dx, int dy, int w, int h,
                         int lx, int ly, int lw, int lh) {
+    s_native_surface_pending=s_native_surface_enabled &&
+        (path==GL_PRES_VRAM || path==GL_PRES_WIDE || path==GL_PRES_CPU || path==GL_PRES_BLANK);
+    s_native_surface_rect[0]=lx;s_native_surface_rect[1]=ly;
+    s_native_surface_rect[2]=lw;s_native_surface_rect[3]=lh;
     /* The ring metadata stays always-on, but pixel probing must not: each
      * glReadPixels synchronously drains queued GPU work. Two probes per frame
      * were enough to make Tomba 2 miss its frame budget. */
@@ -4750,10 +4765,20 @@ void gl_renderer_set_swap_interval(int interval) {
         }
     }
 }
+int gl_renderer_get_swap_interval(void) {
+    if(!s_ctx)return -2;
+#if defined(PSX_SDL3)
+    int interval=0;
+    return SDL_GL_GetSwapInterval(&interval)?interval:-2;
+#else
+    return SDL_GL_GetSwapInterval();
+#endif
+}
 
 static void pass_resources_release(void);
 
 void gl_renderer_shutdown(void) {
+    s_native_surface_enabled=s_native_surface_pending=0;
     pass_resources_release();
     if (s_ctx) {
         for (unsigned i = 1; i < 65536u; ++i)
@@ -5688,8 +5713,19 @@ void gl_renderer_interpolation_source_diag(int *source, uint32_t *flip_period,
     if (duplicates) *duplicates = s_interp_duplicates;
 }
 
+/* Host suspension OR a running OpenXR session: every XR present would otherwise
+ * wait/begin/submit a frame per interpolated sub-present. The compositor
+ * reprojects instead. Constant 0 contribution without an active XR session;
+ * history is reset on each transition like the FMV suspension. */
+static int s_interp_xr_gated;
+static int interp_suspended_now(void) {
+    int xr = psx_openxr_session_active();
+    if (xr != s_interp_xr_gated) { s_interp_xr_gated = xr; interp_reset_history_unlocked(); }
+    return s_interp_suspended || xr;
+}
+
 int gl_renderer_interpolation_owns_cadence(void) {
-    return s_ctx && s_interp_enabled && !s_interp_suspended;
+    return s_ctx && s_interp_enabled && !interp_suspended_now();
 }
 
 void gl_renderer_interpolation_diag(int *enabled, int *suspended,
@@ -5709,7 +5745,7 @@ void gl_renderer_interpolation_diag(int *enabled, int *suspended,
 static int interp_capture(GLuint fbo, int x, int y, int w, int h,
                           int linear, int force_4_3, int source_path,
                           int origin_x, int origin_y, int redrawn) {
-    if (!s_interp_enabled || s_interp_suspended || !fbo || w <= 0 || h <= 0) return 0;
+    if (!s_interp_enabled || interp_suspended_now() || !fbo || w <= 0 || h <= 0) return 0;
     int sw = w * s_out_scale, sh = h * s_out_scale, pw, ph;
     hiw_capture_size(sw, sh, force_4_3, &pw, &ph);
     int geometry_changed =
@@ -5815,7 +5851,7 @@ static void interp_draw_textures(GLuint prev_tex, GLuint curr_tex, float alpha,
 
 static uint64_t s_present_ticks_accum_fwd(uint64_t add);
 static int interp_present_pair(GLuint a, GLuint b, float t, int blend_mode) {
-    if (!s_ctx || !s_interp_enabled || s_interp_suspended || s_interp_valid < 1)
+    if (!s_ctx || !s_interp_enabled || interp_suspended_now() || s_interp_valid < 1)
         return 0;
     uint64_t present_t0 = SDL_GetPerformanceCounter();
     int ww = 0, wh = 0; SDL_GL_GetDrawableSize(s_win, &ww, &wh);
@@ -6331,6 +6367,12 @@ static void pass_free_color_fbo(GLuint *tex, GLuint *rb, GLuint *fbo,
 /* Context teardown (gl_renderer_shutdown): free the pass images, backups
  * and journal, and forget their names so a new context makes fresh ones. */
 static void pass_resources_release(void) {
+    psx_openxr_shutdown();
+    if(s_ctx) {
+        if(s_xr_color_prog && p_glDeleteProgram) p_glDeleteProgram(s_xr_color_prog);
+        if(s_xr_native_tex) glDeleteTextures(1,&s_xr_native_tex);
+    }
+    s_xr_color_prog=s_xr_native_tex=0;
     stereo_resources_release();
     pass_gen_release(0);
     pass_gen_release(1);
@@ -6711,6 +6753,180 @@ int gl_renderer_stereo_publish(uint64_t id, uint64_t cycle, const int32_t view[2
     if (s_stereo_dump_left > 0) stereo_dump(p);
     return 1;
 }
+
+static uint64_t s_xr_begin_pair;
+int psx_mod_openxr_enable(int enabled) {
+    PSXOpenXRStats s; psx_openxr_stats(&s);
+    if (s_pass_active || s.frame_open) return 0;
+    return psx_openxr_enable(enabled);
+}
+void psx_mod_openxr_recenter(void) { psx_openxr_recenter(); }
+int psx_mod_openxr_quad(double distance,double width,double height) {
+    if(s_pass_active)return 0;
+    return psx_openxr_quad(distance,width,height);
+}
+int psx_mod_openxr_native_surface(double distance,double width,double units) {
+    PSXOpenXRStats stats;psx_openxr_stats(&stats);
+    if(s_pass_active || stats.frame_open || !stats.compiled ||
+       !isfinite(distance) || !isfinite(width) || !isfinite(units))return 0;
+    if(distance && (distance<.25 || distance>20 || width<=0 || width>10 || units<1 || units>65536))return 0;
+    s_native_surface_enabled=distance!=0;s_native_surface_pending=0;
+    s_native_surface_distance=distance;s_native_surface_width=width;s_native_surface_units=units;
+    return 1;
+}
+int psx_mod_openxr_begin(uint32_t width, uint32_t height, double units) {
+    if (s_native_surface_enabled || s_pass_active || gl_renderer_stereo_unavailable() != PSX_MOD_RENDER_PASS_READY ||
+        !width || !height || width > VRAM_W || height > VRAM_H) return 0;
+    s_xr_begin_pair = s_stereo_valid ? s_stereo_pair[s_stereo_current].id : 0;
+    return psx_openxr_begin((int)width, (int)height, units);
+}
+int psx_mod_openxr_view(uint32_t eye, PSXModRenderView *view) {
+    return psx_openxr_view(eye, view);
+}
+int psx_mod_openxr_input(PSXModOpenXRInput *input) {
+    if (s_pass_active) return 0;
+    return psx_openxr_input(input);
+}
+int psx_mod_openxr_hands(PSXModOpenXRHands *hands) {
+    return psx_openxr_hands(hands); /* Snapshot only, also safe during replay. */
+}
+/* The target stores display-encoded RGB for an sRGB swapchain, or explicitly
+ * decoded RGB for a linear-only runtime. Never apply hardware sRGB encoding
+ * to these outputs. All shader state is restored before returning to native. */
+static int openxr_color_draw(GLuint source, int w, int h, int flip, float gamma, int linear) {
+    if (!s_xr_color_prog) s_xr_color_prog = build_program(PRESENT_VS, PSX_XR_COLOR_FS);
+    if (!s_xr_color_prog || !s_present_vao) return 0;
+    GLint program, vao, viewport[4], active, binding, min_filter, mag_filter;
+    GLboolean mask[4];
+    const GLenum caps[] = {GL_BLEND, GL_DEPTH_TEST, GL_STENCIL_TEST, GL_CULL_FACE};
+    GLboolean enabled[4];
+    glGetIntegerv(0x8B8D, &program);glGetIntegerv(0x85B5, &vao);
+    glGetIntegerv(GL_VIEWPORT, viewport);glGetIntegerv(0x84E0, &active);
+    glGetBooleanv(GL_COLOR_WRITEMASK, mask);
+    p_glActiveTexture(PSXGL_TEXTURE0);glGetIntegerv(GL_TEXTURE_BINDING_2D, &binding);
+    glBindTexture(GL_TEXTURE_2D, source);
+    glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, &min_filter);
+    glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, &mag_filter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    for (int i=0;i<4;i++) {enabled[i]=glIsEnabled(caps[i]);glDisable(caps[i]);}
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);glViewport(0,0,w,h);
+    p_glUseProgram(s_xr_color_prog);
+    p_glUniform1i(p_glGetUniformLocation(s_xr_color_prog,"u_tex"),0);
+    p_glUniform1i(p_glGetUniformLocation(s_xr_color_prog,"u_linear"),linear);
+    p_glUniform1f(p_glGetUniformLocation(s_xr_color_prog,"u_gamma"),gamma);
+    p_glUniform4f(p_glGetUniformLocation(s_xr_color_prog,"u_uv_rect"),0,flip?0:1,1,flip?1:0);
+    p_glBindVertexArray(s_present_vao);glDrawArrays(GL_TRIANGLES,0,3);
+    p_glBindVertexArray((GLuint)vao);p_glUseProgram((GLuint)program);
+    glViewport(viewport[0],viewport[1],viewport[2],viewport[3]);
+    glColorMask(mask[0],mask[1],mask[2],mask[3]);
+    for (int i=0;i<4;i++) if(enabled[i]) glEnable(caps[i]);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, min_filter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, mag_filter);
+    glBindTexture(GL_TEXTURE_2D,(GLuint)binding);p_glActiveTexture((GLenum)active);
+    return 1;
+}
+static int openxr_copy_eye(uint32_t eye, uint32_t texture, int w, int h) {
+    StereoPair *p = &s_stereo_pair[s_stereo_current];
+    GLint read_fbo, draw_fbo; GLuint target = 0;
+    GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+    GLboolean srgb = glIsEnabled(0x8DB9); /* GL_FRAMEBUFFER_SRGB */
+    PSXOpenXRStats xr;psx_openxr_stats(&xr);
+    glGetIntegerv(0x8CAA, &read_fbo);
+    glGetIntegerv(0x8CA6, &draw_fbo);
+    p_glGenFramebuffers(1, &target);
+    p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, target);
+    p_glFramebufferTexture2D(PSXGL_DRAW_FRAMEBUFFER, PSXGL_COLOR_ATTACHMENT0,GL_TEXTURE_2D, texture, 0);
+    int ok = p_glCheckFramebufferStatus(PSXGL_DRAW_FRAMEBUFFER) == PSXGL_FRAMEBUFFER_COMPLETE;
+    if (ok) {
+        glDisable(GL_SCISSOR_TEST);
+        glDisable(0x8DB9);
+        p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, p->fbo[eye]);
+        /* Stereo capture texture row convention is opposite the XR layer.
+         * User confirmed inverted headset output with the original direct blit.
+         * Flip only submission; eye dumps and desktop presentation stay intact. */
+        if (xr.swapchain_format == PSX_XR_SRGB8_ALPHA8 && s_present_gamma == 1.0f)
+            p_glBlitFramebuffer(0, p->th[eye], p->tw[eye], 0, 0, 0, w, h,
+                                GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        else
+            ok = openxr_color_draw(p->tex[eye], w, h, 1, s_present_gamma,
+                                   xr.swapchain_format != PSX_XR_SRGB8_ALPHA8);
+        glFlush();
+    }
+    p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, (GLuint)read_fbo);
+    p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, (GLuint)draw_fbo);
+    if (scissor) glEnable(GL_SCISSOR_TEST);
+    if (srgb) glEnable(0x8DB9);
+    p_glDeleteFramebuffers(1, &target);return ok;
+}
+int psx_mod_openxr_end(int rendered) {
+    int fresh = rendered && s_stereo_valid && !s_pass_active &&
+                s_stereo_pair[s_stereo_current].id != s_xr_begin_pair;
+    if (fresh) psx_openxr_pair_metadata(s_stereo_pair[s_stereo_current].id,
+                                       s_stereo_pair[s_stereo_current].cycle);
+    return psx_openxr_end(fresh, openxr_copy_eye);
+}
+
+static int openxr_copy_native(uint32_t eye,uint32_t texture,int w,int h) {
+    GLint read_fbo,draw_fbo,read_buffer;GLuint target=0;
+    GLboolean scissor=glIsEnabled(GL_SCISSOR_TEST);
+    GLboolean srgb=glIsEnabled(0x8DB9);
+    PSXOpenXRStats xr;psx_openxr_stats(&xr);
+    (void)eye;
+    glGetIntegerv(0x8CAA,&read_fbo);glGetIntegerv(0x8CA6,&draw_fbo);
+    glGetIntegerv(GL_READ_BUFFER,&read_buffer);
+    p_glGenFramebuffers(1,&target);p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER,target);
+    p_glFramebufferTexture2D(PSXGL_DRAW_FRAMEBUFFER,PSXGL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,texture,0);
+    int ok=p_glCheckFramebufferStatus(PSXGL_DRAW_FRAMEBUFFER)==PSXGL_FRAMEBUFFER_COMPLETE;
+    if(ok) {
+        int *r=s_native_surface_rect;
+        glDisable(GL_SCISSOR_TEST);p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER,0);glReadBuffer(GL_BACK);
+        glDisable(0x8DB9);
+        /* Default framebuffer is already upright: unlike native VRAM/eye
+         * textures, its bottom GL row is the displayed bottom row. */
+        (void)pass_gl_errors();
+        if (xr.swapchain_format == PSX_XR_SRGB8_ALPHA8)
+            p_glBlitFramebuffer(r[0],r[1],r[0]+r[2],r[1]+r[3],0,0,w,h,GL_COLOR_BUFFER_BIT,GL_LINEAR);
+        else {
+            GLint active,binding;glGetIntegerv(0x84E0,&active);
+            p_glActiveTexture(PSXGL_TEXTURE0);glGetIntegerv(GL_TEXTURE_BINDING_2D,&binding);
+            if(!s_xr_native_tex) glGenTextures(1,&s_xr_native_tex);
+            glBindTexture(GL_TEXTURE_2D,s_xr_native_tex);
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+            glCopyTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,r[0],r[1],r[2],r[3],0);
+            glBindTexture(GL_TEXTURE_2D,(GLuint)binding);p_glActiveTexture((GLenum)active);
+            /* Desktop gamma is already baked into GL_BACK; decode it once. */
+            ok=openxr_color_draw(s_xr_native_tex,w,h,0,1.0f,1);
+        }
+        glFlush();ok=ok && pass_gl_errors()==0;
+    }
+    p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER,(GLuint)read_fbo);glReadBuffer((GLenum)read_buffer);
+    p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER,(GLuint)draw_fbo);
+    if(scissor)glEnable(GL_SCISSOR_TEST);
+    if(srgb)glEnable(0x8DB9);
+    p_glDeleteFramebuffers(1,&target);return ok;
+}
+static void openxr_present_native(void) {
+    int ww=0,wh=0,*r=s_native_surface_rect;
+    if(!s_native_surface_enabled || !s_native_surface_pending || s_pass_active)return;
+    s_native_surface_pending=0;
+    SDL_GL_GetDrawableSize(s_win,&ww,&wh);
+    if(r[0]<0 || r[1]<0 || r[2]<1 || r[3]<1 || r[0]+r[2]>ww || r[1]+r[3]>wh)return;
+    /* No replay or retained pair: this exact native present is the source.
+     * Direct lifecycle permits native 24-bit videos as well as 15-bit UI. */
+    /* The shared locator also builds PSX projection matrices, whose domain
+     * is native VRAM dimensions. Quad geometry does not use those matrices;
+     * keep that domain bounded while copying the full drawable rectangle. */
+    if(!psx_openxr_begin(512,240,s_native_surface_units))return;
+    if(!psx_openxr_quad(s_native_surface_distance,s_native_surface_width,
+                       s_native_surface_width*(double)r[3]/r[2])) {
+        (void)psx_openxr_end(0,NULL);return;
+    }
+    psx_openxr_native_metadata(s_frame_count);
+    (void)psx_openxr_end(1,openxr_copy_native);
+}
+
 static int stereo_present(int w, int h) {
     StereoPair *p = &s_stereo_pair[s_stereo_current];
     int ww, wh, lx, ly, lw, lh;
@@ -7062,6 +7278,8 @@ static void present_image_ring_capture_gl(void) {
 #endif
 
 static void gl_swap_with_osd(void) {
+    openxr_present_native(); /* Copy guest content before host-only overlays. */
+    s_native_surface_pending=0; /* Hold-last/resim cannot reuse a native source. */
 #ifndef PSX_NO_DEBUG_TOOLS
     if (s_ctx) present_image_ring_capture_gl();
 #endif
@@ -7335,7 +7553,7 @@ void gl_renderer_present_vram(int disp_x, int disp_y, int w, int h, int linear,
     flush_tex_batch();
     flush_cpu_upload();
     if (stereo_present(w, h)) return;
-    if (s_force_present_remaining <= 0 &&
+    if (!s_native_surface_enabled && s_force_present_remaining <= 0 &&
         s_last_present_path == GL_PRES_VRAM &&
         s_last_dx == disp_x && s_last_dy == disp_y &&
         s_last_dw == w && s_last_dh == h &&
@@ -7502,7 +7720,7 @@ int gl_renderer_present_wide_fbo(int disp_x, int disp_y, int disp_h, int linear)
     flush_tex_batch();
     flush_cpu_upload();
     hiw_flush_queue();   /* windowed: queued wide mirrors */
-    if (s_force_present_remaining <= 0 &&
+    if (!s_native_surface_enabled && s_force_present_remaining <= 0 &&
         s_last_present_path == GL_PRES_WIDE &&
         s_last_dx == disp_x && s_last_dy == disp_y &&
         s_last_dw == g_wide_w && s_last_dh == disp_h &&

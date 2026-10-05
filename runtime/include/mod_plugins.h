@@ -531,6 +531,66 @@ typedef struct PSXModRenderView {
     int32_t fx_q16, fy_q16, cx_delta_q16, cy_delta_q16;
 } PSXModRenderView;
 int psx_mod_render_view(const PSXModRenderView *view);
+/* Begin locates both views at one predicted time. End submits only a fresh
+ * complete pair; failed/shed redraws submit zero layers. */
+int psx_mod_openxr_enable(int enabled);
+int psx_mod_openxr_begin(uint32_t width, uint32_t height, double units_per_meter);
+int psx_mod_openxr_view(uint32_t eye, PSXModRenderView *view);
+int psx_mod_openxr_end(int pair_rendered);
+/* Frame-local UI surface: the fresh pair's left image is shown to both eyes
+ * on a head-relative quad. Call after begin, outside the draw transaction.
+ * Dimensions and distance are meters; zero distance restores projection.
+ * Requests reset at begin/end and never affect faithful guest rendering. */
+int psx_mod_openxr_quad(double distance_m, double width_m, double height_m);
+/* Opt-in native presentation surface for boot, videos and menus. Copies the
+ * freshly drawn desktop content before host overlays, without guest replay.
+ * Zero distance disables it. Applications disable it before scene begin and
+ * re-enable when their scene renderer is inactive. Dimensions are meters;
+ * height follows the presented content aspect. No retained stereo substitution. */
+int psx_mod_openxr_native_surface(double distance_m, double width_m,
+                                  double units_per_meter);
+void psx_mod_openxr_recenter(void);
+/* Fresh action sample at the offline input boundary, never in an eye replay.
+ * Positive Y is forward/up in XR. active[] refers only to thumbsticks;
+ * other actions have independent activity. Unavailable/unfocused actions
+ * return zero values. Click masks are active-high, unrelated to PSX pad bits. */
+#define PSX_MOD_XR_PRIMARY   1u /* left X / right A */
+#define PSX_MOD_XR_SECONDARY 2u /* left Y / right B */
+#define PSX_MOD_XR_MENU      4u /* Touch left Menu */
+#define PSX_MOD_XR_STICK     8u /* thumbstick click */
+#define PSX_MOD_XR_CLICKS   15u
+typedef struct PSXModOpenXRInput {
+    uint32_t struct_size, focused, active[2], synthetic;
+    float stick[2][2];
+    uint64_t sequence;
+    float trigger[2], squeeze[2]; /* [0,1] */
+    uint32_t trigger_active[2], squeeze_active[2];
+    uint32_t buttons[2], buttons_active[2]; /* PSX_MOD_XR_* masks */
+} PSXModOpenXRInput;
+int psx_mod_openxr_input(PSXModOpenXRInput *input);
+
+/* Read-only controller snapshot from the latest located XR frame. Grip and aim
+ * share the eye poses' predicted time and LOCAL space; no action sync or locate
+ * occurs here, including during eye replay. Positions are meters; quaternions
+ * are x,y,z,w. The origin matches the rendered view's recenter basis. Consumers
+ * must check focus, activity, validity and age before using a cached pose. */
+enum { PSX_MOD_XR_GRIP_POSE = 0, PSX_MOD_XR_AIM_POSE = 1 };
+#define PSX_MOD_XR_ORIENTATION_VALID   1u
+#define PSX_MOD_XR_POSITION_VALID      2u
+#define PSX_MOD_XR_ORIENTATION_TRACKED 4u
+#define PSX_MOD_XR_POSITION_TRACKED    8u
+typedef struct PSXModTrackedPose {
+    uint32_t active, flags;
+    float position_m[3], orientation_xyzw[4];
+} PSXModTrackedPose;
+typedef struct PSXModOpenXRHands {
+    uint32_t struct_size, focused, synthetic, origin_valid;
+    uint64_t sequence, predicted_time;
+    uint32_t age_ms; /* UINT32_MAX when no real frame has been located */
+    double origin_position_m[3], origin_orientation_xyzw[4];
+    PSXModTrackedPose pose[2][2]; /* [left/right][grip/aim] */
+} PSXModOpenXRHands;
+int psx_mod_openxr_hands(PSXModOpenXRHands *hands);
 
 
 

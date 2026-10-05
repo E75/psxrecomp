@@ -2025,8 +2025,33 @@ static void update_adaptive_widescreen() {
  * teardown resets them and macOS otherwise supplies a legacy 2.1 context. */
 static void configure_core_gl_context_attributes() {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    int major = 3, minor = 3;
+#if defined(PSX_OPENXR)
+    /* Opt-in headset context (docs/OPENXR_RENDERING.md). Ordinary GL launches
+     * keep the historic 3.3. The environment variable is PSX_OPENXR_ENABLE;
+     * the bare PSX_OPENXR spelling collides with the CMake option of the same
+     * name, so it is deprecated (still honoured, with a note). */
+    const char *xr = std::getenv("PSX_OPENXR_ENABLE");
+    const char *xr_old = std::getenv("PSX_OPENXR");
+    const bool xr_on = xr && xr[0] && xr[0] != '0';
+    const bool xr_old_on = xr_old && xr_old[0] && xr_old[0] != '0';
+    static bool s_xr_ctx_logged = false;
+    if (xr_on || xr_old_on) {
+        major = 4; minor = 6;
+        if (!s_xr_ctx_logged) {
+            s_xr_ctx_logged = true;
+            std::fprintf(stderr,
+                "psxrecomp: OpenXR build: %s requests an OpenGL 4.6 core context "
+                "(default is 3.3)\n", xr_on ? "PSX_OPENXR_ENABLE" : "PSX_OPENXR");
+            if (!xr_on)
+                std::fprintf(stderr,
+                    "psxrecomp: environment variable PSX_OPENXR is deprecated "
+                    "(it shares its name with the CMake option); use PSX_OPENXR_ENABLE\n");
+        }
+    }
+#endif
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, major);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, minor);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
 }

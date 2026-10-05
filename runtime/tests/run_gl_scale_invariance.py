@@ -116,6 +116,8 @@ def main():
                ("fi", framework / "runtime/src/frame_interpolation.c")]
     if (framework / "runtime/src/render_pass_plan.c").exists():
         sources.append(("rp", framework / "runtime/src/render_pass_plan.c"))
+    if (framework / "runtime/src/psx_openxr.c").exists():
+        sources.append(("xr", framework / "runtime/src/psx_openxr.c"))
     # Unused renderer functions reference the rest of the runtime; the linker
     # drops them (-dead_strip, or per-function sections with --gc-sections).
     # Anything still unresolved is a link error, not a NULL call at run time.

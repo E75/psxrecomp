@@ -79,3 +79,5 @@ The game's [VR execution plan](https://github.com/FractalEngineer/Medal-Of-Honor
 records historical alpha evidence. Projection scale and eye separation remain
 game-specific and must be calibrated independently. This API also works without
 a headset backend; it does not enable a headset mode by default.
+
+The optional headset backend is described in [OPENXR_RENDERING.md](OPENXR_RENDERING.md).

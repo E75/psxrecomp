@@ -431,9 +431,9 @@ The TCP server is the canonical instrumentation surface. Rule 3 in `CLAUDE.md` i
 
 ## Complete command index (generated)
 
-**337 commands registered** — 324 on the native server (`runtime/src/debug_server.c`), 61 on the Beetle server (`runtime/src/beetle_debug_server.c`).
+**344 commands registered** — 331 on the native server (`runtime/src/debug_server.c`), 61 on the Beetle server (`runtime/src/beetle_debug_server.c`).
 
-63 of 337 have prose above; **274 are index-only**. An index-only command still works — it just has no description here yet. Send it `{"cmd":"<name>"}` and read the reply, or find its `handle_*` function in the server source.
+63 of 344 have prose above; **281 are index-only**. An index-only command still works — it just has no description here yet. Send it `{"cmd":"<name>"}` and read the reply, or find its `handle_*` function in the server source.
 
 Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this block has drifted from the code.
 
@@ -609,6 +609,13 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `mmx6_freshfix` | ✓ |  |  |
 | `mod_counters` | ✓ |  |  |
 | `nclip_stats` | ✓ |  |  |
+| `openxr_control` | ✓ |  |  |
+| `openxr_hands` | ✓ |  |  |
+| `openxr_hands_override` | ✓ |  |  |
+| `openxr_input` | ✓ |  |  |
+| `openxr_input_override` | ✓ |  |  |
+| `openxr_stats` | ✓ |  |  |
+| `openxr_views` | ✓ |  |  |
 | `overlay_candidates` | ✓ |  |  |
 | `overlay_capture_dump` | ✓ |  |  |
 | `overlay_cps_probe` | ✓ |  |  |
