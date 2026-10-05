@@ -24,11 +24,13 @@ inline int16_t get_imm16(uint32_t i) { return (int16_t)(i & 0xFFFF); }
  * the macros preprocess to ((void)0) and the optimizer erases the dead
  * capture locals, so base objects are unchanged; only a -DPSX_PGXP=1 TU pays.
  *
- * Deliberately unhooked: AND/XOR/NOR/SLT-family and the exotic immediates —
- * they only ever DESTROY precision, and the engine's validate-on-read drops
- * their stale shadows without help. The configured widescreen special sites
- * return early above translate_instruction's main dispatch and are likewise
- * unhooked (they are cull compares, not vertex moves; validation covers). */
+ * Every GPR-writing ALU op is hooked. Bitwise ops (AND/OR/XOR/NOR, ANDI/ORI/
+ * XORI) carry a vertex half whose 11-bit GPU field survives them - engines
+ * pack clip flags above the field after projecting - and SLT-family results
+ * are reset, so no destination keeps a stale shadow. The configured
+ * widescreen special sites return early above translate_instruction's main
+ * dispatch and are unhooked (they are cull compares, not vertex moves;
+ * validation covers). */
 bool emission_ends_on_preprocessor_directive(const std::string& code) {
     /* Scan back to the start of the final line, then find its first
      * non-blank character. A directive is legal with leading whitespace, so
@@ -89,7 +91,8 @@ void append_pgxp_hooks(uint32_t instr, std::string& code) {
                 code, instr, reg_name(rs), reg_name(rt));
             return;
         case 0x20: case 0x21: case 0x22: case 0x23:  /* ADD(U)/SUB(U)         */
-        case 0x25:                                   /* OR                    */
+        case 0x24: case 0x25: case 0x26: case 0x27:  /* AND/OR/XOR/NOR        */
+        case 0x2A: case 0x2B:                        /* SLT/SLTU              */
             if (rd == 0) return;
             code = fmt::format(
                 "{{ uint32_t _pgx1 = {}; uint32_t _pgx2 = {}; {}\n    "
@@ -107,7 +110,8 @@ void append_pgxp_hooks(uint32_t instr, std::string& code) {
             reg_name(rs), code, instr, reg_name(rt),
             (uint32_t)(int32_t)offset);
         return;
-    case 0x0D:                                 /* ORI                         */
+    case 0x0A: case 0x0B:                      /* SLTI / SLTIU                */
+    case 0x0C: case 0x0D: case 0x0E:           /* ANDI / ORI / XORI           */
         if (rt == 0) return;
         code = fmt::format(
             "{{ uint32_t _pgx1 = {}; {}\n    PGXP_ALU(0x{:08X}u, {}, _pgx1, 0x{:04X}u); }}",

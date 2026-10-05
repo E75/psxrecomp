@@ -151,7 +151,9 @@ REQUESTED="$(printf '%s' "${REQUESTED}" | tr -d '[:space:]')"
 REQUESTED="${REQUESTED#v}"
 
 EXE=""
-for cand in "${BUILD_DIR}/${EXE_NAME}" "${BUILD_DIR}/${EXE_NAME}.exe" "${BUILD_DIR}/Release/${EXE_NAME}.exe"; do
+# Git Bash's -f accepts a Windows PE through its unsuffixed alias. Prefer the
+# literal .exe path so extension-based DLL bundling and signing cannot be skipped.
+for cand in "${BUILD_DIR}/${EXE_NAME}.exe" "${BUILD_DIR}/Release/${EXE_NAME}.exe" "${BUILD_DIR}/${EXE_NAME}"; do
   if [[ -f "${cand}" ]]; then EXE="${cand}"; break; fi
 done
 if [[ -z "${EXE}" ]]; then
@@ -160,7 +162,7 @@ if [[ -z "${EXE}" ]]; then
   marker="${BUILD_DIR}/psxrecomp_exe_name-${RUNTIME_TARGET}.txt"
   if [[ -f "${marker}" ]]; then
     chosen="$(tr -d '[:space:]' <"${marker}")"
-    for cand in "${BUILD_DIR}/${chosen}" "${BUILD_DIR}/${chosen}.exe"; do
+    for cand in "${BUILD_DIR}/${chosen}.exe" "${BUILD_DIR}/${chosen}"; do
       if [[ -f "${cand}" ]]; then EXE="${cand}"; break; fi
     done
     if [[ -n "${EXE}" ]]; then
@@ -377,6 +379,22 @@ if [[ -d "${FRAMEWORK}/runtime/licenses" ]]; then
 fi
 [[ -f "${FRAMEWORK}/THIRD_PARTY_ATTRIBUTION.md" ]] && cp -a "${FRAMEWORK}/THIRD_PARTY_ATTRIBUTION.md" "${STAGE}/licenses/"
 [[ -f "${FRAMEWORK}/LICENSE" ]] && cp -a "${FRAMEWORK}/LICENSE" "${STAGE}/licenses/psxrecomp-LICENSE"
+# recomp-ui: the executable links it (MIT) and assets/ carries its fonts and
+# images (OFL-1.1, CC BY-SA 4.0), so its license and asset notices ship too.
+# The build's RECOMP_UI_ROOT says which tree it linked; <root>/recomp-ui is the
+# New Project Layout default.
+if ! grep -qs '^PSX_RECOMP_UI:BOOL=OFF' "${BUILD_DIR}/CMakeCache.txt"; then
+  UI_ROOT="$(sed -n 's/^RECOMP_UI_ROOT:[A-Z]*=//p' "${BUILD_DIR}/CMakeCache.txt" 2>/dev/null | head -n1 || true)"
+  [[ -n "${UI_ROOT}" && -f "${UI_ROOT}/recomp_ui.cmake" ]] || UI_ROOT="${ROOT}/recomp-ui"
+  [[ -f "${UI_ROOT}/recomp_ui.cmake" ]] || { echo "error: recomp-ui assets are staged but no recomp-ui tree found (RECOMP_UI_ROOT / ${ROOT}/recomp-ui)" >&2; exit 1; }
+  [[ -f "${UI_ROOT}/LICENSE" ]] || { echo "error: ${UI_ROOT}/LICENSE missing" >&2; exit 1; }
+  cp -a "${UI_ROOT}/LICENSE" "${STAGE}/licenses/recomp-ui-LICENSE"
+  for sub in fonts img; do
+    notice="${UI_ROOT}/assets/common/${sub}/NOTICE.md"
+    [[ -f "${notice}" ]] || { echo "error: ${notice} missing" >&2; exit 1; }
+    cp -a "${notice}" "${STAGE}/assets/${sub}/NOTICE.md"
+  done
+fi
 if [[ -z "$(ls -A "${STAGE}/licenses" 2>/dev/null)" ]]; then
   echo "error: no third-party notices staged (${FRAMEWORK}/runtime/licenses empty?)" >&2
   exit 1

@@ -187,6 +187,30 @@ static void test_user_settings_round_trip() {
     fs::remove(p);
 }
 
+/* settings.toml [video] fov_scale: int and float TOML values read, absent stays
+ * absent, and a launcher save round-trips it (range checking is the runtime's). */
+static void test_user_settings_fov_scale() {
+    fs::path p = write_temp("psxrecomp_fov_settings.toml", "[video]\nfov_scale = 2\n");
+    auto us = PSXRecompV4::load_user_settings(p);
+    check(us.has_fov_scale && us.fov_scale == 2.0, "settings.toml integer fov_scale read");
+    fs::remove(p);
+    p = write_temp("psxrecomp_fov_settings_f.toml", "[video]\nfov_scale = 1.5\n");
+    us = PSXRecompV4::load_user_settings(p);
+    check(us.has_fov_scale && us.fov_scale == 1.5, "settings.toml float fov_scale read");
+    fs::remove(p);
+    p = write_temp("psxrecomp_fov_settings_s.toml", "[video]\nfov_scale = \"wide\"\n");
+    us = PSXRecompV4::load_user_settings(p);
+    check(!us.has_fov_scale, "non-numeric fov_scale leaves has_fov_scale false");
+    fs::remove(p);
+    PSXRecompV4::UserSettings out;
+    out.fov_scale = 1.25; out.has_fov_scale = true;
+    p = fs::temp_directory_path() / "psxrecomp_fov_roundtrip.toml";
+    check(PSXRecompV4::save_user_settings(p, out), "save_user_settings writes fov_scale");
+    auto back = PSXRecompV4::load_user_settings(p);
+    check(back.has_fov_scale && back.fov_scale == 1.25, "fov_scale survives a save/load round trip");
+    fs::remove(p);
+}
+
 /* Internal resolution (Settings -> Display): game.toml shipped default,
  * settings.toml precedence over the legacy factor, stable-id round trip,
  * and the legacy supersampling range widened to the runtime's 1..32. */
@@ -278,6 +302,76 @@ static void test_internal_resolution_settings() {
     }
 }
 
+/* [video] texture_window_batching: a game.toml-only OpenGL batching opt-in
+ * (the image is unchanged; see gpu_gl_renderer.c s_twin_batching). Off unless
+ * the game asks for it. */
+static void test_texture_window_batching() {
+    fs::path p = write_game_toml("psxrecomp_twin_default.toml", "");
+    auto gc = PSXRecompV4::load_game_config(p);
+    check(!gc.runtime.video_texture_window_batching,
+          "texture_window_batching defaults OFF");
+    fs::remove(p);
+    fs::path q = write_game_toml("psxrecomp_twin_on.toml",
+        "[video]\n"
+        "texture_window_batching = true\n");
+    auto gq = PSXRecompV4::load_game_config(q);
+    check(gq.runtime.video_texture_window_batching,
+          "[video] texture_window_batching = true is honoured");
+    fs::remove(q);
+}
+
+/* docs/ENHANCEMENTS.md G1.11: the PGXP title keys. Defaults keep the
+ * historical behaviour (tolerance 0.5, position cache consulted, IR-path
+ * shadows); a title built with the hooks sets all three. */
+static void test_pgxp_title_keys() {
+    fs::path p = write_game_toml("psxrecomp_pgxp_keys_default.toml", "");
+    auto gc = PSXRecompV4::load_game_config(p);
+    check(gc.runtime.video_pgxp_tolerance == 0.5,
+          "pgxp_tolerance defaults to 0.5");
+    check(gc.runtime.video_pgxp_position_fallback,
+          "pgxp_position_fallback defaults ON (unchanged behaviour)");
+    check(!gc.runtime.video_pgxp_preserve_projection,
+          "pgxp_preserve_projection defaults OFF (unchanged behaviour)");
+    check(!gc.runtime.video_pgxp_mod_only,
+          "pgxp_mod_only defaults OFF (unchanged behaviour)");
+    fs::remove(p);
+
+    p = write_game_toml("psxrecomp_pgxp_keys_dataflow.toml",
+        "[video]\n"
+        "pgxp_tolerance = -1.0\n"
+        "pgxp_position_fallback = false\n"
+        "pgxp_preserve_projection = true\n"
+        "pgxp_mod_only = true\n");
+    gc = PSXRecompV4::load_game_config(p);
+    check(gc.runtime.video_pgxp_mod_only, "pgxp_mod_only = true is honoured");
+    check(gc.runtime.video_pgxp_tolerance < 0.0,
+          "pgxp_tolerance = -1.0 disables the clamp");
+    check(!gc.runtime.video_pgxp_position_fallback,
+          "pgxp_position_fallback = false is honoured");
+    check(gc.runtime.video_pgxp_preserve_projection,
+          "pgxp_preserve_projection = true is honoured");
+    check(!gc.runtime.video_geometry_correction &&
+          !gc.runtime.video_perspective_texturing,
+          "the tuning keys do not turn PGXP on by themselves");
+    fs::remove(p);
+
+    p = write_game_toml("psxrecomp_pgxp_keys_bad.toml",
+        "[video]\n"
+        "pgxp_preserve_projection = 1\n");
+    bool rejected = false;
+    try { (void)PSXRecompV4::load_game_config(p); } catch (const std::exception&) { rejected = true; }
+    check(rejected, "pgxp_preserve_projection must be a boolean");
+    fs::remove(p);
+
+    p = write_game_toml("psxrecomp_pgxp_keys_bad_mod_only.toml",
+        "[video]\n"
+        "pgxp_mod_only = \"yes\"\n");
+    rejected = false;
+    try { (void)PSXRecompV4::load_game_config(p); } catch (const std::exception&) { rejected = true; }
+    check(rejected, "pgxp_mod_only must be a boolean");
+    fs::remove(p);
+}
+
 int main() {
     test_internal_resolution_game_toml();
     test_internal_resolution_settings();
@@ -288,6 +382,9 @@ int main() {
     test_user_settings_read();
     test_user_settings_absent_key();
     test_user_settings_round_trip();
+    test_user_settings_fov_scale();
+    test_texture_window_batching();
+    test_pgxp_title_keys();
 
     if (failures) {
         std::fprintf(stderr, "video_enhancement_settings_test: %d failure(s)\n",

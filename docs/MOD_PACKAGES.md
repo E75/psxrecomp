@@ -548,9 +548,11 @@ defensive, for the state listed here.
 | World-scene predicate | `psx_mod_set_world_scene_predicate` | NULL | every session |
 | Retained-scene predicate | `psx_mod_set_retained_scene_predicate` | NULL | every session |
 | Adaptive backdrop preload | `psx_mod_set_adaptive_backdrop_preload` | 0 | every session |
+| Draw-distance clamps | `psx_mod_set_draw_distance_clamp` | off | every session |
 | Bezel artwork | `psx_mod_set_bezel_artwork` | none (see below) | every session |
 | Frame-interpolation blend mode | `psx_mod_set_frame_interpolation_blend` | default | every session |
 | Native VBlank pacing and its rate | `psx_mod_set_native_vblank_rate` | off, 0 | every session |
+| PGXP request (`psx.enhancement.pgxp`) | the builtin `psx.pgxp` activation (`pgxp_mod_request`) | none | every session |
 | Frame period, if native VBlank pacing was on | `psx_mod_set_native_vblank_rate` | first-session value | later sessions |
 | Frame interpolation and its rate | `psx_mod_set_frame_interpolation` | first-session value | later sessions |
 | Vsync forced off | `psx_mod_set_frame_interpolation`, `psx_mod_set_native_vblank_rate` | first-session value | later sessions |
@@ -565,6 +567,20 @@ its initial value, so the first session, and every run that never
 soft-returns, behaves exactly as without the reset. The RAM request matters on
 a rematch because `memory_init()` latches the requested geometry again at every
 boot, including the rematch's.
+
+The PGXP request is how the builtin `psx.enhancement.pgxp` package arms
+geometry and texture correction, and its CPU-mode and precise-culling options.
+Its activation records the request. The renderer setup runs after activation,
+and its session arming (`psx_pgxp_session_arm`,
+`runtime/include/pgxp_session.h`) takes the request: it reads it, clears it,
+and arms PGXP from it and the `[video]` keys together. Arming the corrections
+from activation directly does not work: the renderer setup applies the
+`[video]` baseline afterwards and would switch them back off. A netplay session
+clears the plan, default-on packages included, so it gets the `[video]` keys
+alone, and nothing at all with `[video] pgxp_mod_only`. A title that ships
+PGXP on by default overrides the builtin at the same id and version, with
+`default_enabled = true` and, if it wants it, the `culling` option's default set
+to `"true"` (ENHANCEMENTS.md G1.11/G1.12).
 
 Bezel artwork has two parts. The reset clears the artwork path, so the next
 session start loads nothing unless its own activation selects artwork again.
@@ -620,6 +636,12 @@ game logic still execute. Multipliers 2 through 16 are bounded choices; zero
 selects uncapped host speed. A zero-frame release stops acceleration as soon as
 the sustained-load predicate clears, which is appropriate for timing-sensitive
 or speedrun-oriented packages.
+
+`psx_mod_set_draw_distance_clamp(enabled)` switches the title's
+`[[draw_distance.clamp]]` sites (docs/config_schema.md) on for the session: a
+far primitive the game would drop past the end of its ordering table is kept
+in the farthest slot. It returns 0 when the title lists no sites. More
+primitives mean more guest work, so it belongs to an opt-in feature.
 
 `psx_mod_set_disc_speed(divisor, instant_max_per_frame)` is the guest-visible
 alternative. Divisors 2 and 4 shorten emulated CD deadlines; zero selects the
@@ -733,6 +755,13 @@ some selections of one feature is a `[[requirement]]`, not a dependency.
 
 ## Implicit requirements across packages
 
+The shared PGXP plugin uses `psx_mod_set_pgxp_precision(enabled, cpu_mode)`.
+This stores a session selection as well as setting live correction flags, so
+later renderer initialization cannot erase mod activation with the base video
+settings. Session start clears the selection before activating the new plan;
+the player's persistent settings remain unchanged. Explicit validation
+environment overrides still take precedence at renderer initialization.
+
 Package format 7 lets a feature, while a condition on its own options holds,
 need a feature of **another** package:
 
@@ -838,6 +867,71 @@ they are not copied into the package. Optional resources with no selected path
 are omitted from the committed plan. Required resources reject launch while the
 feature is enabled and unset.
 
+
+Format 8 adds engine-verified donor media to the same picker and state format:
+
+```toml
+[[resource]]
+feature = "arena"
+id = "donor-rom"
+label = "Source ROM"
+format = "n64-rom"
+file_patterns = "*.z64,*.v64,*.n64"
+required = true
+size = 8388608
+sha256 = "<64 lowercase hexadecimal digits from the canonical image>"
+```
+
+`size` and `sha256` must both be present. Verification runs only for enabled
+features. Missing required media, a removed selected file, an incorrect size,
+or a hash mismatch rejects the launch plan before plugin activation. Disabling
+the feature restores the stock launch; the selected path is preserved.
+
+Canonical identity domains:
+
+| `format` | Size and SHA-256 domain |
+|---|---|
+| `file` with identity fields | Exact file bytes, at most 512 MiB |
+| `n64-rom` | Big-endian `.z64` bytes; `.v64` halfword swaps and `.n64` word swaps normalize first; 64 bytes to 64 MiB, word aligned |
+| `psx-disc` | First data track's 2048-byte sector payloads, at most 512 MiB; CUE/BIN/ISO/CHD use the shared disc reader; audio tracks are excluded |
+
+For `psx-disc`, Mode 1 payloads start at raw-sector offset 16 and Mode 2
+payloads at 24. This domain retains the first 2048 bytes of Form 2 sectors;
+it is intended for asset data, and is not a full XA/CD-audio identity. Mixed-mode
+retail ISO headers can declare a volume size extending into audio tracks; the
+reader uses the actual first-track boundary from the TOC or single-track image
+length. An audio-first disc or a nonzero first-track start is rejected. Use a
+CUE for a raw image containing multiple tracks. Declared volume metadata must
+have matching byte orders and 2048-byte logical sectors.
+
+The resolved plan owns an immutable canonical snapshot. During its callbacks,
+a trusted plugin calls `psx_mod_current_resource_bytes(id, &bytes, &size)` to
+obtain a read-only view scoped to its own package and feature. Ordinary
+unverified resources cannot supply bytes through this API. The pointer remains
+valid until the committed plan is replaced or cleared. Decode into host or
+enhancement memory and rebuild derived data when activation changes; never
+reopen the owner path as a substitute for the verified snapshot.
+
+An activation callback can mount a slice of its verified resource for native CD
+streaming with `psx_mod_append_disc_extent(id, byte_offset, sector_count, &lba)`.
+The slice contains 2336-byte Mode-2 sectors beginning at the duplicated XA
+subheader. The runtime appends extents after the mounted disc, synthesizes raw
+sector headers and a data-track TOC/subchannel entry, and retains the original
+CD-ROM/XA decoder, interrupts and timing. The returned LBAs are deterministic
+for the same activation order. Registration rejects missing/unowned resources,
+invalid ranges/subheaders, late calls and addresses beyond the CD MSF limit.
+Plan replacement or netplay clearing removes the extents; base sectors remain
+unchanged. The game plugin supplies its own file lookup, names and stream
+selection. Donor bytes remain external and are covered by the resource fingerprint.
+
+
+Verified resource fingerprints include format, canonical size and SHA-256,
+rather than the selected path, so moving identical media or changing N64 byte
+order does not change save compatibility. Donor bytes are never package files,
+and donor executable code is not dispatched by this API. N64 ZIPs must be
+extracted before selecting the ROM. Format 8 prevents older runtimes from
+silently accepting manifests whose identity checks they cannot enforce.
+
 `resolver = "builtin:<id>"` selects a resolver statically registered by the
 game. Format-5 plugin ids likewise select only statically registered
 implementations. Packages cannot load arbitrary native code or select
@@ -847,6 +941,23 @@ The installer accepts stored or DEFLATE-compressed ZIP entries, validates CRCs,
 rejects encrypted entries and unsafe or absolute paths, limits archives to 4096
 files and 256 MiB expanded size, stages extraction, validates the manifest, and
 publishes the version atomically.
+
+### Guarded instruction callbacks
+
+Trusted plugins can register
+`psx_mod_register_instruction_plugin(id, address, expected_word, callback)`.
+List native code locations in `[recompiler] mod_instruction_sites` and regenerate.
+Callbacks run immediately before the instruction; the registered full word,
+executing word and current RAM word must agree. Segment aliases share a site.
+Only active resolved plugins run, with their feature's resource context.
+The dirty-RAM backend uses the same checks, including nested delay slots.
+Overlay ABI v27 carries the forwarder; site metadata changes the codegen hash.
+
+Callbacks may change registers and data. They must preserve PC and must not
+re-enter guest execution, because pending branch/load state is live.
+`psx_mod_finish_function` is unavailable in this callback scope. Inactive plans
+do not change guest behavior. Function entry replacement remains the separate
+`psx_mod_register_function_entry_plugin` interface.
 
 ### Presentation bezel packages
 

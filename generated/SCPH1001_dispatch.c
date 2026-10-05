@@ -33,6 +33,9 @@ extern void debug_server_trace_dispatch(uint32_t func_addr);
  * the tier. */
 extern int (*g_psx_bios_hle_hook)(CPUState* cpu, uint32_t phys);
 
+extern uint32_t g_psx_mod_guest_functions;
+extern int psx_mod_dispatch_guest_function(CPUState*, uint32_t);
+
 #ifdef PSX_HAS_GAME_DISPATCH
 extern int psx_game_address_in_text(uint32_t addr);
 #endif
@@ -27537,6 +27540,8 @@ static void psx_dispatch_impl(CPUState* cpu, uint32_t addr, uint32_t stop_addr) 
         cpu->pc = 0;
         int lo = 0, hi = 13012 - 1;
         int found = 0;
+        if (g_psx_mod_guest_functions)
+            found = psx_mod_dispatch_guest_function(cpu, addr);
         /* BIOS HLE tier: consult the hook FIRST, on the pre-normalize
          * physical address. It must see (a) the A0/B0/C0 service vectors
          * (game thunks jr there with the function number in $t1) and (b)
@@ -27545,7 +27550,7 @@ static void psx_dispatch_impl(CPUState* cpu, uint32_t addr, uint32_t stop_addr) 
          * backends. Handled (rc 1) ⇒ the service completed against guest
          * state and the guest resumes at $ra via the trampoline's normal
          * return/tail contract below. rc 0 ⇒ pure LLE fall-through. */
-        if (g_psx_bios_hle_hook &&
+        if (!found && g_psx_bios_hle_hook &&
             g_psx_bios_hle_hook(cpu, addr & 0x1FFFFFFFu)) {
             cpu->pc = cpu->gpr[31];
             found = 1;

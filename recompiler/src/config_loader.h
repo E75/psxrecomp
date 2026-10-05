@@ -103,10 +103,39 @@ struct WidescreenCullKeepSite {
 // constant with `addi[u] rt,zero,imm`; the runtime widens tan(angle) by the
 // live horizontal reveal factor. Full-word guards prevent overlay-address
 // aliases from changing unrelated immediates.
+// One register-register view-bound compare whose bound operand is widened
+// with the live reveal: `slt rd, rs, rt` where the configured operand holds
+// +/-half_extent*z (a camera-space frustum edge computed at runtime, so there
+// is no immediate to rewrite). The operand is scaled by
+// (half_extent + margin) / half_extent; identity at 4:3. Full-word guarded.
+struct WidescreenCullScaleSite {
+    uint32_t address = 0;
+    uint32_t expected = 0;     // guarded SLT/SLTU instruction
+    uint32_t operand = 1;      // 0 = scale rs, 1 = scale rt
+    uint32_t half_extent = 0;  // authored screen half-extent (e.g. 160)
+};
+
 struct WidescreenAngleSite {
     uint32_t address = 0;
     uint32_t expected = 0; // guarded ADDI/ADDIU with rs == zero
 };
+
+// [[draw_distance.clamp]]: an ordering-table range guard that a trusted mod
+// may turn from "drop the far primitive" into "keep it in the last slot".
+// While the runtime switch is on (psx_mod_set_draw_distance_clamp), `reg` is
+// clamped to `max` (signed) immediately before the instruction at `address`
+// runs. Main EXE only; the complete instruction word is the guard.
+struct DrawDistanceClampSite {
+    uint32_t address = 0;
+    uint32_t expected = 0; // the instruction; `reg` must be one of its sources
+    uint32_t reg = 0;      // 1..31
+    int32_t  max = 0;
+};
+
+// True when `instr` is an ALU instruction (I-type or SPECIAL R-type, not a
+// load, store, branch or jump) that reads GPR `reg`. These are the only
+// instructions a draw-distance clamp may precede.
+bool draw_distance_clamp_reads(uint32_t instr, uint32_t reg);
 
 // Aspect-aware horizontal participation cone. The exact compare sites are
 // full-word guarded because overlay variants can reuse a virtual address for
@@ -489,10 +518,46 @@ struct RuntimeConfig {
     // the clamp. Live-tunable over TCP (pgxp verb).
     double                video_pgxp_tolerance = 0.5;
 
+    // pgxp_position_fallback: let a vertex with no validated dataflow shadow
+    // take the fraction of the projection last cached at its integer screen
+    // position (the G1.4 exact table). Default true (unchanged behaviour).
+    // A title built with the PGXP hooks (psxrecomp_add_game_runtime PGXP)
+    // reaches near-total dataflow coverage, so for it the cache only hands
+    // unrelated fractions to CPU-built 2D polygons; such a title sets false
+    // ("dataflow only", the reference implementations' default).
+    // Live-tunable over TCP (pgxp verb). docs/ENHANCEMENTS.md G1.11.
+    bool                  video_pgxp_position_fallback = true;
+
+    // pgxp_preserve_projection: shadow the exact projection of each vertex
+    // (from the GTE's unshifted MACs and a true divide) instead of the GTE's
+    // own integer-IR one, which removes the residual wobble of near geometry.
+    // Guest-visible GTE results are unchanged. Truncation agreement becomes a
+    // bounded window (pgxp.h PGXP_PPP_AGREE_*). Default false. Live-tunable
+    // over TCP (pgxp verb). docs/ENHANCEMENTS.md G1.11.
+    bool                  video_pgxp_preserve_projection = false;
+
+    // pgxp_mod_only: the title ships PGXP through the psx.enhancement.pgxp
+    // mod (typically a default-on override of it), which is then the one
+    // switch. The [video] geometry_correction / perspective_texturing /
+    // pgxp_cpu_mode values -- game.toml's and the player's settings.toml --
+    // are not applied, and the launcher hides its Perspective textures row,
+    // so the player is never shown a second control that does nothing or
+    // keeps half of PGXP on after they switch the mod off. Netplay, which
+    // clears the mod, then runs with PGXP fully off. Default false
+    // (unchanged behaviour). game.toml only. docs/ENHANCEMENTS.md G1.12.
+    bool                  video_pgxp_mod_only = false;
+
     // offer_vulkan: expose the experimental Vulkan renderer in the launcher.
     // Defaults false even for Vulkan-enabled builds; developers must opt in per
     // game once visuals are validated.
     bool                  video_offer_vulkan = false;
+
+    // texture_window_batching: OpenGL only. Let textured primitives with
+    // different GP0(E2h) texture windows share one draw (the window rides in
+    // each vertex) instead of ending the batch at every window change. The
+    // image is identical; games that tile textures with per-primitive windows
+    // draw in far fewer batches. Off by default; a game opts in.
+    bool                  video_texture_window_batching = false;
 
     // low_latency_input: re-sample the pad after the wall-clock pacer (just
     // before present) so the next CPU frame reads near-fresh input instead of
@@ -753,6 +818,12 @@ struct BiosConfig {
     // now REJECTS a [runtime] block rather than silently ignoring it.
 };
 
+struct WidescreenMaskedRejectSite {
+    uint32_t address = 0;
+    uint32_t expected = 0;
+    uint32_t reject_mask = 0;
+};
+
 struct GameConfig {
     std::filesystem::path config_path;
     std::filesystem::path project_root;
@@ -824,6 +895,20 @@ struct GameConfig {
     // "16:9", "21:9", or "adaptive" (initial 16:9, live-window capped 21:9).
     // Unset keeps netplay at the title's normal mod-cleared aspect.
     std::string           netplay_local_viewport_aspect;
+    // local_viewport_renderer = "native_wide" (default) | "projection".
+    // native_wide renders extra columns beside the local half; it needs the
+    // game to submit geometry outside its own split viewport. "projection"
+    // instead widens the GTE projection into the half (squash around OFX) and
+    // stretches the half on present -- for titles whose per-viewport culling
+    // rejects everything outside the half (THPS2), as their single-player
+    // [widescreen] native_wide = false path does.
+    std::string           netplay_local_viewport_renderer;
+    // local_viewport_state_addr / _values: optional guest word gating the
+    // local viewport. Split frames crop to this peer's half only while the
+    // word holds one of the values (e.g. a level running); otherwise, as on a
+    // pause menu drawn across both halves, every peer sees the whole frame.
+    uint32_t              netplay_local_viewport_state_addr = 0;
+    std::vector<uint32_t> netplay_local_viewport_state_values;
 
     // [recompiler] block
     std::filesystem::path seeds_path;     // absolute path to seeds (text or json)
@@ -864,6 +949,11 @@ struct GameConfig {
     // the final ordering-table layer. Repeated glyph/icon rows share an anchor
     // so centred text and edge counters cannot split at thirds boundaries.
     bool                  ws_auto_ui_squash = false;
+    // auto_ui_anchor = "in_place": squash each grouped UI run about its own
+    // centre instead of pinning it to the nearest screen edge/centre third.
+    // For HUD widgets that combine flat quads with GTE-projected parts the
+    // correction cannot move (Spider-Man's compass ring and 3D arrow).
+    bool                  ws_auto_ui_in_place = false;
 
     // [data_shards] funcs: functions that get the memoized pure-function
     // replay entry/return hooks (psx_datashard_enter/psx_datashard_ret).
@@ -876,6 +966,8 @@ struct GameConfig {
     // entries that dispatch trusted, statically linked mod callbacks. Empty by
     // default, so projects that do not opt in emit no callback overhead.
     std::vector<uint32_t> mod_function_entry_funcs;
+    // Opt-in pre-instruction callbacks; plugins supply exact-word guards.
+    std::vector<uint32_t> mod_instruction_sites;
 
     // [recompiler] hot_funcs: guest addresses that get __attribute__((hot))
     // on their generated C bodies (profile/host locality; no guest semantics).
@@ -923,7 +1015,9 @@ struct GameConfig {
     std::vector<uint32_t> ws_cull_range_sites;
     std::vector<uint32_t> ws_cull_a1_sites;
     // Explicit `sltiu rt,sx,W` render rejects for cases where codegen function
-    // splitting separates the paired vertical test from auto_screen_x.
+    // splitting separates the paired vertical test from auto_screen_x. Also
+    // the two forms of a screen X kept in the high half of a register:
+    // `lui rt,W` (the edge as W << 16) and `bltz` on `sx << 16`.
     std::vector<uint32_t> ws_cull_screen_x_sites;
 
     // [widescreen.cull] slti_sites — explicit signed right-edge widen sites
@@ -978,6 +1072,9 @@ struct GameConfig {
     // where maximal overdraw is preferable to range guessing. Each entry is
     // guarded by the complete MIPS word; 4:3 executes the vanilla comparison.
     std::vector<WidescreenCullKeepSite> ws_cull_keep_sites;
+    // Register-register frustum-edge compares whose bound operand scales
+    // with the live reveal ([[widescreen.cull.scale]]).
+    std::vector<WidescreenCullScaleSite> ws_cull_scale_sites;
     // Exact 12-bit angular half-extents used by terrain-cell frusta.
     std::vector<WidescreenAngleSite> ws_cull_angle_sites;
     // Full-word-guarded model-participation cosine compares widened only in
@@ -1217,6 +1314,13 @@ struct GameConfig {
     // [widescreen.cull] clip_edge_width -- the screen width a right-edge clip
     // bound equals. 0 = the first screen_w_imms entry (0x140 by default).
     uint32_t ws_cull_clip_edge_width = 0;
+    // Full-word-guarded BNE reg,zero rejects of packed-coordinate flags.
+    // While wide, retain only the specified rejection axes; GPU scissoring
+    // clips the expanded horizontal view. Identity at 4:3/menus/FMV.
+    std::vector<WidescreenMaskedRejectSite> ws_cull_masked_reject_sites;
+    // [[draw_distance.clamp]] -- opt-in "keep far geometry" clamps. Empty by
+    // default; inert until a mod switches them on; regen required.
+    std::vector<DrawDistanceClampSite> draw_distance_clamp_sites;
 };
 
 // Effective clip_edge_width: explicit value, else screen_w_imms[0], else 320.
@@ -1267,6 +1371,9 @@ struct UserSettings {
     // 0..1; the launcher ABI carries it as an integer percent.
     bool has_scanlines         = false; bool   scanlines         = false;
     bool has_scanline_strength = false; double scanline_strength = 0.5;
+    // [video] fov_scale: GTE projection-distance multiplier (1.0 = faithful).
+    // Stored raw (int or float TOML); the runtime range-checks and warns.
+    bool has_fov_scale = false; double fov_scale = 1.0;
     bool has_auto_skip_fmv  = false; bool auto_skip_fmv  = false; // skip FMVs
     // [video] turbo_loads: DEPRECATED AND IGNORED — the legacy home of the
     // generic Turbo loads switch, back when the launcher drew a row for it.
@@ -1430,6 +1537,11 @@ UserSettings load_user_settings(const std::filesystem::path& path);
 
 // Write settings.toml deterministically. Returns false on I/O failure.
 bool save_user_settings(const std::filesystem::path& path, const UserSettings& s);
+
+// `p` relative to `folder` when it lies inside it; otherwise `p` unchanged.
+// Keeps portable game folders portable once the launcher saves a path.
+std::filesystem::path relative_to_folder(const std::filesystem::path& p,
+                                         const std::filesystem::path& folder);
 
 // Surgical upsert of `key = true|false` under [controller] in game.toml.
 // Preserves comments and unrelated keys. Creates [controller] if missing.

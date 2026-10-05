@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.20)
 project(psxrecomp-runtime C CXX)
 include(CTest)
 
@@ -23,6 +23,10 @@ psxrecomp_add_runtime_target(psx-runtime
 # (docs/ENHANCEMENTS.md G1.10). Titles get their <exe>_pgxp the same way.
 
 if(BUILD_TESTING)
+    add_executable(disasm_test tests/test_disasm.cpp src/disasm_shim.cpp
+        ../recompiler/src/mips_decoder.cpp)
+    target_include_directories(disasm_test PRIVATE include ../recompiler/include)
+    add_test(NAME disasm_test COMMAND disasm_test)
     # Netplay: which BIOS a match boots, and its wire helpers.
     add_executable(netplay_bios_settle_test
         tests/test_netplay_bios_settle.c
@@ -38,6 +42,9 @@ if(BUILD_TESTING)
     add_executable(ws_scene_hold_test tests/test_ws_scene_hold.c)
     target_include_directories(ws_scene_hold_test PRIVATE include)
     add_test(NAME ws_scene_hold_test COMMAND ws_scene_hold_test)
+    add_executable(mdec_snapshot_activity_test tests/test_mdec_snapshot_activity.c)
+    target_include_directories(mdec_snapshot_activity_test PRIVATE include src)
+    add_test(NAME mdec_snapshot_activity_test COMMAND mdec_snapshot_activity_test)
     add_executable(mod_texture_banks_test tests/test_mod_texture_banks.c src/mod_texture_banks.c)
     target_include_directories(mod_texture_banks_test PRIVATE include)
     add_test(NAME mod_texture_banks_test COMMAND mod_texture_banks_test)
@@ -63,12 +70,38 @@ if(BUILD_TESTING)
     set_tests_properties(netplay_libjuice_offline_other PROPERTIES
         PASS_REGULAR_EXPRESSION "recomp-net pins libjuice SHA256")
     if(NOT MSVC)
+        add_executable(host_snapshot_guard_test tests/test_host_snapshot_guard.c)
+        add_executable(fntrace_restore_handoff_test
+            tests/test_fntrace_restore_handoff.c src/fntrace.c)
+        foreach(test_target host_snapshot_guard_test fntrace_restore_handoff_test)
+            target_include_directories(${test_target} PRIVATE include src)
+            target_compile_options(${test_target} PRIVATE -O2 -flto -ffunction-sections -fdata-sections)
+            target_link_options(${test_target} PRIVATE -flto -Wl,--gc-sections)
+            add_test(NAME ${test_target} COMMAND ${test_target})
+        endforeach()
         add_executable(ws_world_scene_test tests/test_ws_world_scene.c
             src/psx_video_timing.c)
         target_include_directories(ws_world_scene_test PRIVATE include src)
         target_compile_options(ws_world_scene_test PRIVATE -O2 -flto -ffunction-sections -fdata-sections)
         target_link_options(ws_world_scene_test PRIVATE -flto -Wl,--gc-sections)
         add_test(NAME ws_world_scene_test COMMAND ws_world_scene_test)
+        add_executable(boot_state_handoff_test tests/test_boot_state_handoff.c)
+        target_include_directories(boot_state_handoff_test PRIVATE include src)
+        target_compile_definitions(boot_state_handoff_test PRIVATE PSX_COSIM=1)
+        target_compile_options(boot_state_handoff_test PRIVATE -O2 -flto -ffunction-sections -fdata-sections -UNDEBUG)
+        target_link_options(boot_state_handoff_test PRIVATE -flto -Wl,--gc-sections)
+        target_link_libraries(boot_state_handoff_test PRIVATE ZLIB::ZLIB)
+        add_test(NAME boot_state_handoff_test COMMAND boot_state_handoff_test)
+
+        add_executable(static_match_cache_test tests/test_static_match_cache.c
+            src/overlay_loader.c src/crc32.c)
+        target_include_directories(static_match_cache_test PRIVATE include)
+        target_compile_definitions(static_match_cache_test PRIVATE
+            PSX_HAS_OVERLAY_DISPATCH PSX_NO_DEBUG_TOOLS)
+        target_compile_options(static_match_cache_test PRIVATE -O2 -flto -ffunction-sections -fdata-sections -UNDEBUG)
+        target_link_options(static_match_cache_test PRIVATE -flto -Wl,--gc-sections)
+        add_test(NAME static_match_cache_test COMMAND static_match_cache_test)
+
         add_executable(mod_memory_snapshot_test tests/test_mod_memory_snapshot.c
             src/psx_ram_geometry.c)
         target_include_directories(mod_memory_snapshot_test PRIVATE include src)
@@ -92,6 +125,12 @@ if(BUILD_TESTING)
     set(PSX_GL_READBACK_COMPILER_BIN "${_gl_test_default_bin}" CACHE PATH "GCC/MinGW bin for GL fixture")
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
+        add_test(NAME wtrace_dump_test COMMAND ${CMAKE_COMMAND} -E env
+            "CC=${CMAKE_C_COMPILER}" "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wtrace_dump.py")
+        set_tests_properties(wtrace_dump_test PROPERTIES SKIP_RETURN_CODE 77)
+        add_test(NAME counted_mips_relocations_test COMMAND "${Python3_EXECUTABLE}"
+            "${PSXRECOMP_ROOT}/tools/tests/test_counted_mips_relocations.py")
         add_test(NAME interp_mod_entry_guards_test COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_interp_mod_entry_guards.py")
         add_test(NAME mirror_pc_preserved_guards_test COMMAND "${Python3_EXECUTABLE}"
@@ -147,6 +186,17 @@ if(BUILD_TESTING)
         unset(_gl_scale_sdl_inc)
     else()
         message(STATUS "gl_scale_invariance_test: not registered (needs a non-Windows host, Python 3 and SDL3)")
+    endif()
+    if(Python3_Interpreter_FOUND AND TARGET SDL3::SDL3-static)
+        add_test(NAME gl_texture_filter_test
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_gl_texture_filter.py"
+                --fixture "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gl_texture_filter.c"
+                --cc "${CMAKE_C_COMPILER}"
+                --sdl-include "$<TARGET_PROPERTY:SDL3::Headers,INTERFACE_INCLUDE_DIRECTORIES>"
+                --sdl-library "$<TARGET_FILE:SDL3::SDL3-static>"
+                --output "${CMAKE_CURRENT_BINARY_DIR}/gl-filter-results")
+        set_tests_properties(gl_texture_filter_test PROPERTIES LABELS "gpu;opengl;hardware" TIMEOUT 180)
     endif()
     add_executable(launcher_device_roundtrip_test
         tests/test_launcher_device_roundtrip.cpp)
@@ -234,6 +284,7 @@ if(BUILD_TESTING)
             tests/psx_ram_runtime_map_stubs.c
             src/memory.c
             src/dma.c
+            src/gpu_timeline.c
             src/boot_state.c
             src/psx_ram_geometry.c)
         target_include_directories(psx_ram_runtime_map_test PRIVATE include src)
@@ -254,6 +305,7 @@ if(BUILD_TESTING)
             tests/psx_ram_runtime_map_stubs.c
             src/memory.c
             src/dma.c
+            src/gpu_timeline.c
             src/boot_state.c
             src/psx_icache.c
             src/psx_ram_geometry.c)
@@ -349,6 +401,23 @@ if(BUILD_TESTING)
     add_test(NAME sio_dualshock_rumble_test COMMAND sio_dualshock_rumble_test)
     set_tests_properties(sio_dualshock_rumble_test PROPERTIES DISABLED TRUE)
 
+    add_executable(vr_pose_math_test tests/test_vr_pose_math.c src/vr_pose_math.c)
+    target_include_directories(vr_pose_math_test PRIVATE include)
+    if(NOT MSVC)
+        target_link_libraries(vr_pose_math_test PRIVATE m)
+    endif()
+    add_test(NAME vr_pose_math_test COMMAND vr_pose_math_test)
+
+    add_executable(projection_scale_config_test
+        tests/test_projection_scale_config.cpp src/projection_scale_config.cpp)
+    target_include_directories(projection_scale_config_test PRIVATE
+        include ../recompiler/lib/toml11)
+    add_test(NAME projection_scale_config_test COMMAND projection_scale_config_test)
+
+    add_executable(mod_controller_source_test tests/test_mod_controller_source.c src/mod_controller_source.c)
+    target_include_directories(mod_controller_source_test PRIVATE include)
+    add_test(NAME mod_controller_source_test COMMAND mod_controller_source_test)
+
     add_executable(gte_register_access_test
         tests/test_gte_register_access.cpp
         src/gte.cpp
@@ -372,6 +441,42 @@ if(BUILD_TESTING)
         src/psx_ram_geometry.c)
     target_include_directories(pgxp_test PRIVATE include)
     add_test(NAME pgxp_test COMMAND pgxp_test)
+
+    # psx.enhancement.pgxp at session start (docs/ENHANCEMENTS.md G1.11): the
+    # real builtin activation (mod API stubbed) and the pgxp_session.h
+    # resolver main.cpp's renderer setup uses, in main.cpp's order. Pins that
+    # the [video] baseline no longer undoes the mod, that a cleared (netplay)
+    # plan keeps the baseline, and that the env overrides win.
+    # The session arming main.cpp runs (src/pgxp_session.cpp) against the
+    # real mod runtime, the real builtin plugin and the builtin's own
+    # manifest: default-on, netplay clear, the off switch, options, env
+    # overrides and [video] pgxp_mod_only.
+    add_executable(pgxp_session_test tests/test_pgxp_session.cpp
+        src/pgxp_session.cpp src/mod_builtin_pgxp.c src/pgxp.cpp
+        src/psx_ram_geometry.c
+        src/mod_runtime.cpp
+        src/mod_packages.cpp
+        src/mod_media.cpp
+        src/disc_path.cpp
+        src/cue_sheet.cpp
+        src/iso_reader.cpp
+        src/crc32.c
+        src/psx_sha256.c)
+    target_include_directories(pgxp_session_test PRIVATE
+        include
+        ../recompiler/include
+        ../recompiler/lib/toml11)
+    target_compile_definitions(pgxp_session_test PRIVATE
+        PSX_BUILTIN_PGXP_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/../mods/builtin/packages/psx.enhancement.pgxp/1.0.0/manifest.toml")
+    target_link_libraries(pgxp_session_test PRIVATE chdr-static)
+    if(WIN32)
+        if(MSVC)
+            target_link_options(pgxp_session_test PRIVATE /STACK:16777216)
+        else()
+            target_link_options(pgxp_session_test PRIVATE -Wl,--stack,16777216)
+        endif()
+    endif()
+    add_test(NAME pgxp_session_test COMMAND pgxp_session_test)
 
     add_executable(psx_instr_cost_test tests/test_psx_instr_cost.cpp)
     target_include_directories(psx_instr_cost_test PRIVATE include)
@@ -404,23 +509,61 @@ if(BUILD_TESTING)
 
     add_executable(gpu_textured_dot_nw_shift_exec_test
         tests/test_gpu_textured_dot_nw_shift_exec.c
-        src/psx_video_timing.c)
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
     target_include_directories(gpu_textured_dot_nw_shift_exec_test PRIVATE
         include
         src)
     if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(gpu_textured_dot_nw_shift_exec_test PRIVATE
             -ffunction-sections -fdata-sections)
+        # Apple ld has no --gc-sections; -dead_strip is its equivalent (as
+        # for isc_store_test above), so the test links and runs on macOS.
         target_link_options(gpu_textured_dot_nw_shift_exec_test PRIVATE
-            -Wl,--gc-sections)
+            $<IF:$<PLATFORM_ID:Darwin>,-Wl$<COMMA>-dead_strip,-Wl$<COMMA>--gc-sections>)
     endif()
     add_test(NAME gpu_textured_dot_nw_shift_exec_test
              COMMAND gpu_textured_dot_nw_shift_exec_test)
 
+    # auto_ui_squash corrects untextured HUD fills with their textured frames.
+    add_executable(ws_auto_ui_untextured_exec_test
+        tests/test_ws_auto_ui_untextured_exec.c
+        src/ws_ui_group.c
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
+    target_include_directories(ws_auto_ui_untextured_exec_test PRIVATE
+        include
+        src)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(ws_auto_ui_untextured_exec_test PRIVATE
+            -ffunction-sections -fdata-sections)
+        target_link_options(ws_auto_ui_untextured_exec_test PRIVATE
+            -Wl,--gc-sections)
+    endif()
+    add_test(NAME ws_auto_ui_untextured_exec_test
+             COMMAND ws_auto_ui_untextured_exec_test)
+
+    add_executable(ws_shared_split_ui_exec_test
+        tests/test_ws_shared_split_ui_exec.c
+        src/ws_ui_group.c
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
+    target_include_directories(ws_shared_split_ui_exec_test PRIVATE include src)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(ws_shared_split_ui_exec_test PRIVATE
+            -ffunction-sections -fdata-sections)
+        target_link_options(ws_shared_split_ui_exec_test PRIVATE -Wl,--gc-sections)
+    endif()
+    add_test(NAME ws_shared_split_ui_exec_test COMMAND ws_shared_split_ui_exec_test)
+
     add_executable(ws_view_anchor_test tests/test_ws_view_anchor.c)
     add_executable(ws_view_anchor_gpu_test tests/test_ws_view_anchor_gpu.c
-        src/psx_video_timing.c)
-    foreach(_anchor_test ws_view_anchor ws_view_anchor_gpu)
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
+    add_executable(native_wide_projection_test tests/test_native_wide_projection.c
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
+    foreach(_anchor_test ws_view_anchor ws_view_anchor_gpu native_wide_projection)
         target_include_directories(${_anchor_test}_test PRIVATE include src)
         if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
             target_compile_options(${_anchor_test}_test PRIVATE -ffunction-sections -fdata-sections)
@@ -434,12 +577,16 @@ if(BUILD_TESTING)
     endforeach()
     add_test(NAME ws_view_anchor_test COMMAND ws_view_anchor_test)
     add_test(NAME ws_view_anchor_gpu_test COMMAND ws_view_anchor_gpu_test)
+    add_test(NAME native_wide_projection_test COMMAND native_wide_projection_test)
 
     add_executable(ws_repeat_rect_test tests/test_ws_repeat_rect.c)
     target_include_directories(ws_repeat_rect_test PRIVATE include)
     add_test(NAME ws_repeat_rect_test COMMAND ws_repeat_rect_test)
     add_executable(ws_screen_mask_test tests/test_ws_screen_mask.c)
     target_include_directories(ws_screen_mask_test PRIVATE include)
+    if(UNIX)
+        target_link_libraries(ws_screen_mask_test PRIVATE m)
+    endif()
     add_test(NAME ws_screen_mask_test COMMAND ws_screen_mask_test)
 
     add_executable(mod_gpu_dma_aperture_test
@@ -601,24 +748,37 @@ if(BUILD_TESTING)
     add_executable(mod_packages_test
         tests/test_mod_packages.cpp
         src/mod_packages.cpp
+        src/mod_media.cpp src/iso_reader.cpp src/cue_sheet.cpp
         src/crc32.c
         src/psx_sha256.c)
     target_include_directories(mod_packages_test PRIVATE
         include
+        ../recompiler/include
         ../recompiler/lib/toml11)
+    target_link_libraries(mod_packages_test PRIVATE chdr-static)
     add_test(NAME mod_packages_test COMMAND mod_packages_test)
 
     add_executable(builtin_mod_manifests_test
         tests/test_builtin_mod_manifests.cpp
         src/mod_packages.cpp
+        src/mod_media.cpp src/iso_reader.cpp src/cue_sheet.cpp
         src/crc32.c
         src/psx_sha256.c)
     target_include_directories(builtin_mod_manifests_test PRIVATE
         include
+        ../recompiler/include
         ../recompiler/lib/toml11)
+    target_link_libraries(builtin_mod_manifests_test PRIVATE chdr-static)
     add_test(NAME builtin_mod_manifests_test
              COMMAND builtin_mod_manifests_test
                      "${CMAKE_CURRENT_SOURCE_DIR}/../mods/builtin/packages")
+
+    add_executable(mod_media_test
+        tests/test_mod_media.cpp src/mod_media.cpp src/iso_reader.cpp
+        src/cue_sheet.cpp src/psx_sha256.c)
+    target_include_directories(mod_media_test PRIVATE include ../recompiler/include)
+    target_link_libraries(mod_media_test PRIVATE chdr-static)
+    add_test(NAME mod_media_test COMMAND mod_media_test)
 
     add_executable(text_xlate_fix_only_test
         tests/test_text_xlate_fix_only.cpp
@@ -631,8 +791,10 @@ if(BUILD_TESTING)
 
     add_executable(mod_runtime_test
         tests/test_mod_runtime.cpp
+        src/iso_reader_c.cpp
         src/mod_runtime.cpp
         src/mod_packages.cpp
+        src/mod_media.cpp
         src/disc_path.cpp
         src/cue_sheet.cpp
         src/iso_reader.cpp
@@ -653,6 +815,31 @@ if(BUILD_TESTING)
         endif()
     endif()
     add_test(NAME mod_runtime_test COMMAND mod_runtime_test)
+
+    add_executable(mod_resident_test
+        tests/test_mod_resident.cpp
+        src/mod_resident.cpp
+        src/mod_runtime.cpp
+        src/mod_packages.cpp
+        src/mod_media.cpp
+        src/disc_path.cpp
+        src/cue_sheet.cpp
+        src/iso_reader.cpp
+        src/crc32.c
+        src/psx_sha256.c)
+    target_include_directories(mod_resident_test PRIVATE
+        include
+        ../recompiler/include
+        ../recompiler/lib/toml11)
+    target_link_libraries(mod_resident_test PRIVATE chdr-static)
+    if(WIN32)
+        if(MSVC)
+            target_link_options(mod_resident_test PRIVATE /STACK:16777216)
+        else()
+            target_link_options(mod_resident_test PRIVATE -Wl,--stack,16777216)
+        endif()
+    endif()
+    add_test(NAME mod_resident_test COMMAND mod_resident_test)
 
     if(WIN32)
         add_executable(autocompile_publication_test
@@ -765,6 +952,27 @@ if(BUILD_TESTING)
         target_link_libraries(render_pass_plan_test PRIVATE m)
     endif()
     add_test(NAME render_pass_plan_test COMMAND render_pass_plan_test)
+
+    # Motion kit and per-frame driver for render-pass plugins: blending,
+    # identity matching, limits and the crossfade fallback, on mock RAM.
+    add_executable(render_pass_motion_test
+        tests/test_render_pass_motion.c
+        src/render_pass_motion.c
+        src/render_pass_frame.c)
+    target_include_directories(render_pass_motion_test PRIVATE include)
+    if(NOT MSVC)
+        target_link_libraries(render_pass_motion_test PRIVATE m)
+    endif()
+    add_test(NAME render_pass_motion_test COMMAND render_pass_motion_test)
+    add_executable(render_pass_projection_test
+        tests/test_render_pass_projection.cpp
+        src/render_pass_projection.cpp
+        src/render_pass_motion.c)
+    target_include_directories(render_pass_projection_test PRIVATE include)
+    if(NOT MSVC)
+        target_link_libraries(render_pass_projection_test PRIVATE m)
+    endif()
+    add_test(NAME render_pass_projection_test COMMAND render_pass_projection_test)
 
     # Render-pass time freeze against mock devices (psx_cycles.c only).
     add_executable(render_pass_freeze_test
@@ -988,6 +1196,7 @@ if(BUILD_TESTING)
         add_test(NAME setup_bios_assets_test COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_setup_bios_assets.py)
         if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
             add_test(NAME launch_disc_path_test COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_launch_disc_path.py --compiler ${CMAKE_CXX_COMPILER})
+            add_test(NAME persisted_settings_paths_test COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_persisted_settings_paths.py --compiler ${CMAKE_CXX_COMPILER})
         endif()
         add_test(NAME disc_picker_ascii_test COMMAND ${Python3_EXECUTABLE}
                  ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_disc_picker_ascii.py)
@@ -1038,6 +1247,13 @@ if(BUILD_TESTING)
         add_test(NAME mod_catalog_layout_test
                  COMMAND ${Python3_EXECUTABLE}
                          ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mod_catalog_layout.py
+                         --cmake ${CMAKE_COMMAND})
+        # psxrecomp_add_game_runtime(... PGXP): the real function body under
+        # cmake -P, forwarding the hook-flavor option for the title's one
+        # runtime (docs/ENHANCEMENTS.md G1.11).
+        add_test(NAME game_runtime_pgxp_test
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_game_runtime_pgxp.py
                          --cmake ${CMAKE_COMMAND})
         # tools/mod_channel_filter.py strips developer features from a staged
         # catalog; every entry that served one ([[requirement]] included) must

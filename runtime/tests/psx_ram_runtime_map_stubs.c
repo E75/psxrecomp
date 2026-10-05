@@ -57,6 +57,7 @@ uint32_t ls_read_hook(uint32_t a, int s, uint32_t v) { (void)a; (void)s; return 
 void ls_write_hook(uint32_t a, int s, uint32_t v) { (void)a; (void)s; (void)v; }
 void ls_shadow_record_unreplayable(void) {}
 int  fntrace_is_game_started(void) { return 0; }
+void fntrace_restore_game_started(int started) { (void)started; }
 void overlay_loader_note_code_write(void) {}
 void overlay_loader_resync_validation_after_restore(void) {}
 void gte_canonicalize_cpu_state(CPUState *cpu) { (void)cpu; }
@@ -99,6 +100,9 @@ void cdrom_debug_snapshot(void *out) { (void)out; }
 uint32_t cdrom_dma_sector_word_count(void) { return 0; }
 void dma_gpu_ll_start(void *s, uint32_t a, uint32_t m) { (void)s; (void)a; (void)m; }
 void dma_gpu_ll_cancel(void *s) { (void)s; }
+/* The kick's CPU hold asks for the next walk event; the stubbed start leaves
+ * the walk inactive, so the hold never loops. */
+uint32_t dma_gpu_ll_cycles_to_event(const void *s) { (void)s; return 0xFFFFFFFFu; }
 void gpu_ws_begin_linked_list(void) {}
 void gpu_ws_end_linked_list(void) {}
 void gpu_ws_prepass_linked_list(uint32_t a) { (void)a; }

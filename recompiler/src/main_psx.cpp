@@ -219,7 +219,9 @@ static int psxrecomp_game_main(int argc, char** argv) {
     bool                  reachable_discovery = false;
     std::set<uint32_t>    ws_tag_funcs;         // [widescreen] sprite_tag_funcs
     std::set<uint32_t>    ds_funcs;             // [data_shards] funcs
+    std::set<uint32_t>    mod_instruction_sites;
     std::set<uint32_t>    mod_entry_funcs;      // trusted game-mod entry hooks
+    std::vector<PSXRecompV4::WidescreenMaskedRejectSite> ws_cull_masked_reject;
     std::set<uint32_t>    hot_funcs;            // [recompiler] hot_funcs
     std::set<uint32_t>    load_charge_batch_funcs; // [recompiler] load_charge_batch*
     std::map<uint32_t, std::array<uint32_t, 4>> vsync_query_hle_funcs;
@@ -241,7 +243,9 @@ static int psxrecomp_game_main(int argc, char** argv) {
     std::set<uint32_t>    ws_cull_clip_edge_x_load; // [widescreen.cull] clip_edge_x_load_sites
     uint32_t              ws_cull_clip_edge_width = 0; // [widescreen.cull] clip_edge_width
     std::vector<PSXRecompV4::WidescreenCullKeepSite> ws_cull_keep;
+    std::vector<PSXRecompV4::WidescreenCullScaleSite> ws_cull_scale;
     std::vector<PSXRecompV4::WidescreenAngleSite> ws_cull_angle;
+    std::vector<PSXRecompV4::DrawDistanceClampSite> draw_distance_clamps; // [[draw_distance.clamp]]
     PSXRecompV4::WidescreenAspectConeConfig ws_aspect_cone;
     int                   ws_cull_activation_guard_pixels = 0;
     std::vector<uint32_t> ws_cull_w_imms = { 0x140, 0x141 }; // [widescreen.cull] screen_w_imms
@@ -283,6 +287,7 @@ static int psxrecomp_game_main(int argc, char** argv) {
         ds_funcs.insert(cfg.data_shard_funcs.begin(), cfg.data_shard_funcs.end());
         mod_entry_funcs.insert(cfg.mod_function_entry_funcs.begin(),
                                cfg.mod_function_entry_funcs.end());
+        mod_instruction_sites.insert(cfg.mod_instruction_sites.begin(), cfg.mod_instruction_sites.end());
         hot_funcs.insert(cfg.hot_funcs.begin(), cfg.hot_funcs.end());
         if (cfg.load_charge_batch) {
             load_charge_batch_funcs.insert(cfg.load_charge_batch_funcs.begin(),
@@ -315,7 +320,10 @@ static int psxrecomp_game_main(int argc, char** argv) {
         if (!cfg.ws_cull_clip_edge_x_load_sites.empty())
             ws_cull_clip_edge_width = PSXRecompV4::ws_cull_clip_edge_width(cfg);
         ws_cull_keep = cfg.ws_cull_keep_sites;
+        ws_cull_masked_reject = cfg.ws_cull_masked_reject_sites;
+        ws_cull_scale = cfg.ws_cull_scale_sites;
         ws_cull_angle = cfg.ws_cull_angle_sites;
+        draw_distance_clamps = cfg.draw_distance_clamp_sites;
         ws_aspect_cone = cfg.ws_aspect_cone;
         ws_cull_activation_guard_pixels =
             cfg.ws_cull_activation_guard_pixels;
@@ -396,6 +404,7 @@ static int psxrecomp_game_main(int argc, char** argv) {
         ws_tag_funcs.insert(wscfg.ws_sprite_tag_funcs.begin(), wscfg.ws_sprite_tag_funcs.end());
         mod_entry_funcs.insert(wscfg.mod_function_entry_funcs.begin(),
                                wscfg.mod_function_entry_funcs.end());
+        mod_instruction_sites.insert(wscfg.mod_instruction_sites.begin(), wscfg.mod_instruction_sites.end());
         ws_cull_bias.insert(wscfg.ws_cull_bias_sites.begin(), wscfg.ws_cull_bias_sites.end());
         ws_cull_bias_lower.insert(wscfg.ws_cull_bias_lower_sites.begin(), wscfg.ws_cull_bias_lower_sites.end());
         ws_cull_range.insert(wscfg.ws_cull_range_sites.begin(), wscfg.ws_cull_range_sites.end());
@@ -419,6 +428,8 @@ static int psxrecomp_game_main(int argc, char** argv) {
         if (!wscfg.ws_cull_clip_edge_x_load_sites.empty() && !ws_cull_clip_edge_width)
             ws_cull_clip_edge_width = PSXRecompV4::ws_cull_clip_edge_width(wscfg);
         if (ws_cull_keep.empty()) ws_cull_keep = wscfg.ws_cull_keep_sites;
+        if (ws_cull_masked_reject.empty()) ws_cull_masked_reject = wscfg.ws_cull_masked_reject_sites;
+        if (ws_cull_scale.empty()) ws_cull_scale = wscfg.ws_cull_scale_sites;
         if (ws_cull_angle.empty()) ws_cull_angle = wscfg.ws_cull_angle_sites;
         if (ws_aspect_cone.sites.empty())
             ws_aspect_cone = wscfg.ws_aspect_cone;
@@ -635,6 +646,8 @@ static int psxrecomp_game_main(int argc, char** argv) {
         check_set("widescreen.backdrop.x_sites", ws_backdrop_x);
         check_set("widescreen.backdrop.unsquash_funcs", ws_backdrop_unsquash);
         check_set("persist_options.init_store_pc", persist_init_sites);
+        for (const auto& site : draw_distance_clamps)
+            check("draw_distance.clamp.address", site.address);
         check("widescreen.bg2d.count_site", ws_bg2d_count_site);
         check("widescreen.bg2d.startcol_site", ws_bg2d_startcol_site);
         check("widescreen.bg2d.startx_site", ws_bg2d_startx_site);
@@ -1456,6 +1469,8 @@ static int psxrecomp_game_main(int argc, char** argv) {
     codegen_config.ws_sprite_tag_funcs = ws_tag_funcs;
     codegen_config.data_shard_funcs = ds_funcs;
     codegen_config.mod_function_entry_funcs = mod_entry_funcs;
+    codegen_config.ws_cull_masked_reject_sites = ws_cull_masked_reject;
+    codegen_config.mod_instruction_sites = mod_instruction_sites;
     codegen_config.hot_funcs = hot_funcs;
     codegen_config.load_charge_batch_funcs = load_charge_batch_funcs;
     codegen_config.vsync_query_hle_funcs = vsync_query_hle_funcs;
@@ -1485,7 +1500,9 @@ static int psxrecomp_game_main(int argc, char** argv) {
     else if (!ws_cull_w_imms.empty())
         codegen_config.ws_cull_clip_edge_width = ws_cull_w_imms.front();
     codegen_config.ws_cull_keep_sites = ws_cull_keep;
+    codegen_config.ws_cull_scale_sites = ws_cull_scale;
     codegen_config.ws_cull_angle_sites = ws_cull_angle;
+    codegen_config.draw_distance_clamp_sites = draw_distance_clamps;
     codegen_config.ws_aspect_cone = ws_aspect_cone;
     codegen_config.ws_cull_w_imms      = ws_cull_w_imms;
     codegen_config.ws_cull_h_imms      = ws_cull_h_imms;

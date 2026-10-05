@@ -25,5 +25,26 @@ int main(void){
     check(psx_mod_memory_layout_cookie()==cookie,"stable layout identity");
     check(psx_mod_gpu_dma_memory_alloc(16,16)!=0 && psx_mod_memory_layout_cookie()!=cookie,"layout change detected");
     check(!psx_mod_memory_snapshot_read(saved,size),"old layout rejected");
+    /* Render passes write mod arenas through a first-write page journal and
+     * put them back with the rest of the pass restore. */
+    {
+        const uint64_t before = render_pass_mod_arenas_hash();
+        check(render_pass_mod_store(PSX_MOD_GPU_DMA_GUEST_BASE + 8u, 0xAABBCCDDu, 4) == 1 &&
+              mod_gpu_dma_memory[8] == 0xDD && mod_gpu_dma_memory[11] == 0xAA,
+              "pass store reaches the GPU-DMA arena");
+        check(render_pass_mod_store(PSX_MOD_GPU_DMA_GUEST_BASE + 4096u - 2u, 0x1234u, 2) == 1,
+              "pass store at a page edge");
+        check(render_pass_mod_store(0x9f000004u, 0x77u, 1) == 1 && mod_memory[4] == 0x77,
+              "pass store reaches mod memory");
+        check(render_pass_mod_store(0x80001000u, 1u, 4) == 0, "main RAM left to the RAM path");
+        check(render_pass_mod_arenas_hash() != before, "hash sees the pass writes");
+        render_pass_mod_arenas_rollback();
+        check(mod_gpu_dma_memory[8] == 0x34 && mod_gpu_dma_memory[4094] == 0x34 &&
+              mod_memory[4] == 0x12 && render_pass_mod_arenas_hash() == before,
+              "rollback restores every journaled page");
+        check(render_pass_mod_store(PSX_MOD_GPU_DMA_GUEST_BASE + 8u, 0x1u, 4) == 1 &&
+              (render_pass_mod_arenas_rollback(), mod_gpu_dma_memory[8] == 0x34),
+              "a second pass journals again");
+    }
     free(saved);puts("enhancement snapshot checks passed");return 0;
 }

@@ -25,6 +25,7 @@ from sector_extent_archive import extract_members as extract_extent_members
 from aligned_lzss_banks import banks as extract_lzss_banks
 from indexed_lzss_pack import members as extract_pack_members
 from mips_tagged_relocations import parse as parse_tagged_relocations, relocate as relocate_tagged_image
+from counted_mips_relocations import parse as parse_counted_relocations, relocate as relocate_counted_image
 from mod_package_images import ModPackageView
 
 FRAMEWORK = Path(__file__).resolve().parents[1]
@@ -369,6 +370,8 @@ def positioned_sources(disc, specifications, views=None, ram_bytes=RETAIL_RAM_BY
 def spec_sources(disc, spec):
     sources = []
     method = spec['method']
+    if method == 'counted_relocated_members':
+        return counted_relocated_sources(disc, spec)
     if method == 'fixed_address_extents':
         return extent_sources(disc, spec)
     if method == 'aligned_lzss_banks':
@@ -469,6 +472,48 @@ def spec_sources(disc, spec):
     return sources
 
 
+def counted_relocated_sources(disc, spec):
+    """Original members at declared heap placements, never captured RAM bytes.
+
+    Counted containers describe image boundaries and relocation writes, but no
+    destination. Each placement must be established separately from the loader.
+    A new heap placement remains interpreted until a guarded variant is added.
+    """
+    sources = []
+    for container in spec['containers']:
+        file = container['file'].upper()
+        data = disc.read(file)
+        require(hashlib.sha256(data).hexdigest() == container['sha256'],
+                f'Counted relocation container changed: {file}')
+        members = parse_counted_relocations(data)
+        configured = {number(item['index']): item for item in container['members']}
+        excluded = {number(item['index']): item for item in container.get('excluded_members', [])}
+        require(len(configured) == len(container['members']) and
+                len(excluded) == len(container.get('excluded_members', [])),
+                'Duplicate counted member inventory')
+        require(not configured.keys() & excluded.keys() and
+                configured.keys() | excluded.keys() == set(range(len(members))),
+                'Counted member inventory has missing or conflicting classifications')
+        require(all(item.get('reason', '').strip() for item in excluded.values()),
+                'Excluded counted member needs a reason')
+        for index, member in enumerate(members):
+            item = configured.get(index)
+            if item is None:
+                continue
+            require(len(member.image) == number(item['image_size']) and
+                    len(member.relocations) == number(item['relocation_count']),
+                    f'Counted member inventory changed: {file} {index}')
+            require(item.get('placements'), 'Counted member needs an established placement')
+            bases = [number(p['load_addr']) for p in item['placements']]
+            require(len(bases) == len(set(bases)), 'Duplicate counted member placement')
+            for placement, base in zip(item['placements'], bases):
+                body = relocate_counted_image(member, base)
+                sources.append(dict(name=f'{file}:IMAGE_{index:04X}@{base:08X}',
+                    base=base, body=body, spec={**spec, **item, **placement, 'allow_missing': True},
+                    source_file=file, source_offset=member.image_offset, aliases=[]))
+    return sources
+
+
 def match_sources(record, sources):
     require(not record.get('executed_pcs'), 'Runtime observations cannot be AOT inputs')
     data = base64.b64decode(record['bytes_b64'], validate=True)
@@ -495,6 +540,15 @@ def declared_entries(source, disc):
         offset = number(item.get('file_offset', 0)) + number(item['address']) - number(item.get('base', 0))
         entries.add(struct.unpack_from('<I', view.read(item['file']), offset)[0])
     entries.update(number(x) for x in spec.get('entries', []))
+    # Offsets designate loader-established callback fields in this image.
+    # Read after relocation so one declaration works at several heap bases.
+    for value in spec.get('entry_pointer_offsets', []):
+        offset = number(value)
+        require(offset % 4 == 0 and 0 <= offset <= len(body) - 4,
+                'Callback pointer offset outside image')
+        entry, = struct.unpack_from('<I', body, offset)
+        if entry:
+            entries.add(entry)
     if 'transfer_entries' in spec:
         entries |= transfer_entries(source, view)
     require(all(base <= entry < base + len(body) and entry % 4 == 0 for entry in entries),
@@ -587,7 +641,7 @@ def prepare(profile, disc, records, output, views=None):
             if (lo, hi) == (source['base'], source['base'] + len(source['body'])):
                 singles[source['name']] = record
     for source in sources:
-        if source['spec']['method'] in ('fixed_address_files', 'fixed_address_extents', 'packed_sector_members', 'sector_extent_members', 'aligned_lzss_banks', 'indexed_lzss_members', 'tagged_relocated_files') and source['name'] not in singles:
+        if source['spec']['method'] in ('fixed_address_files', 'fixed_address_extents', 'packed_sector_members', 'sector_extent_members', 'aligned_lzss_banks', 'indexed_lzss_members', 'tagged_relocated_files', 'counted_relocated_members') and source['name'] not in singles:
             record = make_fixed_record(source, disc)
             singles[source['name']] = record
             records.append(record)
@@ -717,16 +771,16 @@ def extract(profile_path, game_toml, recompiler, output, cue=None, disc=None, pr
                    output, views)
 
 
-def audit(game_toml, recompiler, cache, inventory, output, static_dispatch=None):
+def audit(game_toml, recompiler, cache, inventory, output, static_dispatch=None, flavor=0):
     target = ['--static-dispatch', str(static_dispatch)] if static_dispatch else ['--cache-root', str(cache)]
     subprocess.run([sys.executable, str(FRAMEWORK / 'tools/audit_aot_cache.py'),
                     '--framework-root', str(FRAMEWORK), '--recompiler', str(recompiler),
-                    '--game-toml', str(game_toml), *target,
+                    '--game-toml', str(game_toml), '--flavor', str(flavor), *target,
                     '--inventory', str(inventory), '--output', str(output)], check=True)
     return json.loads(output.read_text())
 
 
-def build(inventory, game_toml, recompiler, work, gcc, workers, project_root=None, cps=False):
+def build(inventory, game_toml, recompiler, work, gcc, workers, project_root=None, cps=False, flavor=0):
     """Independent recipe builds cannot nominate entries in sibling images."""
     cache = work / 'cache'
     cache.mkdir(parents=True)
@@ -739,7 +793,7 @@ def build(inventory, game_toml, recompiler, work, gcc, workers, project_root=Non
                    '--project-root', str(project_root or game_toml.parent), '--recompiler', str(recompiler),
                    '--runtime-include', str(FRAMEWORK / 'runtime/include'),
                    '--out-dir', str(target / 'cache'), '--compiler', 'gcc', '--gcc', gcc,
-                   '--flavor', '0', '--jobs', '1'] + (['--cps'] if cps else [])
+                   '--flavor', str(flavor), '--jobs', '1'] + (['--cps'] if cps else [])
         with (target / 'compile.log').open('w') as log:
             subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True)
         return index, job, target
@@ -969,7 +1023,7 @@ def run():
     parser.add_argument('--runtime-config', type=Path,
                         help='Packaged config controlling native cache namespace/code generation')
     parser.add_argument('--runtime-build-dir', type=Path,
-                        help='Verify the staged runtime publishes the supported flavor-0 ABI')
+                        help='Read and validate the staged runtime overlay ABI (base or PGXP)')
     parser.add_argument('--runtime-target', default='psx-runtime')
     parser.add_argument('--recompiler', type=Path, required=True)
     parser.add_argument('--work-dir', type=Path, required=True)
@@ -995,10 +1049,13 @@ def run():
         import tomllib
         require_runtime_cache(tomllib.loads((args.runtime_config or args.game_toml)
                                            .read_text(encoding='utf-8-sig')))
+    flavor = 0
     if args.runtime_build_dir:
         from release_stage import _flavor_from_build
-        require(_flavor_from_build(str(args.runtime_build_dir), args.runtime_target) == 0,
-                'This AOT pipeline currently requires a flavor-0 runtime')
+        flavor = _flavor_from_build(str(args.runtime_build_dir), args.runtime_target)
+        require(flavor in (0, 2), 'Unsupported runtime overlay flavor')
+        require(args.action == 'release' or flavor == 0,
+                'Static AOT generation currently requires a flavor-0 runtime')
     import tomllib
     config, recompiler = args.game_toml.resolve(), args.recompiler.resolve()
     profile_path = args.profile.resolve()
@@ -1048,8 +1105,9 @@ def run():
         require(tomllib.loads(runtime_config.read_text(encoding='utf-8-sig'))['game']['id'] == inventory['game_id'],
                 'Runtime config/game mismatch')
         cache = build(inventory, runtime_config, recompiler, work, args.gcc, args.workers, config.parent,
-                      args.cps)
-        receipt = audit(runtime_config, recompiler, cache, work / 'runtime-input-inventory.json', work / 'audit.json')
+                      args.cps, flavor)
+        receipt = audit(runtime_config, recompiler, cache, work / 'runtime-input-inventory.json', work / 'audit.json',
+                        flavor=flavor)
         receipt['profile_sha256'] = inventory['profile_sha256']
         receipt['original_disc_sha256'] = inventory['original_disc_sha256']
         receipt['required_images'] = inventory['required_images']

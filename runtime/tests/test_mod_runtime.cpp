@@ -22,6 +22,7 @@ static std::array<uint8_t, 2 * 1024 * 1024> ram;
 static int failures;
 static int activation_calls;
 static int plugin_calls;
+static int restore_calls;
 
 extern "C" uint8_t psx_read_byte(uint32_t address) {
     return ram[address & 0x1fffffu];
@@ -76,6 +77,8 @@ extern "C" uint32_t psx_mod_gpu_dma_memory_alloc(uint32_t, uint32_t) {
     return 0;
 }
 extern "C" void psx_ram_reset_size_request(void) {}
+extern "C" void psx_projection_reset_session(void) {}
+extern "C" void gpu_ws_set_native_scene_predicate(int (*)(void)) {}
 extern "C" int psx_ws_x_margin(void) { return 0; }
 
 /* Stand-in for the GPU's display geometry. psx_mod_display_width/height must
@@ -93,9 +96,15 @@ extern "C" int fntrace_is_game_started(void) { return 1; }
 extern "C" void gpu_ws_tag_hud_primitive(uint32_t, int) {}
 extern "C" void gpu_ws_tag_world_primitive(uint32_t, int) {}
 extern "C" void gpu_ws_set_adaptive_backdrop_preload(int) {}
+extern "C" int gpu_ws_configured_x_reveal(void) { return 0; }
+extern "C" void gpu_ws_tag_hud_prim(uint32_t, int) {}
+extern "C" void gpu_ws_tag_screen_mask_quad(uint32_t) {}
+extern "C" void gpu_ws_tag_radial_screen_mask_quad(uint32_t, float) {}
 
+static CPUState* interrupted_entry_cpu;
 static void test_vblank_plugin(void) {
     plugin_calls++;
+    if (interrupted_entry_cpu && psx_mod_finish_function(interrupted_entry_cpu)) failures++;
 }
 
 /* Function-entry hooks: one owned by the plan's active plugin, one by a
@@ -104,9 +113,32 @@ static int active_entry_hits;
 static int disabled_entry_hits;
 static int unselected_entry_hits;
 static uint32_t active_entry_last;
-static void test_active_entry(CPUState*, uint32_t address) {
+static int entry_test_mode, nested_result;
+static uint32_t nested_pc;
+static void test_active_entry(CPUState* cpu, uint32_t address) {
     active_entry_hits++;
     active_entry_last = address;
+    if (entry_test_mode == 1) {
+        CPUState unrelated{};
+        if (psx_mod_finish_function(&unrelated) || !psx_mod_finish_function(cpu)) failures++;
+        cpu->gpr[2] = 0x12345678u;
+    } else if (entry_test_mode == 2 || entry_test_mode == 3) {
+        const int mode = entry_test_mode;
+        if (mode == 3 && !psx_mod_finish_function(cpu)) failures++;
+        CPUState nested{}; nested.gpr[31] = 0x80004000u;
+        entry_test_mode = mode == 2 ? 1 : 0;
+        nested_result = psx_mod_function_entry(&nested, address);
+        nested_pc = nested.pc;
+        entry_test_mode = mode;
+    } else if (entry_test_mode == 4) {
+        /* A native call made by a hook can cross a guest VBlank. Its
+         * callbacks must neither inherit nor discard the interrupted hook. */
+        interrupted_entry_cpu = cpu;
+        mod_runtime_on_vblank();
+        interrupted_entry_cpu = nullptr;
+        if (!psx_mod_finish_function(cpu)) failures++;
+        cpu->gpr[2] = 0x87654321u;
+    }
 }
 static void test_disabled_entry(CPUState*, uint32_t) { disabled_entry_hits++; }
 static void test_unselected_entry(CPUState*, uint32_t) { unselected_entry_hits++; }
@@ -128,14 +160,71 @@ static int test_inactive_filter(CPUState*, uint32_t) {
     ++inactive_filter_hits;
     return 1;
 }
+static int guest_function_hits;
+static int instruction_hits;
+static void test_instruction(CPUState* cpu, uint32_t) {
+    instruction_hits++;
+    cpu->gpr[5] = 0x80301008u;
+    if (psx_mod_finish_function(cpu)) failures++;
+}
+static void test_guest_function(CPUState* cpu, uint32_t) {
+    guest_function_hits++;
+    const uint32_t ra = cpu->gpr[31];
+    CPUState nested{};
+    nested.gpr[31] = 0x80007000u;
+    const int mode = entry_test_mode;
+    entry_test_mode = 1;
+    if (!psx_mod_function_entry(&nested, 0x80003000u) || nested.pc != nested.gpr[31]) failures++;
+    entry_test_mode = mode;
+    interrupted_entry_cpu = cpu;
+    mod_runtime_on_vblank();
+    interrupted_entry_cpu = nullptr;
+    if (!psx_mod_finish_function(cpu)) failures++;
+    cpu->gpr[2] = cpu->gpr[4] + 7u;
+    if (cpu->gpr[31] != ra) failures++;
+}
+
 
 static void test_activation_plugin(void) {
     activation_calls++;
 }
 
+static const uint8_t* media_snapshot;
+static uint64_t media_size;
+static int media_access, foreign_media_access;
+static uint32_t mounted_lba;
+static int extent_ok, invalid_extent, foreign_extent;
+static void test_media_plugin(void) {
+    media_access = psx_mod_current_resource_bytes("rom", &media_snapshot, &media_size);
+    const uint8_t* foreign = nullptr;
+    uint64_t size = 0;
+    foreign_media_access = psx_mod_current_resource_bytes("private", &foreign, &size);
+    extent_ok=psx_mod_append_disc_extent("xa",0,2,&mounted_lba);
+    uint32_t bad=99;
+    invalid_extent=psx_mod_append_disc_extent("xa",1,2,&bad);
+    foreign_extent=psx_mod_append_disc_extent("private",0,1,&bad);
+}
+
+extern "C" {
+void* iso_open(const char*);
+void iso_close(void*);
+int iso_read_raw_sector(void*,uint32_t,uint8_t*,int);
+int iso_read_sector(void*,uint32_t,uint8_t*,int);
+int iso_read_subq(void*,uint32_t,uint8_t*,int,int*);
+uint32_t iso_sector_count(void*);
+int iso_track_count(void*);
+uint32_t iso_track_start_lba(void*,int);
+int iso_track_is_audio(void*,int);
+}
+
 static int big_ram_activations;
 static void test_big_ram_activation(void) {
     big_ram_activations++;
+}
+
+static void test_restore_plugin(void) {
+    restore_calls++;
+    if (ram[0x1000] != 0xa1) failures++; /* main plan must be reapplied first */
 }
 
 static void check(bool value, const char* message) {
@@ -380,18 +469,56 @@ int main() {
               "runtime.unselected-entry", 0x80003000u, test_unselected_entry) == 1,
           "unselected function-entry hook must register");
     CPUState entry_cpu{};
+    check(psx_mod_register_instruction_plugin("runtime.test-vblank", 0x80003004u,
+              0x90A30014u, test_instruction), "register guarded instruction callback");
+    check(!psx_mod_register_instruction_plugin("runtime.test-vblank", 0xA0003004u,
+              0x90A30014u, test_instruction) &&
+          !psx_mod_register_instruction_plugin("runtime.other", 0x80003005u,
+              0x90A30014u, test_instruction), "reject aliased duplicate and unaligned sites");
+    psx_mod_write_word(0x80003004u, 0x90A30014u);
+    check(psx_mod_register_guest_function_plugin(
+              "runtime.test-vblank", 0x8FFF0000u, test_guest_function),
+          "trusted callback registers outside the hardware map");
+    check(!psx_mod_register_guest_function_plugin(
+              "runtime.other", 0xAFFF0000u, test_guest_function) &&
+          !psx_mod_register_guest_function_plugin("runtime.other", 0x80003000u, test_guest_function) &&
+          !psx_mod_register_guest_function_plugin("runtime.other", 0x8FFF0001u, test_guest_function) &&
+          !psx_mod_register_guest_function_plugin("runtime.other", 0xCFFF0000u, test_guest_function),
+          "guest callbacks refuse alias collisions, game addresses, misalignment and KSEG2");
+    check(psx_mod_register_guest_function_plugin(
+              "runtime.unselected-entry", 0x8FFF0004u, test_unselected_entry),
+          "unselected callback implementation can register");
+    check(psx_mod_register_savestate_plugin("runtime.test-vblank", test_restore_plugin),
+          "restore callback must register through the C API");
+    check(!psx_mod_register_savestate_plugin("runtime.test-vblank", test_restore_plugin),
+          "duplicate restore callback must be rejected");
     check(PSXRecompV4::mod_runtime_initialize(
               root, "SLUS-RUNTIME", 0x80002000, {}, &error),
           error.c_str());
     check(PSXRecompV4::mod_runtime_commit(cue_path, &error),
           "CUE and its data-track BIN must have the same mod target identity");
     /* Committed but not yet activated: no hook may run. */
+    psx_mod_instruction(&entry_cpu, 0x80003004u, 0x90A30014u);
+    check(instruction_hits == 0 && !g_psx_mod_instruction_hooks, "instruction hooks await activation");
+    check(!psx_mod_dispatch_guest_function(&entry_cpu, 0x8FFF0000u) &&
+              g_psx_mod_guest_functions == 0,
+          "committed guest functions remain unavailable until activation");
     psx_mod_function_entry(&entry_cpu, 0x80003000u);
     check(g_psx_mod_function_entry_hooks == 0 && active_entry_hits == 0,
           "function-entry hooks must not run before plugin activation");
     mod_runtime_activate_plugins();
     check(activation_calls == 1,
           "resolved trusted plugin must activate before runtime startup");
+    entry_cpu.pc = 0x80004000u;
+    psx_mod_instruction(&entry_cpu, 0x80003004u, 0x90A30014u);
+    psx_mod_instruction(&entry_cpu, 0xA0003004u, 0x90A30014u);
+    check(instruction_hits == 2 && entry_cpu.gpr[5] == 0x80301008u &&
+          entry_cpu.pc == 0x80004000u, "instruction aliases preserve control flow and edit registers");
+    psx_mod_instruction(&entry_cpu, 0x80003004u, 0x90A30015u);
+    psx_mod_write_word(0x80003004u, 0x90A30015u);
+    psx_mod_instruction(&entry_cpu, 0x80003004u, 0x90A30014u);
+    check(instruction_hits == 2, "fetched and live instruction guards reject changed code");
+    psx_mod_write_word(0x80003004u, 0x90A30014u);
     mod_runtime_on_vblank();
     check(plugin_calls == 1,
           "resolved trusted plugin must run on guest VBlank");
@@ -412,6 +539,11 @@ int main() {
           "hooks of plugins the plan does not activate must never run");
     /* A replaced plan drops every hook until its own activation. */
     check(PSXRecompV4::mod_runtime_clear_for_netplay(&error), error.c_str());
+    psx_mod_instruction(&entry_cpu, 0x80003004u, 0x90A30014u);
+    check(instruction_hits == 2 && !g_psx_mod_instruction_hooks, "clearing removes instruction hooks");
+    check(!psx_mod_dispatch_guest_function(&entry_cpu, 0x8FFF0000u) &&
+              g_psx_mod_guest_functions == 0,
+          "clearing the plan drops guest callback availability");
     psx_mod_function_entry(&entry_cpu, 0x80003000u);
     check(g_psx_mod_function_entry_hooks == 0 && active_entry_hits == 3,
           "clearing the plan must drop its function-entry hooks");
@@ -482,6 +614,45 @@ int main() {
     check(PSXRecompV4::mod_runtime_commit(cue_path, &error), error.c_str());
     mod_runtime_activate_plugins();
 
+    entry_cpu.gpr[31] = 0x80005000u;
+    check(!psx_mod_finish_function(&entry_cpu) && !psx_mod_function_entry(nullptr, 0x80003000u),
+          "completion outside an entry callback or with no CPU is refused");
+    entry_test_mode = 1;
+    check(psx_mod_function_entry(&entry_cpu, 0x80003000u) == 1 &&
+              entry_cpu.pc == 0x80005000u && entry_cpu.gpr[2] == 0x12345678u,
+          "explicit completion returns handled and publishes guest return PC/results");
+    entry_test_mode = 2; entry_cpu.pc = 0;
+    check(!psx_mod_function_entry(&entry_cpu, 0x80003000u) && entry_cpu.pc == 0 &&
+              nested_result == 1 && nested_pc == 0x80004000u,
+          "inner completion cannot finish an ordinary outer callback");
+    entry_test_mode = 3;
+    check(psx_mod_function_entry(&entry_cpu, 0x80003000u) == 1 &&
+              entry_cpu.pc == 0x80005000u && nested_result == 0,
+          "outer completion survives a nested ordinary callback");
+    entry_test_mode = 4;
+    check(psx_mod_function_entry(&entry_cpu, 0x80003000u) == 1 &&
+              entry_cpu.pc == 0x80005000u && entry_cpu.gpr[2] == 0x87654321u,
+          "entry completion survives VBlank callbacks during a native call");
+    entry_test_mode = 0;
+
+    entry_cpu.gpr[4] = 35u;
+    const uint32_t guest_sp = entry_cpu.gpr[29];
+    check(g_psx_mod_guest_functions == 1 &&
+              psx_mod_dispatch_guest_function(&entry_cpu, 0x8FFF0000u) &&
+              entry_cpu.gpr[2] == 42u && entry_cpu.pc == 0x80005000u &&
+              entry_cpu.gpr[29] == guest_sp,
+          "active callback returns its result through normal guest PC/stack state");
+    check(psx_mod_dispatch_guest_function(&entry_cpu, 0x0FFF0000u) &&
+              psx_mod_dispatch_guest_function(&entry_cpu, 0xAFFF0000u) &&
+              guest_function_hits == 3,
+          "guest callback aliases retain nested entry and VBlank scope");
+    check(!psx_mod_dispatch_guest_function(&entry_cpu, 0x8FFF0004u) &&
+              !psx_mod_dispatch_guest_function(&entry_cpu, 0x8FFF0001u) &&
+              !psx_mod_dispatch_guest_function(&entry_cpu, 0xCFFF0000u) &&
+              !psx_mod_dispatch_guest_function(nullptr, 0x8FFF0000u) &&
+              unselected_entry_hits == 0,
+          "unselected, unknown, misaligned and invalid callback requests fall through");
+
     ram[0x1000] = 1; ram[0x1001] = 2; ram[0x1002] = 3; ram[0x1003] = 4;
     ram[0x1100] = 0; ram[0x1101] = 0;
     ram[0x1102] = 1; ram[0x1103] = 0;
@@ -508,7 +679,12 @@ int main() {
     ram[0x1102] = 1; ram[0x1103] = 0;
     ram[0x1200] = 2; ram[0x1201] = 0;
     ram[0x1202] = 1; ram[0x1203] = 0x32;
+    const int activation_before_restore = activation_calls;
+    const int vblank_before_restore = plugin_calls;
     mod_runtime_on_savestate_loaded();
+    check(restore_calls == 1 && activation_calls == activation_before_restore &&
+              plugin_calls == vblank_before_restore,
+          "restore must rebind hooks without activation or a gameplay VBlank");
     check(ram[0x1000] == 0xa1 && ram[0x1003] == 0xa4 &&
               ram[0x1100] == 42 && ram[0x1102] == 43 &&
               ram[0x1200] == 1 && ram[0x1201] == 0x42 &&
@@ -808,6 +984,163 @@ int main() {
     check(PSXRecompV4::mod_runtime_commit(raw_path,&error),"reader mount raw disc");
     check(psx_mod_read_disc_file("S0/LEVEL.NSF",result.data(),(uint32_t)result.size(),&bytes) &&
           std::equal(result.begin(),result.end(),iso.begin()+22*2048),"raw and ISO reads identical");
+    /* Verified bytes are scoped to the committed feature, and do not depend
+     * on reopening an owner file after launch. No launcher is needed here. */
+    const auto media_root = root / "verified-media";
+    std::vector<uint8_t> rom(64, 0);
+    rom[0] = 0x80; rom[1] = 0x37; rom[2] = 0x12; rom[3] = 0x40;
+    rom[32] = 0x5a;
+    const auto rom_path = media_root / "owner.z64";
+    write_bytes(rom_path, rom);
+    std::vector<uint8_t> xa(2336*2);
+    xa[2]=xa[6]=0x64;xa[8]=0x52;
+    xa[2336+2]=xa[2336+6]=0xE4;xa[2336+8]=0x63;
+    const auto xa_path=media_root/"owner.xa";write_bytes(xa_path,xa);
+    write_text(media_root / "packages/media.test/1.0.0/manifest.toml",
+        "format_version = 8\nid = \"media.test\"\nversion = \"1.0.0\"\nname = \"Media Test\"\n"
+        "[[target]]\ngame_id = \"READER\"\n"
+        "[[feature]]\nid = \"active\"\nname = \"Active\"\ndefault_enabled = true\n"
+        "[[feature]]\nid = \"private\"\nname = \"Private\"\n"
+        "[[resource]]\nfeature = \"active\"\nid = \"rom\"\nlabel = \"ROM\"\n"
+        "format = \"n64-rom\"\nrequired = true\nsize = 64\nsha256 = \"" + sha256_hex(rom) + "\"\n"
+        "[[resource]]\nfeature = \"active\"\nid = \"xa\"\nlabel = \"XA\"\n"
+        "format = \"file\"\nrequired = true\nsize = 4672\nsha256 = \"" + sha256_hex(xa) + "\"\n"
+        "[[resource]]\nfeature = \"private\"\nid = \"private\"\nlabel = \"Private\"\n"
+        "format = \"n64-rom\"\nrequired = true\nsize = 64\nsha256 = \"" + sha256_hex(rom) + "\"\n"
+        "[[plugin]]\nfeature = \"active\"\nid = \"media.test.plugin\"\n");
+    write_text(media_root / "state.toml",
+        "format_version = 2\n[[feature]]\npackage_id = \"media.test\"\nid = \"active\"\nenabled = true\n"
+        "[feature.resources]\nrom = \"" + rom_path.generic_string() + "\"\nxa = \"" + xa_path.generic_string() + "\"\n");
+    check(psx_mod_register_activation_plugin("media.test.plugin", test_media_plugin), "register media consumer");
+    check(PSXRecompV4::mod_runtime_initialize(media_root, "READER", 0, {}, &error), "media initialize");
+    check(PSXRecompV4::mod_runtime_commit(iso_path, &error), "verify and commit owner media");
+    const uint8_t* unavailable = nullptr;
+    uint64_t unavailable_size = 0;
+    check(!psx_mod_current_resource_bytes("rom", &unavailable, &unavailable_size), "bytes unavailable outside plugin callback");
+    mod_runtime_activate_plugins();
+    check(media_access && media_size == rom.size() &&
+          std::equal(rom.begin(), rom.end(), media_snapshot), "plugin receives exact verified bytes");
+    check(!foreign_media_access, "inactive feature cannot supply bytes to another feature");
+    check(extent_ok && mounted_lba==24 && !invalid_extent && !foreign_extent,"activation mounts only owned bounded resource extents");
+    uint32_t bad_lba=1;
+    check(!psx_mod_append_disc_extent("xa",0,1,&bad_lba)&&!bad_lba,"late mounting refused");
+    void* mounted=iso_open(iso_path.string().c_str());
+    check(mounted&&iso_sector_count(mounted)==24,"BIOS sees original disc before activation is enabled");
+    mod_runtime_enable_disc_patches();
+    std::array<uint8_t,12> subq{};int valid=0;
+    check(iso_sector_count(mounted)==26&&iso_track_count(mounted)==2&&
+          iso_track_start_lba(mounted,2)==24&&!iso_track_is_audio(mounted,2),"appended extents expose one data track and leadout");
+    check(iso_read_raw_sector(mounted,24,sector.data(),sector.size())&&sector[12]==0&&sector[13]==2&&sector[14]==0x24&&sector[15]==2&&
+          std::equal(xa.begin(),xa.begin()+2336,sector.begin()+16),"native raw sector header and exact XA subheader/audio bytes");
+    check(iso_read_sector(mounted,25,sector.data(),sector.size())&&sector[0]==0x63,"cooked access resolves the same extent");
+    check(!iso_read_sector(mounted,26,sector.data(),sector.size())&&
+          !iso_read_raw_sector(mounted,24,sector.data(),2351),"extent end and short raw buffers rejected");
+    check(iso_read_subq(mounted,24,subq.data(),subq.size(),&valid)&&valid&&subq[0]==0x41&&subq[1]==2&&subq[5]==0,"appended data track has native subchannel position");
+    check(iso_read_sector(mounted,22,sector.data(),sector.size())&&sector[1]==7,"base sectors unchanged");
+    xa[8]=0xff;write_bytes(xa_path,xa);
+    check(iso_read_raw_sector(mounted,24,sector.data(),sector.size())&&sector[24]==0x52,"streaming uses verified snapshot after external file changes");
+    mod_runtime_activate_plugins();
+    check(mounted_lba==24&&iso_sector_count(mounted)==26,"reactivation has stable LBAs and no duplicate extents");
+    rom[32] ^= 1;
+    write_bytes(rom_path, rom);
+    check(media_snapshot && media_snapshot[32] == 0x5a, "committed bytes survive owner file changes");
+    check(!PSXRecompV4::mod_runtime_commit({}, &error), "new commit rejects modified media");
+    check(PSXRecompV4::mod_runtime_clear_for_netplay(&error), "netplay clears donor plan");
+    check(iso_sector_count(mounted)==24&&iso_track_count(mounted)==1&&
+          !iso_read_raw_sector(mounted,24,sector.data(),sector.size()),"clearing plan removes all donor sectors and restores TOC");
+    iso_close(mounted);
+    /* Plugin activation (native asset preparation) runs before the emulated
+     * drive's disc patches are enabled. Host reads must already return the
+     * committed plan's effective bytes, or a prepared cache would silently
+     * serve original assets under a modded plan. The drive path stays gated. */
+    {
+        const auto patched_root = root / "host-reader-patched";
+        const auto patched_iso = patched_root / "original.iso";
+        /* A byte past the original 3000-byte extent; a mod that grows the file
+         * through its directory record exposes it. */
+        std::vector<uint8_t> grown_iso = iso;
+        grown_iso[22 * 2048 + 3500] = 0x77;
+        write_bytes(patched_iso, grown_iso);
+        write_text(patched_root / "packages/reader.patch/1.0.0/manifest.toml",
+            "format_version = 5\n"
+            "id = \"reader.patch\"\n"
+            "version = \"1.0.0\"\n"
+            "name = \"Reader Patch\"\n"
+            "[[target]]\n"
+            "game_id = \"READER\"\n"
+            "disc_sha256 = \"" + sha256_hex(grown_iso) + "\"\n"
+            "[[feature]]\n"
+            "id = \"asset\"\n"
+            "name = \"Asset\"\n"
+            "[[feature]]\n"
+            "id = \"grow\"\n"
+            "name = \"Grow\"\n"
+            "[[patch]]\n"
+            "feature = \"grow\"\n"
+            "target = \"disc_user\"\n"
+            "offset = " + std::to_string(21 * 2048 + 10) + "\n"
+            "expected = \"b80b0000\"\n"
+            "replace = \"a00f0000\"\n"
+            "[[feature]]\n"
+            "id = \"huge\"\n"
+            "name = \"Huge\"\n"
+            "[[patch]]\n"
+            "feature = \"huge\"\n"
+            "target = \"disc_user\"\n"
+            "offset = " + std::to_string(21 * 2048 + 10) + "\n"
+            "expected = \"b80b0000\"\n"
+            "replace = \"00f82204\"\n"
+            "[[patch]]\n"
+            "feature = \"asset\"\n"
+            "target = \"disc_user\"\n"
+            "offset = " + std::to_string(22 * 2048 + 5) + "\n"
+            "expected = \"23\"\n"
+            "replace = \"5a\"\n");
+        write_text(patched_root / "state.toml",
+            "format_version = 2\n"
+            "[[feature]]\n"
+            "package_id = \"reader.patch\"\n"
+            "id = \"asset\"\n"
+            "enabled = true\n"
+            "[[feature]]\n"
+            "package_id = \"reader.patch\"\n"
+            "id = \"grow\"\n"
+            "enabled = true\n");
+        check(PSXRecompV4::mod_runtime_initialize(patched_root, "READER", 0, {}, &error),
+              "patched reader initialize");
+        check(PSXRecompV4::mod_runtime_commit(patched_iso, &error), "patched reader commit");
+        check(psx_mod_read_disc_file("S0/LEVEL.NSF", nullptr, 0, &bytes) && bytes == 4000,
+              "host disc reads resolve paths through patched directory records");
+        std::vector<uint8_t> effective(4000);
+        check(psx_mod_read_disc_file("S0/LEVEL.NSF", effective.data(),
+                                     (uint32_t)effective.size(), &bytes) &&
+                  bytes == 4000 && effective[5] == 0x5a && effective[3500] == 0x77 &&
+                  std::equal(effective.begin() + 6, effective.begin() + 3000,
+                             iso.begin() + 22 * 2048 + 6),
+              "host disc reads apply the committed plan before the drive is enabled");
+        check(!psx_mod_read_disc_file("S0", nullptr, 0, &bytes),
+              "effective lookup still rejects directories");
+        std::array<uint8_t, 2048> drive_sector{};
+        std::copy_n(iso.begin() + 22 * 2048, 2048, drive_sector.begin());
+        mod_runtime_patch_disc_sector(22, 0, drive_sector.data(), (uint32_t)drive_sector.size());
+        check(drive_sector[5] == 0x23,
+              "the emulated drive path stays original until disc patches are enabled");
+        mod_runtime_enable_disc_patches();
+        mod_runtime_patch_disc_sector(22, 0, drive_sector.data(), (uint32_t)drive_sector.size());
+        check(drive_sector[5] == 0x5a, "enabled drive path applies the same plan");
+        /* Grown archives may exceed 64 MiB (an extended MMX6 ROCK_X6.DAT is
+         * 69,400,576 bytes); the bound is CD capacity, not a fixed cap. */
+        write_text(patched_root / "state.toml",
+            "format_version = 2\n"
+            "[[feature]]\n"
+            "package_id = \"reader.patch\"\n"
+            "id = \"huge\"\n"
+            "enabled = true\n");
+        check(PSXRecompV4::mod_runtime_initialize(patched_root, "READER", 0, {}, &error) &&
+                  PSXRecompV4::mod_runtime_commit(patched_iso, &error), "huge plan commit");
+        check(psx_mod_read_disc_file("S0/LEVEL.NSF", nullptr, 0, &bytes) && bytes == 69400576u,
+              "files grown past 64 MiB keep their effective size");
+    }
     fs::remove_all(root, ec);
     if (failures) return 1;
     std::cout << "mod runtime tests passed\n";

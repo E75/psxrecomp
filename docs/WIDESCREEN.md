@@ -25,6 +25,47 @@ OpenGL `test_gl_readback_region.c` fixture. MMX6 is the first consumer;
 owner gameplay validation is still pending (`beads-eio.3.146`).
 
 ## Earlier squash-mode implementation
+## Explicit native-wide background polygons (September 2026)
+
+A title plugin can call `gpu_ws_tag_background_prim(prim)` for each opaque
+background polygon in a verified composite, before submitting its ordering
+table. The command starts at `prim + 4`; an embedded command can therefore use
+`command_address - 4` even when that preceding word is not a DMA header.
+The framework validates command type, RAM bounds, complete packet contents,
+address and freshness. The title owns the proof that these are backgrounds
+and that their union covers the authored viewport. No fixed game addresses or
+background guesses belong in the shared API.
+
+OpenGL and software rendering stretch only those polygons about the display
+center in the native-wide surface, preserving canonical VRAM and the default
+4:3 path. Tag every part, including flat fills behind textured sky quads, so
+the composite remains continuous. Tags expire after two frames and reject
+reused packets whose words changed. This method performs no guest writes or
+extra guest allocations.
+
+OpenGL preserves the tag across flat and textured batching. Once a valid
+background has been tagged, it renders the full wide composite instead of
+copying the canonical center over it, which would create a scale seam. Packet
+freshness and displayed-pixel lifetime are separate: a slow game or held display
+can retain stretched pixels after the two-frame packet guard expires. The
+full-composite requirement therefore remains latched until GPU reset or snapshot
+restore; packet-address/content freshness is not relaxed. Sessions that have not
+tagged a background retain the center-copy optimization. Measure performance in
+the title and validate the visible sky at the requested aspect before release.
+Vulkan's native-wide compositor is not implemented; this API does not add one.
+
+### Parked validation checkpoint (2026-09-12)
+
+The focused GPU packet/tag regression passes, including expired packets,
+changed packet contents, disabled widescreen and retained composite lifetime.
+The V8 Windows runtime builds and both game CTests pass. In the oil-field
+21:9 playtest the owner reports that terrain looks fine and the background
+flickers less badly, but still flickers. This is partial improvement, not visual
+acceptance. State replay required the HLE scheduler; repeat the comparison with
+matched scheduler settings before attributing the improvement solely to this
+change. Work is parked in a draft; no release is approved.
+
+## Earlier projection-and-stretch implementation
 
 Status as of 2026-06-13. Branch `feat/widescreen` in **both** `psxrecomp`
 (framework) and `TombaRecomp` (game opt-in + config), pushed to remote.
@@ -95,6 +136,10 @@ auto_ui_squash     = true              # pre-scan the current GPU linked list,
                                        # select its highest populated UI rank,
                                        # and share one anchor across each
                                        # complete glyph/icon run.
+auto_ui_anchor     = "edges"           # "edges" (default): each run pins to
+                                       # its left/centre/right third.
+                                       # "in_place": each run squashes about
+                                       # its own centre.
 clear_reveal       = true              # clear synthetic native-wide side margins
                                        # at opted-in scene/map boundaries (default false).
 nw_left_hud_packet_lo = "0x000E3400"  # optional targeted left-HUD packet range
@@ -136,10 +181,28 @@ the RTPS preamble stores the anchor SXY to scratchpad `0x1F800070`.
 
 `auto_ui_squash` is a runtime-only opt-in and does not require regenerated game
 code. It applies only on the projection-and-stretch path: eligible
-axis-aligned textured quads/rectangles in the front populated ordering-table
-layer are grouped by texture and screen row before any command is transformed.
+axis-aligned quads (textured, flat or gouraud) and rectangles in the front
+populated ordering-table layer are grouped by texture and screen row before any
+command is transformed. Untextured quads are included because HUD fills (health
+gradients, meter bars) sit inside textured frames and must squash with them.
+Widget pieces drawn one rank behind the HUD are also admitted, from the next
+populated rank only (it also carries world geometry): an untextured,
+axis-aligned panel that fully encloses an admitted piece (a text box under its
+glyphs), or a small (at most a quarter of the display each way) axis-aligned
+piece that overlaps or stacks within `WS_UI_GROUP_STACK_GAP` rows on an
+admitted piece (a gauge segment and its fill). This repeats to a fixed point.
+`ws_ui_groups` counts these as `backing_panels`.
 Depth-sorted world packets, full-frame backdrops, and true 4:3 frames remain
 untouched.
+
+By default each run is pinned to the nearest screen edge or centre third, so
+corner HUD moves to the wide-frame corners. Some HUD widgets mix those flat
+quads with GTE-projected parts the correction cannot move: Spider-Man's compass
+is two ring quads around a 3D arrow. Edge-anchoring the ring pulled it ~70 px
+off its arrow at 32:9. `auto_ui_anchor = "in_place"` squashes each run about
+its own centre instead, which corrects its proportions and leaves it where the
+stretched 4:3 layout places it. `gpu_state` reports the mode as
+`ws.auto_ui.in_place`.
 
 **Changing `sprite_tag_funcs` requires a game regen** (the tag callback is
 emitted into the generated C). `widescreen.cull.keep` is consumed by both the
@@ -196,6 +259,39 @@ The interpreter's copies of these lists are sorted and capped at 256 entries
 per key; a longer list is logged rather than silently truncated. `bgez_sites`
 and `clip_edge_x_load_sites` enter the overlay-cache identity only when they
 are non-empty, so titles that do not use them keep their caches.
+
+`screen_x_sites` is the explicit form of the `auto_screen_x` compare, for a
+title whose width is not in `screen_w_imms` or whose function has no paired
+height compare. It takes three instructions:
+
+| Instruction at the site | While widened |
+|---|---|
+| `sltiu rt, SX, W` | `rt = -m <= SX < W + m` |
+| `lui rt, W` (a screen edge kept as `W << 16`) | `rt = (W + m) << 16`; a negative `W` moves left instead |
+| `bltz x, outside` where `x` is `SX << 16` | taken while `SX < -m` |
+
+The last two cover a renderer that keeps a screen X in the high half of a
+register (`sll x, sx, 16`), tests the sign of differences against a `lui`-held
+edge and masks whole points at once; polygon splitters do this. `bltz_sites`
+does not fit that `bltz`: it compares the whole register with `-m`, and every
+negative `SX << 16` is far below that. Widen such tests rather than keeping
+the branch: a splitter that takes its pieces from a fixed list runs out of
+entries when every off-screen half is kept, and then drops polygons inside
+the 4:3 area.
+
+```toml
+[widescreen.cull]
+screen_x_sites = [
+  "0x80010100",   # sltiu s0,v1,0x200   midpoint inside the screen?
+  "0x80010200",   # lui   s6,0x200      right edge as 512 << 16
+  "0x80010210",   # bltz  t0,outside    t0 = SX << 16
+]
+```
+
+`screen_x_sites` is applied when code is generated: native code and overlay
+shards. The dirty-RAM interpreter does not consult this list. In the main EXE
+a listed address holding another non-branch instruction is a hard build error;
+a branch other than `bltz` at a listed address is left as it is.
 
 ---
 

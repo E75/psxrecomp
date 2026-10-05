@@ -157,6 +157,10 @@ def prune_after_rebuild(
             progress.log(f"Pruned build tree to binary+assets under {build_dir}")
 
 
+# Windows Python has no lutimes; follow_symlinks=False raises NotImplementedError.
+_UTIME_NOFOLLOW = os.utime in os.supports_follow_symlinks
+
+
 def clamp_future_mtimes(
     root: Path,
     *,
@@ -213,7 +217,14 @@ def clamp_future_mtimes(
                 continue
             if mtime > stamp:
                 try:
-                    os.utime(p, (stamp, stamp), follow_symlinks=False)
+                    if _UTIME_NOFOLLOW:
+                        os.utime(p, (stamp, stamp), follow_symlinks=False)
+                    elif p.is_symlink():
+                        # Windows cannot retime a link itself; never retime
+                        # the target it points outside the tree at.
+                        continue
+                    else:
+                        os.utime(p, (stamp, stamp))
                     n += 1
                 except OSError:
                     pass
@@ -398,12 +409,24 @@ def ensure_emitters(
     Generate & rebuild without a pre-staged setup-host SDK.
     """
     if not force:
+        # With the framework's recompiler sources present, always run the
+        # (incremental) build: a binary that merely exists may predate the
+        # sources -- a submodule moved to another revision -- and would emit
+        # code for the old framework without a word (a hook site listed in
+        # game.toml silently missing). Ninja makes the up-to-date case cheap.
+        # Without sources (an SDK pack), the staged binaries are the only ones.
         try:
-            game, bios = find_emitters(project_root)
-            progress.log(f"Emitters ready: {game}, {bios}")
-            return game, bios
+            recompiler_source_dir(project_root)
+            have_sources = True
         except FileNotFoundError:
-            pass
+            have_sources = False
+        if not have_sources:
+            try:
+                game, bios = find_emitters(project_root)
+                progress.log(f"Emitters ready: {game}, {bios}")
+                return game, bios
+            except FileNotFoundError:
+                pass
 
     progress.phase(
         "emitters",
@@ -2036,8 +2059,7 @@ def cmd_rebuild(args: argparse.Namespace, progress: ProgressReporter) -> int:
         "-DPSXRECOMP_ALLOW_NO_BIOS=OFF",
         "-DPSXRECOMP_REQUIRE_GAME_C=ON",
     ]
-    if args.cmake_extra:
-        cmake_extra.extend(args.cmake_extra)
+    user_extra = list(args.cmake_extra or [])
 
     clamped = clamp_future_mtimes(project_root, skip=build_dir)
     if clamped:
@@ -2067,7 +2089,7 @@ def cmd_rebuild(args: argparse.Namespace, progress: ProgressReporter) -> int:
         if not pgo_enabled:
             progress.phase("build", pct=0.2, message="cmake Release build...")
             _cmake_configure(
-                project_root, build_dir, pgo="", extra=cmake_extra + ["-DPSX_DEBUG_TOOLS=OFF"], progress=progress
+                project_root, build_dir, pgo="", extra=cmake_extra + ["-DPSX_DEBUG_TOOLS=OFF"] + user_extra, progress=progress
             )
             _cmake_build(build_dir, target, progress)
         else:
@@ -2087,7 +2109,7 @@ def cmd_rebuild(args: argparse.Namespace, progress: ProgressReporter) -> int:
                 project_root,
                 build_dir,
                 pgo="generate",
-                extra=cmake_extra + ["-DPSX_DEBUG_TOOLS=ON"],
+                extra=cmake_extra + user_extra + ["-DPSX_DEBUG_TOOLS=ON"],
                 progress=progress,
             )
             _cmake_build(build_dir, target, progress)
@@ -2114,7 +2136,7 @@ def cmd_rebuild(args: argparse.Namespace, progress: ProgressReporter) -> int:
                 project_root,
                 build_dir,
                 pgo="use",
-                extra=cmake_extra + ["-DPSX_DEBUG_TOOLS=OFF"],
+                extra=cmake_extra + ["-DPSX_DEBUG_TOOLS=OFF"] + user_extra,
                 progress=progress,
             )
             _cmake_build(build_dir, target, progress)

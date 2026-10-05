@@ -66,6 +66,7 @@ struct CodeGenConfig {
     // Trusted game-mod entry hooks ([recompiler] mod_function_entry_funcs).
     // Only explicitly listed guest functions call the runtime dispatcher.
     std::set<uint32_t> mod_function_entry_funcs;
+    std::set<uint32_t> mod_instruction_sites;
 
     // [recompiler] hot_funcs: emit __attribute__((hot)) on these guest
     // addresses (MotK VLC leaves, etc.). Host locality hint only.
@@ -172,10 +173,17 @@ struct CodeGenConfig {
     // Exact, full-word-guarded comparison sites whose result is forced only
     // while widescreen reveals extra world. 4:3 evaluates the original compare.
     std::vector<PSXRecompV4::WidescreenCullKeepSite> ws_cull_keep_sites;
+    std::vector<PSXRecompV4::WidescreenMaskedRejectSite> ws_cull_masked_reject_sites;
+    std::vector<PSXRecompV4::WidescreenCullScaleSite> ws_cull_scale_sites;
 
     // Exact `addi[u] rt,zero,imm` 12-bit angular half-extents. The runtime
     // scales tan(angle) by the current horizontal reveal factor.
     std::vector<PSXRecompV4::WidescreenAngleSite> ws_cull_angle_sites;
+
+    // [[draw_distance.clamp]]: main-EXE ordering-table range guards. While
+    // g_psx_draw_distance_clamp is set the site's register is clamped to its
+    // max before the instruction runs; overlay code keeps its own code.
+    std::vector<PSXRecompV4::DrawDistanceClampSite> draw_distance_clamp_sites;
 
     // Exact model-participation cosine compares that gain a camera-horizontal
     // aspect envelope while preserving the vanilla vertical cone.
@@ -481,6 +489,10 @@ private:
 
     // Instruction translation
     std::string translate_instruction(uint32_t addr, uint32_t instr);
+    std::string translate_instruction_core(uint32_t addr, uint32_t instr);
+    // The [[draw_distance.clamp]] statement for (addr, instr), or "".
+    std::string draw_distance_clamp_prefix(uint32_t addr, uint32_t instr) const;
+    std::string mod_instruction_call(uint32_t addr, uint32_t instr) const;
 
     // Register name mapping
     static std::string reg_name(int reg_num);

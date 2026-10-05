@@ -7,7 +7,9 @@
 #include "mod_plugins.h"
 #include "gpu.h"
 #include "psx_memory.h"
+#include "render_pass_projection.h"
 #include "psx_sha256.h"
+#include "cpu_state.h"
 
 #if defined(RECOMP_LAUNCHER)
 #include "recomp_launcher.h"
@@ -54,11 +56,19 @@ extern "C" int fntrace_is_game_started(void);
 
 /* Declared in mod_plugins.h; see active_function_entry_hooks() below. */
 uint32_t g_psx_mod_function_entry_hooks = 0;
+uint32_t g_psx_mod_guest_functions = 0;
+uint32_t g_psx_mod_instruction_hooks = 0;
+/* Guest vblanks seen by the mod runtime: the plugin counters' time base. */
+static uint64_t g_mod_vblanks = 0;
 
 namespace PSXRecompV4 {
 namespace {
 
 struct RuntimeMods {
+    struct DiscExtent { uint32_t lba, count; const uint8_t* data; };
+    std::vector<DiscExtent> disc_extents;
+    uint32_t extent_start = 0;
+    bool activating = false;
     ModPackageManager manager;
     ModResolution plan;
     ModResolution validation;
@@ -78,12 +88,41 @@ struct RuntimeMods {
     bool disc_enabled = false;
     bool disc_guard_failed = false;
     const ModResolution::Plugin* current_plugin = nullptr;
+    CPUState* current_function_cpu = nullptr;
+    bool current_function_finished = false;
 };
 
 RuntimeMods& state() {
     static RuntimeMods value;
     return value;
 }
+
+/* Guest calls made from an entry hook can deliver VBlank callbacks before
+ * returning. Every callback owns its resource/completion context; restoring
+ * only entry hooks would let VBlank erase the interrupted plugin or complete
+ * a function that belongs to another callback. */
+class PluginCallbackScope {
+    RuntimeMods& runtime;
+    const ModResolution::Plugin* previous_plugin;
+    CPUState* previous_cpu;
+    bool previous_finished;
+public:
+    PluginCallbackScope(RuntimeMods& s, const ModResolution::Plugin* plugin,
+                        CPUState* cpu = nullptr)
+        : runtime(s), previous_plugin(s.current_plugin),
+          previous_cpu(s.current_function_cpu), previous_finished(s.current_function_finished) {
+        s.current_plugin = plugin;
+        s.current_function_cpu = cpu;
+        s.current_function_finished = false;
+    }
+    ~PluginCallbackScope() {
+        runtime.current_plugin = previous_plugin;
+        runtime.current_function_cpu = previous_cpu;
+        runtime.current_function_finished = previous_finished;
+    }
+    PluginCallbackScope(const PluginCallbackScope&) = delete;
+    PluginCallbackScope& operator=(const PluginCallbackScope&) = delete;
+};
 
 /* Function-entry hooks of the ACTIVE plan, flattened at plugin activation into
  * one table sorted by code key (address with the segment bits stripped, so a
@@ -105,6 +144,21 @@ std::vector<ActiveFunctionEntryHook>& active_function_entry_hooks() {
 }
 unsigned function_entry_depth;
 
+std::vector<ActiveFunctionEntryHook>& active_guest_functions() {
+    static std::vector<ActiveFunctionEntryHook> value;
+    return value;
+}
+
+struct ActiveInstructionHook {
+    uint32_t key, expected;
+    PSXModFunctionEntryCallback callback;
+    const ModResolution::Plugin* plugin;
+};
+std::vector<ActiveInstructionHook>& active_instruction_hooks() {
+    static std::vector<ActiveInstructionHook> value;
+    return value;
+}
+
 inline uint32_t function_entry_key(uint32_t address) {
     return address & 0x1FFFFFFFu;
 }
@@ -112,6 +166,10 @@ inline uint32_t function_entry_key(uint32_t address) {
 void clear_function_entry_hooks() {
     active_function_entry_hooks().clear();
     g_psx_mod_function_entry_hooks = 0;
+    active_guest_functions().clear();
+    g_psx_mod_guest_functions = 0;
+    active_instruction_hooks().clear();
+    g_psx_mod_instruction_hooks = 0;
 }
 
 void build_function_entry_hooks(const RuntimeMods& s) {
@@ -127,6 +185,20 @@ void build_function_entry_hooks(const RuntimeMods& s) {
                      [](const ActiveFunctionEntryHook& a,
                         const ActiveFunctionEntryHook& b) { return a.key < b.key; });
     g_psx_mod_function_entry_hooks = (uint32_t)table.size();
+    auto& functions = active_guest_functions();
+    for (const auto& plugin : s.plan.plugins)
+        for (const auto& function : mod_guest_functions(plugin.id))
+            functions.push_back({function.address, function.callback, nullptr, &plugin});
+    std::sort(functions.begin(), functions.end(),
+              [](const auto& a, const auto& b) { return a.key < b.key; });
+    g_psx_mod_guest_functions = (uint32_t)functions.size();
+    auto& instructions = active_instruction_hooks();
+    for (const auto& plugin : s.plan.plugins)
+        for (const auto& hook : mod_instruction_hooks(plugin.id))
+            instructions.push_back({hook.address, hook.expected, hook.callback, &plugin});
+    std::stable_sort(instructions.begin(), instructions.end(),
+                    [](const auto& a, const auto& b) { return a.key < b.key; });
+    g_psx_mod_instruction_hooks = (uint32_t)instructions.size();
 }
 
 const ModPackage* selected_package(const std::string& id) {
@@ -1155,6 +1227,8 @@ bool mod_runtime_initialize(const std::filesystem::path& root,
     RuntimeMods& s = state();
     s.manager.set_root({});
     clear_function_entry_hooks();
+    s.disc_extents.clear();
+    s.extent_start = 0;
     s.plan = {};
     s.validation = {};
     s.raw_disc_index.clear();
@@ -1209,6 +1283,8 @@ bool mod_runtime_clear_for_netplay(std::string* error) {
         return true;
     }
     clear_function_entry_hooks();
+    s.disc_extents.clear();
+    s.extent_start = 0;
     s.plan = {};
     s.validation = {};
     s.raw_disc_index.clear();
@@ -1282,6 +1358,8 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* err
     /* Hooks follow activation, never a bare commit: a new plan runs none of
      * its function-entry hooks until mod_runtime_activate_plugins(). */
     clear_function_entry_hooks();
+    s.disc_extents.clear();
+    s.extent_start = 0;
     s.plan = std::move(plan);
     build_disc_index(s);
     s.effective_disc_path = std::move(effective_disc);
@@ -1364,6 +1442,11 @@ extern "C" void mod_runtime_on_savestate_loaded(void) {
         applied = true;
     }
     s.main_applied = true;
+    for (const ModResolution::Plugin& plugin : s.plan.plugins) {
+        s.current_plugin = &plugin;
+        mod_invoke_savestate_plugin(plugin.id);
+        s.current_plugin = nullptr;
+    }
     if (applied)
         std::fprintf(stdout,
             "psxrecomp: reapplied mod plan %s after savestate restore\n",
@@ -1372,6 +1455,147 @@ extern "C" void mod_runtime_on_savestate_loaded(void) {
 
 extern "C" void mod_runtime_enable_disc_patches(void) {
     PSXRecompV4::state().disc_enabled = true;
+}
+
+extern "C" int psx_mod_append_disc_extent(const char* resource_id,
+        uint64_t byte_offset, uint32_t sector_count, uint32_t* first_lba) {
+    using namespace PSXRecompV4;
+    if (first_lba) *first_lba = 0;
+    auto& s = state();
+    const uint8_t* data = nullptr;
+    uint64_t size = 0;
+    if (!s.activating || !first_lba || !sector_count ||
+        !psx_mod_current_resource_bytes(resource_id, &data, &size) ||
+        byte_offset > size || uint64_t(sector_count)*2336 > size-byte_offset) return 0;
+    try {
+        uint32_t start = s.extent_start;
+        if (s.disc_extents.empty()) {
+            PS1::ISOReader reader;
+            const auto& mount = s.effective_disc_path.empty() ? s.disc_path : s.effective_disc_path;
+            if (mount.empty() || !reader.Open(mount.string()) || reader.TrackCount() >= 99) return 0;
+            start = reader.GetSectorCount();
+            if (!start) return 0;
+        }
+        const uint32_t lba = s.disc_extents.empty() ? start :
+            s.disc_extents.back().lba + s.disc_extents.back().count;
+        if (uint64_t(lba)+sector_count+150 > 450000) return 0;
+        // Mode-2's duplicated subheader is part of the format contract.
+        for (uint32_t i=0; i<sector_count; ++i) {
+            const auto* sector = data+byte_offset+uint64_t(i)*2336;
+            if (std::memcmp(sector,sector+4,4)) return 0;
+        }
+        s.disc_extents.push_back({lba,sector_count,data+byte_offset});
+        s.extent_start = start;
+        *first_lba = lba;
+        return 1;
+    } catch (...) { return 0; }
+}
+
+extern "C" uint32_t mod_runtime_disc_extent_start(void) {
+    const auto& s=PSXRecompV4::state();
+    return s.disc_enabled && !s.disc_extents.empty() ? s.extent_start : 0;
+}
+extern "C" uint32_t mod_runtime_disc_sector_count(uint32_t base_count) {
+    const auto& s=PSXRecompV4::state();
+    return mod_runtime_disc_extent_start() ?
+        std::max(base_count,s.disc_extents.back().lba+s.disc_extents.back().count) : base_count;
+}
+extern "C" int mod_runtime_read_disc_extent(uint32_t lba, int raw,
+        uint8_t* bytes, uint32_t size) {
+    if (!bytes || size < (raw ? 2352u : 2048u) || !mod_runtime_disc_extent_start()) return 0;
+    const auto& extents=PSXRecompV4::state().disc_extents;
+    for (const auto& e:extents) if (lba>=e.lba && lba-e.lba<e.count) {
+        const auto* sector=e.data+uint64_t(lba-e.lba)*2336;
+        if (raw) {
+            std::memset(bytes,0,16);std::memset(bytes+1,0xff,10);
+            const uint32_t msf=lba+150;
+            const auto bcd=[](uint32_t v) {return uint8_t((v/10)*16+v%10);};
+            bytes[12]=bcd(msf/4500);bytes[13]=bcd(msf/75%60);bytes[14]=bcd(msf%75);bytes[15]=2;
+            std::memcpy(bytes+16,sector,2336);
+        } else std::memcpy(bytes,sector+8,2048);
+        return 1;
+    }
+    return 0;
+}
+
+static void patch_committed_disc_sector(uint32_t lba, int raw_sector,
+                                        uint8_t* bytes, uint32_t size);
+
+/* The largest file a CD can hold (80-minute disc, 360,000 sectors). Mods may
+ * grow an archive past its original extent, e.g. into a padding file. */
+static constexpr uint32_t kMaxDiscFileBytes = 360000u * 2048u;
+
+/* One 2048-byte user-data sector of the effective disc: the committed plan's
+ * raw and user-data writes/overlays applied. Form 2 (XA) sectors are refused. */
+static bool read_effective_user_sector(PS1::ISOReader& reader, uint32_t lba,
+                                       uint8_t* sector) {
+    uint8_t raw[2352];
+    if (reader.ReadRawSector(lba, raw)) {
+        if (raw[15] != 1 && (raw[15] != 2 || (raw[18] & 0x20u))) return false;
+        patch_committed_disc_sector(lba, 1, raw, sizeof raw);
+        std::memcpy(sector, raw + (raw[15] == 1 ? 16 : 24), 2048);
+        if (raw[15] == 1) patch_committed_disc_sector(lba, 0, sector, 2048);
+    } else {
+        if (!reader.ReadSector(lba, sector)) return false;
+        patch_committed_disc_sector(lba, 0, sector, 2048);
+    }
+    return !PSXRecompV4::state().disc_guard_failed;
+}
+
+/* ISO 9660 path lookup through the effective directory records. Mods may
+ * relocate or grow a file by patching its directory record (e.g. an archive
+ * extended into the following padding file); the emulated drive serves those
+ * patched records, so host reads must resolve paths through them too. Names
+ * compare case-insensitively without the ";1" version suffix. */
+static bool find_effective_file(PS1::ISOReader& reader, const std::string& path,
+                                uint32_t& lba, uint32_t& bytes, bool& directory) {
+    uint8_t sector[2048];
+    auto le32 = [](const uint8_t* p) {
+        return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+               ((uint32_t)p[3] << 24);
+    };
+    if (!read_effective_user_sector(reader, 16, sector) || sector[0] != 1 ||
+        std::memcmp(sector + 1, "CD001", 5) != 0) return false;
+    lba = le32(sector + 156 + 2);
+    bytes = le32(sector + 156 + 10);
+    directory = true;
+    size_t at = 0;
+    while (at < path.size()) {
+        size_t next = path.find_first_of("/\\", at);
+        if (next == std::string::npos) next = path.size();
+        std::string want = path.substr(at, next - at);
+        at = next + 1;
+        if (want.empty()) continue;
+        if (!directory) return false;
+        std::transform(want.begin(), want.end(), want.begin(),
+                       [](unsigned char c) { return (char)std::toupper(c); });
+        bool found = false;
+        const uint32_t sectors = (bytes + 2047u) / 2048u;
+        for (uint32_t i = 0; i < sectors && !found; ++i) {
+            if (!read_effective_user_sector(reader, lba + i, sector)) return false;
+            for (uint32_t p = 0; p < 2048u && sector[p] && !found;) {
+                const uint32_t length = sector[p];
+                if (length < 34 || p + length > 2048u ||
+                    33u + sector[p + 32] > length) return false;
+                std::string name(reinterpret_cast<const char*>(sector + p + 33),
+                                 sector[p + 32]);
+                name = name.substr(0, name.find(';'));
+                std::transform(name.begin(), name.end(), name.begin(),
+                               [](unsigned char c) { return (char)std::toupper(c); });
+                if (sector[p + 32] == 1 && (sector[p + 33] == 0 || sector[p + 33] == 1))
+                    name.clear();
+                if (!name.empty() && name == want) {
+                    lba = le32(sector + p + 2);
+                    bytes = le32(sector + p + 10);
+                    directory = (sector[p + 25] & 2u) != 0;
+                    found = true;
+                }
+                p += length;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
 }
 
 extern "C" int psx_mod_read_disc_file(const char* path, void* buffer,
@@ -1384,54 +1608,110 @@ extern "C" int psx_mod_read_disc_file(const char* path, void* buffer,
         const auto& mount = s.effective_disc_path.empty() ? s.disc_path : s.effective_disc_path;
         if (mount.empty()) return 0;
         PS1::ISOReader reader;
-        PS1::ISOFileEntry entry;
-        if (!reader.Open(mount.string()) || !reader.FindFile(path, entry) ||
-            entry.is_directory || !entry.size || entry.size > 64u * 1024u * 1024u)
+        uint32_t lba = 0, bytes = 0;
+        bool directory = false;
+        if (!reader.Open(mount.string()) ||
+            !find_effective_file(reader, path, lba, bytes, directory) ||
+            directory || !bytes || bytes > kMaxDiscFileBytes)
             return 0;
-        if (!buffer) { *size = entry.size; return 1; }
-        if (capacity < entry.size) return 0;
-        uint8_t sector[2048], raw[2352];
-        for (uint32_t offset = 0; offset < entry.size; offset += 2048u) {
-            const uint32_t lba = entry.lba + offset / 2048u;
-            if (reader.ReadRawSector(lba, raw)) {
-                if (raw[15] != 1 && (raw[15] != 2 || (raw[18] & 0x20u))) return 0;
-                mod_runtime_patch_disc_sector(lba, 1, raw, sizeof raw);
-                std::memcpy(sector, raw + (raw[15] == 1 ? 16 : 24), sizeof sector);
-                if (raw[15] == 1) mod_runtime_patch_disc_sector(lba, 0, sector, sizeof sector);
-            } else {
-                if (!reader.ReadSector(lba, sector)) return 0;
-                mod_runtime_patch_disc_sector(lba, 0, sector, sizeof sector);
-            }
-            if (state().disc_guard_failed) return 0;
-            const uint32_t count = std::min(2048u, entry.size - offset);
+        if (!buffer) { *size = bytes; return 1; }
+        if (capacity < bytes) return 0;
+        uint8_t sector[2048];
+        for (uint32_t offset = 0; offset < bytes; offset += 2048u) {
+            if (!read_effective_user_sector(reader, lba + offset / 2048u, sector)) return 0;
+            const uint32_t count = std::min(2048u, bytes - offset);
             std::memcpy(static_cast<uint8_t*>(buffer) + offset, sector, count);
         }
-        *size = entry.size;
+        *size = bytes;
         return 1;
     } catch (...) { return 0; }
 }
 
+extern "C" int psx_mod_disc_file_extent(const char* path, uint32_t* lba,
+                                        uint32_t* size) {
+    using namespace PSXRecompV4;
+    if (lba) *lba = 0;
+    if (size) *size = 0;
+    if (!path || !*path || !lba || !size) return 0;
+    try {
+        const auto& s = state();
+        const auto& mount = s.effective_disc_path.empty() ? s.disc_path : s.effective_disc_path;
+        if (mount.empty()) return 0;
+        PS1::ISOReader reader;
+        uint32_t first = 0, bytes = 0;
+        bool directory = false;
+        if (!reader.Open(mount.string()) ||
+            !find_effective_file(reader, path, first, bytes, directory) ||
+            directory || !bytes || bytes > kMaxDiscFileBytes)
+            return 0;
+        *lba = first;
+        *size = bytes;
+        return 1;
+    } catch (...) { return 0; }
+}
+
+namespace PSXRecompV4 {
+/* Whole effective sectors, including the bytes after end-of-file in the last
+ * sector: a sector-granular read by the game receives exactly these. */
+bool mod_runtime_read_disc_file_sectors(const std::string& path, uint32_t max_bytes,
+                                        std::vector<uint8_t>& padded, uint32_t& lba,
+                                        uint32_t& size, std::string* error) {
+    padded.clear();
+    lba = size = 0;
+    auto fail = [&](const std::string& why) {
+        if (error) *error = path + ": " + why;
+        padded.clear();
+        return false;
+    };
+    try {
+        const auto& s = state();
+        const auto& mount = s.effective_disc_path.empty() ? s.disc_path : s.effective_disc_path;
+        if (mount.empty()) return fail("no disc mounted");
+        PS1::ISOReader reader;
+        bool directory = false;
+        if (!reader.Open(mount.string())) return fail("cannot open disc");
+        if (!find_effective_file(reader, path, lba, size, directory) || directory)
+            return fail("not found on the disc");
+        if (!size || size > kMaxDiscFileBytes || (max_bytes && size > max_bytes))
+            return fail("unsupported size " + std::to_string(size));
+        const uint32_t sectors = (size + 2047u) / 2048u;
+        padded.resize(size_t(sectors) * 2048u);
+        for (uint32_t i = 0; i < sectors; ++i)
+            if (!read_effective_user_sector(reader, lba + i, padded.data() + size_t(i) * 2048u))
+                return fail("unreadable sector " + std::to_string(lba + i));
+        return true;
+    } catch (const std::exception& e) {
+        return fail(e.what());
+    }
+}
+} // namespace PSXRecompV4
+
 extern "C" void mod_runtime_activate_plugins(void) {
     using namespace PSXRecompV4;
     RuntimeMods& s = state();
+    psx_projection_reset_session();
+    gpu_ws_set_native_scene_predicate(nullptr);
     psx_ram_reset_size_request();
     if (!s.initialized || !s.plan.ok) return;
+    s.disc_extents.clear();
+    s.extent_start = 0;
+    s.activating = true;
     for (const ModResolution::Plugin& plugin : s.plan.plugins) {
-        s.current_plugin = &plugin;
+        PluginCallbackScope scope(s, &plugin);
         mod_invoke_activation_plugin(plugin.id);
-        s.current_plugin = nullptr;
     }
+    s.activating = false;
     build_function_entry_hooks(s);
 }
 
 extern "C" void mod_runtime_on_vblank(void) {
     using namespace PSXRecompV4;
+    ++g_mod_vblanks;
     RuntimeMods& s = state();
     if (!s.initialized || !s.plan.ok) return;
     for (const ModResolution::Plugin& plugin : s.plan.plugins) {
-        s.current_plugin = &plugin;
+        PluginCallbackScope scope(s, &plugin);
         mod_invoke_vblank_plugin(plugin.id);
-        s.current_plugin = nullptr;
     }
 }
 
@@ -1488,6 +1768,27 @@ extern "C" uint8_t psx_mod_read_byte(uint32_t address) {
     return psx_read_byte(address);
 }
 
+extern "C" int psx_mod_current_resource_bytes(const char* resource_id,
+                                               const uint8_t** bytes,
+                                               uint64_t* size) {
+    using namespace PSXRecompV4;
+    if (bytes) *bytes = nullptr;
+    if (size) *size = 0;
+    if (!resource_id || !*resource_id || !bytes || !size) return 0;
+    const auto& s = state();
+    if (!s.initialized || !s.plan.ok || !s.current_plugin) return 0;
+    for (const auto& resource : s.plan.resources) {
+        if (resource.package_id == s.current_plugin->package_id &&
+            resource.feature_id == s.current_plugin->feature_id &&
+            resource.id == resource_id && resource.bytes) {
+            *bytes = resource.bytes->data();
+            *size = resource.bytes->size();
+            return 1;
+        }
+    }
+    return 0;
+}
+
 extern "C" void psx_mod_write_byte(uint32_t address, uint8_t value) {
     psx_host_write_byte(address, value);
 }
@@ -1523,12 +1824,71 @@ extern "C" uint32_t psx_mod_alloc_gpu_dma_memory(uint32_t size,
     return psx_mod_gpu_dma_memory_alloc(size, alignment);
 }
 
+namespace {
+struct ModCounter {
+    const char* name = nullptr;   /* caller literal; compared by content */
+    uint64_t count = 0;
+    uint64_t last_frame = 0;
+};
+constexpr size_t kModCounterCap = 128;
+ModCounter g_mod_counters[kModCounterCap];
+size_t g_mod_counter_count = 0;
+uint64_t g_mod_counter_overflow = 0;
+}  // namespace
+
+extern "C" void psx_mod_counter_add(const char* name, uint32_t delta) {
+    if (!name || !name[0]) return;
+    for (size_t i = 0; i < g_mod_counter_count; i++) {
+        ModCounter& c = g_mod_counters[i];
+        if (c.name == name || std::strcmp(c.name, name) == 0) {
+            c.count += delta;
+            c.last_frame = g_mod_vblanks;
+            return;
+        }
+    }
+    if (g_mod_counter_count == kModCounterCap) {
+        g_mod_counter_overflow += delta;
+        return;
+    }
+    ModCounter& c = g_mod_counters[g_mod_counter_count++];
+    c.name = name;
+    c.count = delta;
+    c.last_frame = g_mod_vblanks;
+}
+
+/* Debug-server accessor: copies up to `cap` entries; returns the total count
+ * of distinct counters and writes the overflow bucket. */
+extern "C" int psx_mod_counters_snapshot(const char** names, uint64_t* counts,
+                                         uint64_t* last_frames, int cap,
+                                         uint64_t* overflow) {
+    const int n = (int)g_mod_counter_count;
+    for (int i = 0; i < n && i < cap; i++) {
+        names[i] = g_mod_counters[i].name;
+        counts[i] = g_mod_counters[i].count;
+        last_frames[i] = g_mod_counters[i].last_frame;
+    }
+    if (overflow) *overflow = g_mod_counter_overflow;
+    return n;
+}
+
 extern "C" int32_t psx_mod_widescreen_x_margin(void) {
     return (int32_t)psx_ws_x_margin();
+}
+extern "C" int32_t psx_mod_widescreen_view_x_margin(void) {
+    return (int32_t)gpu_ws_configured_x_reveal();
 }
 
 extern "C" void psx_mod_tag_hud_primitive(uint32_t primitive, int edge) {
     gpu_ws_tag_hud_primitive(primitive, edge);
+}
+extern "C" void psx_mod_anchor_hud_primitive(uint32_t primitive, int edge) {
+    gpu_ws_tag_hud_prim(primitive, edge);
+}
+extern "C" void psx_mod_tag_screen_mask_quad(uint32_t primitive) {
+    gpu_ws_tag_screen_mask_quad(primitive);
+}
+extern "C" void psx_mod_tag_radial_screen_mask_quad(uint32_t primitive, float scale) {
+    gpu_ws_tag_radial_screen_mask_quad(primitive, scale);
 }
 
 extern "C" void psx_mod_tag_world_primitive(uint32_t primitive, int is_world) {
@@ -1574,6 +1934,55 @@ extern "C" int psx_mod_register_function_filter_plugin(
     return mod_register_function_filter_plugin(id, address, callback) ? 1 : 0;
 }
 
+extern "C" int psx_mod_finish_function(CPUState* cpu) {
+    using namespace PSXRecompV4;
+    RuntimeMods& s = state();
+    if (!cpu || s.current_function_cpu != cpu || !s.current_plugin) return 0;
+    s.current_function_finished = true;
+    return 1;
+}
+
+extern "C" int psx_mod_register_guest_function_plugin(
+    const char* id, uint32_t address, PSXModFunctionEntryCallback callback) {
+    return id && PSXRecompV4::mod_register_guest_function_plugin(id, address, callback);
+}
+
+extern "C" int psx_mod_dispatch_guest_function(CPUState* cpu, uint32_t address) {
+    using namespace PSXRecompV4;
+    if (!g_psx_mod_guest_functions || !cpu || address >= 0xC0000000u) return 0;
+    const auto& functions = active_guest_functions();
+    const uint32_t key = function_entry_key(address);
+    auto it = std::lower_bound(functions.begin(), functions.end(), key,
+        [](const auto& function, uint32_t k) { return function.key < k; });
+    if (it == functions.end() || it->key != key) return 0;
+    PluginCallbackScope scope(state(), it->plugin, cpu);
+    it->callback(cpu, address);
+    cpu->pc = cpu->gpr[31];
+    return 1;
+}
+
+extern "C" int psx_mod_register_instruction_plugin(const char* id, uint32_t address,
+                                                    uint32_t expected, PSXModFunctionEntryCallback callback) {
+    return id && PSXRecompV4::mod_register_instruction_plugin(id, address, expected, callback);
+}
+
+extern "C" void psx_mod_instruction(CPUState* cpu, uint32_t address, uint32_t instruction) {
+    using namespace PSXRecompV4;
+    if (!g_psx_mod_instruction_hooks || !cpu || address >= 0xC0000000u) return;
+    const auto& hooks = active_instruction_hooks();
+    const auto key = function_entry_key(address);
+    auto it = std::lower_bound(hooks.begin(), hooks.end(), key,
+                              [](const auto& h, uint32_t k) { return h.key < k; });
+    for (; it != hooks.end() && it->key == key; ++it) {
+        if (it->expected != instruction || psx_mod_read_word(address) != instruction) continue;
+        PluginCallbackScope scope(state(), it->plugin, nullptr);
+        const uint32_t pc = cpu->pc;
+        it->callback(cpu, address);
+        if (cpu->pc != pc) std::abort();
+        cpu->gpr[0] = 0;
+    }
+}
+
 extern "C" int psx_mod_function_entry(CPUState* cpu, uint32_t address) {
     using namespace PSXRecompV4;
     if (!g_psx_mod_function_entry_hooks || !cpu) return 0;
@@ -1584,13 +1993,14 @@ extern "C" int psx_mod_function_entry(CPUState* cpu, uint32_t address) {
         table.begin(), table.end(), key,
         [](const ActiveFunctionEntryHook& hook, uint32_t k) { return hook.key < k; });
     for (; it != table.end() && it->key == key; ++it) {
-        const ModResolution::Plugin* previous = s.current_plugin;
-        s.current_plugin = it->plugin;
+        PluginCallbackScope scope(s, it->plugin, cpu);
         ++function_entry_depth;
         if (it->callback) it->callback(cpu, address);
-        const int handled = it->filter && it->filter(cpu, address);
+        /* Either completion form skips the body: an entry callback that
+         * called psx_mod_finish_function(), or a filter returning nonzero. */
+        const bool handled = s.current_function_finished ||
+            (it->filter && it->filter(cpu, address));
         --function_entry_depth;
-        s.current_plugin = previous;
         if (handled) {
             cpu->pc = cpu->gpr[31];
             return 1;
@@ -1603,12 +2013,27 @@ extern "C" int psx_mod_function_entry_active(void) {
     return PSXRecompV4::function_entry_depth != 0;
 }
 
-extern "C" void mod_runtime_patch_disc_sector(uint32_t lba, int raw_sector,
-                                               uint8_t* bytes, uint32_t size) {
+extern "C" void mod_runtime_function_entry_context_save(ModFunctionEntryContext *out) {
+    out->depth = PSXRecompV4::function_entry_depth;
+    out->plugin = PSXRecompV4::state().current_plugin;
+}
+
+extern "C" void mod_runtime_function_entry_context_restore(const ModFunctionEntryContext *in) {
+    PSXRecompV4::function_entry_depth = in->depth;
+    PSXRecompV4::state().current_plugin =
+        static_cast<const PSXRecompV4::ModResolution::Plugin *>(in->plugin);
+}
+
+/* Apply the committed plan's disc writes and overlays to one sector. The
+ * emulated drive reaches this only after mod_runtime_enable_disc_patches()
+ * (reference reads before then must see the original image); host-side
+ * preparation through psx_mod_read_disc_file() always sees the effective disc,
+ * including during plugin activation, which runs before the drive is enabled. */
+static void patch_committed_disc_sector(uint32_t lba, int raw_sector,
+                                        uint8_t* bytes, uint32_t size) {
     using namespace PSXRecompV4;
     RuntimeMods& s = state();
-    if (!s.initialized || !s.disc_enabled || s.disc_guard_failed ||
-        !bytes || size == 0) return;
+    if (!s.initialized || s.disc_guard_failed || !bytes || size == 0) return;
     /* Raw Mode2 Form1 reads are also the source of the 2048-byte logical
      * stream consumed by the emulated CD controller. Apply raw claims to the
      * complete sector, then user-data claims to its payload window. Form2/XA
@@ -1627,7 +2052,7 @@ extern "C" void mod_runtime_patch_disc_sector(uint32_t lba, int raw_sector,
     const auto overlay_sector = overlay_index.find(lba);
     if (sector == index.end() && overlay_sector == overlay_index.end()) {
         if (has_mode2_form1_user_data)
-            mod_runtime_patch_disc_sector(lba, 0, bytes + 24, 2048);
+            patch_committed_disc_sector(lba, 0, bytes + 24, 2048);
         return;
     }
     if (sector != index.end()) {
@@ -1682,5 +2107,11 @@ extern "C" void mod_runtime_patch_disc_sector(uint32_t lba, int raw_sector,
         }
     }
     if (has_mode2_form1_user_data && !s.disc_guard_failed)
-        mod_runtime_patch_disc_sector(lba, 0, bytes + 24, 2048);
+        patch_committed_disc_sector(lba, 0, bytes + 24, 2048);
+}
+
+extern "C" void mod_runtime_patch_disc_sector(uint32_t lba, int raw_sector,
+                                               uint8_t* bytes, uint32_t size) {
+    if (!PSXRecompV4::state().disc_enabled) return;
+    patch_committed_disc_sector(lba, raw_sector, bytes, size);
 }

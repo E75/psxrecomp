@@ -18,6 +18,7 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 GPU_C = ROOT / "runtime" / "src" / "gpu.c"
+GPU_TIMELINE_C = ROOT / "runtime" / "src" / "gpu_timeline.c"
 DEFAULT_GCC = pathlib.Path(r"C:\msys64\mingw64\bin\gcc.exe")
 
 DRIVER_C = r"""
@@ -201,6 +202,7 @@ STUBS_C = r"""
 #include <string.h>
 
 uint64_t s_frame_count = 0;
+uint64_t psx_cycle_count = 0;
 uint32_t g_debug_last_store_pc = 0x80012340u;
 uint32_t g_psx_ram_size = 0x00200000u;
 uint32_t g_psx_ram_mask = 0x001FFFFFu;
@@ -242,8 +244,8 @@ int ws_cull_should_keep(uint32_t addr) { (void)addr; return 1; }
 int ws_ui_group_should_keep(uint32_t addr) { (void)addr; return 1; }
 uint32_t psx_mod_gpu_dma_resolve_address(uint32_t address) { return address; }
 void ws_ui_group_assign(WsUiGroupItem *items, size_t count,
-                        int32_t display_width, int dense_menu)
-{ (void)items; (void)count; (void)display_width; (void)dense_menu; }
+                        int32_t display_width, int dense_menu, int in_place)
+{ (void)items; (void)count; (void)display_width; (void)dense_menu; (void)in_place; }
 int32_t ws_ui_anchor_for_bounds(int32_t x, int32_t width, int32_t display_width)
 { (void)x; (void)width; return display_width / 2; }
 int gte_geometry_correction_enabled(void) { return 0; }
@@ -260,6 +262,11 @@ int gte_precision_load_word(uint32_t addr, uint32_t packed,
 { (void)addr; (void)packed; (void)x16; (void)y16; (void)z; return 0; }
 void pgxp_invalidate_all(void) {}
 void pgxp_invalidate_word(uint32_t addr) { (void)addr; }
+void pgxp_note_triangle(int precise) { (void)precise; }
+void pgxp_note_rect_bypass(int all_precise) { (void)all_precise; }
+int pgxp_probe_precise_vertex(uint32_t addr, uint32_t packet_word,
+                              int32_t int_x, int32_t int_y)
+{ (void)addr; (void)packet_word; (void)int_x; (void)int_y; return 0; }
 void psx_irq_raise(uint32_t bit, uint32_t detail) { (void)bit; (void)detail; }
 void event_ring_record_aux(uint16_t kind, uint8_t detail, uint32_t aux)
 { (void)kind; (void)detail; (void)aux; }
@@ -436,6 +443,7 @@ def build(cc: str, work: pathlib.Path, name: str, prod: bool) -> pathlib.Path:
     cmd.extend([
         str(work / "driver.c"),
         str(GPU_C),
+        str(GPU_TIMELINE_C),
         str(work / "stubs.c"),
     ])
     if platform.system() == "Darwin":

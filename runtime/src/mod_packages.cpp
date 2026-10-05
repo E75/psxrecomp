@@ -2,6 +2,7 @@
 
 #include "crc32.h"
 #include "mod_plugins.h"
+#include "mod_media.h"
 #include "psx_sha256.h"
 #include "toml.hpp"
 
@@ -23,7 +24,7 @@ namespace PSXRecompV4 {
 namespace {
 
 constexpr uint32_t kMinFormatVersion = 1;
-constexpr uint32_t kMaxFormatVersion = 7;
+constexpr uint32_t kMaxFormatVersion = 8;
 constexpr uint64_t kMaxArchiveBytes = 256ull * 1024ull * 1024ull;
 constexpr uint32_t kMaxArchiveFiles = 4096;
 
@@ -33,11 +34,14 @@ std::map<std::string, ModBuiltinResolver>& builtin_resolvers() {
 }
 
 struct RegisteredPlugin {
+    void (*savestate)(void) = nullptr;
     PSXModActivationCallback activation = nullptr;
     PSXModVBlankCallback vblank = nullptr;
     /* Generated-function entry hooks, keyed by guest address. One id may
      * observe several functions. */
     std::vector<ModFunctionEntryHook> function_entries;
+    std::vector<ModFunctionEntryHook> guest_functions;
+    std::vector<ModInstructionHook> instructions;
 };
 
 std::map<std::string, RegisteredPlugin>& registered_plugins() {
@@ -760,7 +764,13 @@ std::string canonical_resolution(const std::vector<const ModPackage*>& ordered,
     }
     for (const ModResolution::Resource& resource : resources) {
         out << "resource:" << resource.package_id << ':' << resource.feature_id
-            << ':' << resource.id << '=' << resource.path.string() << '\n';
+            << ':' << resource.id << '=';
+        if (resource.bytes)
+            out << resource.format << ':' << resource.bytes->size() << ':'
+                << resource.sha256;
+        else
+            out << resource.path.string();
+        out << '\n';
     }
     return out.str();
 }
@@ -1477,8 +1487,60 @@ bool mod_register_function_filter_plugin(const std::string& id, uint32_t address
 bool mod_plugin_registered(const std::string& id) {
     const auto found = registered_plugins().find(id);
     return found != registered_plugins().end() &&
-        (found->second.activation || found->second.vblank ||
-         !found->second.function_entries.empty());
+        (found->second.activation || found->second.vblank || found->second.savestate ||
+         !found->second.function_entries.empty() || !found->second.guest_functions.empty() ||
+         !found->second.instructions.empty());
+}
+
+bool mod_register_guest_function_plugin(const std::string& id, uint32_t address,
+                                        PSXModFunctionEntryCallback callback) {
+    const uint32_t key = address & 0x1FFFFFFFu;
+    if (!valid_id(id) || !callback || (address & 3u) ||
+        key < 0x0F000000u || key >= 0x10000000u || address >= 0xC0000000u)
+        return false;
+    for (const auto& plugin : registered_plugins())
+        for (const auto& function : plugin.second.guest_functions)
+            if (function.address == key) return false;
+    registered_plugins()[id].guest_functions.push_back({key, callback, nullptr});
+    return true;
+}
+
+std::vector<ModFunctionEntryHook> mod_guest_functions(const std::string& id) {
+    const auto found = registered_plugins().find(id);
+    return found == registered_plugins().end()
+        ? std::vector<ModFunctionEntryHook>{} : found->second.guest_functions;
+}
+
+bool mod_register_instruction_plugin(const std::string& id, uint32_t address,
+                                      uint32_t expected, PSXModFunctionEntryCallback callback) {
+    if (!valid_id(id) || !callback || (address & 3u) || address >= 0xC0000000u ||
+        (address & 0x1FFFFFFFu) >= 0x00800000u) return false;
+    auto& hooks = registered_plugins()[id].instructions;
+    const uint32_t key = address & 0x1FFFFFFFu;
+    for (const auto& hook : hooks)
+        if (hook.address == key) return false;
+    hooks.push_back({key, expected, callback});
+    return true;
+}
+
+std::vector<ModInstructionHook> mod_instruction_hooks(const std::string& id) {
+    const auto found = registered_plugins().find(id);
+    return found == registered_plugins().end()
+        ? std::vector<ModInstructionHook>{} : found->second.instructions;
+}
+
+bool mod_register_savestate_plugin(const std::string& id, void (*callback)(void)) {
+    if (!valid_id(id) || !callback) return false;
+    RegisteredPlugin& plugin = registered_plugins()[id];
+    if (plugin.savestate) return false;
+    plugin.savestate = callback;
+    return true;
+}
+
+void mod_invoke_savestate_plugin(const std::string& id) {
+    const auto found = registered_plugins().find(id);
+    if (found != registered_plugins().end() && found->second.savestate)
+        found->second.savestate();
 }
 
 void mod_invoke_activation_plugin(const std::string& id) {
@@ -1502,6 +1564,47 @@ std::vector<ModFunctionEntryHook> mod_function_entry_hooks(const std::string& id
 
 void mod_clear_plugins_for_tests() {
     registered_plugins().clear();
+}
+
+std::vector<std::string> mod_registered_plugin_ids() {
+    std::vector<std::string> ids;
+    for (const auto& entry : registered_plugins())
+        if (entry.second.activation || entry.second.vblank ||
+            !entry.second.function_entries.empty() || !entry.second.guest_functions.empty())
+            ids.push_back(entry.first);
+    return ids;  /* std::map keeps them sorted */
+}
+
+ModPluginAudit mod_audit_registered_plugins(
+    const std::vector<fs::path>& manifest_roots) {
+    ModPluginAudit audit;
+    std::set<std::string> declared;
+    for (const fs::path& root : manifest_roots) {
+        std::error_code ec;
+        if (!fs::is_directory(root, ec)) {
+            audit.errors.push_back(root.string() + ": not a directory");
+            continue;
+        }
+        for (fs::recursive_directory_iterator it(root, ec), end;
+             !ec && it != end; it.increment(ec)) {
+            if (!it->is_regular_file(ec) || it->path().filename() != "manifest.toml")
+                continue;
+            ModPackage package;
+            std::string error;
+            if (!ModPackageManager::read_manifest(it->path(), package, &error)) {
+                audit.errors.push_back(it->path().string() + ": " + error);
+                continue;
+            }
+            ++audit.manifests;
+            for (const ModPlugin& plugin : package.plugins)
+                declared.insert(plugin.id);
+        }
+        if (ec) audit.errors.push_back(root.string() + ": " + ec.message());
+    }
+    audit.declared.assign(declared.begin(), declared.end());
+    for (const std::string& id : mod_registered_plugin_ids())
+        if (!declared.count(id)) audit.undeclared.push_back(id);
+    return audit;
 }
 
 const char* mod_channel_name(ModChannel channel) {
@@ -1803,6 +1906,19 @@ bool ModPackageManager::read_manifest(const fs::path& path, ModPackage& out,
                     toml::find_or<std::string>(v, "format", "file");
                 resource.required =
                     toml::find_or<bool>(v, "required", false);
+                if (v.contains("size") || v.contains("sha256") ||
+                    resource.format == "n64-rom" || resource.format == "psx-disc") {
+                    if (out.format_version < 8)
+                        throw std::runtime_error("verified media requires format_version 8");
+                    const int64_t size = toml::find<int64_t>(v, "size");
+                    resource.sha256 = toml::find<std::string>(v, "sha256");
+                    if (size <= 0 || size > 512ll * 1024 * 1024 ||
+                        !valid_sha256(resource.sha256) ||
+                        (resource.format != "file" && resource.format != "n64-rom" &&
+                         resource.format != "psx-disc"))
+                        throw std::runtime_error("invalid verified media identity or format");
+                    resource.size = static_cast<uint64_t>(size);
+                }
                 if (!find_feature(out, resource.feature_id))
                     throw std::runtime_error(
                         "resource references unknown feature");
@@ -1815,9 +1931,11 @@ bool ModPackageManager::read_manifest(const fs::path& path, ModPackage& out,
                     throw std::runtime_error("resource label is empty");
                 if (resource.format != "file" &&
                     resource.format != "directory" &&
-                    resource.format != "folder")
+                    resource.format != "folder" &&
+                    resource.format != "n64-rom" &&
+                    resource.format != "psx-disc")
                     throw std::runtime_error(
-                        "resource format must be file or directory");
+                        "unsupported resource format");
                 out.resources.push_back(std::move(resource));
             }
         }
@@ -3700,6 +3818,17 @@ ModResolution ModPackageManager::resolve(const std::string& game_id,
             resolved.feature_id = resource.feature_id;
             resolved.id = resource.id;
             resolved.path = path;
+            resolved.format = resource.format;
+            resolved.sha256 = resource.sha256;
+            if (!resource.sha256.empty()) {
+                std::string media_error;
+                if (!load_mod_media(path, resource.format, resource.size,
+                                    resource.sha256, resolved.bytes, &media_error)) {
+                    result.errors.push_back(package->id + "/" + resource.feature_id +
+                                            ": " + resource.id + ": " + media_error);
+                    continue;
+                }
+            }
             result.resources.push_back(std::move(resolved));
         }
     }
@@ -3912,4 +4041,10 @@ extern "C" int psx_mod_register_activation_plugin(
     const char* id, PSXModActivationCallback callback) {
     return id &&
         PSXRecompV4::mod_register_activation_plugin(id, callback) ? 1 : 0;
+}
+
+extern "C" int psx_mod_register_savestate_plugin(
+    const char* id, PSXModActivationCallback callback) {
+    return id &&
+        PSXRecompV4::mod_register_savestate_plugin(id, callback) ? 1 : 0;
 }
