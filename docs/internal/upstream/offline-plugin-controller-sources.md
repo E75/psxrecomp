@@ -11,7 +11,7 @@ that exact human author identity. The focused port consolidates the selected
 source hunks and corrections. Its commit also cites these sources and carries
 the original human contributor's `Co-authored-by: Yves <calibratedbeats@gmail.com>` trailer.
 
-Adapted: Only trusted controller-source registration, validation/neutralization and the existing offline host-input boundary.
+Adapted: Only offline controller-source registration (documented as mod-trusted), validation/neutralization and the existing offline host-input boundary.
 
 Deliberately excluded: OpenXR Touch action implementation, game bindings/deadzones/aiming and guest SIO replacements.
 

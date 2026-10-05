@@ -645,8 +645,10 @@ int psx_mod_set_controller_presentation_policy(
     uint32_t initial_mode,
     int config_capable);
 
-/* Trusted offline source owns a player's pad at normal input sampling. A
- * declined/invalid sample delivers neutral, not the previous held input.
+/* Offline controller source owns a player's pad at normal input sampling.
+ * Mod-trusted like any mod code (arbitrary native code; the setter does no
+ * caller check). A declined/invalid sample delivers neutral, not the previous
+ * held input.
  * Existing TCP overrides take priority; netplay/resim and eye redraws never
  * invoke the source. The runtime keeps coherent SIO type requests/recording.
  * Pass NULL to detach. Local keyboard/pad buttons remain merged for menus;
