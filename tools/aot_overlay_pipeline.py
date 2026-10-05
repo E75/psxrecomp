@@ -771,16 +771,16 @@ def extract(profile_path, game_toml, recompiler, output, cue=None, disc=None, pr
                    output, views)
 
 
-def audit(game_toml, recompiler, cache, inventory, output, static_dispatch=None):
+def audit(game_toml, recompiler, cache, inventory, output, static_dispatch=None, flavor=0):
     target = ['--static-dispatch', str(static_dispatch)] if static_dispatch else ['--cache-root', str(cache)]
     subprocess.run([sys.executable, str(FRAMEWORK / 'tools/audit_aot_cache.py'),
                     '--framework-root', str(FRAMEWORK), '--recompiler', str(recompiler),
-                    '--game-toml', str(game_toml), *target,
+                    '--game-toml', str(game_toml), '--flavor', str(flavor), *target,
                     '--inventory', str(inventory), '--output', str(output)], check=True)
     return json.loads(output.read_text())
 
 
-def build(inventory, game_toml, recompiler, work, gcc, workers, project_root=None, cps=False):
+def build(inventory, game_toml, recompiler, work, gcc, workers, project_root=None, cps=False, flavor=0):
     """Independent recipe builds cannot nominate entries in sibling images."""
     cache = work / 'cache'
     cache.mkdir(parents=True)
@@ -793,7 +793,7 @@ def build(inventory, game_toml, recompiler, work, gcc, workers, project_root=Non
                    '--project-root', str(project_root or game_toml.parent), '--recompiler', str(recompiler),
                    '--runtime-include', str(FRAMEWORK / 'runtime/include'),
                    '--out-dir', str(target / 'cache'), '--compiler', 'gcc', '--gcc', gcc,
-                   '--flavor', '0', '--jobs', '1'] + (['--cps'] if cps else [])
+                   '--flavor', str(flavor), '--jobs', '1'] + (['--cps'] if cps else [])
         with (target / 'compile.log').open('w') as log:
             subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True)
         return index, job, target
@@ -1023,7 +1023,7 @@ def run():
     parser.add_argument('--runtime-config', type=Path,
                         help='Packaged config controlling native cache namespace/code generation')
     parser.add_argument('--runtime-build-dir', type=Path,
-                        help='Verify the staged runtime publishes the supported flavor-0 ABI')
+                        help='Read and validate the staged runtime overlay ABI (base or PGXP)')
     parser.add_argument('--runtime-target', default='psx-runtime')
     parser.add_argument('--recompiler', type=Path, required=True)
     parser.add_argument('--work-dir', type=Path, required=True)
@@ -1049,10 +1049,13 @@ def run():
         import tomllib
         require_runtime_cache(tomllib.loads((args.runtime_config or args.game_toml)
                                            .read_text(encoding='utf-8-sig')))
+    flavor = 0
     if args.runtime_build_dir:
         from release_stage import _flavor_from_build
-        require(_flavor_from_build(str(args.runtime_build_dir), args.runtime_target) == 0,
-                'This AOT pipeline currently requires a flavor-0 runtime')
+        flavor = _flavor_from_build(str(args.runtime_build_dir), args.runtime_target)
+        require(flavor in (0, 2), 'Unsupported runtime overlay flavor')
+        require(args.action == 'release' or flavor == 0,
+                'Static AOT generation currently requires a flavor-0 runtime')
     import tomllib
     config, recompiler = args.game_toml.resolve(), args.recompiler.resolve()
     profile_path = args.profile.resolve()
@@ -1102,8 +1105,9 @@ def run():
         require(tomllib.loads(runtime_config.read_text(encoding='utf-8-sig'))['game']['id'] == inventory['game_id'],
                 'Runtime config/game mismatch')
         cache = build(inventory, runtime_config, recompiler, work, args.gcc, args.workers, config.parent,
-                      args.cps)
-        receipt = audit(runtime_config, recompiler, cache, work / 'runtime-input-inventory.json', work / 'audit.json')
+                      args.cps, flavor)
+        receipt = audit(runtime_config, recompiler, cache, work / 'runtime-input-inventory.json', work / 'audit.json',
+                        flavor=flavor)
         receipt['profile_sha256'] = inventory['profile_sha256']
         receipt['original_disc_sha256'] = inventory['original_disc_sha256']
         receipt['required_images'] = inventory['required_images']

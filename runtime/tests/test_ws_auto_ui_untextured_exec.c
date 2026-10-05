@@ -227,12 +227,15 @@ int main(void) {
     assert(gmax == ws_scale_about(120, left));
     assert(fmin == gmin && fmax == gmax);
 
-    /* A non-axis-aligned untextured quad is world geometry, never UI. */
+    /* A non-axis-aligned untextured quad reaching outside every widget is
+     * world geometry, never UI (one inside a widget is a part of it: see the
+     * needle below). */
     reset_state(1);
     build_hud(60, 128, 64, 120);
-    test_ram[NODE_FILL / 4u + 1u + 3u] = pack_vertex(121, 25);  /* skew v1 */
+    test_ram[NODE_FILL / 4u + 1u + 3u] = pack_vertex(140, 25);  /* skew v1 out */
     gpu_ws_prepass_linked_list(OT_HEAD);
     assert(ws_ui_prepass_count == 2);
+    assert(ws_ui_reject.enclosed == 0);
 
     /* Backing panel enclosing the frame: admitted from the rank behind the
      * HUD and squashed with it about the shared run's centre. */
@@ -292,6 +295,73 @@ int main(void) {
     gpu_ws_prepass_linked_list(OT_HEAD);
     assert(ws_ui_prepass_count == 3);
     assert(ws_ui_reject.backing == 0);
+
+    /* A letterbox bar spanning the whole display width in the HUD's own
+     * rank is a full-width overlay: never UI, drawn edge to edge. */
+    reset_state(1);
+    build_hud(60, 128, 64, 120);
+    {
+        const int16_t bx0 = (int16_t)ws_disp_x(), bx1 = (int16_t)(ws_disp_x() + ws_disp_w());
+        const uint32_t bar[5] = {
+            0x28000000u, pack_vertex(bx0, 0), pack_vertex(bx1, 0),
+            pack_vertex(bx0, 30), pack_vertex(bx1, 30),
+        };
+        put_node(NODE_FLAT, 0xFFFFFFu, bar, 5);
+        gpu_ws_prepass_linked_list(OT_HEAD);
+        assert(ws_ui_prepass_count == 2);        /* frame + gouraud fill only */
+        assert(ws_ui_reject.too_big == 1);
+        /* A rule stopping two pixels short of each edge is full width too. */
+        const uint32_t rule[5] = {
+            0x28000000u, pack_vertex((int16_t)(bx0 + 2), 40), pack_vertex((int16_t)(bx1 - 2), 40),
+            pack_vertex((int16_t)(bx0 + 2), 44), pack_vertex((int16_t)(bx1 - 2), 44),
+        };
+        put_node(NODE_FLAT, 0xFFFFFFu, rule, 5);
+        gpu_ws_prepass_linked_list(OT_HEAD);
+        assert(ws_ui_prepass_count == 2 && ws_ui_reject.too_big == 1);
+        put_node(NODE_FLAT, 0xFFFFFFu, bar, 5);
+        gpu_exec_reset_triangles();
+        load_packet(NODE_FLAT, 5);
+        gp0_exec_mono_quad();
+        assert(gpu_exec_triangles.min_x == bx0);
+        assert(gpu_exec_triangles.max_x == bx1);
+    }
+
+    /* A needle inside its widget (Spider-Man's compass arrow: flat
+     * triangles in the ring's rank) joins the widget and squashes with it. */
+    reset_state(1);
+    build_hud(60, 128, 64, 120);
+    {
+        const uint32_t tri[4] = {
+            0x20FFFF00u, pack_vertex(70, 22), pack_vertex(100, 30), pack_vertex(80, 34),
+        };
+        put_node(NODE_FLAT, 0xFFFFFFu, tri, 4);
+        gpu_ws_prepass_linked_list(OT_HEAD);
+        assert(ws_ui_prepass_count == 3);        /* frame, fill, needle */
+        assert(ws_ui_reject.enclosed == 1);
+        gpu_exec_reset_triangles();
+        load_packet(NODE_FLAT, 4);
+        gp0_exec_mono_tri();
+        const int32_t widget = 60 + (128 - 60) / 2;
+        assert(gpu_exec_triangles.min_x == ws_scale_about(70, widget));
+        assert(gpu_exec_triangles.max_x == ws_scale_about(100, widget));
+    }
+
+    /* A triangle reaching outside every widget is world geometry. */
+    reset_state(1);
+    build_hud(60, 128, 64, 120);
+    {
+        const uint32_t tri[4] = {
+            0x20FFFF00u, pack_vertex(50, 22), pack_vertex(140, 30), pack_vertex(80, 34),
+        };
+        put_node(NODE_FLAT, 0xFFFFFFu, tri, 4);
+        gpu_ws_prepass_linked_list(OT_HEAD);
+        assert(ws_ui_prepass_count == 2);
+        assert(ws_ui_reject.enclosed == 0);
+        gpu_exec_reset_triangles();
+        load_packet(NODE_FLAT, 4);
+        gp0_exec_mono_tri();
+        assert(gpu_exec_triangles.min_x == 50 && gpu_exec_triangles.max_x == 140);
+    }
 
     puts("ws_auto_ui_untextured_exec_test: PASS");
     return 0;

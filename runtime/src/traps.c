@@ -6,6 +6,7 @@
 
 #include "cpu_state.h"
 #include "psx_memory.h"
+#include "interrupts.h"
 #include "psx_bss.h"
 #include "psx_runtime.h"   /* fix B: psx_exc_escape_reason_t + g_exc_escape_reason */
 #include "debug_server.h"
@@ -811,6 +812,7 @@ void psx_scheduler_run(CPUState* cpu)
     g_sched_escape.reason = PSX_RUN_CONTINUE;
     for (;;) {
         if (setjmp(g_scheduler_jmpbuf) != 0) {
+            psx_snapshot_host_call_reset();
             /* A structured escape unwound the native stack to here. Reset the
              * invariants the skipped psx_dispatch_impl frames would otherwise
              * own. No exception_jmpbuf frame is ever skipped (switch fires only

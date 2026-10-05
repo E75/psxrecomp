@@ -1281,7 +1281,8 @@ label_BFC000B8:
     psx_cyc_step(cpu, 0x10004u);
 #endif
     /* 0xBFC000C0: 0202102B  sltu $v0, $s0, $v0 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[16] < cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[16]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[16] < cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x0202102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC000C0u);
 #endif
@@ -1622,7 +1623,8 @@ label_BFC00118:
     psx_cyc_step(cpu, 0x10000u);
 #endif
     /* 0xBFC0011C: 321000FF  andi $s0, $s0, 0xFF */
-    cpu->gpr[16] = cpu->gpr[16] & 0xFFu;
+    { uint32_t _pgx1 = cpu->gpr[16]; cpu->gpr[16] = cpu->gpr[16] & 0xFFu;
+    PGXP_ALU(0x321000FFu, cpu->gpr[16], _pgx1, 0x00FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC0011Cu);
 #endif
@@ -3945,7 +3947,8 @@ label_BFC003A8:
     psx_cyc_step(cpu, 0x48u);
 #endif
     /* 0xBFC003B8: 00661826  xor $v1, $v1, $a2 */
-    cpu->gpr[3] = cpu->gpr[3] ^ cpu->gpr[6];
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[6]; cpu->gpr[3] = cpu->gpr[3] ^ cpu->gpr[6];
+    PGXP_ALU(0x00661826u, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC003B8u);
 #endif
@@ -4118,7 +4121,8 @@ label_BFC003D0:
     psx_cyc_step(cpu, 0x60u);
 #endif
     /* 0xBFC003E0: 00A62826  xor $a1, $a1, $a2 */
-    cpu->gpr[5] = cpu->gpr[5] ^ cpu->gpr[6];
+    { uint32_t _pgx1 = cpu->gpr[5]; uint32_t _pgx2 = cpu->gpr[6]; cpu->gpr[5] = cpu->gpr[5] ^ cpu->gpr[6];
+    PGXP_ALU(0x00A62826u, cpu->gpr[5], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC003E0u);
 #endif
@@ -4170,7 +4174,8 @@ label_BFC003E4:
     psx_cyc_step(cpu, 0x24u);
 #endif
     /* 0xBFC003EC: 00451026  xor $v0, $v0, $a1 */
-    cpu->gpr[2] = cpu->gpr[2] ^ cpu->gpr[5];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[5]; cpu->gpr[2] = cpu->gpr[2] ^ cpu->gpr[5];
+    PGXP_ALU(0x00451026u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC003ECu);
 #endif
@@ -4189,7 +4194,8 @@ label_BFC003E4:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC003F4: 2C420001  sltiu $v0, $v0, 1 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000001u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000001u ? 1 : 0);
+    PGXP_ALU(0x2C420001u, cpu->gpr[2], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC003F4u);
 #endif
@@ -4816,7 +4822,8 @@ label_BFC00478:
     psx_cyc_step(cpu, 0x80u);
 #endif
     /* 0xBFC00488: 30E700F0  andi $a3, $a3, 0xF0 */
-    cpu->gpr[7] = cpu->gpr[7] & 0xF0u;
+    { uint32_t _pgx1 = cpu->gpr[7]; cpu->gpr[7] = cpu->gpr[7] & 0xF0u;
+    PGXP_ALU(0x30E700F0u, cpu->gpr[7], _pgx1, 0x00F0u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC00488u);
 #endif
@@ -5388,7 +5395,8 @@ label_BFC00514:
     psx_cyc_step(cpu, 0x14u);
 #endif
     /* 0xBFC00514: 38820052  xori $v0, $a0, 0x52 */
-    cpu->gpr[2] = cpu->gpr[4] ^ 0x52u;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[2] = cpu->gpr[4] ^ 0x52u;
+    PGXP_ALU(0x38820052u, cpu->gpr[2], _pgx1, 0x0052u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC00514u);
 #endif
@@ -5407,7 +5415,8 @@ label_BFC00514:
     psx_cyc_step(cpu, 0x5u);
 #endif
     /* 0xBFC0051C: 0002102B  sltu $v0, $zero, $v0 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x0002102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC0051Cu);
 #endif
@@ -5442,7 +5451,8 @@ label_BFC00520:
     psx_cyc_step(cpu, 0x14u);
 #endif
     /* 0xBFC00520: 38820051  xori $v0, $a0, 0x51 */
-    cpu->gpr[2] = cpu->gpr[4] ^ 0x51u;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[2] = cpu->gpr[4] ^ 0x51u;
+    PGXP_ALU(0x38820051u, cpu->gpr[2], _pgx1, 0x0051u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC00520u);
 #endif
@@ -5461,7 +5471,8 @@ label_BFC00520:
     psx_cyc_step(cpu, 0x5u);
 #endif
     /* 0xBFC00528: 0002102B  sltu $v0, $zero, $v0 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x0002102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC00528u);
 #endif
@@ -13509,7 +13520,8 @@ label_BFC00D4C:
     psx_cyc_step(cpu, 0x5u);
 #endif
     /* 0xBFC00D54: 0002102B  sltu $v0, $zero, $v0 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x0002102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC00D54u);
 #endif
@@ -15460,7 +15472,8 @@ label_BFC00F38:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC00F64: 2C430009  sltiu $v1, $v0, 9 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x00000009u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x00000009u ? 1 : 0);
+    PGXP_ALU(0x2C430009u, cpu->gpr[3], _pgx1, 0x0009u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC00F64u);
 #endif
@@ -19391,7 +19404,8 @@ label_BFC01364:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC01378: 2842000F  slti $v0, $v0, 15 */
-    cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[2] < (15) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[2] < (15) ? 1 : 0);
+    PGXP_ALU(0x2842000Fu, cpu->gpr[2], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC01378u);
 #endif
@@ -21063,7 +21077,8 @@ label_BFC0150C:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC01520: 28420014  slti $v0, $v0, 20 */
-    cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[2] < (20) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[2] < (20) ? 1 : 0);
+    PGXP_ALU(0x28420014u, cpu->gpr[2], _pgx1, 0x0014u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC01520u);
 #endif
@@ -23647,7 +23662,8 @@ label_BFC017B0:
     psx_cyc_step(cpu, 0x5u);
 #endif
     /* 0xBFC017B4: 0002102B  sltu $v0, $zero, $v0 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x0002102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC017B4u);
 #endif
@@ -26795,7 +26811,8 @@ label_BFC01AE8:
     psx_cyc_step(cpu, 0x10004u);
 #endif
     /* 0xBFC01AE8: 2A02000F  slti $v0, $s0, 15 */
-    cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[16] < (15) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[16]; cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[16] < (15) ? 1 : 0);
+    PGXP_ALU(0x2A02000Fu, cpu->gpr[2], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC01AE8u);
 #endif
@@ -28285,7 +28302,8 @@ label_BFC01C40:
     psx_cyc_step(cpu, 0x800004u);
 #endif
     /* 0xBFC01C40: 32E28000  andi $v0, $s7, 0x8000 */
-    cpu->gpr[2] = cpu->gpr[23] & 0x8000u;
+    { uint32_t _pgx1 = cpu->gpr[23]; cpu->gpr[2] = cpu->gpr[23] & 0x8000u;
+    PGXP_ALU(0x32E28000u, cpu->gpr[2], _pgx1, 0x8000u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC01C40u);
 #endif
@@ -28479,7 +28497,8 @@ label_BFC01C5C:
     psx_cyc_step(cpu, 0x800004u);
 #endif
     /* 0xBFC01C70: 32E20200  andi $v0, $s7, 0x200 */
-    cpu->gpr[2] = cpu->gpr[23] & 0x200u;
+    { uint32_t _pgx1 = cpu->gpr[23]; cpu->gpr[2] = cpu->gpr[23] & 0x200u;
+    PGXP_ALU(0x32E20200u, cpu->gpr[2], _pgx1, 0x0200u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC01C70u);
 #endif
@@ -28798,7 +28817,8 @@ label_BFC01CBC:
     psx_cyc_step(cpu, 0x40u);
 #endif
     /* 0xBFC01CC4: 30C600F0  andi $a2, $a2, 0xF0 */
-    cpu->gpr[6] = cpu->gpr[6] & 0xF0u;
+    { uint32_t _pgx1 = cpu->gpr[6]; cpu->gpr[6] = cpu->gpr[6] & 0xF0u;
+    PGXP_ALU(0x30C600F0u, cpu->gpr[6], _pgx1, 0x00F0u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC01CC4u);
 #endif
@@ -28950,7 +28970,8 @@ label_BFC01CE0:
     psx_cyc_step(cpu, 0x84u);
 #endif
     /* 0xBFC01CE8: 0047102B  sltu $v0, $v0, $a3 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < cpu->gpr[7] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[7]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < cpu->gpr[7] ? 1 : 0);
+    PGXP_ALU(0x0047102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC01CE8u);
 #endif
@@ -29103,7 +29124,8 @@ label_BFC01D0C:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC01D14: 304200F0  andi $v0, $v0, 0xF0 */
-    cpu->gpr[2] = cpu->gpr[2] & 0xF0u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0xF0u;
+    PGXP_ALU(0x304200F0u, cpu->gpr[2], _pgx1, 0x00F0u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC01D14u);
 #endif
@@ -29351,7 +29373,8 @@ label_BFC01D4C:
     psx_cyc_step(cpu, 0x1010u);
 #endif
     /* 0xBFC01D54: 2C8C0001  sltiu $t4, $a0, 1 */
-    cpu->gpr[12] = (uint32_t)(cpu->gpr[4] < 0x00000001u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[12] = (uint32_t)(cpu->gpr[4] < 0x00000001u ? 1 : 0);
+    PGXP_ALU(0x2C8C0001u, cpu->gpr[12], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC01D54u);
 #endif
@@ -29467,7 +29490,8 @@ label_BFC01D6C:
     psx_cyc_step(cpu, 0x94u);
 #endif
     /* 0xBFC01D70: 0047202B  sltu $a0, $v0, $a3 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[2] < cpu->gpr[7] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[7]; cpu->gpr[4] = (uint32_t)(cpu->gpr[2] < cpu->gpr[7] ? 1 : 0);
+    PGXP_ALU(0x0047202Bu, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC01D70u);
 #endif
@@ -29520,7 +29544,8 @@ label_BFC01D7C:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC01D7C: 28420002  slti $v0, $v0, 2 */
-    cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[2] < (2) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[2] < (2) ? 1 : 0);
+    PGXP_ALU(0x28420002u, cpu->gpr[2], _pgx1, 0x0002u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC01D7Cu);
 #endif
@@ -33843,7 +33868,8 @@ label_BFC021C4:
     psx_cyc_step(cpu, 0x20u);
 #endif
     /* 0xBFC021E4: 30A500F0  andi $a1, $a1, 0xF0 */
-    cpu->gpr[5] = cpu->gpr[5] & 0xF0u;
+    { uint32_t _pgx1 = cpu->gpr[5]; cpu->gpr[5] = cpu->gpr[5] & 0xF0u;
+    PGXP_ALU(0x30A500F0u, cpu->gpr[5], _pgx1, 0x00F0u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC021E4u);
 #endif
@@ -35457,7 +35483,8 @@ label_BFC02378:
     psx_cyc_step(cpu, 0x58u);
 #endif
     /* 0xBFC02378: 0083302B  sltu $a2, $a0, $v1 */
-    cpu->gpr[6] = (uint32_t)(cpu->gpr[4] < cpu->gpr[3] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[6] = (uint32_t)(cpu->gpr[4] < cpu->gpr[3] ? 1 : 0);
+    PGXP_ALU(0x0083302Bu, cpu->gpr[6], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC02378u);
 #endif
@@ -35510,7 +35537,8 @@ label_BFC02384:
     psx_cyc_step(cpu, 0x1Cu);
 #endif
     /* 0xBFC02384: 0043202B  sltu $a0, $v0, $v1 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[2] < cpu->gpr[3] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[4] = (uint32_t)(cpu->gpr[2] < cpu->gpr[3] ? 1 : 0);
+    PGXP_ALU(0x0043202Bu, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC02384u);
 #endif
@@ -37718,7 +37746,8 @@ label_BFC025AC:
     psx_cyc_step(cpu, 0x60u);
 #endif
     /* 0xBFC025AC: 28C50040  slti $a1, $a2, 64 */
-    cpu->gpr[5] = (uint32_t)((int32_t)cpu->gpr[6] < (64) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[6]; cpu->gpr[5] = (uint32_t)((int32_t)cpu->gpr[6] < (64) ? 1 : 0);
+    PGXP_ALU(0x28C50040u, cpu->gpr[5], _pgx1, 0x0040u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC025ACu);
 #endif
@@ -38870,7 +38899,8 @@ label_BFC026BC:
     psx_cyc_step(cpu, 0x20004u);
 #endif
     /* 0xBFC026C4: 3222007F  andi $v0, $s1, 0x7F */
-    cpu->gpr[2] = cpu->gpr[17] & 0x7Fu;
+    { uint32_t _pgx1 = cpu->gpr[17]; cpu->gpr[2] = cpu->gpr[17] & 0x7Fu;
+    PGXP_ALU(0x3222007Fu, cpu->gpr[2], _pgx1, 0x007Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC026C4u);
 #endif
@@ -38943,7 +38973,8 @@ label_BFC026D0:
     psx_cyc_step(cpu, 0x20004u);
 #endif
     /* 0xBFC026D8: 0222102B  sltu $v0, $s1, $v0 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[17] < cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[17]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[17] < cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x0222102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC026D8u);
 #endif
@@ -39285,7 +39316,8 @@ label_BFC02738:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC02740: 30428000  andi $v0, $v0, 0x8000 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x8000u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x8000u;
+    PGXP_ALU(0x30428000u, cpu->gpr[2], _pgx1, 0x8000u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC02740u);
 #endif
@@ -39529,7 +39561,8 @@ label_BFC02774:
     psx_cyc_step(cpu, 0x20004u);
 #endif
     /* 0xBFC02774: 3222003F  andi $v0, $s1, 0x3F */
-    cpu->gpr[2] = cpu->gpr[17] & 0x3Fu;
+    { uint32_t _pgx1 = cpu->gpr[17]; cpu->gpr[2] = cpu->gpr[17] & 0x3Fu;
+    PGXP_ALU(0x3222003Fu, cpu->gpr[2], _pgx1, 0x003Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC02774u);
 #endif
@@ -39626,7 +39659,8 @@ label_BFC02784:
     psx_cyc_step(cpu, 0x90004u);
 #endif
     /* 0xBFC0278C: 0270102A  slt $v0, $s3, $s0 */
-    cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[19] < (int32_t)cpu->gpr[16] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[19]; uint32_t _pgx2 = cpu->gpr[16]; cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[19] < (int32_t)cpu->gpr[16] ? 1 : 0);
+    PGXP_ALU(0x0270102Au, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC0278Cu);
 #endif
@@ -42244,7 +42278,8 @@ label_BFC02A20:
     psx_cyc_step(cpu, 0x40004u);
 #endif
     /* 0xBFC02A28: 3242007F  andi $v0, $s2, 0x7F */
-    cpu->gpr[2] = cpu->gpr[18] & 0x7Fu;
+    { uint32_t _pgx1 = cpu->gpr[18]; cpu->gpr[2] = cpu->gpr[18] & 0x7Fu;
+    PGXP_ALU(0x3242007Fu, cpu->gpr[2], _pgx1, 0x007Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC02A28u);
 #endif
@@ -42317,7 +42352,8 @@ label_BFC02A34:
     psx_cyc_step(cpu, 0x40004u);
 #endif
     /* 0xBFC02A3C: 0242102B  sltu $v0, $s2, $v0 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[18] < cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[18]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[18] < cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x0242102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC02A3Cu);
 #endif
@@ -42659,7 +42695,8 @@ label_BFC02A9C:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC02AA4: 30428000  andi $v0, $v0, 0x8000 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x8000u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x8000u;
+    PGXP_ALU(0x30428000u, cpu->gpr[2], _pgx1, 0x8000u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC02AA4u);
 #endif
@@ -42891,7 +42928,8 @@ label_BFC02AD4:
     psx_cyc_step(cpu, 0x40008u);
 #endif
     /* 0xBFC02AD4: 3243003F  andi $v1, $s2, 0x3F */
-    cpu->gpr[3] = cpu->gpr[18] & 0x3Fu;
+    { uint32_t _pgx1 = cpu->gpr[18]; cpu->gpr[3] = cpu->gpr[18] & 0x3Fu;
+    PGXP_ALU(0x3243003Fu, cpu->gpr[3], _pgx1, 0x003Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC02AD4u);
 #endif
@@ -42988,7 +43026,8 @@ label_BFC02AE4:
     psx_cyc_step(cpu, 0x280004u);
 #endif
     /* 0xBFC02AEC: 0275102A  slt $v0, $s3, $s5 */
-    cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[19] < (int32_t)cpu->gpr[21] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[19]; uint32_t _pgx2 = cpu->gpr[21]; cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[19] < (int32_t)cpu->gpr[21] ? 1 : 0);
+    PGXP_ALU(0x0275102Au, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC02AECu);
 #endif
@@ -50849,7 +50888,8 @@ label_BFC032B4:
     psx_cyc_step(cpu, 0x40010004u);
 #endif
     /* 0xBFC032C4: 021E102B  sltu $v0, $s0, $fp */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[16] < cpu->gpr[30] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[16]; uint32_t _pgx2 = cpu->gpr[30]; cpu->gpr[2] = (uint32_t)(cpu->gpr[16] < cpu->gpr[30] ? 1 : 0);
+    PGXP_ALU(0x021E102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC032C4u);
 #endif
@@ -51113,7 +51153,8 @@ label_BFC0330C:
     psx_cyc_step(cpu, 0x20108u);
 #endif
     /* 0xBFC0330C: 0228182A  slt $v1, $s1, $t0 */
-    cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[17] < (int32_t)cpu->gpr[8] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[17]; uint32_t _pgx2 = cpu->gpr[8]; cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[17] < (int32_t)cpu->gpr[8] ? 1 : 0);
+    PGXP_ALU(0x0228182Au, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC0330Cu);
 #endif
@@ -51429,7 +51470,8 @@ label_BFC03354:
     psx_cyc_step(cpu, 0x244u);
 #endif
     /* 0xBFC03354: 0049302A  slt $a2, $v0, $t1 */
-    cpu->gpr[6] = (uint32_t)((int32_t)cpu->gpr[2] < (int32_t)cpu->gpr[9] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[9]; cpu->gpr[6] = (uint32_t)((int32_t)cpu->gpr[2] < (int32_t)cpu->gpr[9] ? 1 : 0);
+    PGXP_ALU(0x0049302Au, cpu->gpr[6], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC03354u);
 #endif
@@ -53045,7 +53087,8 @@ label_BFC034F8:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC03504: 00641826  xor $v1, $v1, $a0 */
-    cpu->gpr[3] = cpu->gpr[3] ^ cpu->gpr[4];
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[3] = cpu->gpr[3] ^ cpu->gpr[4];
+    PGXP_ALU(0x00641826u, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC03504u);
 #endif
@@ -53412,7 +53455,8 @@ label_BFC03564:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0356C: 30430001  andi $v1, $v0, 0x1 */
-    cpu->gpr[3] = cpu->gpr[2] & 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = cpu->gpr[2] & 0x1u;
+    PGXP_ALU(0x30430001u, cpu->gpr[3], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC0356Cu);
 #endif
@@ -53496,7 +53540,8 @@ label_BFC0357C:
     psx_cyc_step(cpu, 0x110004u);
 #endif
     /* 0xBFC03580: 0214102B  sltu $v0, $s0, $s4 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[16] < cpu->gpr[20] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[16]; uint32_t _pgx2 = cpu->gpr[20]; cpu->gpr[2] = (uint32_t)(cpu->gpr[16] < cpu->gpr[20] ? 1 : 0);
+    PGXP_ALU(0x0214102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC03580u);
 #endif
@@ -53888,7 +53933,8 @@ label_BFC035D0:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC035D0: 30420010  andi $v0, $v0, 0x10 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x10u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x10u;
+    PGXP_ALU(0x30420010u, cpu->gpr[2], _pgx1, 0x0010u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC035D0u);
 #endif
@@ -54177,7 +54223,8 @@ label_BFC03610:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC0361C: 2C84001A  sltiu $a0, $a0, 26 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[4] < 0x0000001Au ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = (uint32_t)(cpu->gpr[4] < 0x0000001Au ? 1 : 0);
+    PGXP_ALU(0x2C84001Au, cpu->gpr[4], _pgx1, 0x001Au); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC0361Cu);
 #endif
@@ -54231,7 +54278,8 @@ label_BFC03628:
     psx_cyc_step(cpu, 0x24u);
 #endif
     /* 0xBFC03628: 00451024  and $v0, $v0, $a1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[5];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[5]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[5];
+    PGXP_ALU(0x00451024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC03628u);
 #endif
@@ -55022,7 +55070,8 @@ label_BFC036E0:
     psx_cyc_step(cpu, 0x44u);
 #endif
     /* 0xBFC036E4: 30C207FF  andi $v0, $a2, 0x7FF */
-    cpu->gpr[2] = cpu->gpr[6] & 0x7FFu;
+    { uint32_t _pgx1 = cpu->gpr[6]; cpu->gpr[2] = cpu->gpr[6] & 0x7FFu;
+    PGXP_ALU(0x30C207FFu, cpu->gpr[2], _pgx1, 0x07FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC036E4u);
 #endif
@@ -55144,7 +55193,8 @@ label_BFC03700:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC03708: 304307FF  andi $v1, $v0, 0x7FF */
-    cpu->gpr[3] = cpu->gpr[2] & 0x7FFu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = cpu->gpr[2] & 0x7FFu;
+    PGXP_ALU(0x304307FFu, cpu->gpr[3], _pgx1, 0x07FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC03708u);
 #endif
@@ -55260,7 +55310,8 @@ label_BFC0371C:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC03724: 0043102B  sltu $v0, $v0, $v1 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < cpu->gpr[3] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < cpu->gpr[3] ? 1 : 0);
+    PGXP_ALU(0x0043102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC03724u);
 #endif
@@ -55461,7 +55512,8 @@ label_BFC03758:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC03758: 30420010  andi $v0, $v0, 0x10 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x10u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x10u;
+    PGXP_ALU(0x30420010u, cpu->gpr[2], _pgx1, 0x0010u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC03758u);
 #endif
@@ -55899,7 +55951,8 @@ label_BFC037C0:
     psx_cyc_step(cpu, 0x20004u);
 #endif
     /* 0xBFC037CC: 02221024  and $v0, $s1, $v0 */
-    cpu->gpr[2] = cpu->gpr[17] & cpu->gpr[2];
+    { uint32_t _pgx1 = cpu->gpr[17]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[17] & cpu->gpr[2];
+    PGXP_ALU(0x02221024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC037CCu);
 #endif
@@ -55922,7 +55975,8 @@ label_BFC037C0:
     psx_cyc_step(cpu, 0x30u);
 #endif
     /* 0xBFC037D4: 00A4202B  sltu $a0, $a1, $a0 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[5] < cpu->gpr[4] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[5]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[4] = (uint32_t)(cpu->gpr[5] < cpu->gpr[4] ? 1 : 0);
+    PGXP_ALU(0x00A4202Bu, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC037D4u);
 #endif
@@ -56199,7 +56253,8 @@ label_BFC0380C:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0380C: 30420010  andi $v0, $v0, 0x10 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x10u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x10u;
+    PGXP_ALU(0x30420010u, cpu->gpr[2], _pgx1, 0x0010u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC0380Cu);
 #endif
@@ -57844,7 +57899,8 @@ label_BFC039B0:
     psx_cyc_step(cpu, 0x40u);
 #endif
     /* 0xBFC039B0: 2CC6001A  sltiu $a2, $a2, 26 */
-    cpu->gpr[6] = (uint32_t)(cpu->gpr[6] < 0x0000001Au ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[6]; cpu->gpr[6] = (uint32_t)(cpu->gpr[6] < 0x0000001Au ? 1 : 0);
+    PGXP_ALU(0x2CC6001Au, cpu->gpr[6], _pgx1, 0x001Au); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC039B0u);
 #endif
@@ -57898,7 +57954,8 @@ label_BFC039BC:
     psx_cyc_step(cpu, 0x108u);
 #endif
     /* 0xBFC039BC: 00681824  and $v1, $v1, $t0 */
-    cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[8];
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[8]; cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[8];
+    PGXP_ALU(0x00681824u, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC039BCu);
 #endif
@@ -58162,7 +58219,8 @@ label_BFC039FC:
     psx_cyc_step(cpu, 0xC8u);
 #endif
     /* 0xBFC039FC: 00C3382B  sltu $a3, $a2, $v1 */
-    cpu->gpr[7] = (uint32_t)(cpu->gpr[6] < cpu->gpr[3] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[6]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[7] = (uint32_t)(cpu->gpr[6] < cpu->gpr[3] ? 1 : 0);
+    PGXP_ALU(0x00C3382Bu, cpu->gpr[7], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC039FCu);
 #endif
@@ -58215,7 +58273,8 @@ label_BFC03A08:
     psx_cyc_step(cpu, 0x4Cu);
 #endif
     /* 0xBFC03A08: 0043302B  sltu $a2, $v0, $v1 */
-    cpu->gpr[6] = (uint32_t)(cpu->gpr[2] < cpu->gpr[3] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[6] = (uint32_t)(cpu->gpr[2] < cpu->gpr[3] ? 1 : 0);
+    PGXP_ALU(0x0043302Bu, cpu->gpr[6], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC03A08u);
 #endif
@@ -58563,7 +58622,8 @@ label_BFC03A54:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC03A54: 2C84001A  sltiu $a0, $a0, 26 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[4] < 0x0000001Au ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = (uint32_t)(cpu->gpr[4] < 0x0000001Au ? 1 : 0);
+    PGXP_ALU(0x2C84001Au, cpu->gpr[4], _pgx1, 0x001Au); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC03A54u);
 #endif
@@ -58617,7 +58677,8 @@ label_BFC03A60:
     psx_cyc_step(cpu, 0x44u);
 #endif
     /* 0xBFC03A60: 00461024  and $v0, $v0, $a2 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[6];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[6]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[6];
+    PGXP_ALU(0x00461024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC03A60u);
 #endif
@@ -62272,7 +62333,8 @@ label_BFC03DE0:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC03DEC: 3084FFFF  andi $a0, $a0, 0xFFFF */
-    cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    PGXP_ALU(0x3084FFFFu, cpu->gpr[4], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC03DECu);
 #endif
@@ -62347,7 +62409,8 @@ label_BFC03DF8:
     psx_cyc_step(cpu, 0x20u);
 #endif
     /* 0xBFC03DFC: 30A5FFFF  andi $a1, $a1, 0xFFFF */
-    cpu->gpr[5] = cpu->gpr[5] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[5]; cpu->gpr[5] = cpu->gpr[5] & 0xFFFFu;
+    PGXP_ALU(0x30A5FFFFu, cpu->gpr[5], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC03DFCu);
 #endif
@@ -62358,7 +62421,8 @@ label_BFC03DF8:
     psx_cyc_step(cpu, 0x20u);
 #endif
     /* 0xBFC03E00: 2CA51733  sltiu $a1, $a1, 5939 */
-    cpu->gpr[5] = (uint32_t)(cpu->gpr[5] < 0x00001733u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[5]; cpu->gpr[5] = (uint32_t)(cpu->gpr[5] < 0x00001733u ? 1 : 0);
+    PGXP_ALU(0x2CA51733u, cpu->gpr[5], _pgx1, 0x1733u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC03E00u);
 #endif
@@ -62475,7 +62539,8 @@ label_BFC03E10:
     psx_cyc_step(cpu, 0x30u);
 #endif
     /* 0xBFC03E20: 0085282B  sltu $a1, $a0, $a1 */
-    cpu->gpr[5] = (uint32_t)(cpu->gpr[4] < cpu->gpr[5] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; uint32_t _pgx2 = cpu->gpr[5]; cpu->gpr[5] = (uint32_t)(cpu->gpr[4] < cpu->gpr[5] ? 1 : 0);
+    PGXP_ALU(0x0085282Bu, cpu->gpr[5], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC03E20u);
 #endif
@@ -62628,7 +62693,8 @@ label_BFC03E2C:
     psx_cyc_step(cpu, 0x14u);
 #endif
     /* 0xBFC03E50: 3082FFFF  andi $v0, $a0, 0xFFFF */
-    cpu->gpr[2] = cpu->gpr[4] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[2] = cpu->gpr[4] & 0xFFFFu;
+    PGXP_ALU(0x3082FFFFu, cpu->gpr[2], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC03E50u);
 #endif
@@ -62833,7 +62899,8 @@ label_BFC03E70:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC03E74: 3042FFFF  andi $v0, $v0, 0xFFFF */
-    cpu->gpr[2] = cpu->gpr[2] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0xFFFFu;
+    PGXP_ALU(0x3042FFFFu, cpu->gpr[2], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC03E74u);
 #endif
@@ -62844,7 +62911,8 @@ label_BFC03E70:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC03E78: 2C42037F  sltiu $v0, $v0, 895 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x0000037Fu ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x0000037Fu ? 1 : 0);
+    PGXP_ALU(0x2C42037Fu, cpu->gpr[2], _pgx1, 0x037Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC03E78u);
 #endif
@@ -62997,7 +63065,8 @@ label_BFC03E94:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC03EA0: 3084FFFF  andi $a0, $a0, 0xFFFF */
-    cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    PGXP_ALU(0x3084FFFFu, cpu->gpr[4], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC03EA0u);
 #endif
@@ -63116,7 +63185,8 @@ label_BFC03EC0:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC03EC0: 3063FFFF  andi $v1, $v1, 0xFFFF */
-    cpu->gpr[3] = cpu->gpr[3] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] & 0xFFFFu;
+    PGXP_ALU(0x3063FFFFu, cpu->gpr[3], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC03EC0u);
 #endif
@@ -63127,7 +63197,8 @@ label_BFC03EC0:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC03EC4: 2C630FD4  sltiu $v1, $v1, 4052 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[3] < 0x00000FD4u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = (uint32_t)(cpu->gpr[3] < 0x00000FD4u ? 1 : 0);
+    PGXP_ALU(0x2C630FD4u, cpu->gpr[3], _pgx1, 0x0FD4u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC03EC4u);
 #endif
@@ -67424,7 +67495,8 @@ label_BFC04304:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC04304: 2C830010  sltiu $v1, $a0, 16 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[4] < 0x00000010u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[3] = (uint32_t)(cpu->gpr[4] < 0x00000010u ? 1 : 0);
+    PGXP_ALU(0x2C830010u, cpu->gpr[3], _pgx1, 0x0010u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC04304u);
 #endif
@@ -68746,7 +68818,8 @@ label_BFC0443C:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC04440: 2C42000A  sltiu $v0, $v0, 10 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x0000000Au ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x0000000Au ? 1 : 0);
+    PGXP_ALU(0x2C42000Au, cpu->gpr[2], _pgx1, 0x000Au); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC04440u);
 #endif
@@ -69220,7 +69293,8 @@ label_BFC044B0:
     psx_cyc_step(cpu, 0x100u);
 #endif
     /* 0xBFC044B0: 2D08000A  sltiu $t0, $t0, 10 */
-    cpu->gpr[8] = (uint32_t)(cpu->gpr[8] < 0x0000000Au ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[8]; cpu->gpr[8] = (uint32_t)(cpu->gpr[8] < 0x0000000Au ? 1 : 0);
+    PGXP_ALU(0x2D08000Au, cpu->gpr[8], _pgx1, 0x000Au); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC044B0u);
 #endif
@@ -69514,7 +69588,8 @@ label_BFC044F0:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC044F8: 30421000  andi $v0, $v0, 0x1000 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x1000u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x1000u;
+    PGXP_ALU(0x30421000u, cpu->gpr[2], _pgx1, 0x1000u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC044F8u);
 #endif
@@ -70320,7 +70395,8 @@ label_BFC045B8:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC045CC: 30420001  andi $v0, $v0, 0x1 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x1u;
+    PGXP_ALU(0x30420001u, cpu->gpr[2], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC045CCu);
 #endif
@@ -73347,7 +73423,8 @@ label_BFC048AC:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC048B4: 30420010  andi $v0, $v0, 0x10 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x10u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x10u;
+    PGXP_ALU(0x30420010u, cpu->gpr[2], _pgx1, 0x0010u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC048B4u);
 #endif
@@ -73599,7 +73676,8 @@ label_BFC048E4:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC048F4: 30420004  andi $v0, $v0, 0x4 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x4u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x4u;
+    PGXP_ALU(0x30420004u, cpu->gpr[2], _pgx1, 0x0004u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC048F4u);
 #endif
@@ -74633,7 +74711,8 @@ label_BFC049E0:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC049E8: 30420010  andi $v0, $v0, 0x10 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x10u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x10u;
+    PGXP_ALU(0x30420010u, cpu->gpr[2], _pgx1, 0x0010u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC049E8u);
 #endif
@@ -74885,7 +74964,8 @@ label_BFC04A18:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC04A28: 30420004  andi $v0, $v0, 0x4 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x4u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x4u;
+    PGXP_ALU(0x30420004u, cpu->gpr[2], _pgx1, 0x0004u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC04A28u);
 #endif
@@ -77343,7 +77423,8 @@ label_BFC04C70:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC04C74: 00621024  and $v0, $v1, $v0 */
-    cpu->gpr[2] = cpu->gpr[3] & cpu->gpr[2];
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[3] & cpu->gpr[2];
+    PGXP_ALU(0x00621024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC04C74u);
 #endif
@@ -78209,7 +78290,8 @@ label_BFC04D3C:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC04D44: 30420007  andi $v0, $v0, 0x7 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x7u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x7u;
+    PGXP_ALU(0x30420007u, cpu->gpr[2], _pgx1, 0x0007u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC04D44u);
 #endif
@@ -78712,7 +78794,8 @@ label_BFC04DB8:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC04DC0: 3042007F  andi $v0, $v0, 0x7F */
-    cpu->gpr[2] = cpu->gpr[2] & 0x7Fu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x7Fu;
+    PGXP_ALU(0x3042007Fu, cpu->gpr[2], _pgx1, 0x007Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC04DC0u);
 #endif
@@ -79103,7 +79186,8 @@ label_BFC04E1C:
     psx_cyc_step(cpu, 0x30008u);
 #endif
     /* 0xBFC04E20: 0230182B  sltu $v1, $s1, $s0 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[17] < cpu->gpr[16] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[17]; uint32_t _pgx2 = cpu->gpr[16]; cpu->gpr[3] = (uint32_t)(cpu->gpr[17] < cpu->gpr[16] ? 1 : 0);
+    PGXP_ALU(0x0230182Bu, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC04E20u);
 #endif
@@ -79608,7 +79692,8 @@ label_BFC04E84:
     psx_cyc_step(cpu, 0x50008u);
 #endif
     /* 0xBFC04E84: 0212182B  sltu $v1, $s0, $s2 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[16] < cpu->gpr[18] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[16]; uint32_t _pgx2 = cpu->gpr[18]; cpu->gpr[3] = (uint32_t)(cpu->gpr[16] < cpu->gpr[18] ? 1 : 0);
+    PGXP_ALU(0x0212182Bu, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC04E84u);
 #endif
@@ -79815,7 +79900,8 @@ label_BFC04EB0:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC04EB0: 28430020  slti $v1, $v0, 32 */
-    cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[2] < (32) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[2] < (32) ? 1 : 0);
+    PGXP_ALU(0x28430020u, cpu->gpr[3], _pgx1, 0x0020u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC04EB0u);
 #endif
@@ -79900,7 +79986,8 @@ label_BFC04EC4:
     psx_cyc_step(cpu, 0x50004u);
 #endif
     /* 0xBFC04EC4: 0212102B  sltu $v0, $s0, $s2 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[16] < cpu->gpr[18] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[16]; uint32_t _pgx2 = cpu->gpr[18]; cpu->gpr[2] = (uint32_t)(cpu->gpr[16] < cpu->gpr[18] ? 1 : 0);
+    PGXP_ALU(0x0212102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC04EC4u);
 #endif
@@ -83370,7 +83457,8 @@ label_BFC0522C:
     psx_cyc_step(cpu, 0x80008u);
 #endif
     /* 0xBFC05234: 00731824  and $v1, $v1, $s3 */
-    cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[19];
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[19]; cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[19];
+    PGXP_ALU(0x00731824u, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC05234u);
 #endif
@@ -83451,7 +83539,8 @@ label_BFC05240:
     psx_cyc_step(cpu, 0x48u);
 #endif
     /* 0xBFC05248: 30C3FFFF  andi $v1, $a2, 0xFFFF */
-    cpu->gpr[3] = cpu->gpr[6] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[6]; cpu->gpr[3] = cpu->gpr[6] & 0xFFFFu;
+    PGXP_ALU(0x30C3FFFFu, cpu->gpr[3], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC05248u);
 #endif
@@ -83474,7 +83563,8 @@ label_BFC05240:
     psx_cyc_step(cpu, 0x10000u);
 #endif
     /* 0xBFC05250: 3210FFFF  andi $s0, $s0, 0xFFFF */
-    cpu->gpr[16] = cpu->gpr[16] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[16]; cpu->gpr[16] = cpu->gpr[16] & 0xFFFFu;
+    PGXP_ALU(0x3210FFFFu, cpu->gpr[16], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC05250u);
 #endif
@@ -84170,7 +84260,8 @@ label_BFC052F4:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC05308: 00621824  and $v1, $v1, $v0 */
-    cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[2];
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[2];
+    PGXP_ALU(0x00621824u, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC05308u);
 #endif
@@ -84299,7 +84390,8 @@ label_BFC05324:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC0532C: 00641824  and $v1, $v1, $a0 */
-    cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[4];
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[4];
+    PGXP_ALU(0x00641824u, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC0532Cu);
 #endif
@@ -84708,7 +84800,8 @@ label_BFC05384:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC0538C: 00641824  and $v1, $v1, $a0 */
-    cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[4];
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[4];
+    PGXP_ALU(0x00641824u, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC0538Cu);
 #endif
@@ -84825,7 +84918,8 @@ label_BFC053A4:
     psx_cyc_step(cpu, 0x14u);
 #endif
     /* 0xBFC053AC: 00441024  and $v0, $v0, $a0 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[4];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[4];
+    PGXP_ALU(0x00441024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC053ACu);
 #endif
@@ -85188,7 +85282,8 @@ label_BFC053E0:
     psx_cyc_step(cpu, 0x50u);
 #endif
     /* 0xBFC05410: 30C4FFFF  andi $a0, $a2, 0xFFFF */
-    cpu->gpr[4] = cpu->gpr[6] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[6]; cpu->gpr[4] = cpu->gpr[6] & 0xFFFFu;
+    PGXP_ALU(0x30C4FFFFu, cpu->gpr[4], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC05410u);
 #endif
@@ -86811,7 +86906,8 @@ label_BFC055D8:
     psx_cyc_step(cpu, 0x38u);
 #endif
     /* 0xBFC055D8: 0065202B  sltu $a0, $v1, $a1 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[3] < cpu->gpr[5] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[5]; cpu->gpr[4] = (uint32_t)(cpu->gpr[3] < cpu->gpr[5] ? 1 : 0);
+    PGXP_ALU(0x0065202Bu, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC055D8u);
 #endif
@@ -87079,7 +87175,8 @@ label_BFC05618:
     psx_cyc_step(cpu, 0x38u);
 #endif
     /* 0xBFC05618: 0064282B  sltu $a1, $v1, $a0 */
-    cpu->gpr[5] = (uint32_t)(cpu->gpr[3] < cpu->gpr[4] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[5] = (uint32_t)(cpu->gpr[3] < cpu->gpr[4] ? 1 : 0);
+    PGXP_ALU(0x0064282Bu, cpu->gpr[5], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC05618u);
 #endif
@@ -87705,7 +87802,8 @@ label_BFC056B4:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC056B4: 3084FFFF  andi $a0, $a0, 0xFFFF */
-    cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    PGXP_ALU(0x3084FFFFu, cpu->gpr[4], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC056B4u);
 #endif
@@ -87922,7 +88020,8 @@ label_BFC056EC:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC056EC: 3084FFFF  andi $a0, $a0, 0xFFFF */
-    cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    PGXP_ALU(0x3084FFFFu, cpu->gpr[4], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC056ECu);
 #endif
@@ -88128,7 +88227,8 @@ label_BFC05724:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC05724: 3084FFFF  andi $a0, $a0, 0xFFFF */
-    cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    PGXP_ALU(0x3084FFFFu, cpu->gpr[4], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC05724u);
 #endif
@@ -88275,7 +88375,8 @@ label_BFC0574C:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC0574C: 3084FFFF  andi $a0, $a0, 0xFFFF */
-    cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    PGXP_ALU(0x3084FFFFu, cpu->gpr[4], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC0574Cu);
 #endif
@@ -88526,7 +88627,8 @@ label_BFC0578C:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC0578C: 3084FFFF  andi $a0, $a0, 0xFFFF */
-    cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    PGXP_ALU(0x3084FFFFu, cpu->gpr[4], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC0578Cu);
 #endif
@@ -89314,7 +89416,8 @@ label_BFC05858:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC0585C: 2C63001A  sltiu $v1, $v1, 26 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[3] < 0x0000001Au ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = (uint32_t)(cpu->gpr[3] < 0x0000001Au ? 1 : 0);
+    PGXP_ALU(0x2C63001Au, cpu->gpr[3], _pgx1, 0x001Au); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC0585Cu);
 #endif
@@ -89380,7 +89483,8 @@ label_BFC05868:
     psx_cyc_step(cpu, 0x1Cu);
 #endif
     /* 0xBFC0586C: 00831024  and $v0, $a0, $v1 */
-    cpu->gpr[2] = cpu->gpr[4] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[4]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[4] & cpu->gpr[3];
+    PGXP_ALU(0x00831024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC0586Cu);
 #endif
@@ -89464,7 +89568,8 @@ label_BFC05878:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC0587C: 2C63001A  sltiu $v1, $v1, 26 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[3] < 0x0000001Au ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = (uint32_t)(cpu->gpr[3] < 0x0000001Au ? 1 : 0);
+    PGXP_ALU(0x2C63001Au, cpu->gpr[3], _pgx1, 0x001Au); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC0587Cu);
 #endif
@@ -90541,7 +90646,8 @@ label_BFC05958:
     psx_cyc_step(cpu, 0x90u);
 #endif
     /* 0xBFC05960: 2C870001  sltiu $a3, $a0, 1 */
-    cpu->gpr[7] = (uint32_t)(cpu->gpr[4] < 0x00000001u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[7] = (uint32_t)(cpu->gpr[4] < 0x00000001u ? 1 : 0);
+    PGXP_ALU(0x2C870001u, cpu->gpr[7], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC05960u);
 #endif
@@ -95822,7 +95928,8 @@ label_BFC05E74:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC05E78: 2C43000A  sltiu $v1, $v0, 10 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x0000000Au ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x0000000Au ? 1 : 0);
+    PGXP_ALU(0x2C43000Au, cpu->gpr[3], _pgx1, 0x000Au); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC05E78u);
 #endif
@@ -95887,7 +95994,8 @@ label_BFC05E84:
     psx_cyc_step(cpu, 0x14u);
 #endif
     /* 0xBFC05E88: 00821024  and $v0, $a0, $v0 */
-    cpu->gpr[2] = cpu->gpr[4] & cpu->gpr[2];
+    { uint32_t _pgx1 = cpu->gpr[4]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[4] & cpu->gpr[2];
+    PGXP_ALU(0x00821024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC05E88u);
 #endif
@@ -95910,7 +96018,8 @@ label_BFC05E84:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC05E90: 2C420006  sltiu $v0, $v0, 6 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000006u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000006u ? 1 : 0);
+    PGXP_ALU(0x2C420006u, cpu->gpr[2], _pgx1, 0x0006u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC05E90u);
 #endif
@@ -96011,7 +96120,8 @@ label_BFC05EA4:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC05EA8: 2C42001A  sltiu $v0, $v0, 26 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x0000001Au ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x0000001Au ? 1 : 0);
+    PGXP_ALU(0x2C42001Au, cpu->gpr[2], _pgx1, 0x001Au); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC05EA8u);
 #endif
@@ -96157,7 +96267,8 @@ label_BFC05EC4:
     psx_cyc_step(cpu, 0x14u);
 #endif
     /* 0xBFC05EC8: 00442026  xor $a0, $v0, $a0 */
-    cpu->gpr[4] = cpu->gpr[2] ^ cpu->gpr[4];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[4] = cpu->gpr[2] ^ cpu->gpr[4];
+    PGXP_ALU(0x00442026u, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC05EC8u);
 #endif
@@ -97072,7 +97183,8 @@ label_BFC05F90:
     psx_cyc_step(cpu, 0x4Cu);
 #endif
     /* 0xBFC05F94: 0043302B  sltu $a2, $v0, $v1 */
-    cpu->gpr[6] = (uint32_t)(cpu->gpr[2] < cpu->gpr[3] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[6] = (uint32_t)(cpu->gpr[2] < cpu->gpr[3] ? 1 : 0);
+    PGXP_ALU(0x0043302Bu, cpu->gpr[6], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC05F94u);
 #endif
@@ -97473,7 +97585,8 @@ label_BFC05FE4:
     psx_cyc_step(cpu, 0x4Cu);
 #endif
     /* 0xBFC05FE8: 0043302B  sltu $a2, $v0, $v1 */
-    cpu->gpr[6] = (uint32_t)(cpu->gpr[2] < cpu->gpr[3] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[6] = (uint32_t)(cpu->gpr[2] < cpu->gpr[3] ? 1 : 0);
+    PGXP_ALU(0x0043302Bu, cpu->gpr[6], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC05FE8u);
 #endif
@@ -98786,7 +98899,8 @@ label_BFC060E4:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0610C: 30427FFF  andi $v0, $v0, 0x7FFF */
-    cpu->gpr[2] = cpu->gpr[2] & 0x7FFFu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x7FFFu;
+    PGXP_ALU(0x30427FFFu, cpu->gpr[2], _pgx1, 0x7FFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC0610Cu);
 #endif
@@ -99426,7 +99540,8 @@ label_BFC061A0:
     psx_cyc_step(cpu, 0x20044u);
 #endif
     /* 0xBFC061A0: 0226102A  slt $v0, $s1, $a2 */
-    cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[17] < (int32_t)cpu->gpr[6] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[17]; uint32_t _pgx2 = cpu->gpr[6]; cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[17] < (int32_t)cpu->gpr[6] ? 1 : 0);
+    PGXP_ALU(0x0226102Au, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC061A0u);
 #endif
@@ -99937,7 +100052,8 @@ label_BFC06220:
     psx_cyc_step(cpu, 0x14u);
 #endif
     /* 0xBFC06220: 2C82000F  sltiu $v0, $a0, 15 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[4] < 0x0000000Fu ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[2] = (uint32_t)(cpu->gpr[4] < 0x0000000Fu ? 1 : 0);
+    PGXP_ALU(0x2C82000Fu, cpu->gpr[2], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC06220u);
 #endif
@@ -100639,7 +100755,8 @@ label_BFC062A8:
     psx_cyc_step(cpu, 0x24u);
 #endif
     /* 0xBFC062BC: 00A21024  and $v0, $a1, $v0 */
-    cpu->gpr[2] = cpu->gpr[5] & cpu->gpr[2];
+    { uint32_t _pgx1 = cpu->gpr[5]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[5] & cpu->gpr[2];
+    PGXP_ALU(0x00A21024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC062BCu);
 #endif
@@ -100671,7 +100788,8 @@ label_BFC062C0:
     psx_cyc_step(cpu, 0x50u);
 #endif
     /* 0xBFC062C0: 28860009  slti $a2, $a0, 9 */
-    cpu->gpr[6] = (uint32_t)((int32_t)cpu->gpr[4] < (9) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[6] = (uint32_t)((int32_t)cpu->gpr[4] < (9) ? 1 : 0);
+    PGXP_ALU(0x28860009u, cpu->gpr[6], _pgx1, 0x0009u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC062C0u);
 #endif
@@ -101246,7 +101364,8 @@ label_BFC06348:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC06348: 28430800  slti $v1, $v0, 2048 */
-    cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[2] < (2048) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[2] < (2048) ? 1 : 0);
+    PGXP_ALU(0x28430800u, cpu->gpr[3], _pgx1, 0x0800u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC06348u);
 #endif
@@ -102912,7 +103031,8 @@ label_BFC064E4:
     psx_cyc_step(cpu, 0x20u);
 #endif
     /* 0xBFC064E8: 2CA5001A  sltiu $a1, $a1, 26 */
-    cpu->gpr[5] = (uint32_t)(cpu->gpr[5] < 0x0000001Au ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[5]; cpu->gpr[5] = (uint32_t)(cpu->gpr[5] < 0x0000001Au ? 1 : 0);
+    PGXP_ALU(0x2CA5001Au, cpu->gpr[5], _pgx1, 0x001Au); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC064E8u);
 #endif
@@ -102966,7 +103086,8 @@ label_BFC064F4:
     psx_cyc_step(cpu, 0x44u);
 #endif
     /* 0xBFC064F4: 00461024  and $v0, $v0, $a2 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[6];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[6]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[6];
+    PGXP_ALU(0x00461024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC064F4u);
 #endif
@@ -105726,7 +105847,8 @@ label_BFC067D4:
     psx_cyc_step(cpu, 0x80028u);
 #endif
     /* 0xBFC067D4: 0073282A  slt $a1, $v1, $s3 */
-    cpu->gpr[5] = (uint32_t)((int32_t)cpu->gpr[3] < (int32_t)cpu->gpr[19] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[19]; cpu->gpr[5] = (uint32_t)((int32_t)cpu->gpr[3] < (int32_t)cpu->gpr[19] ? 1 : 0);
+    PGXP_ALU(0x0073282Au, cpu->gpr[5], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC067D4u);
 #endif
@@ -105811,7 +105933,8 @@ label_BFC067E8:
     psx_cyc_step(cpu, 0x40048u);
 #endif
     /* 0xBFC067E8: 0072302A  slt $a2, $v1, $s2 */
-    cpu->gpr[6] = (uint32_t)((int32_t)cpu->gpr[3] < (int32_t)cpu->gpr[18] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[18]; cpu->gpr[6] = (uint32_t)((int32_t)cpu->gpr[3] < (int32_t)cpu->gpr[18] ? 1 : 0);
+    PGXP_ALU(0x0072302Au, cpu->gpr[6], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC067E8u);
 #endif
@@ -106917,7 +107040,8 @@ label_BFC068F8:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC068F8: 3084FFFF  andi $a0, $a0, 0xFFFF */
-    cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    PGXP_ALU(0x3084FFFFu, cpu->gpr[4], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC068F8u);
 #endif
@@ -107065,7 +107189,8 @@ label_BFC06924:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC06924: 3084FFFF  andi $a0, $a0, 0xFFFF */
-    cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    PGXP_ALU(0x3084FFFFu, cpu->gpr[4], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC06924u);
 #endif
@@ -107577,7 +107702,8 @@ label_BFC069A8:
     psx_cyc_step(cpu, 0x14u);
 #endif
     /* 0xBFC069AC: 2C820005  sltiu $v0, $a0, 5 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[4] < 0x00000005u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[2] = (uint32_t)(cpu->gpr[4] < 0x00000005u ? 1 : 0);
+    PGXP_ALU(0x2C820005u, cpu->gpr[2], _pgx1, 0x0005u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC069ACu);
 #endif
@@ -109990,7 +110116,8 @@ label_BFC06BC8:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC06BC8: 2C64000A  sltiu $a0, $v1, 10 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[3] < 0x0000000Au ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[4] = (uint32_t)(cpu->gpr[3] < 0x0000000Au ? 1 : 0);
+    PGXP_ALU(0x2C64000Au, cpu->gpr[4], _pgx1, 0x000Au); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC06BC8u);
 #endif
@@ -110117,7 +110244,8 @@ label_BFC06BE4:
     psx_cyc_step(cpu, 0x1108u);
 #endif
     /* 0xBFC06BE4: 010C1824  and $v1, $t0, $t4 */
-    cpu->gpr[3] = cpu->gpr[8] & cpu->gpr[12];
+    { uint32_t _pgx1 = cpu->gpr[8]; uint32_t _pgx2 = cpu->gpr[12]; cpu->gpr[3] = cpu->gpr[8] & cpu->gpr[12];
+    PGXP_ALU(0x010C1824u, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC06BE4u);
 #endif
@@ -110140,7 +110268,8 @@ label_BFC06BE4:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC06BEC: 306300FF  andi $v1, $v1, 0xFF */
-    cpu->gpr[3] = cpu->gpr[3] & 0xFFu;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] & 0xFFu;
+    PGXP_ALU(0x306300FFu, cpu->gpr[3], _pgx1, 0x00FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC06BECu);
 #endif
@@ -110151,7 +110280,8 @@ label_BFC06BE4:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC06BF0: 2C630006  sltiu $v1, $v1, 6 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[3] < 0x00000006u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = (uint32_t)(cpu->gpr[3] < 0x00000006u ? 1 : 0);
+    PGXP_ALU(0x2C630006u, cpu->gpr[3], _pgx1, 0x0006u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC06BF0u);
 #endif
@@ -110216,7 +110346,8 @@ label_BFC06BFC:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC06C00: 2C42001A  sltiu $v0, $v0, 26 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x0000001Au ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x0000001Au ? 1 : 0);
+    PGXP_ALU(0x2C42001Au, cpu->gpr[2], _pgx1, 0x001Au); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC06C00u);
 #endif
@@ -110469,7 +110600,8 @@ label_BFC06C38:
     psx_cyc_step(cpu, 0x500u);
 #endif
     /* 0xBFC06C40: 310A00FF  andi $t2, $t0, 0xFF */
-    cpu->gpr[10] = cpu->gpr[8] & 0xFFu;
+    { uint32_t _pgx1 = cpu->gpr[8]; cpu->gpr[10] = cpu->gpr[8] & 0xFFu;
+    PGXP_ALU(0x310A00FFu, cpu->gpr[10], _pgx1, 0x00FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC06C40u);
 #endif
@@ -111165,7 +111297,8 @@ label_BFC06C7C:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC06CB0: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC06CB0u);
 #endif
@@ -111939,7 +112072,8 @@ label_BFC06D78:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC06D80: 2C430021  sltiu $v1, $v0, 33 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x00000021u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x00000021u ? 1 : 0);
+    PGXP_ALU(0x2C430021u, cpu->gpr[3], _pgx1, 0x0021u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC06D80u);
 #endif
@@ -113276,7 +113410,8 @@ label_BFC06ED8:
     psx_cyc_step(cpu, 0x108u);
 #endif
     /* 0xBFC06EE0: 3068000F  andi $t0, $v1, 0xF */
-    cpu->gpr[8] = cpu->gpr[3] & 0xFu;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[8] = cpu->gpr[3] & 0xFu;
+    PGXP_ALU(0x3068000Fu, cpu->gpr[8], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC06EE0u);
 #endif
@@ -114891,7 +115026,8 @@ label_BFC07074:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC07080: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07080u);
 #endif
@@ -116895,7 +117031,8 @@ label_BFC0728C:
     psx_cyc_step(cpu, 0x84u);
 #endif
     /* 0xBFC07290: 28E2000B  slti $v0, $a3, 11 */
-    cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[7] < (11) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[7]; cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[7] < (11) ? 1 : 0);
+    PGXP_ALU(0x28E2000Bu, cpu->gpr[2], _pgx1, 0x000Bu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07290u);
 #endif
@@ -117825,7 +117962,8 @@ label_BFC07354:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC07360: 306400FF  andi $a0, $v1, 0xFF */
-    cpu->gpr[4] = cpu->gpr[3] & 0xFFu;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[4] = cpu->gpr[3] & 0xFFu;
+    PGXP_ALU(0x306400FFu, cpu->gpr[4], _pgx1, 0x00FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07360u);
 #endif
@@ -117836,7 +117974,8 @@ label_BFC07354:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC07364: 2C84000E  sltiu $a0, $a0, 14 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[4] < 0x0000000Eu ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = (uint32_t)(cpu->gpr[4] < 0x0000000Eu ? 1 : 0);
+    PGXP_ALU(0x2C84000Eu, cpu->gpr[4], _pgx1, 0x000Eu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07364u);
 #endif
@@ -117890,7 +118029,8 @@ label_BFC07370:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC07370: 30840001  andi $a0, $a0, 0x1 */
-    cpu->gpr[4] = cpu->gpr[4] & 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = cpu->gpr[4] & 0x1u;
+    PGXP_ALU(0x30840001u, cpu->gpr[4], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07370u);
 #endif
@@ -119578,7 +119718,8 @@ label_BFC07510:
     psx_cyc_step(cpu, 0x30004u);
 #endif
     /* 0xBFC07514: 0211102B  sltu $v0, $s0, $s1 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[16] < cpu->gpr[17] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[16]; uint32_t _pgx2 = cpu->gpr[17]; cpu->gpr[2] = (uint32_t)(cpu->gpr[16] < cpu->gpr[17] ? 1 : 0);
+    PGXP_ALU(0x0211102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07514u);
 #endif
@@ -122137,7 +122278,8 @@ label_BFC0776C:
     psx_cyc_step(cpu, 0x80u);
 #endif
     /* 0xBFC07784: 30E70001  andi $a3, $a3, 0x1 */
-    cpu->gpr[7] = cpu->gpr[7] & 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[7]; cpu->gpr[7] = cpu->gpr[7] & 0x1u;
+    PGXP_ALU(0x30E70001u, cpu->gpr[7], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07784u);
 #endif
@@ -122225,7 +122367,8 @@ label_BFC07798:
     psx_cyc_step(cpu, 0xA0u);
 #endif
     /* 0xBFC07798: 2CA70401  sltiu $a3, $a1, 1025 */
-    cpu->gpr[7] = (uint32_t)(cpu->gpr[5] < 0x00000401u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[5]; cpu->gpr[7] = (uint32_t)(cpu->gpr[5] < 0x00000401u ? 1 : 0);
+    PGXP_ALU(0x2CA70401u, cpu->gpr[7], _pgx1, 0x0401u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07798u);
 #endif
@@ -122747,7 +122890,8 @@ label_BFC07814:
     psx_cyc_step(cpu, 0x80u);
 #endif
     /* 0xBFC0782C: 30E70001  andi $a3, $a3, 0x1 */
-    cpu->gpr[7] = cpu->gpr[7] & 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[7]; cpu->gpr[7] = cpu->gpr[7] & 0x1u;
+    PGXP_ALU(0x30E70001u, cpu->gpr[7], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC0782Cu);
 #endif
@@ -122835,7 +122979,8 @@ label_BFC07840:
     psx_cyc_step(cpu, 0xA0u);
 #endif
     /* 0xBFC07840: 2CA70401  sltiu $a3, $a1, 1025 */
-    cpu->gpr[7] = (uint32_t)(cpu->gpr[5] < 0x00000401u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[5]; cpu->gpr[7] = (uint32_t)(cpu->gpr[5] < 0x00000401u ? 1 : 0);
+    PGXP_ALU(0x2CA70401u, cpu->gpr[7], _pgx1, 0x0401u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07840u);
 #endif
@@ -123353,7 +123498,8 @@ label_BFC078BC:
     psx_cyc_step(cpu, 0x40u);
 #endif
     /* 0xBFC078D4: 30C60001  andi $a2, $a2, 0x1 */
-    cpu->gpr[6] = cpu->gpr[6] & 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[6]; cpu->gpr[6] = cpu->gpr[6] & 0x1u;
+    PGXP_ALU(0x30C60001u, cpu->gpr[6], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC078D4u);
 #endif
@@ -123923,7 +124069,8 @@ label_BFC07968:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC07980: 306300FE  andi $v1, $v1, 0xFE */
-    cpu->gpr[3] = cpu->gpr[3] & 0xFEu;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] & 0xFEu;
+    PGXP_ALU(0x306300FEu, cpu->gpr[3], _pgx1, 0x00FEu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07980u);
 #endif
@@ -124216,7 +124363,8 @@ label_BFC079C8:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC079DC: 2C420002  sltiu $v0, $v0, 2 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000002u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000002u ? 1 : 0);
+    PGXP_ALU(0x2C420002u, cpu->gpr[2], _pgx1, 0x0002u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC079DCu);
 #endif
@@ -124541,7 +124689,8 @@ label_BFC07A24:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC07A38: 30630010  andi $v1, $v1, 0x10 */
-    cpu->gpr[3] = cpu->gpr[3] & 0x10u;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] & 0x10u;
+    PGXP_ALU(0x30630010u, cpu->gpr[3], _pgx1, 0x0010u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07A38u);
 #endif
@@ -125456,7 +125605,8 @@ label_BFC07B18:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC07B20: 30420004  andi $v0, $v0, 0x4 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x4u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x4u;
+    PGXP_ALU(0x30420004u, cpu->gpr[2], _pgx1, 0x0004u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07B20u);
 #endif
@@ -126150,7 +126300,8 @@ label_BFC07BE0:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC07BE8: 30420002  andi $v0, $v0, 0x2 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x2u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x2u;
+    PGXP_ALU(0x30420002u, cpu->gpr[2], _pgx1, 0x0002u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07BE8u);
 #endif
@@ -126380,7 +126531,8 @@ label_BFC07C20:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC07C28: 30420002  andi $v0, $v0, 0x2 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x2u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x2u;
+    PGXP_ALU(0x30420002u, cpu->gpr[2], _pgx1, 0x0002u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07C28u);
 #endif
@@ -126474,7 +126626,8 @@ label_BFC07C34:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC07C44: 30420008  andi $v0, $v0, 0x8 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x8u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x8u;
+    PGXP_ALU(0x30420008u, cpu->gpr[2], _pgx1, 0x0008u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07C44u);
 #endif
@@ -126931,7 +127084,8 @@ label_BFC07CA4:
     psx_cyc_step(cpu, 0x120u);
 #endif
     /* 0xBFC07CAC: 28A87403  slti $t0, $a1, 29699 */
-    cpu->gpr[8] = (uint32_t)((int32_t)cpu->gpr[5] < (29699) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[5]; cpu->gpr[8] = (uint32_t)((int32_t)cpu->gpr[5] < (29699) ? 1 : 0);
+    PGXP_ALU(0x28A87403u, cpu->gpr[8], _pgx1, 0x7403u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07CACu);
 #endif
@@ -127729,7 +127883,8 @@ label_BFC07D68:
     psx_cyc_step(cpu, 0x28u);
 #endif
     /* 0xBFC07D6C: 00651824  and $v1, $v1, $a1 */
-    cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[5];
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[5]; cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[5];
+    PGXP_ALU(0x00651824u, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07D6Cu);
 #endif
@@ -128406,7 +128561,8 @@ label_BFC07E14:
     psx_cyc_step(cpu, 0x108u);
 #endif
     /* 0xBFC07E14: 30680003  andi $t0, $v1, 0x3 */
-    cpu->gpr[8] = cpu->gpr[3] & 0x3u;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[8] = cpu->gpr[3] & 0x3u;
+    PGXP_ALU(0x30680003u, cpu->gpr[8], _pgx1, 0x0003u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07E14u);
 #endif
@@ -128543,7 +128699,8 @@ label_BFC07E30:
     psx_cyc_step(cpu, 0x8080u);
 #endif
     /* 0xBFC07E30: 00EF3824  and $a3, $a3, $t7 */
-    cpu->gpr[7] = cpu->gpr[7] & cpu->gpr[15];
+    { uint32_t _pgx1 = cpu->gpr[7]; uint32_t _pgx2 = cpu->gpr[15]; cpu->gpr[7] = cpu->gpr[7] & cpu->gpr[15];
+    PGXP_ALU(0x00EF3824u, cpu->gpr[7], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07E30u);
 #endif
@@ -128573,7 +128730,8 @@ label_BFC07E34:
     psx_cyc_step(cpu, 0x180u);
 #endif
     /* 0xBFC07E38: 01074026  xor $t0, $t0, $a3 */
-    cpu->gpr[8] = cpu->gpr[8] ^ cpu->gpr[7];
+    { uint32_t _pgx1 = cpu->gpr[8]; uint32_t _pgx2 = cpu->gpr[7]; cpu->gpr[8] = cpu->gpr[8] ^ cpu->gpr[7];
+    PGXP_ALU(0x01074026u, cpu->gpr[8], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07E38u);
 #endif
@@ -128584,7 +128742,8 @@ label_BFC07E34:
     psx_cyc_step(cpu, 0x100u);
 #endif
     /* 0xBFC07E3C: 3908003D  xori $t0, $t0, 0x3D */
-    cpu->gpr[8] = cpu->gpr[8] ^ 0x3Du;
+    { uint32_t _pgx1 = cpu->gpr[8]; cpu->gpr[8] = cpu->gpr[8] ^ 0x3Du;
+    PGXP_ALU(0x3908003Du, cpu->gpr[8], _pgx1, 0x003Du); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07E3Cu);
 #endif
@@ -128631,7 +128790,8 @@ label_BFC07E34:
     psx_cyc_step(cpu, 0x180u);
 #endif
     /* 0xBFC07E4C: 00E83826  xor $a3, $a3, $t0 */
-    cpu->gpr[7] = cpu->gpr[7] ^ cpu->gpr[8];
+    { uint32_t _pgx1 = cpu->gpr[7]; uint32_t _pgx2 = cpu->gpr[8]; cpu->gpr[7] = cpu->gpr[7] ^ cpu->gpr[8];
+    PGXP_ALU(0x00E83826u, cpu->gpr[7], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07E4Cu);
 #endif
@@ -128684,7 +128844,8 @@ label_BFC07E34:
     psx_cyc_step(cpu, 0x180u);
 #endif
     /* 0xBFC07E5C: 00E83826  xor $a3, $a3, $t0 */
-    cpu->gpr[7] = cpu->gpr[7] ^ cpu->gpr[8];
+    { uint32_t _pgx1 = cpu->gpr[7]; uint32_t _pgx2 = cpu->gpr[8]; cpu->gpr[7] = cpu->gpr[7] ^ cpu->gpr[8];
+    PGXP_ALU(0x00E83826u, cpu->gpr[7], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07E5Cu);
 #endif
@@ -128790,7 +128951,8 @@ label_BFC07E74:
     psx_cyc_step(cpu, 0x2080u);
 #endif
     /* 0xBFC07E78: 00ED3824  and $a3, $a3, $t5 */
-    cpu->gpr[7] = cpu->gpr[7] & cpu->gpr[13];
+    { uint32_t _pgx1 = cpu->gpr[7]; uint32_t _pgx2 = cpu->gpr[13]; cpu->gpr[7] = cpu->gpr[7] & cpu->gpr[13];
+    PGXP_ALU(0x00ED3824u, cpu->gpr[7], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC07E78u);
 #endif
@@ -134818,7 +134980,8 @@ label_BFC08478:
     psx_cyc_step(cpu, 0x24u);
 #endif
     /* 0xBFC08478: 2CA20002  sltiu $v0, $a1, 2 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[5] < 0x00000002u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[5]; cpu->gpr[2] = (uint32_t)(cpu->gpr[5] < 0x00000002u ? 1 : 0);
+    PGXP_ALU(0x2CA20002u, cpu->gpr[2], _pgx1, 0x0002u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08478u);
 #endif
@@ -135180,7 +135343,8 @@ label_BFC084D4:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC084D8: 0043182B  sltu $v1, $v0, $v1 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < cpu->gpr[3] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < cpu->gpr[3] ? 1 : 0);
+    PGXP_ALU(0x0043182Bu, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC084D8u);
 #endif
@@ -135763,7 +135927,8 @@ label_BFC08570:
     psx_cyc_step(cpu, 0x10004u);
 #endif
     /* 0xBFC08574: 0050102B  sltu $v0, $v0, $s0 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < cpu->gpr[16] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[16]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < cpu->gpr[16] ? 1 : 0);
+    PGXP_ALU(0x0050102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08574u);
 #endif
@@ -135836,7 +136001,8 @@ label_BFC08584:
     psx_cyc_step(cpu, 0x280004u);
 #endif
     /* 0xBFC08584: 0275102B  sltu $v0, $s3, $s5 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[19] < cpu->gpr[21] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[19]; uint32_t _pgx2 = cpu->gpr[21]; cpu->gpr[2] = (uint32_t)(cpu->gpr[19] < cpu->gpr[21] ? 1 : 0);
+    PGXP_ALU(0x0275102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08584u);
 #endif
@@ -136446,7 +136612,8 @@ label_BFC08604:
     psx_cyc_step(cpu, 0x38u);
 #endif
     /* 0xBFC08604: 0085182B  sltu $v1, $a0, $a1 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[4] < cpu->gpr[5] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; uint32_t _pgx2 = cpu->gpr[5]; cpu->gpr[3] = (uint32_t)(cpu->gpr[4] < cpu->gpr[5] ? 1 : 0);
+    PGXP_ALU(0x0085182Bu, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08604u);
 #endif
@@ -136500,7 +136667,8 @@ label_BFC08610:
     psx_cyc_step(cpu, 0x38u);
 #endif
     /* 0xBFC08610: 00A4182B  sltu $v1, $a1, $a0 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[5] < cpu->gpr[4] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[5]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[3] = (uint32_t)(cpu->gpr[5] < cpu->gpr[4] ? 1 : 0);
+    PGXP_ALU(0x00A4182Bu, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08610u);
 #endif
@@ -136597,7 +136765,8 @@ label_BFC08624:
     psx_cyc_step(cpu, 0x50u);
 #endif
     /* 0xBFC08628: 0086202B  sltu $a0, $a0, $a2 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[4] < cpu->gpr[6] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; uint32_t _pgx2 = cpu->gpr[6]; cpu->gpr[4] = (uint32_t)(cpu->gpr[4] < cpu->gpr[6] ? 1 : 0);
+    PGXP_ALU(0x0086202Bu, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08628u);
 #endif
@@ -137097,7 +137266,8 @@ label_BFC08688:
     psx_cyc_step(cpu, 0x188u);
 #endif
     /* 0xBFC08698: 0067402B  sltu $t0, $v1, $a3 */
-    cpu->gpr[8] = (uint32_t)(cpu->gpr[3] < cpu->gpr[7] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[7]; cpu->gpr[8] = (uint32_t)(cpu->gpr[3] < cpu->gpr[7] ? 1 : 0);
+    PGXP_ALU(0x0067402Bu, cpu->gpr[8], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08698u);
 #endif
@@ -137118,7 +137288,8 @@ label_BFC08688:
     psx_cyc_step(cpu, 0x88u);
 #endif
     /* 0xBFC086A0: 00E3182B  sltu $v1, $a3, $v1 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[7] < cpu->gpr[3] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[7]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[3] = (uint32_t)(cpu->gpr[7] < cpu->gpr[3] ? 1 : 0);
+    PGXP_ALU(0x00E3182Bu, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC086A0u);
 #endif
@@ -137620,7 +137791,8 @@ label_BFC086E8:
     psx_cyc_step(cpu, 0x44u);
 #endif
     /* 0xBFC086E8: 2CC20025  sltiu $v0, $a2, 37 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[6] < 0x00000025u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[6]; cpu->gpr[2] = (uint32_t)(cpu->gpr[6] < 0x00000025u ? 1 : 0);
+    PGXP_ALU(0x2CC20025u, cpu->gpr[2], _pgx1, 0x0025u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC086E8u);
 #endif
@@ -138087,7 +138259,8 @@ label_BFC08760:
     psx_cyc_step(cpu, 0x1000000u);
 #endif
     /* 0xBFC08760: 331800FF  andi $t8, $t8, 0xFF */
-    cpu->gpr[24] = cpu->gpr[24] & 0xFFu;
+    { uint32_t _pgx1 = cpu->gpr[24]; cpu->gpr[24] = cpu->gpr[24] & 0xFFu;
+    PGXP_ALU(0x331800FFu, cpu->gpr[24], _pgx1, 0x00FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08760u);
 #endif
@@ -138098,7 +138271,8 @@ label_BFC08760:
     psx_cyc_step(cpu, 0x1000000u);
 #endif
     /* 0xBFC08764: 2F180005  sltiu $t8, $t8, 5 */
-    cpu->gpr[24] = (uint32_t)(cpu->gpr[24] < 0x00000005u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[24]; cpu->gpr[24] = (uint32_t)(cpu->gpr[24] < 0x00000005u ? 1 : 0);
+    PGXP_ALU(0x2F180005u, cpu->gpr[24], _pgx1, 0x0005u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08764u);
 #endif
@@ -138413,7 +138587,8 @@ label_BFC087A8:
     psx_cyc_step(cpu, 0x1002000u);
 #endif
     /* 0xBFC087A8: 030DC024  and $t8, $t8, $t5 */
-    cpu->gpr[24] = cpu->gpr[24] & cpu->gpr[13];
+    { uint32_t _pgx1 = cpu->gpr[24]; uint32_t _pgx2 = cpu->gpr[13]; cpu->gpr[24] = cpu->gpr[24] & cpu->gpr[13];
+    PGXP_ALU(0x030DC024u, cpu->gpr[24], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC087A8u);
 #endif
@@ -138424,7 +138599,8 @@ label_BFC087A8:
     psx_cyc_step(cpu, 0x1000000u);
 #endif
     /* 0xBFC087AC: 331800FF  andi $t8, $t8, 0xFF */
-    cpu->gpr[24] = cpu->gpr[24] & 0xFFu;
+    { uint32_t _pgx1 = cpu->gpr[24]; cpu->gpr[24] = cpu->gpr[24] & 0xFFu;
+    PGXP_ALU(0x331800FFu, cpu->gpr[24], _pgx1, 0x00FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC087ACu);
 #endif
@@ -138519,7 +138695,8 @@ label_BFC087C0:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC087C0: 3863002D  xori $v1, $v1, 0x2D */
-    cpu->gpr[3] = cpu->gpr[3] ^ 0x2Du;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] ^ 0x2Du;
+    PGXP_ALU(0x3863002Du, cpu->gpr[3], _pgx1, 0x002Du); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC087C0u);
 #endif
@@ -138530,7 +138707,8 @@ label_BFC087C0:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC087C4: 2C630001  sltiu $v1, $v1, 1 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[3] < 0x00000001u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = (uint32_t)(cpu->gpr[3] < 0x00000001u ? 1 : 0);
+    PGXP_ALU(0x2C630001u, cpu->gpr[3], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC087C4u);
 #endif
@@ -138773,7 +138951,8 @@ label_BFC087F4:
     psx_cyc_step(cpu, 0xC8u);
 #endif
     /* 0xBFC087F8: 0066382A  slt $a3, $v1, $a2 */
-    cpu->gpr[7] = (uint32_t)((int32_t)cpu->gpr[3] < (int32_t)cpu->gpr[6] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[6]; cpu->gpr[7] = (uint32_t)((int32_t)cpu->gpr[3] < (int32_t)cpu->gpr[6] ? 1 : 0);
+    PGXP_ALU(0x0066382Au, cpu->gpr[7], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC087F8u);
 #endif
@@ -138857,7 +139036,8 @@ label_BFC08804:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0880C: 0062102B  sltu $v0, $v1, $v0 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[3] < cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[3] < cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x0062102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC0880Cu);
 #endif
@@ -138878,7 +139058,8 @@ label_BFC08804:
     psx_cyc_step(cpu, 0x80Cu);
 #endif
     /* 0xBFC08814: 006B102B  sltu $v0, $v1, $t3 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[3] < cpu->gpr[11] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[11]; cpu->gpr[2] = (uint32_t)(cpu->gpr[3] < cpu->gpr[11] ? 1 : 0);
+    PGXP_ALU(0x006B102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08814u);
 #endif
@@ -139473,7 +139654,8 @@ label_BFC08898:
     psx_cyc_step(cpu, 0x80u);
 #endif
     /* 0xBFC08898: 30E700FF  andi $a3, $a3, 0xFF */
-    cpu->gpr[7] = cpu->gpr[7] & 0xFFu;
+    { uint32_t _pgx1 = cpu->gpr[7]; cpu->gpr[7] = cpu->gpr[7] & 0xFFu;
+    PGXP_ALU(0x30E700FFu, cpu->gpr[7], _pgx1, 0x00FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08898u);
 #endif
@@ -139484,7 +139666,8 @@ label_BFC08898:
     psx_cyc_step(cpu, 0x1000080u);
 #endif
     /* 0xBFC0889C: 2CF8000A  sltiu $t8, $a3, 10 */
-    cpu->gpr[24] = (uint32_t)(cpu->gpr[7] < 0x0000000Au ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[7]; cpu->gpr[24] = (uint32_t)(cpu->gpr[7] < 0x0000000Au ? 1 : 0);
+    PGXP_ALU(0x2CF8000Au, cpu->gpr[24], _pgx1, 0x000Au); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC0889Cu);
 #endif
@@ -139549,7 +139732,8 @@ label_BFC088A8:
     psx_cyc_step(cpu, 0x80u);
 #endif
     /* 0xBFC088AC: 30E700FF  andi $a3, $a3, 0xFF */
-    cpu->gpr[7] = cpu->gpr[7] & 0xFFu;
+    { uint32_t _pgx1 = cpu->gpr[7]; cpu->gpr[7] = cpu->gpr[7] & 0xFFu;
+    PGXP_ALU(0x30E700FFu, cpu->gpr[7], _pgx1, 0x00FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC088ACu);
 #endif
@@ -139560,7 +139744,8 @@ label_BFC088A8:
     psx_cyc_step(cpu, 0x80u);
 #endif
     /* 0xBFC088B0: 2CE7001A  sltiu $a3, $a3, 26 */
-    cpu->gpr[7] = (uint32_t)(cpu->gpr[7] < 0x0000001Au ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[7]; cpu->gpr[7] = (uint32_t)(cpu->gpr[7] < 0x0000001Au ? 1 : 0);
+    PGXP_ALU(0x2CE7001Au, cpu->gpr[7], _pgx1, 0x001Au); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC088B0u);
 #endif
@@ -139614,7 +139799,8 @@ label_BFC088BC:
     psx_cyc_step(cpu, 0x80u);
 #endif
     /* 0xBFC088BC: 30E700FF  andi $a3, $a3, 0xFF */
-    cpu->gpr[7] = cpu->gpr[7] & 0xFFu;
+    { uint32_t _pgx1 = cpu->gpr[7]; cpu->gpr[7] = cpu->gpr[7] & 0xFFu;
+    PGXP_ALU(0x30E700FFu, cpu->gpr[7], _pgx1, 0x00FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC088BCu);
 #endif
@@ -139625,7 +139811,8 @@ label_BFC088BC:
     psx_cyc_step(cpu, 0x80u);
 #endif
     /* 0xBFC088C0: 2CE7001A  sltiu $a3, $a3, 26 */
-    cpu->gpr[7] = (uint32_t)(cpu->gpr[7] < 0x0000001Au ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[7]; cpu->gpr[7] = (uint32_t)(cpu->gpr[7] < 0x0000001Au ? 1 : 0);
+    PGXP_ALU(0x2CE7001Au, cpu->gpr[7], _pgx1, 0x001Au); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC088C0u);
 #endif
@@ -141170,7 +141357,8 @@ label_BFC08A44:
     psx_cyc_step(cpu, 0x1000008u);
 #endif
     /* 0xBFC08A48: 2878002E  slti $t8, $v1, 46 */
-    cpu->gpr[24] = (uint32_t)((int32_t)cpu->gpr[3] < (46) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[24] = (uint32_t)((int32_t)cpu->gpr[3] < (46) ? 1 : 0);
+    PGXP_ALU(0x2878002Eu, cpu->gpr[24], _pgx1, 0x002Eu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08A48u);
 #endif
@@ -141370,7 +141558,8 @@ label_BFC08A6C:
     psx_cyc_step(cpu, 0x200100u);
 #endif
     /* 0xBFC08A6C: 3AA80001  xori $t0, $s5, 0x1 */
-    cpu->gpr[8] = cpu->gpr[21] ^ 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[21]; cpu->gpr[8] = cpu->gpr[21] ^ 0x1u;
+    PGXP_ALU(0x3AA80001u, cpu->gpr[8], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08A6Cu);
 #endif
@@ -141388,7 +141577,8 @@ label_BFC08A70:
     psx_cyc_step(cpu, 0x400110u);
 #endif
     /* 0xBFC08A70: 0104B024  and $s6, $t0, $a0 */
-    cpu->gpr[22] = cpu->gpr[8] & cpu->gpr[4];
+    { uint32_t _pgx1 = cpu->gpr[8]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[22] = cpu->gpr[8] & cpu->gpr[4];
+    PGXP_ALU(0x0104B024u, cpu->gpr[22], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08A70u);
 #endif
@@ -141580,7 +141770,8 @@ label_BFC08A98:
     psx_cyc_step(cpu, 0x90u);
 #endif
     /* 0xBFC08AA4: 28E4005B  slti $a0, $a3, 91 */
-    cpu->gpr[4] = (uint32_t)((int32_t)cpu->gpr[7] < (91) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[7]; cpu->gpr[4] = (uint32_t)((int32_t)cpu->gpr[7] < (91) ? 1 : 0);
+    PGXP_ALU(0x28E4005Bu, cpu->gpr[4], _pgx1, 0x005Bu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08AA4u);
 #endif
@@ -141810,7 +142001,8 @@ label_BFC08AD8:
     psx_cyc_step(cpu, 0x20u);
 #endif
     /* 0xBFC08AD8: 2CA5000A  sltiu $a1, $a1, 10 */
-    cpu->gpr[5] = (uint32_t)(cpu->gpr[5] < 0x0000000Au ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[5]; cpu->gpr[5] = (uint32_t)(cpu->gpr[5] < 0x0000000Au ? 1 : 0);
+    PGXP_ALU(0x2CA5000Au, cpu->gpr[5], _pgx1, 0x000Au); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08AD8u);
 #endif
@@ -142152,7 +142344,8 @@ label_BFC08B28:
     psx_cyc_step(cpu, 0x200100u);
 #endif
     /* 0xBFC08B2C: 3AA80001  xori $t0, $s5, 0x1 */
-    cpu->gpr[8] = cpu->gpr[21] ^ 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[21]; cpu->gpr[8] = cpu->gpr[21] ^ 0x1u;
+    PGXP_ALU(0x3AA80001u, cpu->gpr[8], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08B2Cu);
 #endif
@@ -142510,7 +142703,8 @@ label_BFC08B78:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC08B7C: 2C84000A  sltiu $a0, $a0, 10 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[4] < 0x0000000Au ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = (uint32_t)(cpu->gpr[4] < 0x0000000Au ? 1 : 0);
+    PGXP_ALU(0x2C84000Au, cpu->gpr[4], _pgx1, 0x000Au); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08B7Cu);
 #endif
@@ -142531,7 +142725,8 @@ label_BFC08B78:
     psx_cyc_step(cpu, 0x90u);
 #endif
     /* 0xBFC08B84: 28E4005B  slti $a0, $a3, 91 */
-    cpu->gpr[4] = (uint32_t)((int32_t)cpu->gpr[7] < (91) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[7]; cpu->gpr[4] = (uint32_t)((int32_t)cpu->gpr[7] < (91) ? 1 : 0);
+    PGXP_ALU(0x28E4005Bu, cpu->gpr[4], _pgx1, 0x005Bu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08B84u);
 #endif
@@ -142681,7 +142876,8 @@ label_BFC08B98:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC08BA4: 00642026  xor $a0, $v1, $a0 */
-    cpu->gpr[4] = cpu->gpr[3] ^ cpu->gpr[4];
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[4] = cpu->gpr[3] ^ cpu->gpr[4];
+    PGXP_ALU(0x00642026u, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08BA4u);
 #endif
@@ -142732,7 +142928,8 @@ label_BFC08BB4:
     psx_cyc_step(cpu, 0x30u);
 #endif
     /* 0xBFC08BB4: 2885003D  slti $a1, $a0, 61 */
-    cpu->gpr[5] = (uint32_t)((int32_t)cpu->gpr[4] < (61) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[5] = (uint32_t)((int32_t)cpu->gpr[4] < (61) ? 1 : 0);
+    PGXP_ALU(0x2885003Du, cpu->gpr[5], _pgx1, 0x003Du); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08BB4u);
 #endif
@@ -143167,7 +143364,8 @@ label_BFC08C28:
     psx_cyc_step(cpu, 0x1008000u);
 #endif
     /* 0xBFC08C28: 2F0F000D  sltiu $t7, $t8, 13 */
-    cpu->gpr[15] = (uint32_t)(cpu->gpr[24] < 0x0000000Du ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[24]; cpu->gpr[15] = (uint32_t)(cpu->gpr[24] < 0x0000000Du ? 1 : 0);
+    PGXP_ALU(0x2F0F000Du, cpu->gpr[15], _pgx1, 0x000Du); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08C28u);
 #endif
@@ -143386,7 +143584,8 @@ label_BFC08C58:
     psx_cyc_step(cpu, 0x29u);
 #endif
     /* 0xBFC08C5C: 0003282B  sltu $a1, $zero, $v1 */
-    cpu->gpr[5] = (uint32_t)(cpu->gpr[0] < cpu->gpr[3] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[5] = (uint32_t)(cpu->gpr[0] < cpu->gpr[3] ? 1 : 0);
+    PGXP_ALU(0x0003282Bu, cpu->gpr[5], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08C5Cu);
 #endif
@@ -143534,7 +143733,8 @@ label_BFC08C84:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC08C8C: 2C630001  sltiu $v1, $v1, 1 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[3] < 0x00000001u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = (uint32_t)(cpu->gpr[3] < 0x00000001u ? 1 : 0);
+    PGXP_ALU(0x2C630001u, cpu->gpr[3], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08C8Cu);
 #endif
@@ -143861,7 +144061,8 @@ label_BFC08CBC:
     psx_cyc_step(cpu, 0x2040000u);
 #endif
     /* 0xBFC08CBC: 3A590008  xori $t9, $s2, 0x8 */
-    cpu->gpr[25] = cpu->gpr[18] ^ 0x8u;
+    { uint32_t _pgx1 = cpu->gpr[18]; cpu->gpr[25] = cpu->gpr[18] ^ 0x8u;
+    PGXP_ALU(0x3A590008u, cpu->gpr[25], _pgx1, 0x0008u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08CBCu);
 #endif
@@ -143872,7 +144073,8 @@ label_BFC08CBC:
     psx_cyc_step(cpu, 0x2000001u);
 #endif
     /* 0xBFC08CC0: 0019C82B  sltu $t9, $zero, $t9 */
-    cpu->gpr[25] = (uint32_t)(cpu->gpr[0] < cpu->gpr[25] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[25]; cpu->gpr[25] = (uint32_t)(cpu->gpr[0] < cpu->gpr[25] ? 1 : 0);
+    PGXP_ALU(0x0019C82Bu, cpu->gpr[25], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08CC0u);
 #endif
@@ -143883,7 +144085,8 @@ label_BFC08CBC:
     psx_cyc_step(cpu, 0x2000800u);
 #endif
     /* 0xBFC08CC4: 01795824  and $t3, $t3, $t9 */
-    cpu->gpr[11] = cpu->gpr[11] & cpu->gpr[25];
+    { uint32_t _pgx1 = cpu->gpr[11]; uint32_t _pgx2 = cpu->gpr[25]; cpu->gpr[11] = cpu->gpr[11] & cpu->gpr[25];
+    PGXP_ALU(0x01795824u, cpu->gpr[11], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08CC4u);
 #endif
@@ -144083,7 +144286,8 @@ label_BFC08CF4:
     psx_cyc_step(cpu, 0x2001001u);
 #endif
     /* 0xBFC08CF8: 0019602B  sltu $t4, $zero, $t9 */
-    cpu->gpr[12] = (uint32_t)(cpu->gpr[0] < cpu->gpr[25] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[25]; cpu->gpr[12] = (uint32_t)(cpu->gpr[0] < cpu->gpr[25] ? 1 : 0);
+    PGXP_ALU(0x0019602Bu, cpu->gpr[12], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08CF8u);
 #endif
@@ -144127,7 +144331,8 @@ label_BFC08CFC:
     psx_cyc_step(cpu, 0x3010u);
 #endif
     /* 0xBFC08D00: 008C682A  slt $t5, $a0, $t4 */
-    cpu->gpr[13] = (uint32_t)((int32_t)cpu->gpr[4] < (int32_t)cpu->gpr[12] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; uint32_t _pgx2 = cpu->gpr[12]; cpu->gpr[13] = (uint32_t)((int32_t)cpu->gpr[4] < (int32_t)cpu->gpr[12] ? 1 : 0);
+    PGXP_ALU(0x008C682Au, cpu->gpr[13], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08D00u);
 #endif
@@ -144357,7 +144562,8 @@ label_BFC08D2C:
     psx_cyc_step(cpu, 0x1000u);
 #endif
     /* 0xBFC08D34: 2D8C0003  sltiu $t4, $t4, 3 */
-    cpu->gpr[12] = (uint32_t)(cpu->gpr[12] < 0x00000003u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[12]; cpu->gpr[12] = (uint32_t)(cpu->gpr[12] < 0x00000003u ? 1 : 0);
+    PGXP_ALU(0x2D8C0003u, cpu->gpr[12], _pgx1, 0x0003u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08D34u);
 #endif
@@ -144502,7 +144708,8 @@ label_BFC08D4C:
     psx_cyc_step(cpu, 0x1000u);
 #endif
     /* 0xBFC08D54: 2D8C0003  sltiu $t4, $t4, 3 */
-    cpu->gpr[12] = (uint32_t)(cpu->gpr[12] < 0x00000003u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[12]; cpu->gpr[12] = (uint32_t)(cpu->gpr[12] < 0x00000003u ? 1 : 0);
+    PGXP_ALU(0x2D8C0003u, cpu->gpr[12], _pgx1, 0x0003u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08D54u);
 #endif
@@ -144793,7 +145000,8 @@ label_BFC08D88:
     psx_cyc_step(cpu, 0x41008u);
 #endif
     /* 0xBFC08DA0: 0072602B  sltu $t4, $v1, $s2 */
-    cpu->gpr[12] = (uint32_t)(cpu->gpr[3] < cpu->gpr[18] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[18]; cpu->gpr[12] = (uint32_t)(cpu->gpr[3] < cpu->gpr[18] ? 1 : 0);
+    PGXP_ALU(0x0072602Bu, cpu->gpr[12], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08DA0u);
 #endif
@@ -144994,7 +145202,8 @@ label_BFC08DD4:
     psx_cyc_step(cpu, 0x19u);
 #endif
     /* 0xBFC08DD4: 00032027  nor $a0, $zero, $v1 */
-    cpu->gpr[4] = ~(cpu->gpr[0] | cpu->gpr[3]);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[4] = ~(cpu->gpr[0] | cpu->gpr[3]);
+    PGXP_ALU(0x00032027u, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08DD4u);
 #endif
@@ -145017,7 +145226,8 @@ label_BFC08DD4:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC08DDC: 00641824  and $v1, $v1, $a0 */
-    cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[4];
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[4];
+    PGXP_ALU(0x00641824u, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08DDCu);
 #endif
@@ -145583,7 +145793,8 @@ label_BFC08E64:
     psx_cyc_step(cpu, 0x400010u);
 #endif
     /* 0xBFC08E64: 2EC40034  sltiu $a0, $s6, 52 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[22] < 0x00000034u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[22]; cpu->gpr[4] = (uint32_t)(cpu->gpr[22] < 0x00000034u ? 1 : 0);
+    PGXP_ALU(0x2EC40034u, cpu->gpr[4], _pgx1, 0x0034u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08E64u);
 #endif
@@ -145975,7 +146186,8 @@ label_BFC08EBC:
     psx_cyc_step(cpu, 0x800008u);
 #endif
     /* 0xBFC08EBC: 2EE30034  sltiu $v1, $s7, 52 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[23] < 0x00000034u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[23]; cpu->gpr[3] = (uint32_t)(cpu->gpr[23] < 0x00000034u ? 1 : 0);
+    PGXP_ALU(0x2EE30034u, cpu->gpr[3], _pgx1, 0x0034u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08EBCu);
 #endif
@@ -146603,7 +146815,8 @@ label_BFC08F38:
     psx_cyc_step(cpu, 0x80008u);
 #endif
     /* 0xBFC08F40: 02639824  and $s3, $s3, $v1 */
-    cpu->gpr[19] = cpu->gpr[19] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[19]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[19] = cpu->gpr[19] & cpu->gpr[3];
+    PGXP_ALU(0x02639824u, cpu->gpr[19], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08F40u);
 #endif
@@ -147229,7 +147442,8 @@ label_BFC08FC0:
     psx_cyc_step(cpu, 0x58u);
 #endif
     /* 0xBFC08FC0: 0064302A  slt $a2, $v1, $a0 */
-    cpu->gpr[6] = (uint32_t)((int32_t)cpu->gpr[3] < (int32_t)cpu->gpr[4] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[6] = (uint32_t)((int32_t)cpu->gpr[3] < (int32_t)cpu->gpr[4] ? 1 : 0);
+    PGXP_ALU(0x0064302Au, cpu->gpr[6], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC08FC0u);
 #endif
@@ -147594,7 +147808,8 @@ label_BFC0900C:
     psx_cyc_step(cpu, 0x40030u);
 #endif
     /* 0xBFC0900C: 0092282A  slt $a1, $a0, $s2 */
-    cpu->gpr[5] = (uint32_t)((int32_t)cpu->gpr[4] < (int32_t)cpu->gpr[18] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; uint32_t _pgx2 = cpu->gpr[18]; cpu->gpr[5] = (uint32_t)((int32_t)cpu->gpr[4] < (int32_t)cpu->gpr[18] ? 1 : 0);
+    PGXP_ALU(0x0092282Au, cpu->gpr[5], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC0900Cu);
 #endif
@@ -147928,7 +148143,8 @@ label_BFC0904C:
     psx_cyc_step(cpu, 0x40u);
 #endif
     /* 0xBFC0904C: 2CC6005F  sltiu $a2, $a2, 95 */
-    cpu->gpr[6] = (uint32_t)(cpu->gpr[6] < 0x0000005Fu ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[6]; cpu->gpr[6] = (uint32_t)(cpu->gpr[6] < 0x0000005Fu ? 1 : 0);
+    PGXP_ALU(0x2CC6005Fu, cpu->gpr[6], _pgx1, 0x005Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC0904Cu);
 #endif
@@ -147994,7 +148210,8 @@ label_BFC09058:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC0905C: 3063001F  andi $v1, $v1, 0x1F */
-    cpu->gpr[3] = cpu->gpr[3] & 0x1Fu;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] & 0x1Fu;
+    PGXP_ALU(0x3063001Fu, cpu->gpr[3], _pgx1, 0x001Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC0905Cu);
 #endif
@@ -148084,7 +148301,8 @@ label_BFC09074:
     psx_cyc_step(cpu, 0x40008u);
 #endif
     /* 0xBFC09078: 2A430063  slti $v1, $s2, 99 */
-    cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[18] < (99) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[18]; cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[18] < (99) ? 1 : 0);
+    PGXP_ALU(0x2A430063u, cpu->gpr[3], _pgx1, 0x0063u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC09078u);
 #endif
@@ -148147,7 +148365,8 @@ label_BFC09084:
     psx_cyc_step(cpu, 0x40018u);
 #endif
     /* 0xBFC09088: 0092182A  slt $v1, $a0, $s2 */
-    cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[4] < (int32_t)cpu->gpr[18] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; uint32_t _pgx2 = cpu->gpr[18]; cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[4] < (int32_t)cpu->gpr[18] ? 1 : 0);
+    PGXP_ALU(0x0092182Au, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC09088u);
 #endif
@@ -150556,7 +150775,8 @@ label_BFC09274:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC09280: 306300FF  andi $v1, $v1, 0xFF */
-    cpu->gpr[3] = cpu->gpr[3] & 0xFFu;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] & 0xFFu;
+    PGXP_ALU(0x306300FFu, cpu->gpr[3], _pgx1, 0x00FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC09280u);
 #endif
@@ -150567,7 +150787,8 @@ label_BFC09274:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC09284: 2C64000A  sltiu $a0, $v1, 10 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[3] < 0x0000000Au ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[4] = (uint32_t)(cpu->gpr[3] < 0x0000000Au ? 1 : 0);
+    PGXP_ALU(0x2C64000Au, cpu->gpr[4], _pgx1, 0x000Au); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC09284u);
 #endif
@@ -150642,7 +150863,8 @@ label_BFC09290:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC09298: 2843006A  slti $v1, $v0, 106 */
-    cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[2] < (106) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[2] < (106) ? 1 : 0);
+    PGXP_ALU(0x2843006Au, cpu->gpr[3], _pgx1, 0x006Au); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC09298u);
 #endif
@@ -150726,7 +150948,8 @@ label_BFC092A4:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC092A8: 28430026  slti $v1, $v0, 38 */
-    cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[2] < (38) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[2] < (38) ? 1 : 0);
+    PGXP_ALU(0x28430026u, cpu->gpr[3], _pgx1, 0x0026u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC092A8u);
 #endif
@@ -151657,7 +151880,8 @@ label_BFC09374:
     psx_cyc_step(cpu, 0x10004u);
 #endif
     /* 0xBFC0938C: 2E02000A  sltiu $v0, $s0, 10 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[16] < 0x0000000Au ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[16]; cpu->gpr[2] = (uint32_t)(cpu->gpr[16] < 0x0000000Au ? 1 : 0);
+    PGXP_ALU(0x2E02000Au, cpu->gpr[2], _pgx1, 0x000Au); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC0938Cu);
 #endif
@@ -151902,7 +152126,8 @@ label_BFC093C0:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC093C8: 28430076  slti $v1, $v0, 118 */
-    cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[2] < (118) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[2] < (118) ? 1 : 0);
+    PGXP_ALU(0x28430076u, cpu->gpr[3], _pgx1, 0x0076u); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC093C8u);
 #endif
@@ -152190,7 +152415,8 @@ label_BFC09408:
     psx_cyc_step(cpu, 0x300004u);
 #endif
     /* 0xBFC09408: 02B4102A  slt $v0, $s5, $s4 */
-    cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[21] < (int32_t)cpu->gpr[20] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[21]; uint32_t _pgx2 = cpu->gpr[20]; cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[21] < (int32_t)cpu->gpr[20] ? 1 : 0);
+    PGXP_ALU(0x02B4102Au, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC09408u);
 #endif
@@ -152553,7 +152779,8 @@ label_BFC09464:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC09464: 3084000F  andi $a0, $a0, 0xF */
-    cpu->gpr[4] = cpu->gpr[4] & 0xFu;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = cpu->gpr[4] & 0xFu;
+    PGXP_ALU(0x3084000Fu, cpu->gpr[4], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC09464u);
 #endif
@@ -153102,7 +153329,8 @@ label_BFC094E8:
     psx_cyc_step(cpu, 0x900008u);
 #endif
     /* 0xBFC094E8: 02F4182A  slt $v1, $s7, $s4 */
-    cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[23] < (int32_t)cpu->gpr[20] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[23]; uint32_t _pgx2 = cpu->gpr[20]; cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[23] < (int32_t)cpu->gpr[20] ? 1 : 0);
+    PGXP_ALU(0x02F4182Au, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC094E8u);
 #endif
@@ -153646,7 +153874,8 @@ label_BFC0956C:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC0956C: 3084000F  andi $a0, $a0, 0xF */
-    cpu->gpr[4] = cpu->gpr[4] & 0xFu;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = cpu->gpr[4] & 0xFu;
+    PGXP_ALU(0x3084000Fu, cpu->gpr[4], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0xBFC0956Cu);
 #endif
@@ -154279,7 +154508,8 @@ label_BFC0A510:
     psx_cyc_step(cpu, 0x502u);
 #endif
     /* 0xBFC0A510: 0148082A  slt $at, $t2, $t0 */
-    cpu->gpr[1] = (uint32_t)((int32_t)cpu->gpr[10] < (int32_t)cpu->gpr[8] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[10]; uint32_t _pgx2 = cpu->gpr[8]; cpu->gpr[1] = (uint32_t)((int32_t)cpu->gpr[10] < (int32_t)cpu->gpr[8] ? 1 : 0);
+    PGXP_ALU(0x0148082Au, cpu->gpr[1], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030010u);
 #endif
@@ -155184,7 +155414,8 @@ label_BFC0A59C:
     psx_cyc_step(cpu, 0x10008u);
 #endif
     /* 0xBFC0A5B8: 38700045  xori $s0, $v1, 0x45 */
-    cpu->gpr[16] = cpu->gpr[3] ^ 0x45u;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[16] = cpu->gpr[3] ^ 0x45u;
+    PGXP_ALU(0x38700045u, cpu->gpr[16], _pgx1, 0x0045u); }
 #ifdef PSX_COSIM
     cosim_instr(0x800300B8u);
 #endif
@@ -155192,7 +155423,8 @@ label_BFC0A59C:
     psx_cyc_step(cpu, 0x10000u);
 #endif
     /* 0xBFC0A5BC: 2E100001  sltiu $s0, $s0, 1 */
-    cpu->gpr[16] = (uint32_t)(cpu->gpr[16] < 0x00000001u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[16]; cpu->gpr[16] = (uint32_t)(cpu->gpr[16] < 0x00000001u ? 1 : 0);
+    PGXP_ALU(0x2E100001u, cpu->gpr[16], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x800300BCu);
 #endif
@@ -156242,7 +156474,8 @@ label_BFC0A6F8:
     psx_cyc_step(cpu, 0xC04u);
 #endif
     /* 0xBFC0A700: 014B102A  slt $v0, $t2, $t3 */
-    cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[10] < (int32_t)cpu->gpr[11] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[10]; uint32_t _pgx2 = cpu->gpr[11]; cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[10] < (int32_t)cpu->gpr[11] ? 1 : 0);
+    PGXP_ALU(0x014B102Au, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030200u);
 #endif
@@ -156329,7 +156562,8 @@ label_BFC0A710:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0A71C: 2C430003  sltiu $v1, $v0, 3 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x00000003u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x00000003u ? 1 : 0);
+    PGXP_ALU(0x2C430003u, cpu->gpr[3], _pgx1, 0x0003u); }
 #ifdef PSX_COSIM
     cosim_instr(0x8003021Cu);
 #endif
@@ -156570,7 +156804,8 @@ label_BFC0A760:
     psx_cyc_step(cpu, 0x400Cu);
 #endif
     /* 0xBFC0A76C: 004E182A  slt $v1, $v0, $t6 */
-    cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[2] < (int32_t)cpu->gpr[14] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[14]; cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[2] < (int32_t)cpu->gpr[14] ? 1 : 0);
+    PGXP_ALU(0x004E182Au, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x8003026Cu);
 #endif
@@ -158972,7 +159207,8 @@ label_BFC0AA54:
     psx_cyc_step(cpu, 0x28u);
 #endif
     /* 0xBFC0AA5C: 00651824  and $v1, $v1, $a1 */
-    cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[5];
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[5]; cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[5];
+    PGXP_ALU(0x00651824u, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x8003055Cu);
 #endif
@@ -159287,7 +159523,8 @@ label_BFC0AAC0:
     psx_cyc_step(cpu, 0x1104u);
 #endif
     /* 0xBFC0AAC0: 010C102A  slt $v0, $t0, $t4 */
-    cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[8] < (int32_t)cpu->gpr[12] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[8]; uint32_t _pgx2 = cpu->gpr[12]; cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[8] < (int32_t)cpu->gpr[12] ? 1 : 0);
+    PGXP_ALU(0x010C102Au, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x800305C0u);
 #endif
@@ -159401,7 +159638,8 @@ label_BFC0AAD4:
     psx_cyc_step(cpu, 0x400u);
 #endif
     /* 0xBFC0AAE0: 2D4A0028  sltiu $t2, $t2, 40 */
-    cpu->gpr[10] = (uint32_t)(cpu->gpr[10] < 0x00000028u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[10]; cpu->gpr[10] = (uint32_t)(cpu->gpr[10] < 0x00000028u ? 1 : 0);
+    PGXP_ALU(0x2D4A0028u, cpu->gpr[10], _pgx1, 0x0028u); }
 #ifdef PSX_COSIM
     cosim_instr(0x800305E0u);
 #endif
@@ -159703,7 +159941,8 @@ label_BFC0AB34:
     psx_cyc_step(cpu, 0x8Cu);
 #endif
     /* 0xBFC0AB34: 0067102A  slt $v0, $v1, $a3 */
-    cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[3] < (int32_t)cpu->gpr[7] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[7]; cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[3] < (int32_t)cpu->gpr[7] ? 1 : 0);
+    PGXP_ALU(0x0067102Au, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030634u);
 #endif
@@ -160105,7 +160344,8 @@ label_BFC0ABC4:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC0ABCC: 00641824  and $v1, $v1, $a0 */
-    cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[4];
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[4];
+    PGXP_ALU(0x00641824u, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x800306CCu);
 #endif
@@ -162105,7 +162345,8 @@ label_BFC0AE6C:
     psx_cyc_step(cpu, 0x320u);
 #endif
     /* 0xBFC0AE6C: 00A8482A  slt $t1, $a1, $t0 */
-    cpu->gpr[9] = (uint32_t)((int32_t)cpu->gpr[5] < (int32_t)cpu->gpr[8] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[5]; uint32_t _pgx2 = cpu->gpr[8]; cpu->gpr[9] = (uint32_t)((int32_t)cpu->gpr[5] < (int32_t)cpu->gpr[8] ? 1 : 0);
+    PGXP_ALU(0x00A8482Au, cpu->gpr[9], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x8003096Cu);
 #endif
@@ -162262,7 +162503,8 @@ label_BFC0AE94:
     psx_cyc_step(cpu, 0x320u);
 #endif
     /* 0xBFC0AE94: 00A8482A  slt $t1, $a1, $t0 */
-    cpu->gpr[9] = (uint32_t)((int32_t)cpu->gpr[5] < (int32_t)cpu->gpr[8] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[5]; uint32_t _pgx2 = cpu->gpr[8]; cpu->gpr[9] = (uint32_t)((int32_t)cpu->gpr[5] < (int32_t)cpu->gpr[8] ? 1 : 0);
+    PGXP_ALU(0x00A8482Au, cpu->gpr[9], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030994u);
 #endif
@@ -162413,7 +162655,8 @@ label_BFC0AEBC:
     psx_cyc_step(cpu, 0x320u);
 #endif
     /* 0xBFC0AEBC: 00A8482A  slt $t1, $a1, $t0 */
-    cpu->gpr[9] = (uint32_t)((int32_t)cpu->gpr[5] < (int32_t)cpu->gpr[8] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[5]; uint32_t _pgx2 = cpu->gpr[8]; cpu->gpr[9] = (uint32_t)((int32_t)cpu->gpr[5] < (int32_t)cpu->gpr[8] ? 1 : 0);
+    PGXP_ALU(0x00A8482Au, cpu->gpr[9], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x800309BCu);
 #endif
@@ -164288,7 +164531,8 @@ label_BFC0B0A4:
     psx_cyc_step(cpu, 0x60u);
 #endif
     /* 0xBFC0B0C8: 00C5282A  slt $a1, $a2, $a1 */
-    cpu->gpr[5] = (uint32_t)((int32_t)cpu->gpr[6] < (int32_t)cpu->gpr[5] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[6]; uint32_t _pgx2 = cpu->gpr[5]; cpu->gpr[5] = (uint32_t)((int32_t)cpu->gpr[6] < (int32_t)cpu->gpr[5] ? 1 : 0);
+    PGXP_ALU(0x00C5282Au, cpu->gpr[5], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030BC8u);
 #endif
@@ -164397,7 +164641,8 @@ label_BFC0B0E4:
     psx_cyc_step(cpu, 0x430u);
 #endif
     /* 0xBFC0B0E4: 008A282A  slt $a1, $a0, $t2 */
-    cpu->gpr[5] = (uint32_t)((int32_t)cpu->gpr[4] < (int32_t)cpu->gpr[10] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; uint32_t _pgx2 = cpu->gpr[10]; cpu->gpr[5] = (uint32_t)((int32_t)cpu->gpr[4] < (int32_t)cpu->gpr[10] ? 1 : 0);
+    PGXP_ALU(0x008A282Au, cpu->gpr[5], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030BE4u);
 #endif
@@ -165247,7 +165492,8 @@ label_BFC0B184:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC0B1C4: 00641824  and $v1, $v1, $a0 */
-    cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[4];
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[4];
+    PGXP_ALU(0x00641824u, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030CC4u);
 #endif
@@ -165729,7 +165975,8 @@ label_BFC0B264:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0B270: 2C42000A  sltiu $v0, $v0, 10 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x0000000Au ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x0000000Au ? 1 : 0);
+    PGXP_ALU(0x2C42000Au, cpu->gpr[2], _pgx1, 0x000Au); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030D70u);
 #endif
@@ -165737,7 +165984,8 @@ label_BFC0B264:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0B274: 38420001  xori $v0, $v0, 0x1 */
-    cpu->gpr[2] = cpu->gpr[2] ^ 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] ^ 0x1u;
+    PGXP_ALU(0x38420001u, cpu->gpr[2], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030D74u);
 #endif
@@ -165835,7 +166083,8 @@ label_BFC0B280:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0B294: 2C420002  sltiu $v0, $v0, 2 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000002u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000002u ? 1 : 0);
+    PGXP_ALU(0x2C420002u, cpu->gpr[2], _pgx1, 0x0002u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030D94u);
 #endif
@@ -165896,7 +166145,8 @@ label_BFC0B298:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0B2A4: 3842000F  xori $v0, $v0, 0xF */
-    cpu->gpr[2] = cpu->gpr[2] ^ 0xFu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] ^ 0xFu;
+    PGXP_ALU(0x3842000Fu, cpu->gpr[2], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030DA4u);
 #endif
@@ -165909,7 +166159,8 @@ label_BFC0B298:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0B2AC: 2C420001  sltiu $v0, $v0, 1 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000001u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000001u ? 1 : 0);
+    PGXP_ALU(0x2C420001u, cpu->gpr[2], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030DACu);
 #endif
@@ -166222,7 +166473,8 @@ label_BFC0B2F4:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0B2FC: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030DFCu);
 #endif
@@ -166290,7 +166542,8 @@ label_BFC0B308:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0B310: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030E10u);
 #endif
@@ -166452,7 +166705,8 @@ label_BFC0B33C:
     psx_cyc_step(cpu, 0x14u);
 #endif
     /* 0xBFC0B340: 0044202B  sltu $a0, $v0, $a0 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[2] < cpu->gpr[4] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[4] = (uint32_t)(cpu->gpr[2] < cpu->gpr[4] ? 1 : 0);
+    PGXP_ALU(0x0044202Bu, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030E40u);
 #endif
@@ -166582,7 +166836,8 @@ label_BFC0B35C:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0B35C: 2C430004  sltiu $v1, $v0, 4 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x00000004u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x00000004u ? 1 : 0);
+    PGXP_ALU(0x2C430004u, cpu->gpr[3], _pgx1, 0x0004u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030E5Cu);
 #endif
@@ -166641,7 +166896,8 @@ label_BFC0B368:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0B36C: 2C420002  sltiu $v0, $v0, 2 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000002u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000002u ? 1 : 0);
+    PGXP_ALU(0x2C420002u, cpu->gpr[2], _pgx1, 0x0002u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030E6Cu);
 #endif
@@ -166835,7 +167091,8 @@ label_BFC0B39C:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0B3A8: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030EA8u);
 #endif
@@ -166901,7 +167158,8 @@ label_BFC0B3B4:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0B3BC: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030EBCu);
 #endif
@@ -167255,7 +167513,8 @@ label_BFC0B410:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0B424: 30620007  andi $v0, $v1, 0x7 */
-    cpu->gpr[2] = cpu->gpr[3] & 0x7u;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[3] & 0x7u;
+    PGXP_ALU(0x30620007u, cpu->gpr[2], _pgx1, 0x0007u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030F24u);
 #endif
@@ -167339,7 +167598,8 @@ label_BFC0B43C:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC0B43C: 30630018  andi $v1, $v1, 0x18 */
-    cpu->gpr[3] = cpu->gpr[3] & 0x18u;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] & 0x18u;
+    PGXP_ALU(0x30630018u, cpu->gpr[3], _pgx1, 0x0018u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030F3Cu);
 #endif
@@ -167439,7 +167699,8 @@ label_BFC0B454:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0B458: 304200FF  andi $v0, $v0, 0xFF */
-    cpu->gpr[2] = cpu->gpr[2] & 0xFFu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0xFFu;
+    PGXP_ALU(0x304200FFu, cpu->gpr[2], _pgx1, 0x00FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030F58u);
 #endif
@@ -167447,7 +167708,8 @@ label_BFC0B454:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0B45C: 2C430005  sltiu $v1, $v0, 5 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x00000005u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x00000005u ? 1 : 0);
+    PGXP_ALU(0x2C430005u, cpu->gpr[3], _pgx1, 0x0005u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030F5Cu);
 #endif
@@ -167994,7 +168256,8 @@ label_BFC0B4D0:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0B4EC: 2C43000D  sltiu $v1, $v0, 13 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x0000000Du ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x0000000Du ? 1 : 0);
+    PGXP_ALU(0x2C43000Du, cpu->gpr[3], _pgx1, 0x000Du); }
 #ifdef PSX_COSIM
     cosim_instr(0x80030FECu);
 #endif
@@ -170064,7 +170327,8 @@ label_BFC0B718:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0B718: 2C420001  sltiu $v0, $v0, 1 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000001u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000001u ? 1 : 0);
+    PGXP_ALU(0x2C420001u, cpu->gpr[2], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80031218u);
 #endif
@@ -170108,7 +170372,8 @@ label_BFC0B71C:
     psx_cyc_step(cpu, 0xA0008u);
 #endif
     /* 0xBFC0B728: 0233182B  sltu $v1, $s1, $s3 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[17] < cpu->gpr[19] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[17]; uint32_t _pgx2 = cpu->gpr[19]; cpu->gpr[3] = (uint32_t)(cpu->gpr[17] < cpu->gpr[19] ? 1 : 0);
+    PGXP_ALU(0x0233182Bu, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80031228u);
 #endif
@@ -170642,7 +170907,8 @@ label_BFC0B7A0:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0B7AC: 2C43000A  sltiu $v1, $v0, 10 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x0000000Au ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x0000000Au ? 1 : 0);
+    PGXP_ALU(0x2C43000Au, cpu->gpr[3], _pgx1, 0x000Au); }
 #ifdef PSX_COSIM
     cosim_instr(0x800312ACu);
 #endif
@@ -172007,7 +172273,8 @@ label_BFC0B930:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0B938: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80031438u);
 #endif
@@ -172220,7 +172487,8 @@ label_BFC0B95C:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0B968: 38620001  xori $v0, $v1, 0x1 */
-    cpu->gpr[2] = cpu->gpr[3] ^ 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[3] ^ 0x1u;
+    PGXP_ALU(0x38620001u, cpu->gpr[2], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80031468u);
 #endif
@@ -172493,7 +172761,8 @@ label_BFC0B9B0:
     psx_cyc_step(cpu, 0x20u);
 #endif
     /* 0xBFC0B9BC: 30A5FFFF  andi $a1, $a1, 0xFFFF */
-    cpu->gpr[5] = cpu->gpr[5] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[5]; cpu->gpr[5] = cpu->gpr[5] & 0xFFFFu;
+    PGXP_ALU(0x30A5FFFFu, cpu->gpr[5], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0x800314BCu);
 #endif
@@ -172579,7 +172848,8 @@ label_BFC0B9D0:
     psx_cyc_step(cpu, 0x20u);
 #endif
     /* 0xBFC0B9DC: 2CA50001  sltiu $a1, $a1, 1 */
-    cpu->gpr[5] = (uint32_t)(cpu->gpr[5] < 0x00000001u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[5]; cpu->gpr[5] = (uint32_t)(cpu->gpr[5] < 0x00000001u ? 1 : 0);
+    PGXP_ALU(0x2CA50001u, cpu->gpr[5], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x800314DCu);
 #endif
@@ -172599,7 +172869,8 @@ label_BFC0B9D0:
     psx_cyc_step(cpu, 0x20u);
 #endif
     /* 0xBFC0B9E4: 30A50280  andi $a1, $a1, 0x280 */
-    cpu->gpr[5] = cpu->gpr[5] & 0x280u;
+    { uint32_t _pgx1 = cpu->gpr[5]; cpu->gpr[5] = cpu->gpr[5] & 0x280u;
+    PGXP_ALU(0x30A50280u, cpu->gpr[5], _pgx1, 0x0280u); }
 #ifdef PSX_COSIM
     cosim_instr(0x800314E4u);
 #endif
@@ -172683,7 +172954,8 @@ label_BFC0B9F0:
     psx_cyc_step(cpu, 0x40u);
 #endif
     /* 0xBFC0BA08: 2CC60001  sltiu $a2, $a2, 1 */
-    cpu->gpr[6] = (uint32_t)(cpu->gpr[6] < 0x00000001u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[6]; cpu->gpr[6] = (uint32_t)(cpu->gpr[6] < 0x00000001u ? 1 : 0);
+    PGXP_ALU(0x2CC60001u, cpu->gpr[6], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80031508u);
 #endif
@@ -172800,7 +173072,8 @@ label_BFC0BA0C:
     psx_cyc_step(cpu, 0x40u);
 #endif
     /* 0xBFC0BA30: 30C60280  andi $a2, $a2, 0x280 */
-    cpu->gpr[6] = cpu->gpr[6] & 0x280u;
+    { uint32_t _pgx1 = cpu->gpr[6]; cpu->gpr[6] = cpu->gpr[6] & 0x280u;
+    PGXP_ALU(0x30C60280u, cpu->gpr[6], _pgx1, 0x0280u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80031530u);
 #endif
@@ -173427,7 +173700,8 @@ label_BFC0BAE0:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC0BAF0: 30642000  andi $a0, $v1, 0x2000 */
-    cpu->gpr[4] = cpu->gpr[3] & 0x2000u;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[4] = cpu->gpr[3] & 0x2000u;
+    PGXP_ALU(0x30642000u, cpu->gpr[4], _pgx1, 0x2000u); }
 #ifdef PSX_COSIM
     cosim_instr(0x800315F0u);
 #endif
@@ -173540,7 +173814,8 @@ label_BFC0BB04:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0BB04: 2C420001  sltiu $v0, $v0, 1 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000001u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000001u ? 1 : 0);
+    PGXP_ALU(0x2C420001u, cpu->gpr[2], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80031604u);
 #endif
@@ -173657,7 +173932,8 @@ label_BFC0BB24:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0BB2C: 30420001  andi $v0, $v0, 0x1 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x1u;
+    PGXP_ALU(0x30420001u, cpu->gpr[2], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x8003162Cu);
 #endif
@@ -173725,7 +174001,8 @@ label_BFC0BB38:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0BB40: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80031640u);
 #endif
@@ -174083,7 +174360,8 @@ label_BFC0BB94:
     psx_cyc_step(cpu, 0x11u);
 #endif
     /* 0xBFC0BB94: 0004202B  sltu $a0, $zero, $a0 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[0] < cpu->gpr[4] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[4] = (uint32_t)(cpu->gpr[0] < cpu->gpr[4] ? 1 : 0);
+    PGXP_ALU(0x0004202Bu, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80031694u);
 #endif
@@ -175353,7 +175631,8 @@ label_BFC0BCD4:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0BD44: 0043182A  slt $v1, $v0, $v1 */
-    cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[2] < (int32_t)cpu->gpr[3] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[2] < (int32_t)cpu->gpr[3] ? 1 : 0);
+    PGXP_ALU(0x0043182Au, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80031844u);
 #endif
@@ -175690,7 +175969,8 @@ label_BFC0BD9C:
     psx_cyc_step(cpu, 0x20004u);
 #endif
     /* 0xBFC0BD9C: 2E220002  sltiu $v0, $s1, 2 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[17] < 0x00000002u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[17]; cpu->gpr[2] = (uint32_t)(cpu->gpr[17] < 0x00000002u ? 1 : 0);
+    PGXP_ALU(0x2E220002u, cpu->gpr[2], _pgx1, 0x0002u); }
 #ifdef PSX_COSIM
     cosim_instr(0x8003189Cu);
 #endif
@@ -175914,7 +176194,8 @@ label_BFC0BDE4:
     psx_cyc_step(cpu, 0x5004u);
 #endif
     /* 0xBFC0BDE8: 01CC102B  sltu $v0, $t6, $t4 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[14] < cpu->gpr[12] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[14]; uint32_t _pgx2 = cpu->gpr[12]; cpu->gpr[2] = (uint32_t)(cpu->gpr[14] < cpu->gpr[12] ? 1 : 0);
+    PGXP_ALU(0x01CC102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x800318E8u);
 #endif
@@ -176264,7 +176545,8 @@ label_BFC0BE3C:
     psx_cyc_step(cpu, 0x30004u);
 #endif
     /* 0xBFC0BE44: 0211102B  sltu $v0, $s0, $s1 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[16] < cpu->gpr[17] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[16]; uint32_t _pgx2 = cpu->gpr[17]; cpu->gpr[2] = (uint32_t)(cpu->gpr[16] < cpu->gpr[17] ? 1 : 0);
+    PGXP_ALU(0x0211102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80031944u);
 #endif
@@ -176899,7 +177181,8 @@ label_BFC0BEE4:
     psx_cyc_step(cpu, 0x20088u);
 #endif
     /* 0xBFC0BEE4: 0071382A  slt $a3, $v1, $s1 */
-    cpu->gpr[7] = (uint32_t)((int32_t)cpu->gpr[3] < (int32_t)cpu->gpr[17] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[17]; cpu->gpr[7] = (uint32_t)((int32_t)cpu->gpr[3] < (int32_t)cpu->gpr[17] ? 1 : 0);
+    PGXP_ALU(0x0071382Au, cpu->gpr[7], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x800319E4u);
 #endif
@@ -177032,7 +177315,8 @@ label_BFC0BEF0:
     psx_cyc_step(cpu, 0x20004u);
 #endif
     /* 0xBFC0BF18: 2A220002  slti $v0, $s1, 2 */
-    cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[17] < (2) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[17]; cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[17] < (2) ? 1 : 0);
+    PGXP_ALU(0x2A220002u, cpu->gpr[2], _pgx1, 0x0002u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80031A18u);
 #endif
@@ -177155,7 +177439,8 @@ label_BFC0BF34:
     psx_cyc_step(cpu, 0x20404u);
 #endif
     /* 0xBFC0BF34: 0151102A  slt $v0, $t2, $s1 */
-    cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[10] < (int32_t)cpu->gpr[17] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[10]; uint32_t _pgx2 = cpu->gpr[17]; cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[10] < (int32_t)cpu->gpr[17] ? 1 : 0);
+    PGXP_ALU(0x0151102Au, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80031A34u);
 #endif
@@ -177203,7 +177488,8 @@ label_BFC0BF40:
     psx_cyc_step(cpu, 0x108u);
 #endif
     /* 0xBFC0BF40: 29030003  slti $v1, $t0, 3 */
-    cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[8] < (3) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[8]; cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[8] < (3) ? 1 : 0);
+    PGXP_ALU(0x29030003u, cpu->gpr[3], _pgx1, 0x0003u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80031A40u);
 #endif
@@ -177517,7 +177803,8 @@ label_BFC0BFA4:
     psx_cyc_step(cpu, 0x1C0u);
 #endif
     /* 0xBFC0BFAC: 00E6402A  slt $t0, $a3, $a2 */
-    cpu->gpr[8] = (uint32_t)((int32_t)cpu->gpr[7] < (int32_t)cpu->gpr[6] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[7]; uint32_t _pgx2 = cpu->gpr[6]; cpu->gpr[8] = (uint32_t)((int32_t)cpu->gpr[7] < (int32_t)cpu->gpr[6] ? 1 : 0);
+    PGXP_ALU(0x00E6402Au, cpu->gpr[8], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80031AACu);
 #endif
@@ -177639,7 +177926,8 @@ label_BFC0BFC0:
     psx_cyc_step(cpu, 0x180u);
 #endif
     /* 0xBFC0BFD0: 00E8382A  slt $a3, $a3, $t0 */
-    cpu->gpr[7] = (uint32_t)((int32_t)cpu->gpr[7] < (int32_t)cpu->gpr[8] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[7]; uint32_t _pgx2 = cpu->gpr[8]; cpu->gpr[7] = (uint32_t)((int32_t)cpu->gpr[7] < (int32_t)cpu->gpr[8] ? 1 : 0);
+    PGXP_ALU(0x00E8382Au, cpu->gpr[7], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80031AD0u);
 #endif
@@ -178569,7 +178857,8 @@ label_BFC0C0DC:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0C0F8: 3042FFFF  andi $v0, $v0, 0xFFFF */
-    cpu->gpr[2] = cpu->gpr[2] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0xFFFFu;
+    PGXP_ALU(0x3042FFFFu, cpu->gpr[2], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80031BF8u);
 #endif
@@ -180345,7 +180634,8 @@ label_BFC0C354:
     psx_cyc_step(cpu, 0x30u);
 #endif
     /* 0xBFC0C358: 30850600  andi $a1, $a0, 0x600 */
-    cpu->gpr[5] = cpu->gpr[4] & 0x600u;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[5] = cpu->gpr[4] & 0x600u;
+    PGXP_ALU(0x30850600u, cpu->gpr[5], _pgx1, 0x0600u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80031E58u);
 #endif
@@ -180353,7 +180643,8 @@ label_BFC0C354:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC0C35C: 308307FF  andi $v1, $a0, 0x7FF */
-    cpu->gpr[3] = cpu->gpr[4] & 0x7FFu;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[3] = cpu->gpr[4] & 0x7FFu;
+    PGXP_ALU(0x308307FFu, cpu->gpr[3], _pgx1, 0x07FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80031E5Cu);
 #endif
@@ -180462,7 +180753,8 @@ label_BFC0C37C:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC0C37C: 30840400  andi $a0, $a0, 0x400 */
-    cpu->gpr[4] = cpu->gpr[4] & 0x400u;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = cpu->gpr[4] & 0x400u;
+    PGXP_ALU(0x30840400u, cpu->gpr[4], _pgx1, 0x0400u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80031E7Cu);
 #endif
@@ -180591,7 +180883,8 @@ label_BFC0C3A0:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC0C3A0: 2C640600  sltiu $a0, $v1, 1536 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[3] < 0x00000600u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[4] = (uint32_t)(cpu->gpr[3] < 0x00000600u ? 1 : 0);
+    PGXP_ALU(0x2C640600u, cpu->gpr[4], _pgx1, 0x0600u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80031EA0u);
 #endif
@@ -180788,7 +181081,8 @@ label_BFC0C3C0:
     psx_cyc_step(cpu, 0x24u);
 #endif
     /* 0xBFC0C3C4: 30A20600  andi $v0, $a1, 0x600 */
-    cpu->gpr[2] = cpu->gpr[5] & 0x600u;
+    { uint32_t _pgx1 = cpu->gpr[5]; cpu->gpr[2] = cpu->gpr[5] & 0x600u;
+    PGXP_ALU(0x30A20600u, cpu->gpr[2], _pgx1, 0x0600u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80031EC4u);
 #endif
@@ -180833,7 +181127,8 @@ label_BFC0C3C0:
     psx_cyc_step(cpu, 0x30u);
 #endif
     /* 0xBFC0C3D8: 30A407FF  andi $a0, $a1, 0x7FF */
-    cpu->gpr[4] = cpu->gpr[5] & 0x7FFu;
+    { uint32_t _pgx1 = cpu->gpr[5]; cpu->gpr[4] = cpu->gpr[5] & 0x7FFu;
+    PGXP_ALU(0x30A407FFu, cpu->gpr[4], _pgx1, 0x07FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80031ED8u);
 #endif
@@ -186147,7 +186442,8 @@ label_BFC0CB40:
     psx_cyc_step(cpu, 0x128u);
 #endif
     /* 0xBFC0CB40: 0105182B  sltu $v1, $t0, $a1 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[8] < cpu->gpr[5] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[8]; uint32_t _pgx2 = cpu->gpr[5]; cpu->gpr[3] = (uint32_t)(cpu->gpr[8] < cpu->gpr[5] ? 1 : 0);
+    PGXP_ALU(0x0105182Bu, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032640u);
 #endif
@@ -186508,7 +186804,8 @@ label_BFC0CBA4:
     psx_cyc_step(cpu, 0x184u);
 #endif
     /* 0xBFC0CBA8: 0048382B  sltu $a3, $v0, $t0 */
-    cpu->gpr[7] = (uint32_t)(cpu->gpr[2] < cpu->gpr[8] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[8]; cpu->gpr[7] = (uint32_t)(cpu->gpr[2] < cpu->gpr[8] ? 1 : 0);
+    PGXP_ALU(0x0048382Bu, cpu->gpr[7], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x800326A8u);
 #endif
@@ -186550,7 +186847,8 @@ label_BFC0CBAC:
     psx_cyc_step(cpu, 0x184u);
 #endif
     /* 0xBFC0CBB0: 0102382B  sltu $a3, $t0, $v0 */
-    cpu->gpr[7] = (uint32_t)(cpu->gpr[8] < cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[8]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[7] = (uint32_t)(cpu->gpr[8] < cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x0102382Bu, cpu->gpr[7], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x800326B0u);
 #endif
@@ -186589,7 +186887,8 @@ label_BFC0CBB4:
     psx_cyc_step(cpu, 0x184u);
 #endif
     /* 0xBFC0CBB8: 0048382B  sltu $a3, $v0, $t0 */
-    cpu->gpr[7] = (uint32_t)(cpu->gpr[2] < cpu->gpr[8] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[8]; cpu->gpr[7] = (uint32_t)(cpu->gpr[2] < cpu->gpr[8] ? 1 : 0);
+    PGXP_ALU(0x0048382Bu, cpu->gpr[7], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x800326B8u);
 #endif
@@ -186670,7 +186969,8 @@ label_BFC0CBC4:
     psx_cyc_step(cpu, 0xB0u);
 #endif
     /* 0xBFC0CBC8: 00A4382B  sltu $a3, $a1, $a0 */
-    cpu->gpr[7] = (uint32_t)(cpu->gpr[5] < cpu->gpr[4] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[5]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[7] = (uint32_t)(cpu->gpr[5] < cpu->gpr[4] ? 1 : 0);
+    PGXP_ALU(0x00A4382Bu, cpu->gpr[7], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x800326C8u);
 #endif
@@ -186745,7 +187045,8 @@ label_BFC0CBD4:
     psx_cyc_step(cpu, 0x184u);
 #endif
     /* 0xBFC0CBD4: 0102382B  sltu $a3, $t0, $v0 */
-    cpu->gpr[7] = (uint32_t)(cpu->gpr[8] < cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[8]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[7] = (uint32_t)(cpu->gpr[8] < cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x0102382Bu, cpu->gpr[7], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x800326D4u);
 #endif
@@ -186809,7 +187110,8 @@ label_BFC0CBE0:
     psx_cyc_step(cpu, 0xB0u);
 #endif
     /* 0xBFC0CBE4: 0085382B  sltu $a3, $a0, $a1 */
-    cpu->gpr[7] = (uint32_t)(cpu->gpr[4] < cpu->gpr[5] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; uint32_t _pgx2 = cpu->gpr[5]; cpu->gpr[7] = (uint32_t)(cpu->gpr[4] < cpu->gpr[5] ? 1 : 0);
+    PGXP_ALU(0x0085382Bu, cpu->gpr[7], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x800326E4u);
 #endif
@@ -186890,7 +187192,8 @@ label_BFC0CBF0:
     psx_cyc_step(cpu, 0x490u);
 #endif
     /* 0xBFC0CBF4: 0087502B  sltu $t2, $a0, $a3 */
-    cpu->gpr[10] = (uint32_t)(cpu->gpr[4] < cpu->gpr[7] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; uint32_t _pgx2 = cpu->gpr[7]; cpu->gpr[10] = (uint32_t)(cpu->gpr[4] < cpu->gpr[7] ? 1 : 0);
+    PGXP_ALU(0x0087502Bu, cpu->gpr[10], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x800326F4u);
 #endif
@@ -188369,7 +188672,8 @@ label_BFC0CDB8:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0CDC0: 2C42001F  sltiu $v0, $v0, 31 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x0000001Fu ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x0000001Fu ? 1 : 0);
+    PGXP_ALU(0x2C42001Fu, cpu->gpr[2], _pgx1, 0x001Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x800328C0u);
 #endif
@@ -188868,7 +189172,8 @@ label_BFC0CE44:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0CE4C: 2C42001F  sltiu $v0, $v0, 31 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x0000001Fu ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x0000001Fu ? 1 : 0);
+    PGXP_ALU(0x2C42001Fu, cpu->gpr[2], _pgx1, 0x001Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x8003294Cu);
 #endif
@@ -189905,7 +190210,8 @@ label_BFC0CFA4:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0CFAC: 304207FF  andi $v0, $v0, 0x7FF */
-    cpu->gpr[2] = cpu->gpr[2] & 0x7FFu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x7FFu;
+    PGXP_ALU(0x304207FFu, cpu->gpr[2], _pgx1, 0x07FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032AACu);
 #endif
@@ -190083,7 +190389,8 @@ label_BFC0CFC0:
     psx_cyc_step(cpu, 0x24u);
 #endif
     /* 0xBFC0CFDC: 00451024  and $v0, $v0, $a1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[5];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[5]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[5];
+    PGXP_ALU(0x00451024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032ADCu);
 #endif
@@ -190667,7 +190974,8 @@ label_BFC0D070:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC0D078: 3063000F  andi $v1, $v1, 0xF */
-    cpu->gpr[3] = cpu->gpr[3] & 0xFu;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] & 0xFu;
+    PGXP_ALU(0x3063000Fu, cpu->gpr[3], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032B78u);
 #endif
@@ -190675,7 +190983,8 @@ label_BFC0D070:
     psx_cyc_step(cpu, 0x48u);
 #endif
     /* 0xBFC0D07C: 2C66000F  sltiu $a2, $v1, 15 */
-    cpu->gpr[6] = (uint32_t)(cpu->gpr[3] < 0x0000000Fu ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[6] = (uint32_t)(cpu->gpr[3] < 0x0000000Fu ? 1 : 0);
+    PGXP_ALU(0x2C66000Fu, cpu->gpr[6], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032B7Cu);
 #endif
@@ -190686,7 +190995,8 @@ label_BFC0D070:
     psx_cyc_step(cpu, 0x24u);
 #endif
     /* 0xBFC0D080: 3045000F  andi $a1, $v0, 0xF */
-    cpu->gpr[5] = cpu->gpr[2] & 0xFu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[5] = cpu->gpr[2] & 0xFu;
+    PGXP_ALU(0x3045000Fu, cpu->gpr[5], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032B80u);
 #endif
@@ -191003,7 +191313,8 @@ label_BFC0D0C0:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0D0CC: 304300FF  andi $v1, $v0, 0xFF */
-    cpu->gpr[3] = cpu->gpr[2] & 0xFFu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = cpu->gpr[2] & 0xFFu;
+    PGXP_ALU(0x304300FFu, cpu->gpr[3], _pgx1, 0x00FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032BCCu);
 #endif
@@ -191746,7 +192057,8 @@ label_BFC0D174:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0D180: 2843006C  slti $v1, $v0, 108 */
-    cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[2] < (108) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[2] < (108) ? 1 : 0);
+    PGXP_ALU(0x2843006Cu, cpu->gpr[3], _pgx1, 0x006Cu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032C80u);
 #endif
@@ -191903,7 +192215,8 @@ label_BFC0D198:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0D1A4: 2843038C  slti $v1, $v0, 908 */
-    cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[2] < (908) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[2] < (908) ? 1 : 0);
+    PGXP_ALU(0x2843038Cu, cpu->gpr[3], _pgx1, 0x038Cu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032CA4u);
 #endif
@@ -192025,7 +192338,8 @@ label_BFC0D1B8:
     psx_cyc_step(cpu, 0x24u);
 #endif
     /* 0xBFC0D1B8: 2C450011  sltiu $a1, $v0, 17 */
-    cpu->gpr[5] = (uint32_t)(cpu->gpr[2] < 0x00000011u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[5] = (uint32_t)(cpu->gpr[2] < 0x00000011u ? 1 : 0);
+    PGXP_ALU(0x2C450011u, cpu->gpr[5], _pgx1, 0x0011u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032CB8u);
 #endif
@@ -192238,7 +192552,8 @@ label_BFC0D1F4:
     psx_cyc_step(cpu, 0x108u);
 #endif
     /* 0xBFC0D1F4: 31030001  andi $v1, $t0, 0x1 */
-    cpu->gpr[3] = cpu->gpr[8] & 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[8]; cpu->gpr[3] = cpu->gpr[8] & 0x1u;
+    PGXP_ALU(0x31030001u, cpu->gpr[3], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032CF4u);
 #endif
@@ -192428,7 +192743,8 @@ label_BFC0D214:
     psx_cyc_step(cpu, 0x1Cu);
 #endif
     /* 0xBFC0D220: 0043202A  slt $a0, $v0, $v1 */
-    cpu->gpr[4] = (uint32_t)((int32_t)cpu->gpr[2] < (int32_t)cpu->gpr[3] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[4] = (uint32_t)((int32_t)cpu->gpr[2] < (int32_t)cpu->gpr[3] ? 1 : 0);
+    PGXP_ALU(0x0043202Au, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032D20u);
 #endif
@@ -192501,7 +192817,8 @@ label_BFC0D22C:
     psx_cyc_step(cpu, 0x1Cu);
 #endif
     /* 0xBFC0D238: 0062202A  slt $a0, $v1, $v0 */
-    cpu->gpr[4] = (uint32_t)((int32_t)cpu->gpr[3] < (int32_t)cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[4] = (uint32_t)((int32_t)cpu->gpr[3] < (int32_t)cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x0062202Au, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032D38u);
 #endif
@@ -192721,7 +193038,8 @@ label_BFC0D264:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0D268: 2C430040  sltiu $v1, $v0, 64 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x00000040u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x00000040u ? 1 : 0);
+    PGXP_ALU(0x2C430040u, cpu->gpr[3], _pgx1, 0x0040u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032D68u);
 #endif
@@ -192812,7 +193130,8 @@ label_BFC0D27C:
     psx_cyc_step(cpu, 0x1Cu);
 #endif
     /* 0xBFC0D27C: 0062202A  slt $a0, $v1, $v0 */
-    cpu->gpr[4] = (uint32_t)((int32_t)cpu->gpr[3] < (int32_t)cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[4] = (uint32_t)((int32_t)cpu->gpr[3] < (int32_t)cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x0062202Au, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032D7Cu);
 #endif
@@ -192895,7 +193214,8 @@ label_BFC0D288:
     psx_cyc_step(cpu, 0x1Cu);
 #endif
     /* 0xBFC0D298: 0043202A  slt $a0, $v0, $v1 */
-    cpu->gpr[4] = (uint32_t)((int32_t)cpu->gpr[2] < (int32_t)cpu->gpr[3] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[4] = (uint32_t)((int32_t)cpu->gpr[2] < (int32_t)cpu->gpr[3] ? 1 : 0);
+    PGXP_ALU(0x0043202Au, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032D98u);
 #endif
@@ -192962,7 +193282,8 @@ label_BFC0D29C:
     psx_cyc_step(cpu, 0x24u);
 #endif
     /* 0xBFC0D29C: 2C450011  sltiu $a1, $v0, 17 */
-    cpu->gpr[5] = (uint32_t)(cpu->gpr[2] < 0x00000011u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[5] = (uint32_t)(cpu->gpr[2] < 0x00000011u ? 1 : 0);
+    PGXP_ALU(0x2C450011u, cpu->gpr[5], _pgx1, 0x0011u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032D9Cu);
 #endif
@@ -193178,7 +193499,8 @@ label_BFC0D2D8:
     psx_cyc_step(cpu, 0x108u);
 #endif
     /* 0xBFC0D2D8: 31030001  andi $v1, $t0, 0x1 */
-    cpu->gpr[3] = cpu->gpr[8] & 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[8]; cpu->gpr[3] = cpu->gpr[8] & 0x1u;
+    PGXP_ALU(0x31030001u, cpu->gpr[3], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032DD8u);
 #endif
@@ -193359,7 +193681,8 @@ label_BFC0D2F8:
     psx_cyc_step(cpu, 0x20u);
 #endif
     /* 0xBFC0D300: 30A50003  andi $a1, $a1, 0x3 */
-    cpu->gpr[5] = cpu->gpr[5] & 0x3u;
+    { uint32_t _pgx1 = cpu->gpr[5]; cpu->gpr[5] = cpu->gpr[5] & 0x3u;
+    PGXP_ALU(0x30A50003u, cpu->gpr[5], _pgx1, 0x0003u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032E00u);
 #endif
@@ -193374,7 +193697,8 @@ label_BFC0D2F8:
     psx_cyc_step(cpu, 0x14u);
 #endif
     /* 0xBFC0D308: 3082001F  andi $v0, $a0, 0x1F */
-    cpu->gpr[2] = cpu->gpr[4] & 0x1Fu;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[2] = cpu->gpr[4] & 0x1Fu;
+    PGXP_ALU(0x3082001Fu, cpu->gpr[2], _pgx1, 0x001Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032E08u);
 #endif
@@ -193623,7 +193947,8 @@ label_BFC0D34C:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0D34C: 3042000F  andi $v0, $v0, 0xF */
-    cpu->gpr[2] = cpu->gpr[2] & 0xFu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0xFu;
+    PGXP_ALU(0x3042000Fu, cpu->gpr[2], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032E4Cu);
 #endif
@@ -193661,7 +193986,8 @@ label_BFC0D34C:
     psx_cyc_step(cpu, 0x30u);
 #endif
     /* 0xBFC0D35C: 28850020  slti $a1, $a0, 32 */
-    cpu->gpr[5] = (uint32_t)((int32_t)cpu->gpr[4] < (32) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[5] = (uint32_t)((int32_t)cpu->gpr[4] < (32) ? 1 : 0);
+    PGXP_ALU(0x28850020u, cpu->gpr[5], _pgx1, 0x0020u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032E5Cu);
 #endif
@@ -193791,7 +194117,8 @@ label_BFC0D378:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0D37C: 2C430040  sltiu $v1, $v0, 64 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x00000040u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x00000040u ? 1 : 0);
+    PGXP_ALU(0x2C430040u, cpu->gpr[3], _pgx1, 0x0040u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032E7Cu);
 #endif
@@ -194054,7 +194381,8 @@ label_BFC0D3A8:
     psx_cyc_step(cpu, 0x20u);
 #endif
     /* 0xBFC0D3B0: 30A50003  andi $a1, $a1, 0x3 */
-    cpu->gpr[5] = cpu->gpr[5] & 0x3u;
+    { uint32_t _pgx1 = cpu->gpr[5]; cpu->gpr[5] = cpu->gpr[5] & 0x3u;
+    PGXP_ALU(0x30A50003u, cpu->gpr[5], _pgx1, 0x0003u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032EB0u);
 #endif
@@ -194093,7 +194421,8 @@ label_BFC0D3A8:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0D3C4: 3042001F  andi $v0, $v0, 0x1F */
-    cpu->gpr[2] = cpu->gpr[2] & 0x1Fu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x1Fu;
+    PGXP_ALU(0x3042001Fu, cpu->gpr[2], _pgx1, 0x001Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032EC4u);
 #endif
@@ -194360,7 +194689,8 @@ label_BFC0D408:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC0D410: 3084000F  andi $a0, $a0, 0xF */
-    cpu->gpr[4] = cpu->gpr[4] & 0xFu;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = cpu->gpr[4] & 0xFu;
+    PGXP_ALU(0x3084000Fu, cpu->gpr[4], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032F10u);
 #endif
@@ -194398,7 +194728,8 @@ label_BFC0D408:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC0D420: 28840020  slti $a0, $a0, 32 */
-    cpu->gpr[4] = (uint32_t)((int32_t)cpu->gpr[4] < (32) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = (uint32_t)((int32_t)cpu->gpr[4] < (32) ? 1 : 0);
+    PGXP_ALU(0x28840020u, cpu->gpr[4], _pgx1, 0x0020u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032F20u);
 #endif
@@ -194474,7 +194805,8 @@ label_BFC0D430:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0D434: 28420040  slti $v0, $v0, 64 */
-    cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[2] < (64) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[2] < (64) ? 1 : 0);
+    PGXP_ALU(0x28420040u, cpu->gpr[2], _pgx1, 0x0040u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032F34u);
 #endif
@@ -194626,7 +194958,8 @@ label_BFC0D460:
     psx_cyc_step(cpu, 0x108u);
 #endif
     /* 0xBFC0D460: 31030001  andi $v1, $t0, 0x1 */
-    cpu->gpr[3] = cpu->gpr[8] & 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[8]; cpu->gpr[3] = cpu->gpr[8] & 0x1u;
+    PGXP_ALU(0x31030001u, cpu->gpr[3], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032F60u);
 #endif
@@ -194918,7 +195251,8 @@ label_BFC0D4A0:
     psx_cyc_step(cpu, 0x24u);
 #endif
     /* 0xBFC0D4A0: 2C450011  sltiu $a1, $v0, 17 */
-    cpu->gpr[5] = (uint32_t)(cpu->gpr[2] < 0x00000011u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[5] = (uint32_t)(cpu->gpr[2] < 0x00000011u ? 1 : 0);
+    PGXP_ALU(0x2C450011u, cpu->gpr[5], _pgx1, 0x0011u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032FA0u);
 #endif
@@ -195083,7 +195417,8 @@ label_BFC0D4C4:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0D4C8: 2C430040  sltiu $v1, $v0, 64 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x00000040u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x00000040u ? 1 : 0);
+    PGXP_ALU(0x2C430040u, cpu->gpr[3], _pgx1, 0x0040u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80032FC8u);
 #endif
@@ -195661,7 +195996,8 @@ label_BFC0D54C:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC0D554: 3063000F  andi $v1, $v1, 0xF */
-    cpu->gpr[3] = cpu->gpr[3] & 0xFu;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] & 0xFu;
+    PGXP_ALU(0x3063000Fu, cpu->gpr[3], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033054u);
 #endif
@@ -195669,7 +196005,8 @@ label_BFC0D54C:
     psx_cyc_step(cpu, 0x48u);
 #endif
     /* 0xBFC0D558: 2C66000F  sltiu $a2, $v1, 15 */
-    cpu->gpr[6] = (uint32_t)(cpu->gpr[3] < 0x0000000Fu ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[6] = (uint32_t)(cpu->gpr[3] < 0x0000000Fu ? 1 : 0);
+    PGXP_ALU(0x2C66000Fu, cpu->gpr[6], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033058u);
 #endif
@@ -195677,7 +196014,8 @@ label_BFC0D54C:
     psx_cyc_step(cpu, 0x24u);
 #endif
     /* 0xBFC0D55C: 3045000F  andi $a1, $v0, 0xF */
-    cpu->gpr[5] = cpu->gpr[2] & 0xFu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[5] = cpu->gpr[2] & 0xFu;
+    PGXP_ALU(0x3045000Fu, cpu->gpr[5], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x8003305Cu);
 #endif
@@ -195888,7 +196226,8 @@ label_BFC0D588:
     psx_cyc_step(cpu, 0x20u);
 #endif
     /* 0xBFC0D58C: 30A5003F  andi $a1, $a1, 0x3F */
-    cpu->gpr[5] = cpu->gpr[5] & 0x3Fu;
+    { uint32_t _pgx1 = cpu->gpr[5]; cpu->gpr[5] = cpu->gpr[5] & 0x3Fu;
+    PGXP_ALU(0x30A5003Fu, cpu->gpr[5], _pgx1, 0x003Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x8003308Cu);
 #endif
@@ -195899,7 +196238,8 @@ label_BFC0D588:
     psx_cyc_step(cpu, 0x21u);
 #endif
     /* 0xBFC0D590: 0005282B  sltu $a1, $zero, $a1 */
-    cpu->gpr[5] = (uint32_t)(cpu->gpr[0] < cpu->gpr[5] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[5]; cpu->gpr[5] = (uint32_t)(cpu->gpr[0] < cpu->gpr[5] ? 1 : 0);
+    PGXP_ALU(0x0005282Bu, cpu->gpr[5], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033090u);
 #endif
@@ -195961,7 +196301,8 @@ label_BFC0D588:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC0D5AC: 3063FFCF  andi $v1, $v1, 0xFFCF */
-    cpu->gpr[3] = cpu->gpr[3] & 0xFFCFu;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] & 0xFFCFu;
+    PGXP_ALU(0x3063FFCFu, cpu->gpr[3], _pgx1, 0xFFCFu); }
 #ifdef PSX_COSIM
     cosim_instr(0x800330ACu);
 #endif
@@ -196044,7 +196385,8 @@ label_BFC0D5C4:
     psx_cyc_step(cpu, 0x20u);
 #endif
     /* 0xBFC0D5CC: 30A50030  andi $a1, $a1, 0x30 */
-    cpu->gpr[5] = cpu->gpr[5] & 0x30u;
+    { uint32_t _pgx1 = cpu->gpr[5]; cpu->gpr[5] = cpu->gpr[5] & 0x30u;
+    PGXP_ALU(0x30A50030u, cpu->gpr[5], _pgx1, 0x0030u); }
 #ifdef PSX_COSIM
     cosim_instr(0x800330CCu);
 #endif
@@ -196121,7 +196463,8 @@ label_BFC0D5D8:
     psx_cyc_step(cpu, 0x60u);
 #endif
     /* 0xBFC0D5E4: 00A62824  and $a1, $a1, $a2 */
-    cpu->gpr[5] = cpu->gpr[5] & cpu->gpr[6];
+    { uint32_t _pgx1 = cpu->gpr[5]; uint32_t _pgx2 = cpu->gpr[6]; cpu->gpr[5] = cpu->gpr[5] & cpu->gpr[6];
+    PGXP_ALU(0x00A62824u, cpu->gpr[5], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x800330E4u);
 #endif
@@ -196234,7 +196577,8 @@ label_BFC0D608:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0D610: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033110u);
 #endif
@@ -197277,7 +197621,8 @@ label_BFC0D730:
     psx_cyc_step(cpu, 0x10410u);
 #endif
     /* 0xBFC0D738: 0204502B  sltu $t2, $s0, $a0 */
-    cpu->gpr[10] = (uint32_t)(cpu->gpr[16] < cpu->gpr[4] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[16]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[10] = (uint32_t)(cpu->gpr[16] < cpu->gpr[4] ? 1 : 0);
+    PGXP_ALU(0x0204502Bu, cpu->gpr[10], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033238u);
 #endif
@@ -197427,7 +197772,8 @@ label_BFC0D754:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC0D760: 2C63FFFE  sltiu $v1, $v1, -2 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[3] < 0xFFFFFFFEu ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = (uint32_t)(cpu->gpr[3] < 0xFFFFFFFEu ? 1 : 0);
+    PGXP_ALU(0x2C63FFFEu, cpu->gpr[3], _pgx1, 0xFFFEu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033260u);
 #endif
@@ -198806,7 +199152,8 @@ label_BFC0D8C4:
     psx_cyc_step(cpu, 0x14u);
 #endif
     /* 0xBFC0D8E8: 0044102B  sltu $v0, $v0, $a0 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < cpu->gpr[4] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < cpu->gpr[4] ? 1 : 0);
+    PGXP_ALU(0x0044102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x800333E8u);
 #endif
@@ -199186,7 +199533,8 @@ label_BFC0D950:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0D964: 0043182B  sltu $v1, $v0, $v1 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < cpu->gpr[3] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < cpu->gpr[3] ? 1 : 0);
+    PGXP_ALU(0x0043182Bu, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033464u);
 #endif
@@ -199203,7 +199551,8 @@ label_BFC0D950:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0D96C: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x8003346Cu);
 #endif
@@ -199401,7 +199750,8 @@ label_BFC0D9A4:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC0D9B8: 3063000F  andi $v1, $v1, 0xF */
-    cpu->gpr[3] = cpu->gpr[3] & 0xFu;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] & 0xFu;
+    PGXP_ALU(0x3063000Fu, cpu->gpr[3], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x800334B8u);
 #endif
@@ -199430,7 +199780,8 @@ label_BFC0D9A4:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0D9C4: 2C430040  sltiu $v1, $v0, 64 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x00000040u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x00000040u ? 1 : 0);
+    PGXP_ALU(0x2C430040u, cpu->gpr[3], _pgx1, 0x0040u); }
 #ifdef PSX_COSIM
     cosim_instr(0x800334C4u);
 #endif
@@ -199447,7 +199798,8 @@ label_BFC0D9A4:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0D9CC: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x800334CCu);
 #endif
@@ -199540,7 +199892,8 @@ label_BFC0D9D8:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0D9EC: 0043182B  sltu $v1, $v0, $v1 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < cpu->gpr[3] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < cpu->gpr[3] ? 1 : 0);
+    PGXP_ALU(0x0043182Bu, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x800334ECu);
 #endif
@@ -199981,7 +200334,8 @@ label_BFC0DA80:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0DA8C: 2C430040  sltiu $v1, $v0, 64 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x00000040u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x00000040u ? 1 : 0);
+    PGXP_ALU(0x2C430040u, cpu->gpr[3], _pgx1, 0x0040u); }
 #ifdef PSX_COSIM
     cosim_instr(0x8003358Cu);
 #endif
@@ -200278,7 +200632,8 @@ label_BFC0DAE8:
     psx_cyc_step(cpu, 0x1008u);
 #endif
     /* 0xBFC0DAF4: 318300F0  andi $v1, $t4, 0xF0 */
-    cpu->gpr[3] = cpu->gpr[12] & 0xF0u;
+    { uint32_t _pgx1 = cpu->gpr[12]; cpu->gpr[3] = cpu->gpr[12] & 0xF0u;
+    PGXP_ALU(0x318300F0u, cpu->gpr[3], _pgx1, 0x00F0u); }
 #ifdef PSX_COSIM
     cosim_instr(0x800335F4u);
 #endif
@@ -200313,7 +200668,8 @@ label_BFC0DAE8:
     psx_cyc_step(cpu, 0x1000u);
 #endif
     /* 0xBFC0DB04: 318C0F00  andi $t4, $t4, 0xF00 */
-    cpu->gpr[12] = cpu->gpr[12] & 0xF00u;
+    { uint32_t _pgx1 = cpu->gpr[12]; cpu->gpr[12] = cpu->gpr[12] & 0xF00u;
+    PGXP_ALU(0x318C0F00u, cpu->gpr[12], _pgx1, 0x0F00u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033604u);
 #endif
@@ -200342,7 +200698,8 @@ label_BFC0DAE8:
     psx_cyc_step(cpu, 0x800u);
 #endif
     /* 0xBFC0DB10: 316B000F  andi $t3, $t3, 0xF */
-    cpu->gpr[11] = cpu->gpr[11] & 0xFu;
+    { uint32_t _pgx1 = cpu->gpr[11]; cpu->gpr[11] = cpu->gpr[11] & 0xFu;
+    PGXP_ALU(0x316B000Fu, cpu->gpr[11], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033610u);
 #endif
@@ -200368,7 +200725,8 @@ label_BFC0DAE8:
     psx_cyc_step(cpu, 0x500u);
 #endif
     /* 0xBFC0DB1C: 310A000F  andi $t2, $t0, 0xF */
-    cpu->gpr[10] = cpu->gpr[8] & 0xFu;
+    { uint32_t _pgx1 = cpu->gpr[8]; cpu->gpr[10] = cpu->gpr[8] & 0xFu;
+    PGXP_ALU(0x310A000Fu, cpu->gpr[10], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x8003361Cu);
 #endif
@@ -200530,7 +200888,8 @@ label_BFC0DB34:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC0DB4C: 28630040  slti $v1, $v1, 64 */
-    cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[3] < (64) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = (uint32_t)((int32_t)cpu->gpr[3] < (64) ? 1 : 0);
+    PGXP_ALU(0x28630040u, cpu->gpr[3], _pgx1, 0x0040u); }
 #ifdef PSX_COSIM
     cosim_instr(0x8003364Cu);
 #endif
@@ -200740,7 +201099,8 @@ label_BFC0DB84:
     psx_cyc_step(cpu, 0x210u);
 #endif
     /* 0xBFC0DB84: 31240001  andi $a0, $t1, 0x1 */
-    cpu->gpr[4] = cpu->gpr[9] & 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[9]; cpu->gpr[4] = cpu->gpr[9] & 0x1u;
+    PGXP_ALU(0x31240001u, cpu->gpr[4], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033684u);
 #endif
@@ -201246,7 +201606,8 @@ label_BFC0DBF4:
     psx_cyc_step(cpu, 0x28u);
 #endif
     /* 0xBFC0DC28: 3065000C  andi $a1, $v1, 0xC */
-    cpu->gpr[5] = cpu->gpr[3] & 0xCu;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[5] = cpu->gpr[3] & 0xCu;
+    PGXP_ALU(0x3065000Cu, cpu->gpr[5], _pgx1, 0x000Cu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033728u);
 #endif
@@ -201315,7 +201676,8 @@ label_BFC0DC38:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC0DC38: 2C630040  sltiu $v1, $v1, 64 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[3] < 0x00000040u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = (uint32_t)(cpu->gpr[3] < 0x00000040u ? 1 : 0);
+    PGXP_ALU(0x2C630040u, cpu->gpr[3], _pgx1, 0x0040u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033738u);
 #endif
@@ -201393,7 +201755,8 @@ label_BFC0DC48:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC0DC4C: 306300FD  andi $v1, $v1, 0xFD */
-    cpu->gpr[3] = cpu->gpr[3] & 0xFDu;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] & 0xFDu;
+    PGXP_ALU(0x306300FDu, cpu->gpr[3], _pgx1, 0x00FDu); }
 #ifdef PSX_COSIM
     cosim_instr(0x8003374Cu);
 #endif
@@ -201835,7 +202198,8 @@ label_BFC0DCD0:
     psx_cyc_step(cpu, 0x800u);
 #endif
     /* 0xBFC0DCD4: 316B00FF  andi $t3, $t3, 0xFF */
-    cpu->gpr[11] = cpu->gpr[11] & 0xFFu;
+    { uint32_t _pgx1 = cpu->gpr[11]; cpu->gpr[11] = cpu->gpr[11] & 0xFFu;
+    PGXP_ALU(0x316B00FFu, cpu->gpr[11], _pgx1, 0x00FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0x800337D4u);
 #endif
@@ -201843,7 +202207,8 @@ label_BFC0DCD0:
     psx_cyc_step(cpu, 0x808u);
 #endif
     /* 0xBFC0DCD8: 2D63000D  sltiu $v1, $t3, 13 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[11] < 0x0000000Du ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[11]; cpu->gpr[3] = (uint32_t)(cpu->gpr[11] < 0x0000000Du ? 1 : 0);
+    PGXP_ALU(0x2D63000Du, cpu->gpr[3], _pgx1, 0x000Du); }
 #ifdef PSX_COSIM
     cosim_instr(0x800337D8u);
 #endif
@@ -202353,7 +202718,8 @@ label_BFC0DD50:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC0DD58: 306300F0  andi $v1, $v1, 0xF0 */
-    cpu->gpr[3] = cpu->gpr[3] & 0xF0u;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] & 0xF0u;
+    PGXP_ALU(0x306300F0u, cpu->gpr[3], _pgx1, 0x00F0u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033858u);
 #endif
@@ -202399,7 +202765,8 @@ label_BFC0DD64:
     psx_cyc_step(cpu, 0x100u);
 #endif
     /* 0xBFC0DD68: 310800F0  andi $t0, $t0, 0xF0 */
-    cpu->gpr[8] = cpu->gpr[8] & 0xF0u;
+    { uint32_t _pgx1 = cpu->gpr[8]; cpu->gpr[8] = cpu->gpr[8] & 0xF0u;
+    PGXP_ALU(0x310800F0u, cpu->gpr[8], _pgx1, 0x00F0u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033868u);
 #endif
@@ -202448,7 +202815,8 @@ label_BFC0DD6C:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0DD74: 3042000F  andi $v0, $v0, 0xF */
-    cpu->gpr[2] = cpu->gpr[2] & 0xFu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0xFu;
+    PGXP_ALU(0x3042000Fu, cpu->gpr[2], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033874u);
 #endif
@@ -202593,7 +202961,8 @@ label_BFC0DD8C:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC0DD94: 306300F0  andi $v1, $v1, 0xF0 */
-    cpu->gpr[3] = cpu->gpr[3] & 0xF0u;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] & 0xF0u;
+    PGXP_ALU(0x306300F0u, cpu->gpr[3], _pgx1, 0x00F0u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033894u);
 #endif
@@ -202686,7 +203055,8 @@ label_BFC0DDA8:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0DDB0: 3042000F  andi $v0, $v0, 0xF */
-    cpu->gpr[2] = cpu->gpr[2] & 0xFu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0xFu;
+    PGXP_ALU(0x3042000Fu, cpu->gpr[2], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x800338B0u);
 #endif
@@ -203030,7 +203400,8 @@ label_BFC0DDF0:
     psx_cyc_step(cpu, 0x104u);
 #endif
     /* 0xBFC0DDF4: 29020041  slti $v0, $t0, 65 */
-    cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[8] < (65) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[8]; cpu->gpr[2] = (uint32_t)((int32_t)cpu->gpr[8] < (65) ? 1 : 0);
+    PGXP_ALU(0x29020041u, cpu->gpr[2], _pgx1, 0x0041u); }
 #ifdef PSX_COSIM
     cosim_instr(0x800338F4u);
 #endif
@@ -203213,7 +203584,8 @@ label_BFC0DE28:
     psx_cyc_step(cpu, 0x208u);
 #endif
     /* 0xBFC0DE28: 31230001  andi $v1, $t1, 0x1 */
-    cpu->gpr[3] = cpu->gpr[9] & 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[9]; cpu->gpr[3] = cpu->gpr[9] & 0x1u;
+    PGXP_ALU(0x31230001u, cpu->gpr[3], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033928u);
 #endif
@@ -203545,7 +203917,8 @@ label_BFC0DE70:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0DE74: 304200FF  andi $v0, $v0, 0xFF */
-    cpu->gpr[2] = cpu->gpr[2] & 0xFFu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0xFFu;
+    PGXP_ALU(0x304200FFu, cpu->gpr[2], _pgx1, 0x00FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033974u);
 #endif
@@ -203553,7 +203926,8 @@ label_BFC0DE70:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0DE78: 2C43000E  sltiu $v1, $v0, 14 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x0000000Eu ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x0000000Eu ? 1 : 0);
+    PGXP_ALU(0x2C43000Eu, cpu->gpr[3], _pgx1, 0x000Eu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033978u);
 #endif
@@ -204097,7 +204471,8 @@ label_BFC0DF00:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0DF08: 304200F0  andi $v0, $v0, 0xF0 */
-    cpu->gpr[2] = cpu->gpr[2] & 0xF0u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0xF0u;
+    PGXP_ALU(0x304200F0u, cpu->gpr[2], _pgx1, 0x00F0u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033A08u);
 #endif
@@ -204535,7 +204910,8 @@ label_BFC0DF68:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0DF70: 3042000F  andi $v0, $v0, 0xF */
-    cpu->gpr[2] = cpu->gpr[2] & 0xFu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0xFu;
+    PGXP_ALU(0x3042000Fu, cpu->gpr[2], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033A70u);
 #endif
@@ -204653,7 +205029,8 @@ label_BFC0DF80:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0DF90: 3042FFFF  andi $v0, $v0, 0xFFFF */
-    cpu->gpr[2] = cpu->gpr[2] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0xFFFFu;
+    PGXP_ALU(0x3042FFFFu, cpu->gpr[2], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033A90u);
 #endif
@@ -204661,7 +205038,8 @@ label_BFC0DF80:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC0DF94: 2C420040  sltiu $v0, $v0, 64 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000040u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000040u ? 1 : 0);
+    PGXP_ALU(0x2C420040u, cpu->gpr[2], _pgx1, 0x0040u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033A94u);
 #endif
@@ -205041,7 +205419,8 @@ label_BFC0DFDC:
     psx_cyc_step(cpu, 0x104u);
 #endif
     /* 0xBFC0DFE0: 2D020020  sltiu $v0, $t0, 32 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[8] < 0x00000020u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[8]; cpu->gpr[2] = (uint32_t)(cpu->gpr[8] < 0x00000020u ? 1 : 0);
+    PGXP_ALU(0x2D020020u, cpu->gpr[2], _pgx1, 0x0020u); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033AE0u);
 #endif
@@ -205265,7 +205644,8 @@ label_BFC0E004:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC0E014: 0043182B  sltu $v1, $v0, $v1 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < cpu->gpr[3] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < cpu->gpr[3] ? 1 : 0);
+    PGXP_ALU(0x0043182Bu, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x80033B14u);
 #endif
@@ -205635,7 +206015,8 @@ label_BFC1E51C:
     psx_cyc_step(cpu, 0x48u);
 #endif
     /* 0xBFC1E51C: 2CC30020  sltiu $v1, $a2, 32 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[6] < 0x00000020u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[6]; cpu->gpr[3] = (uint32_t)(cpu->gpr[6] < 0x00000020u ? 1 : 0);
+    PGXP_ALU(0x2CC30020u, cpu->gpr[3], _pgx1, 0x0020u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000548u);
 #endif
@@ -205840,7 +206221,8 @@ label_BFC1E540:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC1E554: 30830003  andi $v1, $a0, 0x3 */
-    cpu->gpr[3] = cpu->gpr[4] & 0x3u;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[3] = cpu->gpr[4] & 0x3u;
+    PGXP_ALU(0x30830003u, cpu->gpr[3], _pgx1, 0x0003u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000580u);
 #endif
@@ -205920,7 +206302,8 @@ label_BFC1E540:
     psx_cyc_step(cpu, 0x240u);
 #endif
     /* 0xBFC1E578: 30C900FF  andi $t1, $a2, 0xFF */
-    cpu->gpr[9] = cpu->gpr[6] & 0xFFu;
+    { uint32_t _pgx1 = cpu->gpr[6]; cpu->gpr[9] = cpu->gpr[6] & 0xFFu;
+    PGXP_ALU(0x30C900FFu, cpu->gpr[9], _pgx1, 0x00FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0x000005A4u);
 #endif
@@ -208316,7 +208699,8 @@ label_BFC1E848:
     psx_cyc_step(cpu, 0x90u);
 #endif
     /* 0xBFC1E848: 00872024  and $a0, $a0, $a3 */
-    cpu->gpr[4] = cpu->gpr[4] & cpu->gpr[7];
+    { uint32_t _pgx1 = cpu->gpr[4]; uint32_t _pgx2 = cpu->gpr[7]; cpu->gpr[4] = cpu->gpr[4] & cpu->gpr[7];
+    PGXP_ALU(0x00872024u, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000874u);
 #endif
@@ -209070,7 +209454,8 @@ label_BFC1E94C:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1E958: 30420008  andi $v0, $v0, 0x8 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x8u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x8u;
+    PGXP_ALU(0x30420008u, cpu->gpr[2], _pgx1, 0x0008u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000984u);
 #endif
@@ -209131,7 +209516,8 @@ label_BFC1E964:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1E96C: 30420008  andi $v0, $v0, 0x8 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x8u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x8u;
+    PGXP_ALU(0x30420008u, cpu->gpr[2], _pgx1, 0x0008u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000998u);
 #endif
@@ -209209,7 +209595,8 @@ label_BFC1E978:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1E984: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000009B0u);
 #endif
@@ -210003,7 +210390,8 @@ label_BFC1EA60:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1EA6C: 30420004  andi $v0, $v0, 0x4 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x4u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x4u;
+    PGXP_ALU(0x30420004u, cpu->gpr[2], _pgx1, 0x0004u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000A98u);
 #endif
@@ -210067,7 +210455,8 @@ label_BFC1EA78:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1EA80: 30420004  andi $v0, $v0, 0x4 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x4u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x4u;
+    PGXP_ALU(0x30420004u, cpu->gpr[2], _pgx1, 0x0004u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000AACu);
 #endif
@@ -210174,7 +210563,8 @@ label_BFC1EA8C:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC1EAA4: 30840007  andi $a0, $a0, 0x7 */
-    cpu->gpr[4] = cpu->gpr[4] & 0x7u;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = cpu->gpr[4] & 0x7u;
+    PGXP_ALU(0x30840007u, cpu->gpr[4], _pgx1, 0x0007u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000AD0u);
 #endif
@@ -210318,7 +210708,8 @@ label_BFC1EACC:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC1EAD4: 30630018  andi $v1, $v1, 0x18 */
-    cpu->gpr[3] = cpu->gpr[3] & 0x18u;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] & 0x18u;
+    PGXP_ALU(0x30630018u, cpu->gpr[3], _pgx1, 0x0018u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000B00u);
 #endif
@@ -210401,7 +210792,8 @@ label_BFC1EAE0:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC1EAF0: 30630018  andi $v1, $v1, 0x18 */
-    cpu->gpr[3] = cpu->gpr[3] & 0x18u;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] & 0x18u;
+    PGXP_ALU(0x30630018u, cpu->gpr[3], _pgx1, 0x0018u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000B1Cu);
 #endif
@@ -210496,7 +210888,8 @@ label_BFC1EB0C:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1EB14: 30420007  andi $v0, $v0, 0x7 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x7u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x7u;
+    PGXP_ALU(0x30420007u, cpu->gpr[2], _pgx1, 0x0007u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000B40u);
 #endif
@@ -210513,7 +210906,8 @@ label_BFC1EB0C:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1EB1C: 304200FF  andi $v0, $v0, 0xFF */
-    cpu->gpr[2] = cpu->gpr[2] & 0xFFu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0xFFu;
+    PGXP_ALU(0x304200FFu, cpu->gpr[2], _pgx1, 0x00FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000B48u);
 #endif
@@ -210521,7 +210915,8 @@ label_BFC1EB0C:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1EB20: 2C430005  sltiu $v1, $v0, 5 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x00000005u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = (uint32_t)(cpu->gpr[2] < 0x00000005u ? 1 : 0);
+    PGXP_ALU(0x2C430005u, cpu->gpr[3], _pgx1, 0x0005u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000B4Cu);
 #endif
@@ -210770,7 +211165,8 @@ label_BFC1EB50:
     psx_cyc_step(cpu, 0x14u);
 #endif
     /* 0xBFC1EB68: 2C4400F7  sltiu $a0, $v0, 247 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[2] < 0x000000F7u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[4] = (uint32_t)(cpu->gpr[2] < 0x000000F7u ? 1 : 0);
+    PGXP_ALU(0x2C4400F7u, cpu->gpr[4], _pgx1, 0x00F7u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000B94u);
 #endif
@@ -210966,7 +211362,8 @@ label_BFC1EB88:
     psx_cyc_step(cpu, 0x14u);
 #endif
     /* 0xBFC1EB94: 2C4400EC  sltiu $a0, $v0, 236 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[2] < 0x000000ECu ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[4] = (uint32_t)(cpu->gpr[2] < 0x000000ECu ? 1 : 0);
+    PGXP_ALU(0x2C4400ECu, cpu->gpr[4], _pgx1, 0x00ECu); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000BC0u);
 #endif
@@ -211005,7 +211402,8 @@ label_BFC1EB98:
     psx_cyc_step(cpu, 0x14u);
 #endif
     /* 0xBFC1EB9C: 2C440006  sltiu $a0, $v0, 6 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[2] < 0x00000006u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[4] = (uint32_t)(cpu->gpr[2] < 0x00000006u ? 1 : 0);
+    PGXP_ALU(0x2C440006u, cpu->gpr[4], _pgx1, 0x0006u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000BC8u);
 #endif
@@ -211079,7 +211477,8 @@ label_BFC1EBA8:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1EBA8: 2C420003  sltiu $v0, $v0, 3 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000003u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000003u ? 1 : 0);
+    PGXP_ALU(0x2C420003u, cpu->gpr[2], _pgx1, 0x0003u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000BD4u);
 #endif
@@ -212280,7 +212679,8 @@ label_BFC1ECA0:
     psx_cyc_step(cpu, 0x24u);
 #endif
     /* 0xBFC1ECAC: 2C45001B  sltiu $a1, $v0, 27 */
-    cpu->gpr[5] = (uint32_t)(cpu->gpr[2] < 0x0000001Bu ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[5] = (uint32_t)(cpu->gpr[2] < 0x0000001Bu ? 1 : 0);
+    PGXP_ALU(0x2C45001Bu, cpu->gpr[5], _pgx1, 0x001Bu); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000CD8u);
 #endif
@@ -212394,7 +212794,8 @@ label_BFC1ECC0:
     psx_cyc_step(cpu, 0x14u);
 #endif
     /* 0xBFC1ECC0: 2C440013  sltiu $a0, $v0, 19 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[2] < 0x00000013u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[4] = (uint32_t)(cpu->gpr[2] < 0x00000013u ? 1 : 0);
+    PGXP_ALU(0x2C440013u, cpu->gpr[4], _pgx1, 0x0013u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000CECu);
 #endif
@@ -212463,7 +212864,8 @@ label_BFC1ECD0:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1ECD0: 2C420002  sltiu $v0, $v0, 2 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000002u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000002u ? 1 : 0);
+    PGXP_ALU(0x2C420002u, cpu->gpr[2], _pgx1, 0x0002u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000CFCu);
 #endif
@@ -212947,7 +213349,8 @@ label_BFC1ED24:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1ED2C: 30420010  andi $v0, $v0, 0x10 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x10u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x10u;
+    PGXP_ALU(0x30420010u, cpu->gpr[2], _pgx1, 0x0010u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000D58u);
 #endif
@@ -213117,7 +213520,8 @@ label_BFC1ED54:
     psx_cyc_step(cpu, 0x24u);
 #endif
     /* 0xBFC1ED60: 2C4500E7  sltiu $a1, $v0, 231 */
-    cpu->gpr[5] = (uint32_t)(cpu->gpr[2] < 0x000000E7u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[5] = (uint32_t)(cpu->gpr[2] < 0x000000E7u ? 1 : 0);
+    PGXP_ALU(0x2C4500E7u, cpu->gpr[5], _pgx1, 0x00E7u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000D8Cu);
 #endif
@@ -213197,7 +213601,8 @@ label_BFC1ED6C:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1ED70: 2C420003  sltiu $v0, $v0, 3 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000003u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000003u ? 1 : 0);
+    PGXP_ALU(0x2C420003u, cpu->gpr[2], _pgx1, 0x0003u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000D9Cu);
 #endif
@@ -213691,7 +214096,8 @@ label_BFC1EDE0:
     psx_cyc_step(cpu, 0x44u);
 #endif
     /* 0xBFC1EDE0: 2C46001A  sltiu $a2, $v0, 26 */
-    cpu->gpr[6] = (uint32_t)(cpu->gpr[2] < 0x0000001Au ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[6] = (uint32_t)(cpu->gpr[2] < 0x0000001Au ? 1 : 0);
+    PGXP_ALU(0x2C46001Au, cpu->gpr[6], _pgx1, 0x001Au); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000E0Cu);
 #endif
@@ -213798,7 +214204,8 @@ label_BFC1EDF8:
     psx_cyc_step(cpu, 0x14u);
 #endif
     /* 0xBFC1EDFC: 2C440019  sltiu $a0, $v0, 25 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[2] < 0x00000019u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[4] = (uint32_t)(cpu->gpr[2] < 0x00000019u ? 1 : 0);
+    PGXP_ALU(0x2C440019u, cpu->gpr[4], _pgx1, 0x0019u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000E28u);
 #endif
@@ -214109,7 +214516,8 @@ label_BFC1EE64:
     psx_cyc_step(cpu, 0x60u);
 #endif
     /* 0xBFC1EE74: 00A63024  and $a2, $a1, $a2 */
-    cpu->gpr[6] = cpu->gpr[5] & cpu->gpr[6];
+    { uint32_t _pgx1 = cpu->gpr[5]; uint32_t _pgx2 = cpu->gpr[6]; cpu->gpr[6] = cpu->gpr[5] & cpu->gpr[6];
+    PGXP_ALU(0x00A63024u, cpu->gpr[6], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000EA0u);
 #endif
@@ -214169,7 +214577,8 @@ label_BFC1EE80:
     psx_cyc_step(cpu, 0x60u);
 #endif
     /* 0xBFC1EE84: 00A62824  and $a1, $a1, $a2 */
-    cpu->gpr[5] = cpu->gpr[5] & cpu->gpr[6];
+    { uint32_t _pgx1 = cpu->gpr[5]; uint32_t _pgx2 = cpu->gpr[6]; cpu->gpr[5] = cpu->gpr[5] & cpu->gpr[6];
+    PGXP_ALU(0x00A62824u, cpu->gpr[5], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000EB0u);
 #endif
@@ -214299,7 +214708,8 @@ label_BFC1EEA0:
     psx_cyc_step(cpu, 0x24u);
 #endif
     /* 0xBFC1EEA0: 2C4500FF  sltiu $a1, $v0, 255 */
-    cpu->gpr[5] = (uint32_t)(cpu->gpr[2] < 0x000000FFu ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[5] = (uint32_t)(cpu->gpr[2] < 0x000000FFu ? 1 : 0);
+    PGXP_ALU(0x2C4500FFu, cpu->gpr[5], _pgx1, 0x00FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000ECCu);
 #endif
@@ -214317,7 +214727,8 @@ label_BFC1EEA0:
     psx_cyc_step(cpu, 0x24u);
 #endif
     /* 0xBFC1EEA8: 2C4500E6  sltiu $a1, $v0, 230 */
-    cpu->gpr[5] = (uint32_t)(cpu->gpr[2] < 0x000000E6u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[5] = (uint32_t)(cpu->gpr[2] < 0x000000E6u ? 1 : 0);
+    PGXP_ALU(0x2C4500E6u, cpu->gpr[5], _pgx1, 0x00E6u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000ED4u);
 #endif
@@ -215179,7 +215590,8 @@ label_BFC1EF34:
     psx_cyc_step(cpu, 0x24u);
 #endif
     /* 0xBFC1EF68: 00A2282B  sltu $a1, $a1, $v0 */
-    cpu->gpr[5] = (uint32_t)(cpu->gpr[5] < cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[5]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[5] = (uint32_t)(cpu->gpr[5] < cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x00A2282Bu, cpu->gpr[5], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000F94u);
 #endif
@@ -215240,7 +215652,8 @@ label_BFC1EF74:
     psx_cyc_step(cpu, 0x20u);
 #endif
     /* 0xBFC1EF7C: 30A50010  andi $a1, $a1, 0x10 */
-    cpu->gpr[5] = cpu->gpr[5] & 0x10u;
+    { uint32_t _pgx1 = cpu->gpr[5]; cpu->gpr[5] = cpu->gpr[5] & 0x10u;
+    PGXP_ALU(0x30A50010u, cpu->gpr[5], _pgx1, 0x0010u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00000FA8u);
 #endif
@@ -215801,7 +216214,8 @@ label_BFC1EFF4:
     psx_cyc_step(cpu, 0x90u);
 #endif
     /* 0xBFC1EFF8: 30E4000F  andi $a0, $a3, 0xF */
-    cpu->gpr[4] = cpu->gpr[7] & 0xFu;
+    { uint32_t _pgx1 = cpu->gpr[7]; cpu->gpr[4] = cpu->gpr[7] & 0xFu;
+    PGXP_ALU(0x30E4000Fu, cpu->gpr[4], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001024u);
 #endif
@@ -215937,7 +216351,8 @@ label_BFC1F014:
     psx_cyc_step(cpu, 0x40u);
 #endif
     /* 0xBFC1F018: 30C6000F  andi $a2, $a2, 0xF */
-    cpu->gpr[6] = cpu->gpr[6] & 0xFu;
+    { uint32_t _pgx1 = cpu->gpr[6]; cpu->gpr[6] = cpu->gpr[6] & 0xFu;
+    PGXP_ALU(0x30C6000Fu, cpu->gpr[6], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001044u);
 #endif
@@ -216055,7 +216470,8 @@ label_BFC1F034:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC1F034: 30840010  andi $a0, $a0, 0x10 */
-    cpu->gpr[4] = cpu->gpr[4] & 0x10u;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = cpu->gpr[4] & 0x10u;
+    PGXP_ALU(0x30840010u, cpu->gpr[4], _pgx1, 0x0010u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001060u);
 #endif
@@ -216465,7 +216881,8 @@ label_BFC1F098:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1F0A8: 30420100  andi $v0, $v0, 0x100 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x100u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x100u;
+    PGXP_ALU(0x30420100u, cpu->gpr[2], _pgx1, 0x0100u); }
 #ifdef PSX_COSIM
     cosim_instr(0x000010D4u);
 #endif
@@ -217519,7 +217936,8 @@ label_BFC1F19C:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1F1A0: 2C420003  sltiu $v0, $v0, 3 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000003u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000003u ? 1 : 0);
+    PGXP_ALU(0x2C420003u, cpu->gpr[2], _pgx1, 0x0003u); }
 #ifdef PSX_COSIM
     cosim_instr(0x000011CCu);
 #endif
@@ -218792,7 +219210,8 @@ label_BFC1F2E8:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1F2F0: 30420010  andi $v0, $v0, 0x10 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x10u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x10u;
+    PGXP_ALU(0x30420010u, cpu->gpr[2], _pgx1, 0x0010u); }
 #ifdef PSX_COSIM
     cosim_instr(0x0000131Cu);
 #endif
@@ -219850,7 +220269,8 @@ label_BFC1F410:
     psx_cyc_step(cpu, 0x48u);
 #endif
     /* 0xBFC1F418: 30C30010  andi $v1, $a2, 0x10 */
-    cpu->gpr[3] = cpu->gpr[6] & 0x10u;
+    { uint32_t _pgx1 = cpu->gpr[6]; cpu->gpr[3] = cpu->gpr[6] & 0x10u;
+    PGXP_ALU(0x30C30010u, cpu->gpr[3], _pgx1, 0x0010u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001444u);
 #endif
@@ -219907,7 +220327,8 @@ label_BFC1F428:
     psx_cyc_step(cpu, 0x48u);
 #endif
     /* 0xBFC1F428: 30C30020  andi $v1, $a2, 0x20 */
-    cpu->gpr[3] = cpu->gpr[6] & 0x20u;
+    { uint32_t _pgx1 = cpu->gpr[6]; cpu->gpr[3] = cpu->gpr[6] & 0x20u;
+    PGXP_ALU(0x30C30020u, cpu->gpr[3], _pgx1, 0x0020u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001454u);
 #endif
@@ -220117,7 +220538,8 @@ label_BFC1F438:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC1F474: 30630010  andi $v1, $v1, 0x10 */
-    cpu->gpr[3] = cpu->gpr[3] & 0x10u;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] & 0x10u;
+    PGXP_ALU(0x30630010u, cpu->gpr[3], _pgx1, 0x0010u); }
 #ifdef PSX_COSIM
     cosim_instr(0x000014A0u);
 #endif
@@ -220527,7 +220949,8 @@ label_BFC1F4D4:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC1F4EC: 30630010  andi $v1, $v1, 0x10 */
-    cpu->gpr[3] = cpu->gpr[3] & 0x10u;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] & 0x10u;
+    PGXP_ALU(0x30630010u, cpu->gpr[3], _pgx1, 0x0010u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001518u);
 #endif
@@ -221057,7 +221480,8 @@ label_BFC1F568:
     psx_cyc_step(cpu, 0x44u);
 #endif
     /* 0xBFC1F594: 00461024  and $v0, $v0, $a2 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[6];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[6]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[6];
+    PGXP_ALU(0x00461024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000015C0u);
 #endif
@@ -221092,7 +221516,8 @@ label_BFC1F568:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F5A4: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000015D0u);
 #endif
@@ -221126,7 +221551,8 @@ label_BFC1F568:
     psx_cyc_step(cpu, 0x44u);
 #endif
     /* 0xBFC1F5B4: 00461024  and $v0, $v0, $a2 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[6];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[6]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[6];
+    PGXP_ALU(0x00461024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000015E0u);
 #endif
@@ -221160,7 +221586,8 @@ label_BFC1F568:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F5C4: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000015F0u);
 #endif
@@ -221282,7 +221709,8 @@ label_BFC1F568:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F5F8: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001624u);
 #endif
@@ -221470,7 +221898,8 @@ label_BFC1F634:
     psx_cyc_step(cpu, 0x44u);
 #endif
     /* 0xBFC1F63C: 00461024  and $v0, $v0, $a2 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[6];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[6]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[6];
+    PGXP_ALU(0x00461024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001668u);
 #endif
@@ -221957,7 +222386,8 @@ label_BFC1F6B8:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F6D4: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001700u);
 #endif
@@ -221965,7 +222395,8 @@ label_BFC1F6B8:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1F6D8: 30420004  andi $v0, $v0, 0x4 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x4u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x4u;
+    PGXP_ALU(0x30420004u, cpu->gpr[2], _pgx1, 0x0004u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001704u);
 #endif
@@ -222136,7 +222567,8 @@ label_BFC1F704:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F70C: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001738u);
 #endif
@@ -222205,7 +222637,8 @@ label_BFC1F718:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F724: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001750u);
 #endif
@@ -222213,7 +222646,8 @@ label_BFC1F718:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1F728: 30420200  andi $v0, $v0, 0x200 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x200u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x200u;
+    PGXP_ALU(0x30420200u, cpu->gpr[2], _pgx1, 0x0200u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001754u);
 #endif
@@ -222384,7 +222818,8 @@ label_BFC1F754:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F75C: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001788u);
 #endif
@@ -222443,7 +222878,8 @@ label_BFC1F764:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F774: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000017A0u);
 #endif
@@ -222451,7 +222887,8 @@ label_BFC1F764:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1F778: 30420002  andi $v0, $v0, 0x2 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x2u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x2u;
+    PGXP_ALU(0x30420002u, cpu->gpr[2], _pgx1, 0x0002u); }
 #ifdef PSX_COSIM
     cosim_instr(0x000017A4u);
 #endif
@@ -222622,7 +223059,8 @@ label_BFC1F7A4:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F7AC: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000017D8u);
 #endif
@@ -222691,7 +223129,8 @@ label_BFC1F7B8:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F7C4: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000017F0u);
 #endif
@@ -222699,7 +223138,8 @@ label_BFC1F7B8:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1F7C8: 30420400  andi $v0, $v0, 0x400 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x400u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x400u;
+    PGXP_ALU(0x30420400u, cpu->gpr[2], _pgx1, 0x0400u); }
 #ifdef PSX_COSIM
     cosim_instr(0x000017F4u);
 #endif
@@ -223021,7 +223461,8 @@ label_BFC1F7F4:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F7FC: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001828u);
 #endif
@@ -223159,7 +223600,8 @@ label_BFC1F814:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F814: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001840u);
 #endif
@@ -223190,7 +223632,8 @@ label_BFC1F818:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1F818: 30420100  andi $v0, $v0, 0x100 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x100u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x100u;
+    PGXP_ALU(0x30420100u, cpu->gpr[2], _pgx1, 0x0100u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001844u);
 #endif
@@ -223466,7 +223909,8 @@ label_BFC1F84C:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F84C: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001878u);
 #endif
@@ -223613,7 +224057,8 @@ label_BFC1F858:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F864: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001890u);
 #endif
@@ -223621,7 +224066,8 @@ label_BFC1F858:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1F868: 30420001  andi $v0, $v0, 0x1 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x1u;
+    PGXP_ALU(0x30420001u, cpu->gpr[2], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001894u);
 #endif
@@ -223792,7 +224238,8 @@ label_BFC1F894:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F89C: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000018C8u);
 #endif
@@ -223851,7 +224298,8 @@ label_BFC1F8A4:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F8B4: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000018E0u);
 #endif
@@ -223859,7 +224307,8 @@ label_BFC1F8A4:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1F8B8: 30420010  andi $v0, $v0, 0x10 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x10u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x10u;
+    PGXP_ALU(0x30420010u, cpu->gpr[2], _pgx1, 0x0010u); }
 #ifdef PSX_COSIM
     cosim_instr(0x000018E4u);
 #endif
@@ -224030,7 +224479,8 @@ label_BFC1F8E4:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F8EC: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001918u);
 #endif
@@ -224099,7 +224549,8 @@ label_BFC1F8F8:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F904: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001930u);
 #endif
@@ -224107,7 +224558,8 @@ label_BFC1F8F8:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1F908: 30420020  andi $v0, $v0, 0x20 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x20u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x20u;
+    PGXP_ALU(0x30420020u, cpu->gpr[2], _pgx1, 0x0020u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001934u);
 #endif
@@ -224278,7 +224730,8 @@ label_BFC1F934:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F93C: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001968u);
 #endif
@@ -224337,7 +224790,8 @@ label_BFC1F944:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F954: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001980u);
 #endif
@@ -224345,7 +224799,8 @@ label_BFC1F944:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1F958: 30420040  andi $v0, $v0, 0x40 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x40u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x40u;
+    PGXP_ALU(0x30420040u, cpu->gpr[2], _pgx1, 0x0040u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001984u);
 #endif
@@ -224516,7 +224971,8 @@ label_BFC1F984:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F98C: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000019B8u);
 #endif
@@ -224585,7 +225041,8 @@ label_BFC1F998:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F9A4: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000019D0u);
 #endif
@@ -224593,7 +225050,8 @@ label_BFC1F998:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1F9A8: 30420080  andi $v0, $v0, 0x80 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x80u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x80u;
+    PGXP_ALU(0x30420080u, cpu->gpr[2], _pgx1, 0x0080u); }
 #ifdef PSX_COSIM
     cosim_instr(0x000019D4u);
 #endif
@@ -224764,7 +225222,8 @@ label_BFC1F9D4:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F9DC: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001A08u);
 #endif
@@ -224823,7 +225282,8 @@ label_BFC1F9E4:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1F9F4: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001A20u);
 #endif
@@ -224831,7 +225291,8 @@ label_BFC1F9E4:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1F9F8: 30420008  andi $v0, $v0, 0x8 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x8u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x8u;
+    PGXP_ALU(0x30420008u, cpu->gpr[2], _pgx1, 0x0008u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001A24u);
 #endif
@@ -225002,7 +225463,8 @@ label_BFC1FA24:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC1FA2C: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001A58u);
 #endif
@@ -225137,7 +225599,8 @@ label_BFC1FA48:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1FA54: 30420001  andi $v0, $v0, 0x1 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x1u;
+    PGXP_ALU(0x30420001u, cpu->gpr[2], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001A80u);
 #endif
@@ -225201,7 +225664,8 @@ label_BFC1FA60:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1FA68: 30420001  andi $v0, $v0, 0x1 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x1u;
+    PGXP_ALU(0x30420001u, cpu->gpr[2], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001A94u);
 #endif
@@ -225446,7 +225910,8 @@ label_BFC1FAA0:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1FAAC: 30420040  andi $v0, $v0, 0x40 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x40u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x40u;
+    PGXP_ALU(0x30420040u, cpu->gpr[2], _pgx1, 0x0040u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001AD8u);
 #endif
@@ -225510,7 +225975,8 @@ label_BFC1FAB8:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1FAC0: 30420040  andi $v0, $v0, 0x40 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x40u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x40u;
+    PGXP_ALU(0x30420040u, cpu->gpr[2], _pgx1, 0x0040u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001AECu);
 #endif
@@ -225761,7 +226227,8 @@ label_BFC1FAF8:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1FB04: 30420020  andi $v0, $v0, 0x20 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x20u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x20u;
+    PGXP_ALU(0x30420020u, cpu->gpr[2], _pgx1, 0x0020u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001B30u);
 #endif
@@ -225825,7 +226292,8 @@ label_BFC1FB10:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1FB18: 30420020  andi $v0, $v0, 0x20 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x20u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x20u;
+    PGXP_ALU(0x30420020u, cpu->gpr[2], _pgx1, 0x0020u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001B44u);
 #endif
@@ -226070,7 +226538,8 @@ label_BFC1FB50:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1FB5C: 30420010  andi $v0, $v0, 0x10 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x10u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x10u;
+    PGXP_ALU(0x30420010u, cpu->gpr[2], _pgx1, 0x0010u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001B88u);
 #endif
@@ -226134,7 +226603,8 @@ label_BFC1FB68:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1FB70: 30420010  andi $v0, $v0, 0x10 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x10u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x10u;
+    PGXP_ALU(0x30420010u, cpu->gpr[2], _pgx1, 0x0010u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001B9Cu);
 #endif
@@ -227657,7 +228127,8 @@ label_BFC1FCB4:
     psx_cyc_step(cpu, 0x24u);
 #endif
     /* 0xBFC1FCD8: 00451024  and $v0, $v0, $a1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[5];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[5]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[5];
+    PGXP_ALU(0x00451024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001D04u);
 #endif
@@ -228112,7 +228583,8 @@ label_BFC1FD74:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC1FD74: 2C830003  sltiu $v1, $a0, 3 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[4] < 0x00000003u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[3] = (uint32_t)(cpu->gpr[4] < 0x00000003u ? 1 : 0);
+    PGXP_ALU(0x2C830003u, cpu->gpr[3], _pgx1, 0x0003u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001DA0u);
 #endif
@@ -228264,7 +228736,8 @@ label_BFC1FD98:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC1FD98: 3084FFFF  andi $a0, $a0, 0xFFFF */
-    cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    PGXP_ALU(0x3084FFFFu, cpu->gpr[4], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001DC4u);
 #endif
@@ -228272,7 +228745,8 @@ label_BFC1FD98:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC1FD9C: 2C830003  sltiu $v1, $a0, 3 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[4] < 0x00000003u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[3] = (uint32_t)(cpu->gpr[4] < 0x00000003u ? 1 : 0);
+    PGXP_ALU(0x2C830003u, cpu->gpr[3], _pgx1, 0x0003u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001DC8u);
 #endif
@@ -228362,7 +228836,8 @@ label_BFC1FDA8:
     psx_cyc_step(cpu, 0x44u);
 #endif
     /* 0xBFC1FDB8: 30C20010  andi $v0, $a2, 0x10 */
-    cpu->gpr[2] = cpu->gpr[6] & 0x10u;
+    { uint32_t _pgx1 = cpu->gpr[6]; cpu->gpr[2] = cpu->gpr[6] & 0x10u;
+    PGXP_ALU(0x30C20010u, cpu->gpr[2], _pgx1, 0x0010u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001DE4u);
 #endif
@@ -228370,7 +228845,8 @@ label_BFC1FDA8:
     psx_cyc_step(cpu, 0x48u);
 #endif
     /* 0xBFC1FDBC: 30C30001  andi $v1, $a2, 0x1 */
-    cpu->gpr[3] = cpu->gpr[6] & 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[6]; cpu->gpr[3] = cpu->gpr[6] & 0x1u;
+    PGXP_ALU(0x30C30001u, cpu->gpr[3], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001DE8u);
 #endif
@@ -228378,7 +228854,8 @@ label_BFC1FDA8:
     psx_cyc_step(cpu, 0x5u);
 #endif
     /* 0xBFC1FDC0: 0002102B  sltu $v0, $zero, $v0 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x0002102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001DECu);
 #endif
@@ -228407,7 +228884,8 @@ label_BFC1FDA8:
     psx_cyc_step(cpu, 0x40u);
 #endif
     /* 0xBFC1FDCC: 30C61000  andi $a2, $a2, 0x1000 */
-    cpu->gpr[6] = cpu->gpr[6] & 0x1000u;
+    { uint32_t _pgx1 = cpu->gpr[6]; cpu->gpr[6] = cpu->gpr[6] & 0x1000u;
+    PGXP_ALU(0x30C61000u, cpu->gpr[6], _pgx1, 0x1000u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001DF8u);
 #endif
@@ -228574,7 +229052,8 @@ label_BFC1FDF8:
     psx_cyc_step(cpu, 0x14u);
 #endif
     /* 0xBFC1FDF8: 3082FFFF  andi $v0, $a0, 0xFFFF */
-    cpu->gpr[2] = cpu->gpr[4] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[2] = cpu->gpr[4] & 0xFFFFu;
+    PGXP_ALU(0x3082FFFFu, cpu->gpr[2], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001E24u);
 #endif
@@ -228645,7 +229124,8 @@ label_BFC1FDF8:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC1FE18: 2C420003  sltiu $v0, $v0, 3 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000003u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000003u ? 1 : 0);
+    PGXP_ALU(0x2C420003u, cpu->gpr[2], _pgx1, 0x0003u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001E44u);
 #endif
@@ -228714,7 +229194,8 @@ label_BFC1FE2C:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC1FE2C: 3084FFFF  andi $a0, $a0, 0xFFFF */
-    cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    PGXP_ALU(0x3084FFFFu, cpu->gpr[4], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001E58u);
 #endif
@@ -228785,7 +229266,8 @@ label_BFC1FE2C:
     psx_cyc_step(cpu, 0x5u);
 #endif
     /* 0xBFC1FE4C: 00021027  nor $v0, $zero, $v0 */
-    cpu->gpr[2] = ~(cpu->gpr[0] | cpu->gpr[2]);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = ~(cpu->gpr[0] | cpu->gpr[2]);
+    PGXP_ALU(0x00021027u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001E78u);
 #endif
@@ -228793,7 +229275,8 @@ label_BFC1FE2C:
     psx_cyc_step(cpu, 0x24u);
 #endif
     /* 0xBFC1FE50: 00451024  and $v0, $v0, $a1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[5];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[5]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[5];
+    PGXP_ALU(0x00451024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001E7Cu);
 #endif
@@ -228865,7 +229348,8 @@ label_BFC1FE60:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC1FE60: 3084FFFF  andi $a0, $a0, 0xFFFF */
-    cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = cpu->gpr[4] & 0xFFFFu;
+    PGXP_ALU(0x3084FFFFu, cpu->gpr[4], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001E8Cu);
 #endif
@@ -228876,7 +229360,8 @@ label_BFC1FE60:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC1FE64: 2C830003  sltiu $v1, $a0, 3 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[4] < 0x00000003u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[3] = (uint32_t)(cpu->gpr[4] < 0x00000003u ? 1 : 0);
+    PGXP_ALU(0x2C830003u, cpu->gpr[3], _pgx1, 0x0003u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001E90u);
 #endif
@@ -229792,7 +230277,8 @@ label_BFC1FF40:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC1FF5C: 3063003C  andi $v1, $v1, 0x3C */
-    cpu->gpr[3] = cpu->gpr[3] & 0x3Cu;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] & 0x3Cu;
+    PGXP_ALU(0x3063003Cu, cpu->gpr[3], _pgx1, 0x003Cu); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001F88u);
 #endif
@@ -229963,7 +230449,8 @@ label_BFC1FF78:
     psx_cyc_step(cpu, 0x28u);
 #endif
     /* 0xBFC1FF94: 2C650003  sltiu $a1, $v1, 3 */
-    cpu->gpr[5] = (uint32_t)(cpu->gpr[3] < 0x00000003u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[5] = (uint32_t)(cpu->gpr[3] < 0x00000003u ? 1 : 0);
+    PGXP_ALU(0x2C650003u, cpu->gpr[5], _pgx1, 0x0003u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00001FC0u);
 #endif
@@ -230306,7 +230793,8 @@ label_BFC1FFD8:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC1FFD8: 30830404  andi $v1, $a0, 0x404 */
-    cpu->gpr[3] = cpu->gpr[4] & 0x404u;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[3] = cpu->gpr[4] & 0x404u;
+    PGXP_ALU(0x30830404u, cpu->gpr[3], _pgx1, 0x0404u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002004u);
 #endif
@@ -230337,7 +230825,8 @@ label_BFC1FFDC:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC1FFDC: 38630404  xori $v1, $v1, 0x404 */
-    cpu->gpr[3] = cpu->gpr[3] ^ 0x404u;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] ^ 0x404u;
+    PGXP_ALU(0x38630404u, cpu->gpr[3], _pgx1, 0x0404u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002008u);
 #endif
@@ -230368,7 +230857,8 @@ label_BFC1FFE0:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC1FFE0: 2C630001  sltiu $v1, $v1, 1 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[3] < 0x00000001u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = (uint32_t)(cpu->gpr[3] < 0x00000001u ? 1 : 0);
+    PGXP_ALU(0x2C630001u, cpu->gpr[3], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x0000200Cu);
 #endif
@@ -230442,7 +230932,8 @@ label_BFC1FFE8:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC1FFEC: 00832024  and $a0, $a0, $v1 */
-    cpu->gpr[4] = cpu->gpr[4] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[4]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[4] = cpu->gpr[4] & cpu->gpr[3];
+    PGXP_ALU(0x00832024u, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002018u);
 #endif
@@ -231204,7 +231695,8 @@ label_BFC20070:
     psx_cyc_step(cpu, 0x14u);
 #endif
     /* 0xBFC20078: 00822024  and $a0, $a0, $v0 */
-    cpu->gpr[4] = cpu->gpr[4] & cpu->gpr[2];
+    { uint32_t _pgx1 = cpu->gpr[4]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[4] = cpu->gpr[4] & cpu->gpr[2];
+    PGXP_ALU(0x00822024u, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000020A4u);
 #endif
@@ -231670,7 +232162,8 @@ label_BFC200E8:
     psx_cyc_step(cpu, 0x510u);
 #endif
     /* 0xBFC200F0: 0104502B  sltu $t2, $t0, $a0 */
-    cpu->gpr[10] = (uint32_t)(cpu->gpr[8] < cpu->gpr[4] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[8]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[10] = (uint32_t)(cpu->gpr[8] < cpu->gpr[4] ? 1 : 0);
+    PGXP_ALU(0x0104502Bu, cpu->gpr[10], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x0000211Cu);
 #endif
@@ -231773,7 +232266,8 @@ label_BFC20104:
     psx_cyc_step(cpu, 0x500u);
 #endif
     /* 0xBFC2010C: 010A502B  sltu $t2, $t0, $t2 */
-    cpu->gpr[10] = (uint32_t)(cpu->gpr[8] < cpu->gpr[10] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[8]; uint32_t _pgx2 = cpu->gpr[10]; cpu->gpr[10] = (uint32_t)(cpu->gpr[8] < cpu->gpr[10] ? 1 : 0);
+    PGXP_ALU(0x010A502Bu, cpu->gpr[10], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002138u);
 #endif
@@ -232691,7 +233185,8 @@ label_BFC201D4:
     psx_cyc_step(cpu, 0x10Cu);
 #endif
     /* 0xBFC201D8: 0062402B  sltu $t0, $v1, $v0 */
-    cpu->gpr[8] = (uint32_t)(cpu->gpr[3] < cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[8] = (uint32_t)(cpu->gpr[3] < cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x0062402Bu, cpu->gpr[8], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002204u);
 #endif
@@ -233438,7 +233933,8 @@ label_BFC202A4:
     psx_cyc_step(cpu, 0x10Cu);
 #endif
     /* 0xBFC202B4: 0062402B  sltu $t0, $v1, $v0 */
-    cpu->gpr[8] = (uint32_t)(cpu->gpr[3] < cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[8] = (uint32_t)(cpu->gpr[3] < cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x0062402Bu, cpu->gpr[8], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000022E0u);
 #endif
@@ -234016,7 +234512,8 @@ label_BFC20318:
     psx_cyc_step(cpu, 0x44u);
 #endif
     /* 0xBFC20324: 00C23024  and $a2, $a2, $v0 */
-    cpu->gpr[6] = cpu->gpr[6] & cpu->gpr[2];
+    { uint32_t _pgx1 = cpu->gpr[6]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[6] = cpu->gpr[6] & cpu->gpr[2];
+    PGXP_ALU(0x00C23024u, cpu->gpr[6], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002350u);
 #endif
@@ -234189,7 +234686,8 @@ label_BFC20350:
     psx_cyc_step(cpu, 0x848u);
 #endif
     /* 0xBFC20350: 00CB182B  sltu $v1, $a2, $t3 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[6] < cpu->gpr[11] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[6]; uint32_t _pgx2 = cpu->gpr[11]; cpu->gpr[3] = (uint32_t)(cpu->gpr[6] < cpu->gpr[11] ? 1 : 0);
+    PGXP_ALU(0x00CB182Bu, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x0000237Cu);
 #endif
@@ -234418,7 +234916,8 @@ label_BFC20388:
     psx_cyc_step(cpu, 0x114u);
 #endif
     /* 0xBFC20388: 0048202B  sltu $a0, $v0, $t0 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[2] < cpu->gpr[8] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[8]; cpu->gpr[4] = (uint32_t)(cpu->gpr[2] < cpu->gpr[8] ? 1 : 0);
+    PGXP_ALU(0x0048202Bu, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000023B4u);
 #endif
@@ -234466,7 +234965,8 @@ label_BFC20394:
     psx_cyc_step(cpu, 0x850u);
 #endif
     /* 0xBFC20394: 00CB202B  sltu $a0, $a2, $t3 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[6] < cpu->gpr[11] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[6]; uint32_t _pgx2 = cpu->gpr[11]; cpu->gpr[4] = (uint32_t)(cpu->gpr[6] < cpu->gpr[11] ? 1 : 0);
+    PGXP_ALU(0x00CB202Bu, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000023C0u);
 #endif
@@ -234743,7 +235243,8 @@ label_BFC203D4:
     psx_cyc_step(cpu, 0x218u);
 #endif
     /* 0xBFC203DC: 0124182B  sltu $v1, $t1, $a0 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[9] < cpu->gpr[4] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[9]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[3] = (uint32_t)(cpu->gpr[9] < cpu->gpr[4] ? 1 : 0);
+    PGXP_ALU(0x0124182Bu, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002408u);
 #endif
@@ -235239,7 +235740,8 @@ label_BFC20448:
     psx_cyc_step(cpu, 0x114u);
 #endif
     /* 0xBFC20454: 0048202B  sltu $a0, $v0, $t0 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[2] < cpu->gpr[8] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[8]; cpu->gpr[4] = (uint32_t)(cpu->gpr[2] < cpu->gpr[8] ? 1 : 0);
+    PGXP_ALU(0x0048202Bu, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002480u);
 #endif
@@ -235271,7 +235773,8 @@ label_BFC20458:
     psx_cyc_step(cpu, 0x850u);
 #endif
     /* 0xBFC20458: 00CB202B  sltu $a0, $a2, $t3 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[6] < cpu->gpr[11] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[6]; uint32_t _pgx2 = cpu->gpr[11]; cpu->gpr[4] = (uint32_t)(cpu->gpr[6] < cpu->gpr[11] ? 1 : 0);
+    PGXP_ALU(0x00CB202Bu, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002484u);
 #endif
@@ -235551,7 +236054,8 @@ label_BFC2049C:
     psx_cyc_step(cpu, 0x850u);
 #endif
     /* 0xBFC2049C: 00CB202B  sltu $a0, $a2, $t3 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[6] < cpu->gpr[11] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[6]; uint32_t _pgx2 = cpu->gpr[11]; cpu->gpr[4] = (uint32_t)(cpu->gpr[6] < cpu->gpr[11] ? 1 : 0);
+    PGXP_ALU(0x00CB202Bu, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000024C8u);
 #endif
@@ -235990,7 +236494,8 @@ label_BFC20500:
     psx_cyc_step(cpu, 0x218u);
 #endif
     /* 0xBFC20508: 0124182B  sltu $v1, $t1, $a0 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[9] < cpu->gpr[4] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[9]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[3] = (uint32_t)(cpu->gpr[9] < cpu->gpr[4] ? 1 : 0);
+    PGXP_ALU(0x0124182Bu, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002534u);
 #endif
@@ -236415,7 +236920,8 @@ label_BFC2056C:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC20574: 00832024  and $a0, $a0, $v1 */
-    cpu->gpr[4] = cpu->gpr[4] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[4]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[4] = cpu->gpr[4] & cpu->gpr[3];
+    PGXP_ALU(0x00832024u, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000025A0u);
 #endif
@@ -236471,7 +236977,8 @@ label_BFC2056C:
     psx_cyc_step(cpu, 0x28u);
 #endif
     /* 0xBFC2058C: 00A32824  and $a1, $a1, $v1 */
-    cpu->gpr[5] = cpu->gpr[5] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[5]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[5] = cpu->gpr[5] & cpu->gpr[3];
+    PGXP_ALU(0x00A32824u, cpu->gpr[5], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000025B8u);
 #endif
@@ -236673,7 +237180,8 @@ label_BFC205B4:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC205BC: 00832024  and $a0, $a0, $v1 */
-    cpu->gpr[4] = cpu->gpr[4] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[4]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[4] = cpu->gpr[4] & cpu->gpr[3];
+    PGXP_ALU(0x00832024u, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000025E8u);
 #endif
@@ -236732,7 +237240,8 @@ label_BFC205B4:
     psx_cyc_step(cpu, 0x28u);
 #endif
     /* 0xBFC205D4: 00A32824  and $a1, $a1, $v1 */
-    cpu->gpr[5] = cpu->gpr[5] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[5]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[5] = cpu->gpr[5] & cpu->gpr[3];
+    PGXP_ALU(0x00A32824u, cpu->gpr[5], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002600u);
 #endif
@@ -236937,7 +237446,8 @@ label_BFC20610:
     psx_cyc_step(cpu, 0x30004u);
 #endif
     /* 0xBFC20610: 0211102B  sltu $v0, $s0, $s1 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[16] < cpu->gpr[17] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[16]; uint32_t _pgx2 = cpu->gpr[17]; cpu->gpr[2] = (uint32_t)(cpu->gpr[16] < cpu->gpr[17] ? 1 : 0);
+    PGXP_ALU(0x0211102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x0000263Cu);
 #endif
@@ -237626,7 +238136,8 @@ label_BFC206D0:
     psx_cyc_step(cpu, 0x4Cu);
 #endif
     /* 0xBFC206D0: 0043302B  sltu $a2, $v0, $v1 */
-    cpu->gpr[6] = (uint32_t)(cpu->gpr[2] < cpu->gpr[3] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[6] = (uint32_t)(cpu->gpr[2] < cpu->gpr[3] ? 1 : 0);
+    PGXP_ALU(0x0043302Bu, cpu->gpr[6], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000026FCu);
 #endif
@@ -238832,7 +239343,8 @@ label_BFC207C0:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC207C0: 3042003C  andi $v0, $v0, 0x3C */
-    cpu->gpr[2] = cpu->gpr[2] & 0x3Cu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x3Cu;
+    PGXP_ALU(0x3042003Cu, cpu->gpr[2], _pgx1, 0x003Cu); }
 #ifdef PSX_COSIM
     cosim_instr(0x000027ECu);
 #endif
@@ -238908,7 +239420,8 @@ label_BFC207CC:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC207D8: 304200FE  andi $v0, $v0, 0xFE */
-    cpu->gpr[2] = cpu->gpr[2] & 0xFEu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0xFEu;
+    PGXP_ALU(0x304200FEu, cpu->gpr[2], _pgx1, 0x00FEu); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002804u);
 #endif
@@ -241496,7 +242009,8 @@ label_BFC20B30:
     psx_cyc_step(cpu, 0x28u);
 #endif
     /* 0xBFC20B54: 2C65000D  sltiu $a1, $v1, 13 */
-    cpu->gpr[5] = (uint32_t)(cpu->gpr[3] < 0x0000000Du ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[5] = (uint32_t)(cpu->gpr[3] < 0x0000000Du ? 1 : 0);
+    PGXP_ALU(0x2C65000Du, cpu->gpr[5], _pgx1, 0x000Du); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002B80u);
 #endif
@@ -241643,7 +242157,8 @@ label_BFC20B80:
     psx_cyc_step(cpu, 0x11u);
 #endif
     /* 0xBFC20B80: 0004202B  sltu $a0, $zero, $a0 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[0] < cpu->gpr[4] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[4] = (uint32_t)(cpu->gpr[0] < cpu->gpr[4] ? 1 : 0);
+    PGXP_ALU(0x0004202Bu, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002BACu);
 #endif
@@ -241753,7 +242268,8 @@ label_BFC20B80:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC20BB0: 3063000F  andi $v1, $v1, 0xF */
-    cpu->gpr[3] = cpu->gpr[3] & 0xFu;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] & 0xFu;
+    PGXP_ALU(0x3063000Fu, cpu->gpr[3], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002BDCu);
 #endif
@@ -242272,7 +242788,8 @@ label_BFC20C5C:
     psx_cyc_step(cpu, 0x28u);
 #endif
     /* 0xBFC20C5C: 30A30008  andi $v1, $a1, 0x8 */
-    cpu->gpr[3] = cpu->gpr[5] & 0x8u;
+    { uint32_t _pgx1 = cpu->gpr[5]; cpu->gpr[3] = cpu->gpr[5] & 0x8u;
+    PGXP_ALU(0x30A30008u, cpu->gpr[3], _pgx1, 0x0008u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002C88u);
 #endif
@@ -242655,7 +243172,8 @@ label_BFC20CCC:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC20CDC: 3842005A  xori $v0, $v0, 0x5A */
-    cpu->gpr[2] = cpu->gpr[2] ^ 0x5Au;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] ^ 0x5Au;
+    PGXP_ALU(0x3842005Au, cpu->gpr[2], _pgx1, 0x005Au); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002D08u);
 #endif
@@ -242714,7 +243232,8 @@ label_BFC20CCC:
     psx_cyc_step(cpu, 0x5u);
 #endif
     /* 0xBFC20CF4: 0002102B  sltu $v0, $zero, $v0 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x0002102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002D20u);
 #endif
@@ -242837,7 +243356,8 @@ label_BFC20D10:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC20D14: 3842005D  xori $v0, $v0, 0x5D */
-    cpu->gpr[2] = cpu->gpr[2] ^ 0x5Du;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] ^ 0x5Du;
+    PGXP_ALU(0x3842005Du, cpu->gpr[2], _pgx1, 0x005Du); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002D40u);
 #endif
@@ -242900,7 +243420,8 @@ label_BFC20D10:
     psx_cyc_step(cpu, 0x5u);
 #endif
     /* 0xBFC20D30: 0002102B  sltu $v0, $zero, $v0 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x0002102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002D5Cu);
 #endif
@@ -243142,7 +243663,8 @@ label_BFC20D5C:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC20D6C: 3842005C  xori $v0, $v0, 0x5C */
-    cpu->gpr[2] = cpu->gpr[2] ^ 0x5Cu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] ^ 0x5Cu;
+    PGXP_ALU(0x3842005Cu, cpu->gpr[2], _pgx1, 0x005Cu); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002D98u);
 #endif
@@ -243208,7 +243730,8 @@ label_BFC20D5C:
     psx_cyc_step(cpu, 0x5u);
 #endif
     /* 0xBFC20D88: 0002102B  sltu $v0, $zero, $v0 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x0002102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002DB4u);
 #endif
@@ -243454,7 +243977,8 @@ label_BFC20DA0:
     psx_cyc_step(cpu, 0x24u);
 #endif
     /* 0xBFC20DD0: 00A22826  xor $a1, $a1, $v0 */
-    cpu->gpr[5] = cpu->gpr[5] ^ cpu->gpr[2];
+    { uint32_t _pgx1 = cpu->gpr[5]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[5] = cpu->gpr[5] ^ cpu->gpr[2];
+    PGXP_ALU(0x00A22826u, cpu->gpr[5], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002DFCu);
 #endif
@@ -243534,7 +244058,8 @@ label_BFC20DD4:
     psx_cyc_step(cpu, 0x20u);
 #endif
     /* 0xBFC20DE8: 30A500FF  andi $a1, $a1, 0xFF */
-    cpu->gpr[5] = cpu->gpr[5] & 0xFFu;
+    { uint32_t _pgx1 = cpu->gpr[5]; cpu->gpr[5] = cpu->gpr[5] & 0xFFu;
+    PGXP_ALU(0x30A500FFu, cpu->gpr[5], _pgx1, 0x00FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002E14u);
 #endif
@@ -243697,7 +244222,8 @@ label_BFC20DFC:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC20E1C: 304200FF  andi $v0, $v0, 0xFF */
-    cpu->gpr[2] = cpu->gpr[2] & 0xFFu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0xFFu;
+    PGXP_ALU(0x304200FFu, cpu->gpr[2], _pgx1, 0x00FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002E48u);
 #endif
@@ -244044,7 +244570,8 @@ label_BFC20E48:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC20E98: 00641826  xor $v1, $v1, $a0 */
-    cpu->gpr[3] = cpu->gpr[3] ^ cpu->gpr[4];
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[3] = cpu->gpr[3] ^ cpu->gpr[4];
+    PGXP_ALU(0x00641826u, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002EC4u);
 #endif
@@ -244313,7 +244840,8 @@ label_BFC20EE8:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC20EF0: 30420002  andi $v0, $v0, 0x2 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x2u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x2u;
+    PGXP_ALU(0x30420002u, cpu->gpr[2], _pgx1, 0x0002u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002F1Cu);
 #endif
@@ -244574,7 +245102,8 @@ label_BFC20F18:
     psx_cyc_step(cpu, 0x48u);
 #endif
     /* 0xBFC20F3C: 2C66000A  sltiu $a2, $v1, 10 */
-    cpu->gpr[6] = (uint32_t)(cpu->gpr[3] < 0x0000000Au ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[6] = (uint32_t)(cpu->gpr[3] < 0x0000000Au ? 1 : 0);
+    PGXP_ALU(0x2C66000Au, cpu->gpr[6], _pgx1, 0x000Au); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002F68u);
 #endif
@@ -244736,7 +245265,8 @@ label_BFC20F70:
     psx_cyc_step(cpu, 0x11u);
 #endif
     /* 0xBFC20F70: 0004202B  sltu $a0, $zero, $a0 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[0] < cpu->gpr[4] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[4] = (uint32_t)(cpu->gpr[0] < cpu->gpr[4] ? 1 : 0);
+    PGXP_ALU(0x0004202Bu, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002F9Cu);
 #endif
@@ -244846,7 +245376,8 @@ label_BFC20F70:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC20FA0: 3063000F  andi $v1, $v1, 0xF */
-    cpu->gpr[3] = cpu->gpr[3] & 0xFu;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] & 0xFu;
+    PGXP_ALU(0x3063000Fu, cpu->gpr[3], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x00002FCCu);
 #endif
@@ -245682,7 +246213,8 @@ label_BFC2104C:
     psx_cyc_step(cpu, 0x20u);
 #endif
     /* 0xBFC21064: 30A50008  andi $a1, $a1, 0x8 */
-    cpu->gpr[5] = cpu->gpr[5] & 0x8u;
+    { uint32_t _pgx1 = cpu->gpr[5]; cpu->gpr[5] = cpu->gpr[5] & 0x8u;
+    PGXP_ALU(0x30A50008u, cpu->gpr[5], _pgx1, 0x0008u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003090u);
 #endif
@@ -246066,7 +246598,8 @@ label_BFC210C0:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC210D0: 3842005A  xori $v0, $v0, 0x5A */
-    cpu->gpr[2] = cpu->gpr[2] ^ 0x5Au;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] ^ 0x5Au;
+    PGXP_ALU(0x3842005Au, cpu->gpr[2], _pgx1, 0x005Au); }
 #ifdef PSX_COSIM
     cosim_instr(0x000030FCu);
 #endif
@@ -246125,7 +246658,8 @@ label_BFC210C0:
     psx_cyc_step(cpu, 0x5u);
 #endif
     /* 0xBFC210E8: 0002102B  sltu $v0, $zero, $v0 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x0002102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003114u);
 #endif
@@ -246487,7 +247021,8 @@ label_BFC2113C:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC2114C: 304200FF  andi $v0, $v0, 0xFF */
-    cpu->gpr[2] = cpu->gpr[2] & 0xFFu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0xFFu;
+    PGXP_ALU(0x304200FFu, cpu->gpr[2], _pgx1, 0x00FFu); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003178u);
 #endif
@@ -246590,7 +247125,8 @@ label_BFC2113C:
     psx_cyc_step(cpu, 0x14u);
 #endif
     /* 0xBFC21178: 00821026  xor $v0, $a0, $v0 */
-    cpu->gpr[2] = cpu->gpr[4] ^ cpu->gpr[2];
+    { uint32_t _pgx1 = cpu->gpr[4]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[4] ^ cpu->gpr[2];
+    PGXP_ALU(0x00821026u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000031A4u);
 #endif
@@ -246923,7 +247459,8 @@ label_BFC211CC:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC211DC: 3842005C  xori $v0, $v0, 0x5C */
-    cpu->gpr[2] = cpu->gpr[2] ^ 0x5Cu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] ^ 0x5Cu;
+    PGXP_ALU(0x3842005Cu, cpu->gpr[2], _pgx1, 0x005Cu); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003208u);
 #endif
@@ -246989,7 +247526,8 @@ label_BFC211CC:
     psx_cyc_step(cpu, 0x5u);
 #endif
     /* 0xBFC211F8: 0002102B  sltu $v0, $zero, $v0 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x0002102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003224u);
 #endif
@@ -247223,7 +247761,8 @@ label_BFC21230:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC21238: 30420002  andi $v0, $v0, 0x2 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x2u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x2u;
+    PGXP_ALU(0x30420002u, cpu->gpr[2], _pgx1, 0x0002u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003264u);
 #endif
@@ -247360,7 +247899,8 @@ label_BFC21254:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC21264: 30420004  andi $v0, $v0, 0x4 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x4u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x4u;
+    PGXP_ALU(0x30420004u, cpu->gpr[2], _pgx1, 0x0004u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003290u);
 #endif
@@ -247892,7 +248432,8 @@ label_BFC212E0:
     psx_cyc_step(cpu, 0x14u);
 #endif
     /* 0xBFC212F8: 28440004  slti $a0, $v0, 4 */
-    cpu->gpr[4] = (uint32_t)((int32_t)cpu->gpr[2] < (4) ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[4] = (uint32_t)((int32_t)cpu->gpr[2] < (4) ? 1 : 0);
+    PGXP_ALU(0x28440004u, cpu->gpr[4], _pgx1, 0x0004u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003324u);
 #endif
@@ -248383,7 +248924,8 @@ label_BFC2137C:
     psx_cyc_step(cpu, 0x19u);
 #endif
     /* 0xBFC2137C: 0003202B  sltu $a0, $zero, $v1 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[0] < cpu->gpr[3] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[4] = (uint32_t)(cpu->gpr[0] < cpu->gpr[3] ? 1 : 0);
+    PGXP_ALU(0x0003202Bu, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000033A8u);
 #endif
@@ -248493,7 +249035,8 @@ label_BFC2137C:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC213AC: 3063000F  andi $v1, $v1, 0xF */
-    cpu->gpr[3] = cpu->gpr[3] & 0xFu;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] & 0xFu;
+    PGXP_ALU(0x3063000Fu, cpu->gpr[3], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x000033D8u);
 #endif
@@ -248933,7 +249476,8 @@ label_BFC21450:
     psx_cyc_step(cpu, 0x30u);
 #endif
     /* 0xBFC21450: 3085000C  andi $a1, $a0, 0xC */
-    cpu->gpr[5] = cpu->gpr[4] & 0xCu;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[5] = cpu->gpr[4] & 0xCu;
+    PGXP_ALU(0x3085000Cu, cpu->gpr[5], _pgx1, 0x000Cu); }
 #ifdef PSX_COSIM
     cosim_instr(0x0000347Cu);
 #endif
@@ -249067,7 +249611,8 @@ label_BFC2145C:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC21480: 30840004  andi $a0, $a0, 0x4 */
-    cpu->gpr[4] = cpu->gpr[4] & 0x4u;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = cpu->gpr[4] & 0x4u;
+    PGXP_ALU(0x30840004u, cpu->gpr[4], _pgx1, 0x0004u); }
 #ifdef PSX_COSIM
     cosim_instr(0x000034ACu);
 #endif
@@ -249571,7 +250116,8 @@ label_BFC21504:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC2150C: 30430001  andi $v1, $v0, 0x1 */
-    cpu->gpr[3] = cpu->gpr[2] & 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[3] = cpu->gpr[2] & 0x1u;
+    PGXP_ALU(0x30430001u, cpu->gpr[3], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003538u);
 #endif
@@ -249833,7 +250379,8 @@ label_BFC2153C:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC21544: 30420080  andi $v0, $v0, 0x80 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x80u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x80u;
+    PGXP_ALU(0x30420080u, cpu->gpr[2], _pgx1, 0x0080u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003570u);
 #endif
@@ -249956,7 +250503,8 @@ label_BFC21558:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC21558: 30420080  andi $v0, $v0, 0x80 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x80u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x80u;
+    PGXP_ALU(0x30420080u, cpu->gpr[2], _pgx1, 0x0080u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003584u);
 #endif
@@ -250279,7 +250827,8 @@ label_BFC21588:
     psx_cyc_step(cpu, 0x6u);
 #endif
     /* 0xBFC215C4: 00220826  xor $at, $at, $v0 */
-    cpu->gpr[1] = cpu->gpr[1] ^ cpu->gpr[2];
+    { uint32_t _pgx1 = cpu->gpr[1]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[1] = cpu->gpr[1] ^ cpu->gpr[2];
+    PGXP_ALU(0x00220826u, cpu->gpr[1], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000035F0u);
 #endif
@@ -250361,7 +250910,8 @@ label_BFC21588:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC215E8: 2C420080  sltiu $v0, $v0, 128 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000080u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000080u ? 1 : 0);
+    PGXP_ALU(0x2C420080u, cpu->gpr[2], _pgx1, 0x0080u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003614u);
 #endif
@@ -250581,7 +251131,8 @@ label_BFC215FC:
     psx_cyc_step(cpu, 0x6u);
 #endif
     /* 0xBFC21638: 00220826  xor $at, $at, $v0 */
-    cpu->gpr[1] = cpu->gpr[1] ^ cpu->gpr[2];
+    { uint32_t _pgx1 = cpu->gpr[1]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[1] = cpu->gpr[1] ^ cpu->gpr[2];
+    PGXP_ALU(0x00220826u, cpu->gpr[1], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003664u);
 #endif
@@ -250663,7 +251214,8 @@ label_BFC215FC:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC2165C: 2C42007F  sltiu $v0, $v0, 127 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x0000007Fu ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x0000007Fu ? 1 : 0);
+    PGXP_ALU(0x2C42007Fu, cpu->gpr[2], _pgx1, 0x007Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003688u);
 #endif
@@ -250947,7 +251499,8 @@ label_BFC216AC:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC216B8: 30420080  andi $v0, $v0, 0x80 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x80u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x80u;
+    PGXP_ALU(0x30420080u, cpu->gpr[2], _pgx1, 0x0080u); }
 #ifdef PSX_COSIM
     cosim_instr(0x000036E4u);
 #endif
@@ -251008,7 +251561,8 @@ label_BFC216C4:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC216CC: 30420080  andi $v0, $v0, 0x80 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x80u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x80u;
+    PGXP_ALU(0x30420080u, cpu->gpr[2], _pgx1, 0x0080u); }
 #ifdef PSX_COSIM
     cosim_instr(0x000036F8u);
 #endif
@@ -251084,7 +251638,8 @@ label_BFC216D8:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC216E4: 2C420001  sltiu $v0, $v0, 1 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000001u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000001u ? 1 : 0);
+    PGXP_ALU(0x2C420001u, cpu->gpr[2], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003710u);
 #endif
@@ -251179,7 +251734,8 @@ label_BFC216F0:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC216FC: 30420001  andi $v0, $v0, 0x1 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x1u;
+    PGXP_ALU(0x30420001u, cpu->gpr[2], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003728u);
 #endif
@@ -251243,7 +251799,8 @@ label_BFC21708:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC21710: 30420001  andi $v0, $v0, 0x1 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x1u;
+    PGXP_ALU(0x30420001u, cpu->gpr[2], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x0000373Cu);
 #endif
@@ -252155,7 +252712,8 @@ label_BFC2180C:
     psx_cyc_step(cpu, 0x15u);
 #endif
     /* 0xBFC2181C: 0002202B  sltu $a0, $zero, $v0 */
-    cpu->gpr[4] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[4] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x0002202Bu, cpu->gpr[4], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003848u);
 #endif
@@ -253058,7 +253616,8 @@ label_BFC21924:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC21938: 00641824  and $v1, $v1, $a0 */
-    cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[4];
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[4];
+    PGXP_ALU(0x00641824u, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003964u);
 #endif
@@ -253428,7 +253987,8 @@ label_BFC21998:
     psx_cyc_step(cpu, 0x18u);
 #endif
     /* 0xBFC219AC: 00641824  and $v1, $v1, $a0 */
-    cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[4];
+    { uint32_t _pgx1 = cpu->gpr[3]; uint32_t _pgx2 = cpu->gpr[4]; cpu->gpr[3] = cpu->gpr[3] & cpu->gpr[4];
+    PGXP_ALU(0x00641824u, cpu->gpr[3], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x000039D8u);
 #endif
@@ -253977,7 +254537,8 @@ label_BFC21A20:
     psx_cyc_step(cpu, 0x800000u);
 #endif
     /* 0xBFC21A68: 32F7FFFF  andi $s7, $s7, 0xFFFF */
-    cpu->gpr[23] = cpu->gpr[23] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[23]; cpu->gpr[23] = cpu->gpr[23] & 0xFFFFu;
+    PGXP_ALU(0x32F7FFFFu, cpu->gpr[23], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003A94u);
 #endif
@@ -254126,7 +254687,8 @@ label_BFC21A98:
     psx_cyc_step(cpu, 0x20001u);
 #endif
     /* 0xBFC21AA0: 0011882B  sltu $s1, $zero, $s1 */
-    cpu->gpr[17] = (uint32_t)(cpu->gpr[0] < cpu->gpr[17] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[17]; cpu->gpr[17] = (uint32_t)(cpu->gpr[0] < cpu->gpr[17] ? 1 : 0);
+    PGXP_ALU(0x0011882Bu, cpu->gpr[17], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003ACCu);
 #endif
@@ -254258,7 +254820,8 @@ label_BFC21AC4:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC21ACC: 30420001  andi $v0, $v0, 0x1 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x1u;
+    PGXP_ALU(0x30420001u, cpu->gpr[2], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003AF8u);
 #endif
@@ -254475,7 +255038,8 @@ label_BFC21B0C:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC21B14: 30420002  andi $v0, $v0, 0x2 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x2u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x2u;
+    PGXP_ALU(0x30420002u, cpu->gpr[2], _pgx1, 0x0002u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003B40u);
 #endif
@@ -254607,7 +255171,8 @@ label_BFC21B34:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC21B3C: 30420080  andi $v0, $v0, 0x80 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x80u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x80u;
+    PGXP_ALU(0x30420080u, cpu->gpr[2], _pgx1, 0x0080u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003B68u);
 #endif
@@ -254811,7 +255376,8 @@ label_BFC21B78:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC21B80: 30420002  andi $v0, $v0, 0x2 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x2u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x2u;
+    PGXP_ALU(0x30420002u, cpu->gpr[2], _pgx1, 0x0002u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003BACu);
 #endif
@@ -254888,7 +255454,8 @@ label_BFC21B8C:
     psx_cyc_step(cpu, 0x10000u);
 #endif
     /* 0xBFC21B98: 3210000F  andi $s0, $s0, 0xF */
-    cpu->gpr[16] = cpu->gpr[16] & 0xFu;
+    { uint32_t _pgx1 = cpu->gpr[16]; cpu->gpr[16] = cpu->gpr[16] & 0xFu;
+    PGXP_ALU(0x3210000Fu, cpu->gpr[16], _pgx1, 0x000Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003BC4u);
 #endif
@@ -254991,7 +255558,8 @@ label_BFC21BAC:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC21BB4: 30420080  andi $v0, $v0, 0x80 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x80u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x80u;
+    PGXP_ALU(0x30420080u, cpu->gpr[2], _pgx1, 0x0080u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003BE0u);
 #endif
@@ -255249,7 +255817,8 @@ label_BFC21BEC:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC21BF4: 30420002  andi $v0, $v0, 0x2 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x2u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x2u;
+    PGXP_ALU(0x30420002u, cpu->gpr[2], _pgx1, 0x0002u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003C20u);
 #endif
@@ -255558,7 +256127,8 @@ label_BFC21C20:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC21C24: 30630080  andi $v1, $v1, 0x80 */
-    cpu->gpr[3] = cpu->gpr[3] & 0x80u;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = cpu->gpr[3] & 0x80u;
+    PGXP_ALU(0x30630080u, cpu->gpr[3], _pgx1, 0x0080u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003C50u);
 #endif
@@ -255774,7 +256344,8 @@ label_BFC21C48:
     psx_cyc_step(cpu, 0x20004u);
 #endif
     /* 0xBFC21C50: 02221024  and $v0, $s1, $v0 */
-    cpu->gpr[2] = cpu->gpr[17] & cpu->gpr[2];
+    { uint32_t _pgx1 = cpu->gpr[17]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[17] & cpu->gpr[2];
+    PGXP_ALU(0x02221024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003C7Cu);
 #endif
@@ -255951,7 +256522,8 @@ label_BFC21C88:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC21C90: 30420002  andi $v0, $v0, 0x2 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x2u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x2u;
+    PGXP_ALU(0x30420002u, cpu->gpr[2], _pgx1, 0x0002u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003CBCu);
 #endif
@@ -256064,7 +256636,8 @@ label_BFC21CAC:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC21CB4: 30420080  andi $v0, $v0, 0x80 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x80u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x80u;
+    PGXP_ALU(0x30420080u, cpu->gpr[2], _pgx1, 0x0080u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003CE0u);
 #endif
@@ -256192,7 +256765,8 @@ label_BFC21CD4:
     psx_cyc_step(cpu, 0x20004u);
 #endif
     /* 0xBFC21CDC: 02221024  and $v0, $s1, $v0 */
-    cpu->gpr[2] = cpu->gpr[17] & cpu->gpr[2];
+    { uint32_t _pgx1 = cpu->gpr[17]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[17] & cpu->gpr[2];
+    PGXP_ALU(0x02221024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003D08u);
 #endif
@@ -256343,7 +256917,8 @@ label_BFC21D08:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC21D10: 30420002  andi $v0, $v0, 0x2 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x2u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x2u;
+    PGXP_ALU(0x30420002u, cpu->gpr[2], _pgx1, 0x0002u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003D3Cu);
 #endif
@@ -257085,7 +257660,8 @@ label_BFC21DDC:
     psx_cyc_step(cpu, 0x5u);
 #endif
     /* 0xBFC21DE4: 0002102B  sltu $v0, $zero, $v0 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x0002102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003E10u);
 #endif
@@ -257131,7 +257707,8 @@ label_BFC21DE8:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC21DF0: 30420080  andi $v0, $v0, 0x80 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x80u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x80u;
+    PGXP_ALU(0x30420080u, cpu->gpr[2], _pgx1, 0x0080u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003E1Cu);
 #endif
@@ -257217,7 +257794,8 @@ label_BFC21E00:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC21E08: 30420002  andi $v0, $v0, 0x2 */
-    cpu->gpr[2] = cpu->gpr[2] & 0x2u;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0x2u;
+    PGXP_ALU(0x30420002u, cpu->gpr[2], _pgx1, 0x0002u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003E34u);
 #endif
@@ -257470,7 +258048,8 @@ label_BFC21E34:
     psx_cyc_step(cpu, 0x5u);
 #endif
     /* 0xBFC21E3C: 0002102B  sltu $v0, $zero, $v0 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[0]; uint32_t _pgx2 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[0] < cpu->gpr[2] ? 1 : 0);
+    PGXP_ALU(0x0002102Bu, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003E68u);
 #endif
@@ -258412,7 +258991,8 @@ label_BFC21F1C:
     psx_cyc_step(cpu, 0x60u);
 #endif
     /* 0xBFC21F3C: 00A62824  and $a1, $a1, $a2 */
-    cpu->gpr[5] = cpu->gpr[5] & cpu->gpr[6];
+    { uint32_t _pgx1 = cpu->gpr[5]; uint32_t _pgx2 = cpu->gpr[6]; cpu->gpr[5] = cpu->gpr[5] & cpu->gpr[6];
+    PGXP_ALU(0x00A62824u, cpu->gpr[5], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x00003F68u);
 #endif
@@ -258943,7 +259523,8 @@ label_BFC21FE0:
     psx_cyc_step(cpu, 0x10u);
 #endif
     /* 0xBFC21FE0: 30840001  andi $a0, $a0, 0x1 */
-    cpu->gpr[4] = cpu->gpr[4] & 0x1u;
+    { uint32_t _pgx1 = cpu->gpr[4]; cpu->gpr[4] = cpu->gpr[4] & 0x1u;
+    PGXP_ALU(0x30840001u, cpu->gpr[4], _pgx1, 0x0001u); }
 #ifdef PSX_COSIM
     cosim_instr(0x0000400Cu);
 #endif
@@ -262472,7 +263053,8 @@ label_BFC22414:
     psx_cyc_step(cpu, 0x44u);
 #endif
     /* 0xBFC22414: 38C20041  xori $v0, $a2, 0x41 */
-    cpu->gpr[2] = cpu->gpr[6] ^ 0x41u;
+    { uint32_t _pgx1 = cpu->gpr[6]; cpu->gpr[2] = cpu->gpr[6] ^ 0x41u;
+    PGXP_ALU(0x38C20041u, cpu->gpr[2], _pgx1, 0x0041u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00004440u);
 #endif
@@ -262487,7 +263069,8 @@ label_BFC22414:
     psx_cyc_step(cpu, 0x44u);
 #endif
     /* 0xBFC2241C: 38C20023  xori $v0, $a2, 0x23 */
-    cpu->gpr[2] = cpu->gpr[6] ^ 0x23u;
+    { uint32_t _pgx1 = cpu->gpr[6]; cpu->gpr[2] = cpu->gpr[6] ^ 0x23u;
+    PGXP_ALU(0x38C20023u, cpu->gpr[2], _pgx1, 0x0023u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00004448u);
 #endif
@@ -262575,7 +263158,8 @@ label_BFC22428:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC22430: 3062FFFF  andi $v0, $v1, 0xFFFF */
-    cpu->gpr[2] = cpu->gpr[3] & 0xFFFFu;
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[3] & 0xFFFFu;
+    PGXP_ALU(0x3062FFFFu, cpu->gpr[2], _pgx1, 0xFFFFu); }
 #ifdef PSX_COSIM
     cosim_instr(0x0000445Cu);
 #endif
@@ -262744,7 +263328,8 @@ label_BFC22458:
     psx_cyc_step(cpu, 0x8u);
 #endif
     /* 0xBFC22464: 2C630011  sltiu $v1, $v1, 17 */
-    cpu->gpr[3] = (uint32_t)(cpu->gpr[3] < 0x00000011u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[3]; cpu->gpr[3] = (uint32_t)(cpu->gpr[3] < 0x00000011u ? 1 : 0);
+    PGXP_ALU(0x2C630011u, cpu->gpr[3], _pgx1, 0x0011u); }
 #ifdef PSX_COSIM
     cosim_instr(0x00004490u);
 #endif
@@ -262792,7 +263377,8 @@ label_BFC22470:
     psx_cyc_step(cpu, 0xCu);
 #endif
     /* 0xBFC22470: 00431024  and $v0, $v0, $v1 */
-    cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    { uint32_t _pgx1 = cpu->gpr[2]; uint32_t _pgx2 = cpu->gpr[3]; cpu->gpr[2] = cpu->gpr[2] & cpu->gpr[3];
+    PGXP_ALU(0x00431024u, cpu->gpr[2], _pgx1, _pgx2); }
 #ifdef PSX_COSIM
     cosim_instr(0x0000449Cu);
 #endif
@@ -262848,7 +263434,8 @@ label_BFC2247C:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC22484: 2C420011  sltiu $v0, $v0, 17 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000011u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000011u ? 1 : 0);
+    PGXP_ALU(0x2C420011u, cpu->gpr[2], _pgx1, 0x0011u); }
 #ifdef PSX_COSIM
     cosim_instr(0x000044B0u);
 #endif
@@ -262911,7 +263498,8 @@ label_BFC22490:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC22498: 3042FF7F  andi $v0, $v0, 0xFF7F */
-    cpu->gpr[2] = cpu->gpr[2] & 0xFF7Fu;
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = cpu->gpr[2] & 0xFF7Fu;
+    PGXP_ALU(0x3042FF7Fu, cpu->gpr[2], _pgx1, 0xFF7Fu); }
 #ifdef PSX_COSIM
     cosim_instr(0x000044C4u);
 #endif
@@ -263139,7 +263727,8 @@ label_BFC224CC:
     psx_cyc_step(cpu, 0x4u);
 #endif
     /* 0xBFC224D0: 2C420002  sltiu $v0, $v0, 2 */
-    cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000002u ? 1 : 0);
+    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[2] = (uint32_t)(cpu->gpr[2] < 0x00000002u ? 1 : 0);
+    PGXP_ALU(0x2C420002u, cpu->gpr[2], _pgx1, 0x0002u); }
 #ifdef PSX_COSIM
     cosim_instr(0x000044FCu);
 #endif

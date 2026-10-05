@@ -25,6 +25,10 @@ int psx_mod_register_activation_plugin(const char* id,
                                        PSXModActivationCallback callback);
 int psx_mod_register_vblank_plugin(const char* id,
                                    PSXModVBlankCallback callback);
+/* Runs after successful guest-state restore, before the restored PC resumes.
+ * Rebind host hooks here; do not advance guest gameplay as a VBlank would. */
+int psx_mod_register_savestate_plugin(const char* id,
+                                      PSXModActivationCallback callback);
 int psx_mod_register_function_entry_plugin(
     const char* id, uint32_t address, PSXModFunctionEntryCallback callback);
 /* Mod-defined guest functions have no original machine-code body. Addresses
@@ -85,6 +89,9 @@ int psx_mod_game_started(void);
  * otherwise capacity must hold the entire file. Active sector mods apply. */
 int psx_mod_read_disc_file(const char* path, void* buffer, uint32_t capacity,
                            uint32_t* size);
+/* Effective-disc LBA and byte size of a file (directory records patched by
+ * active mods apply, so a relocated file reports its new extent). */
+int psx_mod_disc_file_extent(const char* path, uint32_t* lba, uint32_t* size);
 /* Experimental retained-texture service (currently OpenGL only). IDs are
  * nonzero, stable game-owned identities, NOT GL names. Banks are immutable
  * 16-bit PS1 texels/indices with a caller-selected row pitch (width).
@@ -121,6 +128,42 @@ void psx_mod_write_word(uint32_t address, uint32_t value);
  * restored save state cannot leave the compiled instruction stale.
  */
 void psx_mod_write_code_word(uint32_t address, uint32_t value);
+
+/*
+ * Services shared by seamless-loading adapters (resident disc data: see
+ * mod_resident.h). Emulation-thread callbacks only.
+ *
+ * Run a guest function to completion from a hook: a0..a3 and $ra are set,
+ * control returns when the guest reaches return_address, and the caller's
+ * GPRs, PC, HI and LO are restored. COP0, GTE and timing deadlines keep the
+ * callee's effects, as they would after an ordinary call. Snapshots wait
+ * until the call returns (the host stack holds the continuation). Returns v0.
+ */
+uint32_t psx_mod_call_guest(struct CPUState* cpu, uint32_t function,
+                            uint32_t return_address, uint32_t a0, uint32_t a1,
+                            uint32_t a2, uint32_t a3);
+/* Deliver disc sectors into RAM exactly as a completed CD-ROM DMA would
+ * (overlay capture, executable-page invalidation, CD DMA log when lba >= 0).
+ * Word-aligned address and length. Returns 0 when the span leaves RAM. */
+int psx_mod_dma_write_ram(uint32_t address, const void* data, uint32_t bytes,
+                          int lba);
+/* Store bytes through the CPU store path (any alignment): for data the
+ * original code produces with CPU stores, e.g. a decompressor's output. */
+int psx_mod_host_write_ram(uint32_t address, const void* data, uint32_t bytes);
+/* PsyQ SpuWrite by DMA, completed synchronously: transfer address, DMA-write
+ * transfer mode, the words through the SPU's DMA write path (address
+ * advance and sample-IRQ checks), then transfer mode stop when stop_after.
+ * spu_address 8-aligned, guest_source/bytes word aligned, at most 512 KiB;
+ * the transfer address wraps at the end of SPU RAM as on hardware.
+ * Library bookkeeping (transfer callbacks, busy flags) stays the caller's. */
+int psx_mod_spu_upload(uint32_t spu_address, uint32_t guest_source,
+                       uint32_t bytes, int stop_after);
+/* PsyQ LoadImage completed synchronously: texture-cache flush, GP0 A0h
+ * rectangle copy of w*h 16-bit pixels from guest RAM (provenance attributed
+ * per word), then GP1(04h) DMA direction CPU->GP0 for uploads the library
+ * would DMA (16 words or more). Caller drains earlier GPU work first. */
+int psx_mod_psyq_load_image(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                            uint32_t guest_source);
 
 /*
  * Allocate opt-in enhancement memory from Expansion 1. Until the first
@@ -274,6 +317,22 @@ int psx_mod_option_value(const char* package_id, const char* feature_id,
  */
 int psx_mod_current_resource_path(const char* resource_id,
                                   char* out, uint32_t out_size);
+/* Read-only canonical media verified by the engine for this plugin's owning
+ * package/feature. The pointer lives until the committed plan is replaced or
+ * cleared. Available only during that plugin's callbacks; returns 0 for an
+ * ordinary unverified resource, an inactive feature, or a different owner. */
+int psx_mod_current_resource_bytes(const char* resource_id,
+                                   const uint8_t** bytes, uint64_t* size);
+
+/* Append raw Mode-2 sectors (2336 bytes, starting with the XA subheader)
+ * from a verified resource owned by this activation callback. Returns their
+ * native CD LBA in first_lba. Registration is deterministic, append-only and
+ * rejected outside activation, for invalid ranges or beyond 99:59:74.
+ * The immutable committed snapshot remains mounted until the plan changes;
+ * no host path or donor data is saved into guest RAM/savestates. */
+int psx_mod_append_disc_extent(const char* resource_id, uint64_t byte_offset,
+                               uint32_t sector_count, uint32_t* first_lba);
+
 /* Display aspects have no framework ceiling: the native-wide surfaces size
  * themselves from the live width, and each title caps its own view at what
  * it has validated (fixed ratio, or the adaptive maximum below). Requests
