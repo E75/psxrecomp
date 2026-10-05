@@ -3331,13 +3331,12 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
     int lim_buf[4];
     int uv_buf[6];
     if (!lim) {
-        /* Poly path: exact sampled bounds from the ORIGINAL uvs, then the
-         * center-sampling mirror compensation (rect prims arrive with their
-         * own precomputed lim and pre-bumped uvs). */
+        /* World polygons keep authored UVs and inclusive atlas bounds.
+         * Affine primitives keep the PS1 center-sampling compensation (rects
+         * arrive with their own precomputed bounds and compensated UVs). */
         int *mu = uv_buf, *mv = uv_buf + 3;
         for (int i = 0; i < 3; i++) { mu[i] = us[i]; mv[i] = vs[i]; }
-        psx_uv_tri_limits(xs, ys, mu, mv, lim_buf);
-        psx_uv_tri_mirror_offset(xs, ys, mu, mv);
+        psx_uv_tri_center_sample(xs, ys, mu, mv, s_pq_valid, lim_buf);
         us = mu; vs = mv;
         lim = lim_buf;
     }
