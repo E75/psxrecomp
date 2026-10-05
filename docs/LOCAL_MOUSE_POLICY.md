@@ -1,7 +1,8 @@
 # Optional local mouse policy
 
-The SDL-free `PSXModMousePolicy` interface provides one trusted local P1 policy.
-Register it from an opt-in activation plugin. Registration copies the policy,
+The SDL-free `PSXModMousePolicy` interface provides one local P1 policy.
+Register it, like a controller source, from mod code on the main thread (see
+`mod_plugins.h`: one registration rule, mod-trusted, no caller check). Registration copies the policy,
 rejects incompatible struct sizes, missing callbacks and a second policy,
 and returns success/failure. Existing const-input controller presentation is
 unchanged. The generic runtime has no game addresses or gesture recognizer.
@@ -54,6 +55,22 @@ stall's backlog cannot acquire capture again. Eligibility recovery needs a
 release/repress of LEFT and fresh motion. Reset retains physical LEFT down-state,
 so holding it across an interruption cannot recapture. Debug input injection, headless, netplay, replay/resimulation and
 render-only passes inhibit this policy.
+
+## Order with offline controller sources
+
+Per player the runtime resolves, in `pad_external_input.c`: (1) physical
+capture, (2) an offline controller source (`psx_mod_set_controller_source`:
+buttons = source AND physical, sticks/type from the source), (3) this mouse
+policy, P1 only, which may override only the right axes of that result. A
+source never suppresses the mouse policy: it sees the final buttons, analog
+flag and right stick, so capture is never taken and then discarded, and a
+deflected source right stick, a digital pad or Start held disable it just as a
+physical pad would. A source release/decline frame, no device, or an armed
+input guard resets the capture. `pad_ext_live` is the single mouse gate list
+(debug override, headless, netplay/resim, selfcheck lock/resim, render pass,
+savestate menu, rewind, input guard). With no policy registered
+`psx_local_mouse_begin/pad` return immediately: no per-frame mouse or focus
+polling.
 
 `psx_local_mouse_clear()` unregisters the policy during existing mod/session
 reset. Source suppression already owed through release survives unregister,
