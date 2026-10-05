@@ -84,6 +84,10 @@ void gpu_depth24_upload_span_reset(void){}
  * in test_gl_readback_region.c. */
 uint64_t psx_cycle_count=0;
 uint32_t g_psx_vblank_cycles=564480u;
+/* Widescreen/timeline renderer seams the compiled renderer calls; test
+ * stand-ins, like the other return-0 seams above. */
+int gpu_ws_background_requires_full_composite(void){return 0;}
+void gpu_timeline_note(uint8_t kind,uint32_t a,uint32_t b){(void)kind;(void)a;(void)b;}
 
 static uint16_t vram[1024*512], peek[1024*512];
 static int si_max_dim(void) { return s_gl_max_dim > 0 ? s_gl_max_dim : 1 << 30; }
