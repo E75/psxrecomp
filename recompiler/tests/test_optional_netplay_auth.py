@@ -50,6 +50,9 @@ def main():
                               "RNET_HOST_RELAY_HEADER_INCLUDED", "RNetHostRelayStatus st"):
                     assert token in p.stdout, f"enabled path lost {token}"
             else:
+                # netplay-off builds must not need any recomp_net header
+                # (none exist in this include path, so -E would have failed).
+                assert "RNET_RELAY_HEADER_INCLUDED" not in p.stdout
                 assert "rnet_account_" not in p.stdout, "offline launcher retained account linkage"
                 assert "RNET_ACCOUNT_" not in p.stdout, "offline launcher retained account state dependency"
                 assert "RNetHostRelayStatus st" not in p.stdout, "offline launcher retained the recomp-net host relay"

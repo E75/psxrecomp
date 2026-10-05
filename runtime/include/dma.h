@@ -42,6 +42,14 @@ uint32_t dma_get_dicr(void);
 uint32_t dma_get_dpcr(void);
 int      dma_cdrom_transfer_active(void);
 int      dma_gpu_linked_list_active(void);
+/* RAM-side effects of a completed CD-ROM (ch3) transfer of host-supplied
+ * sector data, for seamless-loading adapters serving a game's own CdGetSector
+ * or read loop: overlay capture before the first word, per-word RAM stores
+ * under DMA attribution, executable-page invalidation, the CD DMA log (when
+ * lba >= 0) and overlay capture on completion. Channel registers, IRQs and
+ * guest timing are untouched. dest/bytes word aligned; returns 0 if the span
+ * leaves live RAM. */
+int      dma_host_cdrom_write(uint32_t dest, const uint8_t* src, uint32_t bytes, int lba);
 
 typedef struct DMAChannelDebugState {
     uint32_t madr;

@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "gpu_timeline.h"
 
 /* Word-aligned main-RAM offset of a DMA address (MADR / stepped cursor)
  * through the live geometry: retail folds to 2 MiB exactly as the DMAC's
@@ -515,6 +516,39 @@ static void start_async_cdrom_transfer(void) {
     }
 }
 
+int dma_host_cdrom_write(uint32_t dest, const uint8_t *src, uint32_t bytes, int lba) {
+    if ((dest & 3u) || (bytes & 3u) || (!src && bytes)) return 0;
+    const uint32_t addr = DMA_RAM_ADDR(dest);
+    const uint32_t live = psx_ram_live_bytes();
+    if (addr >= live || bytes > live - addr) return 0;
+    if (!bytes) return 1;
+    /* Same capture window as the real ch3 path: game data, not FMV buffers. */
+    const int capture = addr < 0x1C0000u || addr >= PSX_MAIN_RAM_RETAIL_BYTES;
+    const int saved_ch = g_dma_cur_ch;
+    const uint32_t saved_madr = g_dma_cur_madr, saved_bcr = g_dma_cur_bcr;
+    g_dma_exec_depth++;
+    g_dma_cur_ch = 3;
+    g_dma_cur_bcr = bytes / 4u;
+    if (capture) overlay_capture_before_dma(addr, bytes);
+    for (uint32_t i = 0; i < bytes; i += 4u) {
+        uint32_t word;
+        memcpy(&word, src + i, 4);
+        g_dma_cur_madr = addr + i;
+        psx_write_word(addr + i, word);
+    }
+    dirty_ram_mark_executable_range(addr, bytes);
+    if (capture) {
+        if (lba >= 0) cd_dma_log_push(lba, addr, bytes);
+        extern uint8_t *memory_get_ram_ptr(void);
+        overlay_capture_on_dma(addr, bytes, memory_get_ram_ptr() + addr);
+    }
+    g_dma_cur_ch = saved_ch;
+    g_dma_cur_madr = saved_madr;
+    g_dma_cur_bcr = saved_bcr;
+    g_dma_exec_depth--;
+    return 1;
+}
+
 static void finish_async_cdrom_transfer(uint32_t final_addr) {
     finish_cdrom_dma_capture(final_addr, 1);
     DMAAsyncChannel *a = &cdrom_async;
@@ -730,6 +764,8 @@ static void gpu_ll_complete(void *opaque, int hit_limit) {
     (void)opaque;
     gpu_ot_stats.completes++;
     gpu_ot_record_walk_stats(psx_cycle_count - gpu_ot_start_cycle);
+    gpu_timeline_note(GTL_LL_END, gpu_linked_list.nodes_processed,
+                      gpu_linked_list.total_words);
     channels[2].madr = hit_limit ? gpu_linked_list.current_addr
                                  : 0x00FFFFFFu;
     gpu_ws_end_linked_list();
@@ -757,6 +793,7 @@ static void start_async_gpu_linked_list(void) {
      * header and payload read at its consumption boundary. */
     gpu_ws_prepass_linked_list(start_addr);
     dma_gpu_ll_start(&gpu_linked_list, start_addr, 0x40000u);
+    gpu_timeline_note(GTL_LL_START, start_addr, 0);
     event_ring_record_aux(EV_DMA_SCHED, 2u, channels[2].chcr);
     gpu_ot_stats.starts++;
     gpu_ot_start_cycle = psx_cycle_count;

@@ -48,7 +48,8 @@ def main():
     block = block[:block.index('#endif\n\n    /* B-2')]
     assert re.search(r'clean_game_text_miss = psx_game_address_in_text\(addr\) \? 1 : 0;', block), \
         'a compiled-dispatch miss in game text no longer sets clean_game_text_miss'
-    hook = re.search(r'if \(clean_game_text_miss\)\s*\(void\)psx_segment_miss_note\(addr, '
+    # A forced span replay interprets compiled text on purpose: not a miss.
+    hook = re.search(r'if \(clean_game_text_miss && !forced\)\s*\(void\)psx_segment_miss_note\(addr, '
                      r'psx_game_is_function_entry,\s*cpu->gpr\[31\], cpu->gpr\[29\],', block)
     assert hook, 'dirty_ram_dispatch_inner no longer notes segment misses on a clean-text miss'
     assert block.index('psx_dispatch_game_compiled(cpu, addr)') < hook.start(), \
