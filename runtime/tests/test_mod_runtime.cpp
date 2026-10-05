@@ -184,29 +184,6 @@ static void test_guest_function(CPUState* cpu, uint32_t) {
     if (cpu->gpr[31] != ra) failures++;
 }
 
-static int guest_function_hits;
-static int instruction_hits;
-static void test_instruction(CPUState* cpu, uint32_t) {
-    instruction_hits++;
-    cpu->gpr[5] = 0x80301008u;
-    if (psx_mod_finish_function(cpu)) failures++;
-}
-static void test_guest_function(CPUState* cpu, uint32_t) {
-    guest_function_hits++;
-    const uint32_t ra = cpu->gpr[31];
-    CPUState nested{};
-    nested.gpr[31] = 0x80007000u;
-    const int mode = entry_test_mode;
-    entry_test_mode = 1;
-    if (!psx_mod_function_entry(&nested, 0x80003000u) || nested.pc != nested.gpr[31]) failures++;
-    entry_test_mode = mode;
-    interrupted_entry_cpu = cpu;
-    mod_runtime_on_vblank();
-    interrupted_entry_cpu = nullptr;
-    if (!psx_mod_finish_function(cpu)) failures++;
-    cpu->gpr[2] = cpu->gpr[4] + 7u;
-    if (cpu->gpr[31] != ra) failures++;
-}
 
 static void test_activation_plugin(void) {
     activation_calls++;
