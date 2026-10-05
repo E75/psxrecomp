@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+extern "C" int psx_netplay_active(void);
 
 extern "C" uint32_t psx_read_word(uint32_t addr);
 extern "C" int gpu_ws_precise_nclip_enabled(void);
@@ -599,6 +600,7 @@ struct GteRtpRec {
     int16_t  RT[9];
     int32_t  TR[3];
     uint16_t H;  int32_t OFX, OFY;
+    uint16_t Hs;   /* H after fov_scale (== H when identity); SXY0..2 used Hs */
     int32_t  SXY0, SXY1, SXY2;
     uint16_t SZ1, SZ2, SZ3;
     uint32_t FLAG;
@@ -627,6 +629,8 @@ static uint64_t   s_gte_latch_seq = 0;
 static inline int gte_sxx(int32_t p){ int v=p&0xFFFF; return v>=0x8000? v-0x10000:v; }
 static inline int gte_syy(int32_t p){ int v=(p>>16)&0xFFFF; return v>=0x8000? v-0x10000:v; }
 
+static int32_t gte_h_scaled(const GTEState* gte);
+
 static void gte_rtp_record(const GTEState* g, uint32_t cmd) {
     if (s_gte_replay_sandbox) return;
     if (!s_gte_rtp_ring) {
@@ -641,7 +645,7 @@ static void gte_rtp_record(const GTEState* g, uint32_t cmd) {
     for (int i = 0; i < 3; i++) { e->V0[i]=g->V0[i]; e->V1[i]=g->V1[i]; e->V2[i]=g->V2[i]; }
     for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) e->RT[r*3+c]=g->RT[r][c];
     for (int i = 0; i < 3; i++) e->TR[i]=g->TR[i];
-    e->H=g->H; e->OFX=g->OFX; e->OFY=g->OFY;
+    e->H=g->H; e->Hs=(uint16_t)gte_h_scaled(g); e->OFX=g->OFX; e->OFY=g->OFY;
     e->SXY0=g->SXY[0]; e->SXY1=g->SXY[1]; e->SXY2=g->SXY[2];
     e->SZ1=g->SZ[1]; e->SZ2=g->SZ[2]; e->SZ3=g->SZ[3];
     e->FLAG=g->FLAG;
@@ -815,12 +819,12 @@ extern "C" int gte_latch_dump_json(char* out, int outsz, int max_count) {
         if (pos>outsz-700) break;
         pos+=snprintf(out+pos,outsz-pos,
             "%s{\"frame\":%u,\"ra\":\"0x%08X\",\"cmd\":\"0x%08X\","
-            "\"RT\":[%d,%d,%d,%d,%d,%d,%d,%d,%d],\"TR\":[%d,%d,%d],\"H\":%u,"
+            "\"RT\":[%d,%d,%d,%d,%d,%d,%d,%d,%d],\"TR\":[%d,%d,%d],\"H\":%u,\"Hs\":%u,"
             "\"V0\":[%d,%d,%d],\"V1\":[%d,%d,%d],\"V2\":[%d,%d,%d],"
             "\"S0\":[%d,%d],\"S1\":[%d,%d],\"S2\":[%d,%d],\"SZ\":[%u,%u,%u],\"FLAG\":\"0x%08X\"}",
             emitted?",":"", e->frame, e->caller_ra, e->cmd,
             e->RT[0],e->RT[1],e->RT[2],e->RT[3],e->RT[4],e->RT[5],e->RT[6],e->RT[7],e->RT[8],
-            e->TR[0],e->TR[1],e->TR[2],(unsigned)e->H,
+            e->TR[0],e->TR[1],e->TR[2],(unsigned)e->H,(unsigned)e->Hs,
             e->V0[0],e->V0[1],e->V0[2], e->V1[0],e->V1[1],e->V1[2], e->V2[0],e->V2[1],e->V2[2],
             gte_sxx(e->SXY0),gte_syy(e->SXY0),gte_sxx(e->SXY1),gte_syy(e->SXY1),
             gte_sxx(e->SXY2),gte_syy(e->SXY2),(unsigned)e->SZ1,(unsigned)e->SZ2,(unsigned)e->SZ3,e->FLAG);
@@ -850,13 +854,13 @@ extern "C" int gte_rtp_ring_dump_json(char* out, int outsz, int max_count,
             "%s{\"seq\":%u,\"frame\":%u,\"ra\":\"0x%08X\",\"cmd\":\"0x%08X\","
             "\"V0\":[%d,%d,%d],\"V1\":[%d,%d,%d],\"V2\":[%d,%d,%d],"
             "\"RT\":[%d,%d,%d,%d,%d,%d,%d,%d,%d],\"TR\":[%d,%d,%d],"
-            "\"H\":%u,\"OFX\":%d,\"OFY\":%d,"
+            "\"H\":%u,\"Hs\":%u,\"OFX\":%d,\"OFY\":%d,"
             "\"S0\":[%d,%d],\"S1\":[%d,%d],\"S2\":[%d,%d],"
             "\"SZ\":[%u,%u,%u],\"FLAG\":\"0x%08X\"}",
             emitted?",":"", e->seq, e->frame, e->caller_ra, e->cmd,
             e->V0[0],e->V0[1],e->V0[2], e->V1[0],e->V1[1],e->V1[2], e->V2[0],e->V2[1],e->V2[2],
             e->RT[0],e->RT[1],e->RT[2],e->RT[3],e->RT[4],e->RT[5],e->RT[6],e->RT[7],e->RT[8],
-            e->TR[0],e->TR[1],e->TR[2], (unsigned)e->H, e->OFX, e->OFY,
+            e->TR[0],e->TR[1],e->TR[2], (unsigned)e->H, (unsigned)e->Hs, e->OFX, e->OFY,
             sxx(e->SXY0),syy(e->SXY0), sxx(e->SXY1),syy(e->SXY1), sxx(e->SXY2),syy(e->SXY2),
             (unsigned)e->SZ1,(unsigned)e->SZ2,(unsigned)e->SZ3, e->FLAG);
         emitted++;
@@ -873,6 +877,45 @@ extern "C" void gte_set_display_aspect(int num, int den) {
     while (b) { int32_t t = a % b; a = b; b = t; }   // gcd
     s_ws_xnum = n / a;
     s_ws_xden = d / a;
+}
+
+// ---------------------------------------------------------------------------
+// VR: perspective (FOV) scale.
+//
+// The PS1 projection distance lives in GTE control register H; psx-spx:
+//     fov = 2*atan(screen_width / (2*H))
+// gte_h_scaled applies H * num / den. A *FOV multiplier* v maps to
+// (num, den) = (1000, v*1000), i.e. H becomes H/v, so v > 1 widens the view.
+// Scaling H here avoids guest-code patches, which cannot change a statically
+// recompiled constant. Identity (num==den) by default, so the faithful path is
+// unchanged. Set from PSX_GTE_FOV_SCALE (float) or gte_set_fov_scale(num, den).
+// ---------------------------------------------------------------------------
+static int32_t s_h_scale_num = 1;
+static int32_t s_h_scale_den = 1;
+
+extern "C" void gte_set_fov_scale(int num, int den) {
+    if (num <= 0 || den <= 0) { s_h_scale_num = s_h_scale_den = 1; return; }
+    s_h_scale_num = num;
+    s_h_scale_den = den;
+}
+
+static int32_t gte_h_scaled(const GTEState* gte) {
+    if (s_h_scale_num == s_h_scale_den) return gte->H;
+    if (gte->H == 0) return 0;   // a guest H of 0 is a real (degenerate) projection
+    // Both peers must compute identical SXY/MAC/FLAG: the scale is a local
+    // display option, so it is forced to identity for the whole netplay session.
+    if (psx_netplay_active()) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            fprintf(stderr, "psxrecomp: fov_scale ignored while netplay is active\n");
+        }
+        return gte->H;
+    }
+    int64_t h = (int64_t)gte->H * s_h_scale_num / s_h_scale_den;
+    if (h < 1) h = 1;
+    if (h > 0xFFFF) h = 0xFFFF;
+    return (int32_t)h;
 }
 
 // ---------------------------------------------------------------------------
@@ -926,7 +969,7 @@ void gte_rtps_internal(GTEState* gte, int16_t* V, bool setMac0, uint32_t instr) 
     gte->push_sz(static_cast<int32_t>(mac3 >> 12));
 
     // Step 3: Perspective division
-    int32_t h_div_sz = gte_divide(gte->H, gte->SZ[3], gte->FLAG);
+    int32_t h_div_sz = gte_divide(gte_h_scaled(gte), gte->SZ[3], gte->FLAG);
 
     // Step 4: Project to screen coordinates. Squash X only when configured AND
     // this frame is being stretched — never on a 4:3-presented frame (FMV /
@@ -1003,7 +1046,7 @@ void gte_rtps_internal(GTEState* gte, int16_t* V, bool setMac0, uint32_t instr) 
         if (pgxp_preserve_projection() && pgxp_active()) {
             int32_t ex16, ey16;
             if (pgxp_project_precise(mac1, mac2, mac3, shift, gte->IR1, gte->IR2,
-                                     gte->SZ[3], gte->H, gte->OFX, gte->OFY,
+                                     gte->SZ[3], gte_h_scaled(gte), gte->OFX, gte->OFY,
                                      x_num, x_den, &ex16, &ey16) &&
                 pgxp_ppp_accept(ex16, ey16, (uint32_t)gte->SXY[2])) {
                 px16 = ex16;
@@ -1013,15 +1056,16 @@ void gte_rtps_internal(GTEState* gte, int16_t* V, bool setMac0, uint32_t instr) 
         pgxp_gte_push_sxy(px16, py16, gte->SZ[3], (uint32_t)gte->SXY[2]);
         if (pgxp_projection_tracking() && shift == 12 && !lm) {
             const double z = (double)(mac3 >> 12);
-            double hx = (double)gte->MAC1 * gte->H;
+            const double h_proj = (double)gte_h_scaled(gte);
+            double hx = (double)gte->MAC1 * h_proj;
             if (do_squash) hx = hx * s_ws_xnum / s_ws_xden;
             else if (s_ws_dome_on && s_ws_dome_num != s_ws_dome_den &&
                      !gpu_ws_present_native_43() && gte->SZ[3] >= s_ws_far_threshold)
                 hx = hx * s_ws_dome_num / s_ws_dome_den;
             PGXPProjection projection = {
                 (float)(gte->OFX / 65536.0 * z + hx),
-                (float)(gte->OFY / 65536.0 * z + (double)gte->MAC2 * gte->H),
-                (float)z, (float)gte->H / 2.0f};
+                (float)(gte->OFY / 65536.0 * z + (double)gte->MAC2 * h_proj),
+                (float)z, (float)h_proj / 2.0f};
             pgxp_gte_set_projection(&projection);
         }
     }
@@ -1234,7 +1278,7 @@ void gte_nclip(GTEState* gte, uint32_t instr) {
         for (int i = 0; i < 3; ++i) {
             const int x = exact_x[i] >> 16;
             checked &= (exact_y[i] >> 16) == raw_y[i] && x > -4096 && x < 4096;
-            checked &= gte->SZ[i + 1] >= gte->H / 2 && gte->SZ[i + 1] != 0;
+            checked &= gte->SZ[i + 1] >= gte_h_scaled(gte) / 2 && gte->SZ[i + 1] != 0;
             if (raw_x[i] == 1023 && x > 1023) saturated = true;
             else if (raw_x[i] == -1024 && x < -1024) saturated = true;
             else checked &= x == raw_x[i];

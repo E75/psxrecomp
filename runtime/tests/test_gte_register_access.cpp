@@ -1,14 +1,24 @@
 #include "cpu_state.h"
 #include "gte.h"
 #include "pgxp.h"
+#include "projection_scale.hpp"
 #include "gte_nclip_stats.h"
 #include "render_pass_projection.h"
+#include <limits>
+extern "C" void gte_set_fov_scale(int, int);
 
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+
+#define CHECK(expr) do { \
+    if (!(expr)) { \
+        std::fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #expr); \
+        return 1; \
+    } \
+} while (0)
 
 using PSXRecomp::GTE::GTEState;
 using PSXRecomp::GTE::gte_cfc2;
@@ -56,6 +66,8 @@ extern "C" void gpu_pgxp_rederive_enable(void) {}
 static int g_test_shadow_diff = 0;
 extern "C" int psx_overlay_shadow_diff_active(void) { return g_test_shadow_diff; }
 extern "C" void psx_ws_note_gte_project(int) {}
+static int g_test_netplay_active = 0;
+extern "C" int psx_netplay_active(void) { return g_test_netplay_active; }
 extern "C" {
 uint64_t s_frame_count = 0;
 uint32_t g_debug_last_store_pc = 0;
@@ -1111,7 +1123,56 @@ int test_preserve_projection_is_shadow_only() {
     return 0;
 }
 
+int test_projection_scale() {
+    double value = 2;
+    for (const char* bad : {"", "nan", "inf", "9", "0", "-1", "2junk", "1e999", "1e-999"}) {
+        CHECK(!psx_projection_scale_parse(bad, &value) && value == 2);
+    }
+    CHECK(psx_projection_scale_parse(" 8.0 ", &value) && value == 8);
+    CHECK(!psx_projection_scale_valid(std::numeric_limits<double>::quiet_NaN()));
+    CHECK(psx_projection_scale_denominator(0.00001) == 1);
+    CPUState seed{};
+    seed.gte_ctrl[0] = 4096; seed.gte_ctrl[2] = 4096; seed.gte_ctrl[4] = 4096;
+    seed.gte_ctrl[26] = 320; seed.gte_data[0] = 100; seed.gte_data[1] = 1000;
+    const uint32_t cmd = 0x80001;
+    CPUState stock=seed; gte_set_fov_scale(1,1); gte_execute(&stock,cmd);
+    CPUState identity=seed; gte_set_fov_scale(1000,1000); gte_execute(&identity,cmd);
+    CHECK(same_gte(stock,identity));
+    CPUState widened=seed; gte_set_fov_scale(1,2); gte_execute(&widened,cmd);
+    CPUState reference=seed; reference.gte_ctrl[26]=160;
+    gte_set_fov_scale(1,1); gte_execute(&reference,cmd);
+    CHECK(widened.gte_ctrl[26] == 320 && widened.gte_data[14] == reference.gte_data[14]);
+    CHECK(widened.gte_data[14] != stock.gte_data[14]);
+    for (auto ratio : {std::pair<int,int>{0,1}, {-1,1}, {1,0}, {1,-1}}) {
+        CPUState reset=seed; gte_set_fov_scale(ratio.first,ratio.second); gte_execute(&reset,cmd);
+        CHECK(same_gte(stock,reset));
+    }
+    /* Guest H == 0 is a real (degenerate) projection: it must stay 0, not be
+     * clamped to 1, under any scale. */
+    {
+        CPUState h0=seed; h0.gte_ctrl[26]=0;
+        CPUState h0_stock=h0; gte_set_fov_scale(1,1); gte_execute(&h0_stock,cmd);
+        CPUState h0_scaled=h0; gte_set_fov_scale(1,2); gte_execute(&h0_scaled,cmd);
+        CHECK(h0_scaled.gte_ctrl[26] == 0);
+        CHECK(same_gte(h0_stock,h0_scaled));
+        gte_set_fov_scale(1000,500); h0_scaled=h0; gte_execute(&h0_scaled,cmd);
+        CHECK(same_gte(h0_stock,h0_scaled));
+    }
+    /* Netplay forces identity so peers cannot diverge on SXY/MAC/FLAG. */
+    {
+        g_test_netplay_active = 1;
+        CPUState np=seed; gte_set_fov_scale(1,2); gte_execute(&np,cmd);
+        g_test_netplay_active = 0;
+        CHECK(same_gte(stock,np));
+        CPUState off=seed; gte_set_fov_scale(1,2); gte_execute(&off,cmd);
+        CHECK(!same_gte(stock,off));
+    }
+    gte_set_fov_scale(1,1);
+    return 0;
+}
+
 int main() {
+    if (int rc = test_projection_scale()) return rc;
     if (int rc = test_hardware_register_semantics()) return rc;
     if (int rc = test_canonicalizer()) return rc;
     if (int rc = test_reads()) return rc;
@@ -1147,6 +1208,25 @@ int main() {
             return 1;
         }
     }
+    /* The clipper's projection (hx, OFY/MAC2*H term, near_z = H/2) must use the
+     * same scaled H as the guest's SXY, or culling disagrees with the draw. */
+    gte_set_fov_scale(1,2);
+    for (int depth : {1,149,900}) {
+        GTEState g{};
+        g.RT[0][0]=g.RT[1][1]=g.RT[2][2]=4096;
+        g.V0[0]=100;g.V0[1]=30;g.TR[2]=depth;
+        g.H=300;g.OFX=256*65536;g.OFY=120*65536;
+        pgxp_set_projection_tracking(1);
+        PSXRecomp::GTE::gte_rtps(&g,0x0180001u);
+        PGXPProjection p;
+        if (!pgxp_get_gte_projection(2,g.SXY[2],&p) ||
+            p.z!=depth || p.x!=256*depth+15000 || p.y!=120*depth+4500 || p.near_z!=75) {
+            std::fprintf(stderr,"FAIL scaled-H clipper projection at depth %d\n",depth);
+            gte_set_fov_scale(1,1);
+            return 1;
+        }
+    }
+    gte_set_fov_scale(1,1);
     pgxp_set_projection_tracking(0);
     std::puts("PASS: canonical GTE register helpers match GTEState transfer oracle");
     return 0;

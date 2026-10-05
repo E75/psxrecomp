@@ -6,6 +6,8 @@
  */
 
 #include "cpu_state.h"
+#include "projection_scale.hpp"
+#include "projection_scale_config.hpp"
 #include "window_size.h"     /* default game-window size */
 #include "internal_resolution.h" /* Settings -> Display -> Internal resolution */
 #include "psx_scheduler.h"   /* psx_scheduler_run — deterministic TCB scheduler */
@@ -1447,6 +1449,9 @@ extern "C" void debug_get_fmv_config(int *auto_skip, uint32_t *total_table,
 static int           g_video_depth24_trailing_margin = 8;
 static int           g_video_aspect_num = 4;
 static int           g_video_aspect_den = 3;
+/* [video] fov_scale — VR perspective multiplier on the GTE projection distance
+ * H (1.0 = faithful). env PSX_GTE_FOV_SCALE overrides it. */
+static double        g_fov_scale = 1.0;
 /* Resize-driven widescreen. The user's fixed aspect is still used to shape the
  * initial window; after the game window exists these values follow its live
  * aspect, clamped to 4:3..the widest mode offered by the title. */
@@ -1917,6 +1922,8 @@ static void netplay_local_viewport_projection_aspect(
 static int g_ws_projection_num = 4;
 static int g_ws_projection_den = 3;
 static int g_ws_projection_mode = -1;
+extern "C" void gte_set_fov_scale(int num, int den);
+
 static void refresh_widescreen_projection() {
     if (g_ws_engaged && !fntrace_is_game_started()) {
         g_ws_engaged = false;
@@ -1924,6 +1931,12 @@ static void refresh_widescreen_projection() {
         gte_set_display_aspect(4, 3);
         gpu_ws_configure(4, 3, g_ws_anchor_addr, 0, 0);
     }
+    /* VR FOV: scale the GTE projection distance H (fov = 2*atan(w/(2H))).
+     * Independent of the widescreen squash; identity by default. */
+    if (g_fov_scale > 0.0 && g_fov_scale != 1.0)
+        gte_set_fov_scale(1000, psx_projection_scale_denominator(g_fov_scale));
+    else
+        gte_set_fov_scale(1, 1);
     if (!g_ws_engaged) return;
 
     const bool wide = g_video_aspect_num * 3 != g_video_aspect_den * 4;
@@ -13971,6 +13984,7 @@ int main(int argc, char** argv) {
                 (float)gc.runtime.video_scanline_strength;
             g_video_aspect_num = gc.runtime.video_aspect_num;
             g_video_aspect_den = gc.runtime.video_aspect_den;
+            g_fov_scale = psx_projection_scale_load_config(game_config_path);
             g_low_latency_input = gc.runtime.video_low_latency_input ? 1 : 0;
             gl_renderer_set_texture_window_batching(
                 gc.runtime.video_texture_window_batching ? 1 : 0);
@@ -14418,6 +14432,19 @@ int main(int argc, char** argv) {
         if (us.has_scanlines)      g_video_scanlines = us.scanlines;
         if (us.has_scanline_strength)
             g_video_scanline_strength = (float)us.scanline_strength;
+        /* fov_scale precedence: game.toml < settings.toml < PSX_GTE_FOV_SCALE.
+         * Bad values warn and leave the lower layer's value in place. */
+        if (us.has_fov_scale) {
+            if (psx_projection_scale_valid(us.fov_scale)) g_fov_scale = us.fov_scale;
+            else std::fprintf(stderr, "psxrecomp: settings.toml [video] fov_scale %g ignored "
+                                      "(must be > 0 and <= 8)\n", us.fov_scale);
+        }
+        if (const char* fov_env = std::getenv("PSX_GTE_FOV_SCALE")) {
+            double value;
+            if (psx_projection_scale_parse(fov_env, &value)) g_fov_scale = value;
+            else std::fprintf(stderr, "psxrecomp: PSX_GTE_FOV_SCALE=\"%s\" ignored "
+                                      "(must be a number > 0 and <= 8)\n", fov_env);
+        }
         if (us.has_auto_skip_fmv)  g_auto_skip_fmv   = us.auto_skip_fmv ? 1 : 0;
         /* turbo_loads is deliberately NOT restored from settings.toml. It is a
          * write-only latch: the launcher stopped drawing a Turbo loads row when
