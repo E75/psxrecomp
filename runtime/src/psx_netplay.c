@@ -3,6 +3,7 @@
 #endif
 
 #include "psx_netplay.h"
+#include "netplay_load_probe.h"
 
 #include "host_time.h"
 #include "memcard.h"
@@ -601,6 +602,7 @@ typedef struct {
     int          load_ready_replied; /* READY exchanged; synced; stay LOAD_READY until admit */
     int          load_sync_done;     /* hard_resync+prime once at mutual ready */
     int          load_apply_failed;  /* sticky: staged apply rejected — soft-exit */
+    PsxNetplayLoadProbe load_probe; /* guest's verified local LOAD probe/apply */
     /* Transport / ICE / diag (MotK online path). */
     int          use_ice;
     int          ice_has_turn;
@@ -1465,6 +1467,35 @@ static void np_apply_ready_state(void)
      * dependency — relative sandbox/CWD issues used to fail write_slot here).
      * Both peers request apply so host cannot restore before guest has bytes. */
     if (g_np.local_slot != 0) {
+        uint32_t local_size = 0, local_crc = 0;
+        const uint32_t blob_crc = (size <= UINT32_MAX)
+            ? rnet_checksum((const rnet_u8 *)data, size) : 0u;
+        /* A guest whose local hash matched may already have completed the
+         * local restore while the host was collecting other seats' replies.
+         * The host still sends the authoritative blob to every guest after
+         * any miss. Verify its full wire CRC and re-read the local slot before
+         * reusing the completed apply; never skip a different/stale blob. */
+        if (g_np.xfer == NP_XFER_LOAD_READY && g_np.load_applied_local &&
+            size <= UINT32_MAX &&
+            np_slot_crc((int)slot, &local_size, &local_crc) &&
+            psx_netplay_load_probe_can_reuse(&g_np.load_probe, (int)slot,
+                                             (uint32_t)size, blob_crc,
+                                             local_size, local_crc)) {
+            printf("psxrecomp: netplay guest load slot=%u — verified host blob "
+                   "matches completed local apply (size=%u crc=%08x); "
+                   "skipping duplicate restore\n",
+                   (unsigned)slot, (unsigned)size, (unsigned)blob_crc);
+            fflush(stdout);
+            /* Keep the sandbox mirror current for future match probes. */
+            if (!savestate_write_slot((int)slot, data, size)) {
+                printf("psxrecomp: netplay guest load slot=%u — verified "
+                       "sandbox mirror failed (completed local apply retained)\n",
+                       (unsigned)slot);
+                fflush(stdout);
+            }
+            rnet_session_state_finish(g_np.session, 0);
+            return; /* preserve LOAD_READY and its existing apply receipt */
+        }
         if (!savestate_request_load_blob_protocol(data, size)) {
             printf("psxrecomp: netplay guest load slot=%u — blob stage failed "
                    "(%zu bytes, sandbox='%s')\n",
@@ -1625,6 +1656,8 @@ static void np_guest_handle_probe(void)
                     g_np.xfer != NP_XFER_LOAD_READY) {
                     (void)savestate_request_load_protocol((int)slot);
                     np_begin_load_apply((int)slot);
+                    psx_netplay_load_probe_record(&g_np.load_probe,
+                                                  (int)slot, size, crc);
                     printf("psxrecomp: netplay guest load slot=%u — hashes match, "
                            "applying…\n",
                            (unsigned)slot);
@@ -1869,6 +1902,7 @@ static void np_begin_load_apply(int slot)
     g_np.load_applied_local = 0;
     g_np.load_sync_done = 0;
     g_np.load_ready_replied = 0;
+    psx_netplay_load_probe_clear(&g_np.load_probe);
     g_np.needs_advance = 0;
     g_np.latched_for_tick = 0;
     g_np.staged_valid = 0;
@@ -1903,6 +1937,7 @@ static void np_enter_load_ready(int slot)
      * Do not suppress INPUT here either: the first peer to finish apply must
      * keep sending pads so the other can still admit frames for savestate_poll. */
     g_np.load_applied_local = 1;
+    psx_netplay_load_probe_mark_applied(&g_np.load_probe, slot);
     g_np.load_ready_replied = 0;
     g_np.load_sync_done = 0;
     g_np.needs_advance = 0;
@@ -1934,6 +1969,7 @@ static void np_drive_load_barrier(void)
         g_np.load_ready_replied = 0;
         g_np.load_sync_done = 0;
         g_np.load_apply_failed = 1;
+        psx_netplay_load_probe_clear(&g_np.load_probe);
         if (g_np.session)
             rnet_session_set_input_send_suppress(g_np.session, 0);
         return;
