@@ -8,6 +8,7 @@
 #include "cpu_state.h"
 #include "projection_scale.hpp"
 #include "projection_scale_config.hpp"
+#include "mod_controller_source.h"
 #include "window_size.h"     /* default game-window size */
 #include "internal_resolution.h" /* Settings -> Display -> Internal resolution */
 #include "psx_scheduler.h"   /* psx_scheduler_run — deterministic TCB scheduler */
@@ -5030,6 +5031,28 @@ static int effective_player_mode_for_sio(const PlayerInput& p, int sio_slot) {
     return effective_player_mode(p);
 }
 
+/* Assert one slot's real SIO profile (connection, config capability) from its
+ * device/mode/policy and return the pad mode to present at boot. Used by
+ * refresh_player_devices and to restore a port once a mod controller source
+ * detaches. dev_here: dev-any-input keeps P1 connected without a device. */
+static int assert_sio_pad_profile(int s, bool dev_here) {
+    const PlayerInput& p = g_players[s];
+    const int mode = effective_player_mode_for_sio(p, s);
+    const ModControllerPresentationPolicy& policy = g_mod_controller_policy[s];
+    const int boot_mode = policy.callback ? policy.initial_mode : mode;
+    sio_set_pad_connected(s, (p.kind != 0 || dev_here) ? 1 : 0);
+    /* DIGITAL mode == a plain digital controller that ignores the DualShock
+     * config-mode commands (real SCPH-1080 behaviour); ANALOG or an
+     * explicitly config-capable mod policy == a config-capable DualShock.
+     * A digital pad that wrongly answered 0x43 sent Tomba 2's pad driver
+     * down the config path -> phantom 0x00 reads.
+     * Multitap taps are always digital (see sio_pad_on_multitap). */
+    sio_set_pad_config_capable(
+        s, policy.callback ? policy.config_capable
+                           : mode != PSXRecompV4::PAD_MODE_DIGITAL);
+    return boot_mode;
+}
+
 /* Open/close SDL handles so they match g_players, and (re)assert each slot's
  * PSX connection + pad type. Safe to call repeatedly (hotplug, boot).
  * While delay-sync netplay is active, SIO connection/type are owned by
@@ -5041,22 +5064,9 @@ static void refresh_player_devices(void) {
         if (p.kind != 2) close_player(p);           /* keyboard/none: no handle */
         else open_player(p, s);
         if (netplay) continue;
-        const int mode = effective_player_mode_for_sio(p, s);
-        const ModControllerPresentationPolicy& policy =
-            g_mod_controller_policy[s];
-        const int boot_mode = policy.callback ? policy.initial_mode : mode;
-        sio_set_pad_connected(s, p.kind != 0 ? 1 : 0);
+        const int boot_mode = assert_sio_pad_profile(s, false);
         sio_set_pad_analog(s, pad_mode_boot_analog(boot_mode),
                            0x80, 0x80, 0x80, 0x80);
-        /* DIGITAL mode == a plain digital controller that ignores the DualShock
-         * config-mode commands (real SCPH-1080 behaviour); ANALOG or an
-         * explicitly config-capable mod policy == a config-capable DualShock.
-         * A digital pad that wrongly answered 0x43 sent Tomba 2's pad driver
-         * down the config path -> phantom 0x00 reads.
-         * Multitap taps are always digital (see sio_pad_on_multitap). */
-        sio_set_pad_config_capable(
-            s, policy.callback ? policy.config_capable
-                               : mode != PSXRecompV4::PAD_MODE_DIGITAL);
     }
 }
 
@@ -6281,7 +6291,65 @@ static void sample_pad_into_sio(int override) {
         psx_start_consumer_enabled() ? psx_start_consumer_offline_frame() : 0u;
     for (int s = 0; s < n; s++) {
         PsxNetPad pad;
-        if (!capture_pad_slot(s, &pad)) continue;  /* no device in this port */
+        PSXModControllerState source;
+        int released = 0;
+        if (mod_controller_source_sample((uint32_t)s, &source, &released)) {
+            const bool dev_here = (dev_any_input_enabled() && s == 0);
+            if (released) {
+                /* Source detached/reset: deliver one neutral frame (even on a
+                 * port with no device) and give the port back its real SIO
+                 * connection/config state; a device resumes next frame. */
+                const int boot_mode = assert_sio_pad_profile(s, dev_here);
+                pad.buttons = 0xffff;
+                pad.lx = pad.ly = pad.rx = pad.ry = 128;
+                pad.analog = pad_mode_boot_analog(boot_mode) ? 1 : 0;
+                pad.connected = 1;
+            } else {
+                /* Sample physical buttons separately; its axes/type cannot
+                 * steer the source's virtual pad. Guards release every source
+                 * channel. */
+                PsxNetPad local;
+                const int have_local = capture_pad_slot(s, &local);
+                pad.buttons = (uint16_t)source.buttons;
+                if (have_local) pad.buttons &= local.buttons;
+                pad.lx = (uint8_t)source.lx; pad.ly = (uint8_t)source.ly;
+                pad.rx = (uint8_t)source.rx; pad.ry = (uint8_t)source.ry;
+                pad.connected = 1;
+                /* Presentation goes through the same resolution as a physical
+                 * pad: the source's `analog` is the device capability, then
+                 * mod mode override, multitap rule and presentation policy. */
+                const PlayerInput& p = g_players[s];
+                int mode = effective_player_mode_for_sio(p, s);
+                if (g_mod_controller_mode_override[s] >= 0 &&
+                    !(sio_pad_on_multitap(s) && !sio_get_multitap_analog()))
+                    mode = g_mod_controller_mode_override[s];
+                if (!source.analog) mode = PSXRecompV4::PAD_MODE_DIGITAL;
+                uint8_t st[4] = { pad.lx, pad.ly, pad.rx, pad.ry };
+                int eff_mode = controller_policy_resolve_mode(
+                    s, s + 1, mode, pad_sources_for(p, dev_here), p,
+                    pad.buttons, st);
+                if (!source.analog ||
+                    (sio_pad_on_multitap(s) && !sio_get_multitap_analog()))
+                    eff_mode = PSXRecompV4::PAD_MODE_DIGITAL;
+                pad.analog = eff_mode == PSXRecompV4::PAD_MODE_ANALOG ? 1 : 0;
+                if (!pad.analog)
+                    pad.lx = pad.ly = pad.rx = pad.ry = 128;
+                if (savestate_input_guard_active()) {
+                    pad.buttons = 0xffff;
+                    pad.lx = pad.ly = pad.rx = pad.ry = 128;
+                }
+                /* The source occupies the port; config capability follows the
+                 * same rule as a physical pad (apply_pad_slot_to_sio and the
+                 * SIO layer keep multitap taps digital). */
+                const ModControllerPresentationPolicy& policy =
+                    g_mod_controller_policy[s];
+                sio_set_pad_connected(s, 1);
+                sio_set_pad_config_capable(
+                    s, policy.callback
+                           ? policy.config_capable
+                           : mode != PSXRecompV4::PAD_MODE_DIGITAL);
+            }
+        } else if (!capture_pad_slot(s, &pad)) continue;  /* no device in this port */
         /* Push sticks every frame; request the pad type (digital/analog) through
          * the coherent channel so a policy switch is applied only at an idle,
          * non-config bus boundary (never mid-poll / mid-handshake). This is the
@@ -7486,6 +7554,9 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
         }
         /* Solo resim self-check replay republishes the recorded rows itself —
          * live sampling must not touch SIO during the replay window. */
+        /* New frame: the low-latency re-sample later this frame reuses this
+         * frame's mod controller source sample (callback runs once). */
+        mod_controller_source_begin_frame();
         if (!psx_selfcheck_replay_input()) {
             if (g_headless)
                 sample_headless_pad_into_sio(override);
@@ -15943,6 +16014,7 @@ int main(int argc, char** argv) {
          * choices first so disabling a package cannot leave its prior state
          * latched across a soft return. */
         g_mod_controller_mode_override.fill(-1);
+        mod_controller_source_reset();
         for (auto& policy : g_mod_controller_policy)
             policy = ModControllerPresentationPolicy{};
         g_mod_load_wall_multiplier = -1;
