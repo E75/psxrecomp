@@ -1,14 +1,25 @@
 #include "cpu_state.h"
 #include "gte.h"
 #include "pgxp.h"
+#include "projection_scale.hpp"
+#include "gte_view.h"
 #include "gte_nclip_stats.h"
 #include "render_pass_projection.h"
+#include <limits>
+extern "C" void gte_set_fov_scale(int, int);
 
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+
+#define CHECK(expr) do { \
+    if (!(expr)) { \
+        std::fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #expr); \
+        return 1; \
+    } \
+} while (0)
 
 using PSXRecomp::GTE::GTEState;
 using PSXRecomp::GTE::gte_cfc2;
@@ -56,6 +67,8 @@ extern "C" void gpu_pgxp_rederive_enable(void) {}
 static int g_test_shadow_diff = 0;
 extern "C" int psx_overlay_shadow_diff_active(void) { return g_test_shadow_diff; }
 extern "C" void psx_ws_note_gte_project(int) {}
+static int g_test_netplay_active = 0;
+extern "C" int psx_netplay_active(void) { return g_test_netplay_active; }
 extern "C" {
 uint64_t s_frame_count = 0;
 uint32_t g_debug_last_store_pc = 0;
@@ -998,6 +1011,152 @@ int test_precision_speculative_transaction() {
     return 0;
 }
 
+int test_render_pose() {
+    PSXModRenderView pose = {};
+    pose.struct_size = sizeof pose;
+    pose.rotation_q12[2] = 4096; pose.rotation_q12[4] = 4096;
+    pose.rotation_q12[6] = -4096;
+    GTEState g;
+    g.RT[0][0] = g.RT[1][1] = g.RT[2][2] = 4096;
+    g.V0[0] = -800; g.V0[2] = 200; g.H = 400;
+    gte_render_pose_set(&pose);
+    PSXRecomp::GTE::gte_rtps_internal(&g, g.V0, true);
+    if (g.MAC1 != 200 || g.MAC3 != 800 || g.TR[0] != 0)
+        return fail_value("rigid rotation before division",0,0,0,800,g.MAC3);
+    pose = {}; pose.struct_size = sizeof pose;
+    pose.rotation_q12[0] = pose.rotation_q12[4] = pose.rotation_q12[8] = 4096;
+    pose.projection = 1; pose.fx_q16 = 200 << 16; pose.fy_q16 = 100 << 16;
+    pose.cx_delta_q16 = 10 << 16; pose.cy_delta_q16 = -5 * 65536;
+    g = GTEState(); g.RT[0][0] = g.RT[1][1] = g.RT[2][2] = 4096;
+    g.V0[0] = 80; g.V0[1] = 160; g.V0[2] = 800;
+    gte_render_pose_set(&pose);
+    PSXRecomp::GTE::gte_rtps_internal(&g, g.V0, true);
+    if ((int16_t)g.SXY[2] != 30 || (int16_t)(g.SXY[2] >> 16) != 15)
+        return fail_value("asymmetric projection",0,0,0,30,g.SXY[2] & 65535);
+    pose.projection_h_ref = 400; g.H = 133;
+    gte_render_pose_set(&pose);
+    PSXRecomp::GTE::gte_rtps_internal(&g, g.V0, true);
+    if ((int16_t)g.SXY[2] != 16 || (int16_t)(g.SXY[2] >> 16) != 1)
+        return fail_value("authored focal ratio",0,0,0,16,g.SXY[2] & 65535);
+    pose = {}; gte_render_pose_set(&pose);
+    /* Composition with [video] fov_scale (scaled guest H): an absolute override
+     * (projection_h_ref == 0) replaces the guest projection entirely, so the
+     * result does not depend on fov_scale; with projection_h_ref the focal
+     * lengths follow the fov-scaled guest H. Outside the override (pose reset)
+     * the guest path, including fov_scale, is untouched. */
+    {
+        GTEState base;
+        base.RT[0][0] = base.RT[1][1] = base.RT[2][2] = 4096;
+        base.V0[0] = 80; base.V0[1] = 160; base.V0[2] = 800;
+        base.H = 400; base.OFX = 256 << 16; base.OFY = 120 << 16;
+        PSXModRenderView ov = {}; ov.struct_size = sizeof ov;
+        ov.rotation_q12[0] = ov.rotation_q12[4] = ov.rotation_q12[8] = 4096;
+        ov.projection = 1; ov.fx_q16 = 200 << 16; ov.fy_q16 = 100 << 16;
+        GTEState a = base, b = base, c = base, guest1 = base, guest2 = base;
+        gte_set_fov_scale(1, 1);
+        gte_render_pose_set(&ov);
+        PSXRecomp::GTE::gte_rtps_internal(&a, a.V0, true);
+        gte_set_fov_scale(1, 2);
+        PSXRecomp::GTE::gte_rtps_internal(&b, b.V0, true);
+        if (a.SXY[2] != b.SXY[2])
+            return fail_value("absolute override independent of fov_scale",0,0,0,a.SXY[2],b.SXY[2]);
+        ov.projection_h_ref = 400;
+        gte_render_pose_set(&ov);                     /* scaled H = 200 -> half focal */
+        PSXRecomp::GTE::gte_rtps_internal(&c, c.V0, true);
+        if ((int16_t)c.SXY[2] != 256 + 10 || (int16_t)(c.SXY[2] >> 16) != 120 + 10)
+            return fail_value("h_ref override follows fov-scaled H",0,0,0,266,c.SXY[2] & 65535);
+        PSXModRenderView none = {}; gte_render_pose_set(&none);
+        PSXRecomp::GTE::gte_rtps_internal(&guest2, guest2.V0, true);
+        gte_set_fov_scale(1, 1);
+        PSXRecomp::GTE::gte_rtps_internal(&guest1, guest1.V0, true);
+        if (guest1.SXY[2] == guest2.SXY[2])
+            return fail_value("guest path keeps fov_scale after override reset",0,0,0,guest1.SXY[2],guest2.SXY[2]);
+        if (guest1.SXY[2] == a.SXY[2])
+            return fail_value("override differs from guest projection (sanity)",0,0,0,guest1.SXY[2],a.SXY[2]);
+    }
+    gte_set_fov_scale(1, 1);
+    std::puts("PASS: rigid rotation and asymmetric projection before division");
+    return 0;
+}
+
+int test_render_view_parallax() {
+    const int32_t zero[3] = {0, 0, 0}, offset[3] = {24, 0, 0};
+    int shifts[2] = {};
+    for (int i = 0; i < 2; ++i) {
+        GTEState base;
+        base.RT[0][0] = base.RT[1][1] = base.RT[2][2] = 4096;
+        base.H = 400; base.OFX = 256 << 16; base.OFY = 120 << 16;
+        base.V0[2] = i ? 3200 : 800;
+        GTEState baseline = base, eye = base, expected = base, repeat = base;
+        gte_render_view_set(zero);
+        PSXRecomp::GTE::gte_rtps_internal(&baseline, baseline.V0, true);
+        expected.TR[0] += 24;
+        PSXRecomp::GTE::gte_rtps_internal(&expected, expected.V0, true);
+        gte_render_view_set(offset);
+        PSXRecomp::GTE::gte_rtps_internal(&eye, eye.V0, true);
+        PSXRecomp::GTE::gte_rtps_internal(&repeat, repeat.V0, true);
+        if (eye.SXY[2] != expected.SXY[2] || eye.SZ[3] != expected.SZ[3] ||
+            eye.MAC1 != expected.MAC1 || eye.TR[0] != base.TR[0] ||
+            eye.SXY[2] != repeat.SXY[2]) {
+            gte_render_view_set(zero);
+            return fail_value("render view equals pre-divide translation", 0, 0, 0,
+                              expected.SXY[2], eye.SXY[2]);
+        }
+        shifts[i] = (int16_t)eye.SXY[2] - (int16_t)baseline.SXY[2];
+    }
+    gte_render_view_set(zero);
+    if (shifts[0] != 12 || shifts[1] != 3)
+        return fail_value("near/far render-view displacement", 0, 0, 0, 12u,
+                          static_cast<uint32_t>(shifts[0]));
+    std::puts("PASS: view offset gives 12px at Z=800, 3px at Z=3200; TR unchanged; no accumulation");
+    return 0;
+}
+
+int test_pgxp_probe_does_not_count_geometry_lookup() {
+    constexpr uint32_t packed = (80u << 16) | 160u;
+    constexpr int32_t x16 = (160 << 16) + 0x4000;
+    constexpr int32_t y16 = (80 << 16) + 0x2000;
+    const int fallback_was_enabled = pgxp_position_fallback();
+    gte_geometry_correction_set(1);
+    gte_test_seed_geometry(packed, x16, y16);
+    pgxp_set_position_fallback(1);
+
+    uint32_t lookups0 = 0, hits0 = 0, miss_unrecorded0 = 0, miss_ambiguous0 = 0;
+    gte_geometry_correction_stats(&lookups0, &hits0, &miss_unrecorded0,
+                                  &miss_ambiguous0);
+    if (pgxp_probe_precise_vertex(0xFFFFFFFFu, packed, 160, 80) !=
+        PGXP_SRC_FALLBACK)
+        return fail_value("PGXP fallback probe source", 0, 0, packed,
+                          PGXP_SRC_FALLBACK, PGXP_SRC_NATIVE);
+    uint32_t lookups1 = 0, hits1 = 0, miss_unrecorded1 = 0, miss_ambiguous1 = 0;
+    gte_geometry_correction_stats(&lookups1, &hits1, &miss_unrecorded1,
+                                  &miss_ambiguous1);
+    if (lookups1 != lookups0 || hits1 != hits0 ||
+        miss_unrecorded1 != miss_unrecorded0 ||
+        miss_ambiguous1 != miss_ambiguous0)
+        return fail_value("PGXP probe leaves geometry counters unchanged", 0, 0,
+                          packed, lookups0, lookups1);
+
+    int32_t got_x = 0, got_y = 0;
+    uint16_t got_z = 1;
+    if (pgxp_get_precise_vertex(0xFFFFFFFFu, packed, 160, 80,
+                                &got_x, &got_y, &got_z) != PGXP_SRC_FALLBACK ||
+        got_x != x16 || got_y != y16 || got_z != 0)
+        return fail_value("PGXP draw uses geometry fallback", 0, 0, packed,
+                          static_cast<uint32_t>(x16), static_cast<uint32_t>(got_x));
+    uint32_t lookups2 = 0, hits2 = 0, miss_unrecorded2 = 0, miss_ambiguous2 = 0;
+    gte_geometry_correction_stats(&lookups2, &hits2, &miss_unrecorded2,
+                                  &miss_ambiguous2);
+    gte_geometry_correction_set(0);
+    pgxp_set_position_fallback(fallback_was_enabled);
+    if (lookups2 != lookups1 + 1u || hits2 != hits1 + 1u ||
+        miss_unrecorded2 != miss_unrecorded1 ||
+        miss_ambiguous2 != miss_ambiguous1)
+        return fail_value("draw increments geometry counters", 0, 0, packed,
+                          lookups1 + 1u, lookups2);
+    return 0;
+}
+
 } // namespace
 
 /* Preserve projection precision (docs/ENHANCEMENTS.md G1.11) changes the
@@ -1111,7 +1270,56 @@ int test_preserve_projection_is_shadow_only() {
     return 0;
 }
 
+int test_projection_scale() {
+    double value = 2;
+    for (const char* bad : {"", "nan", "inf", "9", "0", "-1", "2junk", "1e999", "1e-999"}) {
+        CHECK(!psx_projection_scale_parse(bad, &value) && value == 2);
+    }
+    CHECK(psx_projection_scale_parse(" 8.0 ", &value) && value == 8);
+    CHECK(!psx_projection_scale_valid(std::numeric_limits<double>::quiet_NaN()));
+    CHECK(psx_projection_scale_denominator(0.00001) == 1);
+    CPUState seed{};
+    seed.gte_ctrl[0] = 4096; seed.gte_ctrl[2] = 4096; seed.gte_ctrl[4] = 4096;
+    seed.gte_ctrl[26] = 320; seed.gte_data[0] = 100; seed.gte_data[1] = 1000;
+    const uint32_t cmd = 0x80001;
+    CPUState stock=seed; gte_set_fov_scale(1,1); gte_execute(&stock,cmd);
+    CPUState identity=seed; gte_set_fov_scale(1000,1000); gte_execute(&identity,cmd);
+    CHECK(same_gte(stock,identity));
+    CPUState widened=seed; gte_set_fov_scale(1,2); gte_execute(&widened,cmd);
+    CPUState reference=seed; reference.gte_ctrl[26]=160;
+    gte_set_fov_scale(1,1); gte_execute(&reference,cmd);
+    CHECK(widened.gte_ctrl[26] == 320 && widened.gte_data[14] == reference.gte_data[14]);
+    CHECK(widened.gte_data[14] != stock.gte_data[14]);
+    for (auto ratio : {std::pair<int,int>{0,1}, {-1,1}, {1,0}, {1,-1}}) {
+        CPUState reset=seed; gte_set_fov_scale(ratio.first,ratio.second); gte_execute(&reset,cmd);
+        CHECK(same_gte(stock,reset));
+    }
+    /* Guest H == 0 is a real (degenerate) projection: it must stay 0, not be
+     * clamped to 1, under any scale. */
+    {
+        CPUState h0=seed; h0.gte_ctrl[26]=0;
+        CPUState h0_stock=h0; gte_set_fov_scale(1,1); gte_execute(&h0_stock,cmd);
+        CPUState h0_scaled=h0; gte_set_fov_scale(1,2); gte_execute(&h0_scaled,cmd);
+        CHECK(h0_scaled.gte_ctrl[26] == 0);
+        CHECK(same_gte(h0_stock,h0_scaled));
+        gte_set_fov_scale(1000,500); h0_scaled=h0; gte_execute(&h0_scaled,cmd);
+        CHECK(same_gte(h0_stock,h0_scaled));
+    }
+    /* Netplay forces identity so peers cannot diverge on SXY/MAC/FLAG. */
+    {
+        g_test_netplay_active = 1;
+        CPUState np=seed; gte_set_fov_scale(1,2); gte_execute(&np,cmd);
+        g_test_netplay_active = 0;
+        CHECK(same_gte(stock,np));
+        CPUState off=seed; gte_set_fov_scale(1,2); gte_execute(&off,cmd);
+        CHECK(!same_gte(stock,off));
+    }
+    gte_set_fov_scale(1,1);
+    return 0;
+}
+
 int main() {
+    if (int rc = test_projection_scale()) return rc;
     if (int rc = test_hardware_register_semantics()) return rc;
     if (int rc = test_canonicalizer()) return rc;
     if (int rc = test_reads()) return rc;
@@ -1124,8 +1332,11 @@ int main() {
     if (int rc = test_precise_nclip_is_title_scoped()) return rc;
     if (int rc = test_saturated_nclip_keeps_architectural_result()) return rc;
     if (int rc = test_precision_speculative_transaction()) return rc;
+    if (int rc = test_pgxp_probe_does_not_count_geometry_lookup()) return rc;
     if (int rc = test_preserve_projection_is_shadow_only()) return rc;
     if (int rc = test_pgxp_culling()) return rc;
+    if (int rc = test_render_view_parallax()) return rc;
+    if (int rc = test_render_pose()) return rc;
     /* Signed host projection spans the camera plane without changing any
      * architectural register, including unsigned SZ and divider/screen flags. */
     pgxp_set_enabled(1);
@@ -1147,6 +1358,25 @@ int main() {
             return 1;
         }
     }
+    /* The clipper's projection (hx, OFY/MAC2*H term, near_z = H/2) must use the
+     * same scaled H as the guest's SXY, or culling disagrees with the draw. */
+    gte_set_fov_scale(1,2);
+    for (int depth : {1,149,900}) {
+        GTEState g{};
+        g.RT[0][0]=g.RT[1][1]=g.RT[2][2]=4096;
+        g.V0[0]=100;g.V0[1]=30;g.TR[2]=depth;
+        g.H=300;g.OFX=256*65536;g.OFY=120*65536;
+        pgxp_set_projection_tracking(1);
+        PSXRecomp::GTE::gte_rtps(&g,0x0180001u);
+        PGXPProjection p;
+        if (!pgxp_get_gte_projection(2,g.SXY[2],&p) ||
+            p.z!=depth || p.x!=256*depth+15000 || p.y!=120*depth+4500 || p.near_z!=75) {
+            std::fprintf(stderr,"FAIL scaled-H clipper projection at depth %d\n",depth);
+            gte_set_fov_scale(1,1);
+            return 1;
+        }
+    }
+    gte_set_fov_scale(1,1);
     pgxp_set_projection_tracking(0);
     std::puts("PASS: canonical GTE register helpers match GTEState transfer oracle");
     return 0;

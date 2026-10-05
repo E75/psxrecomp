@@ -3226,8 +3226,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys, const int *us, c
          * own precomputed lim and pre-bumped uvs). */
         int *mu = uv_buf, *mv = uv_buf + 3;
         for (int i = 0; i < 3; i++) { mu[i] = us[i]; mv[i] = vs[i]; }
-        psx_uv_tri_limits(xs, ys, mu, mv, lim_buf);
-        psx_uv_tri_mirror_offset(xs, ys, mu, mv);
+        psx_uv_tri_center_sample(xs, ys, mu, mv, s_pq_valid, lim_buf);
         us = mu; vs = mv;
         lim = lim_buf;
     }

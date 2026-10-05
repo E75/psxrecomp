@@ -26,9 +26,22 @@ static int g_failures = 0;
 static uint32_t g_fb_packed = 0;
 static int32_t  g_fb_x16 = 0, g_fb_y16 = 0;
 static int      g_fb_valid = 0;
+static uint32_t g_fb_probe_lookups = 0;
+static uint32_t g_fb_render_lookups = 0;
 
 extern "C" int gte_geometry_correction_lookup(uint32_t packed,
                                               int32_t *x16, int32_t *y16) {
+    ++g_fb_render_lookups;
+    if (!g_fb_valid || packed != g_fb_packed) return 0;
+    if (x16) *x16 = g_fb_x16;
+    if (y16) *y16 = g_fb_y16;
+    return 1;
+}
+
+extern "C" int gte_geometry_correction_lookup_probe(uint32_t packed,
+                                                     int32_t *x16,
+                                                     int32_t *y16) {
+    ++g_fb_probe_lookups;
     if (!g_fb_valid || packed != g_fb_packed) return 0;
     if (x16) *x16 = g_fb_x16;
     if (y16) *y16 = g_fb_y16;
@@ -555,6 +568,30 @@ int main(void) {
         pgxp_get_stats(&b);
         CHECK(b.rect_bypass == a.rect_bypass + 1);
         CHECK(b.rect_partial == a.rect_partial + 2);
+
+        const int fallback_was_enabled = pgxp_position_fallback();
+        pgxp_set_position_fallback(1);
+        g_fb_valid = 1;
+        g_fb_packed = PACKED;
+        g_fb_x16 = 160 << 16;
+        g_fb_y16 = 80 << 16;
+        const uint32_t render_lookups = g_fb_render_lookups;
+        const uint32_t probe_lookups = g_fb_probe_lookups;
+        pgxp_get_stats(&a);
+        CHECK(pgxp_probe_precise_vertex(0xFFFFFFFFu, PACKED, 160, 80) ==
+              PGXP_SRC_FALLBACK);
+        pgxp_get_stats(&b);
+        CHECK(std::memcmp(&a, &b, sizeof a) == 0);
+        CHECK(g_fb_render_lookups == render_lookups);
+        CHECK(g_fb_probe_lookups == probe_lookups + 1u);
+        int32_t x16, y16;
+        uint16_t sz;
+        CHECK(pgxp_get_precise_vertex(0xFFFFFFFFu, PACKED, 160, 80,
+                                      &x16, &y16, &sz) == PGXP_SRC_FALLBACK);
+        CHECK(g_fb_render_lookups == render_lookups + 1u);
+        CHECK(g_fb_probe_lookups == probe_lookups + 1u);
+        g_fb_valid = 0;
+        pgxp_set_position_fallback(fallback_was_enabled);
     }
 
     /* --- preserve projection: the RTPS-side window check (G1.11) ---------- */
