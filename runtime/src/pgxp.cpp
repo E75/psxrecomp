@@ -1063,10 +1063,20 @@ static inline int pgxp_accept(int32_t px, int32_t py, int32_t int_x,
             return 2;
     }
     return 0;
+}
+
+/* Rebase a shadow that describes the int16 half onto GP0's 11-bit field when
+ * the half carries flag bits ABOVE the field (Spider-Man packs clip flags in
+ * bits 14/15). A half whose bits 11-15 are a plain sign extension holds an
+ * ordinary number; if it overflowed the field (e.g. 0x0402 parses as -1022),
+ * that is CPU arithmetic the GPU wraps, which pgxp_agrees() only believes on
+ * exact integer agreement, so it is left to that check unchanged. */
 static inline int32_t field_rebase(int32_t v16, uint32_t half, int32_t parsed) {
     int32_t as16 = (int16_t)half;
     int32_t as11 = ((int32_t)(half << 21)) >> 21;
     if (parsed != as11 || parsed == as16) return v16;
+    const uint32_t above = (half >> 11) & 0x1Fu;
+    if (above == ((half & 0x8000u) ? 0x1Fu : 0u)) return v16;
     return (int32_t)((int64_t)v16 + ((int64_t)as11 - as16) * 65536);
 }
 

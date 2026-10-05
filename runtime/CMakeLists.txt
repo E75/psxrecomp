@@ -431,6 +431,7 @@ if(BUILD_TESTING)
         src/psx_ram_geometry.c
         src/mod_runtime.cpp
         src/mod_packages.cpp
+        src/mod_media.cpp
         src/disc_path.cpp
         src/cue_sheet.cpp
         src/iso_reader.cpp
