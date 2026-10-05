@@ -27,6 +27,9 @@
 #include "overlay_backend.h"
 #include "cpu_state.h"
 #include "pgxp.h"
+#ifndef PSX_NO_DEBUG_TOOLS
+#include "psx_disasm.h"
+#endif
 #include "dma.h"
 #include "gpu.h"
 #include "gpu_render.h"   /* gr_scale + gr_render_display_hires (screenshot_hires) */
@@ -5184,6 +5187,60 @@ static void handle_get_registers(int id, const char *json)
     send_line(buf);
     free(buf);
 }
+
+/* disasm: disassemble guest instructions. {"cmd":"disasm","addr":"0x8001121C",
+ * "count":32}. Reads live guest memory, so it works on EXE code and on
+ * RAM-installed/overlay code alike. Uses the recompiler's MIPS decoder.
+ * Reads go through psx_peek_word (main RAM / scratchpad / BIOS ROM only, no
+ * device reads, no read hooks); a word outside those comes back as
+ * {"word":null,"text":"<unreadable>"}. Compiled only with the debug tools,
+ * like the sources it needs (runtime.cmake). */
+#ifndef PSX_NO_DEBUG_TOOLS
+static void handle_disasm(int id, const char *json)
+{
+    char addr_str[32];
+    if (!json_get_str(json, "addr", addr_str, sizeof(addr_str))) {
+        send_err(id, "missing addr"); return;
+    }
+    const char *hex = addr_str;
+    if (hex[0] == '0' && (hex[1] == 'x' || hex[1] == 'X')) hex += 2;
+    char *hex_end = NULL;
+    unsigned long long addr_val = strtoull(hex, &hex_end, 16);
+    if (hex_end == hex || *hex_end != '\0' || addr_val > 0xFFFFFFFFull) {
+        send_err(id, "bad addr"); return;
+    }
+    uint32_t addr = (uint32_t)addr_val & ~3u;
+    int count = json_get_int(json, "count", 16);
+    if (count < 1) count = 1;
+    if (count > 256) count = 256;
+
+    size_t bufsz = 512u + (size_t)count * 160u;
+    char *out = (char *)malloc(bufsz);
+    if (!out) { send_err(id, "oom"); return; }
+    int pos = snprintf(out, bufsz,
+                       "{\"id\":%d,\"ok\":true,\"addr\":\"0x%08X\",\"count\":%d,\"lines\":[",
+                       id, addr, count);
+    char text[128];
+    for (int i = 0; i < count; i++) {
+        uint32_t a = addr + (uint32_t)i * 4u;
+        uint32_t w = 0;
+        if (!psx_peek_word(a, &w)) {
+            pos += snprintf(out + pos, bufsz - (size_t)pos,
+                            "%s{\"addr\":\"0x%08X\",\"word\":null,\"text\":\"<unreadable>\"}",
+                            i ? "," : "", a);
+            continue;
+        }
+        text[0] = '\0';
+        (void)psx_disasm_one(w, a, text, (int)sizeof(text));
+        pos += snprintf(out + pos, bufsz - (size_t)pos,
+                        "%s{\"addr\":\"0x%08X\",\"word\":\"0x%08X\",\"text\":\"%s\"}",
+                        i ? "," : "", a, w, text);
+    }
+    pos += snprintf(out + pos, bufsz - (size_t)pos, "]}");
+    debug_server_send_line(out);
+    free(out);
+}
+#endif /* !PSX_NO_DEBUG_TOOLS */
 
 static void handle_read_ram(int id, const char *json)
 {
@@ -14751,6 +14808,9 @@ static const CmdEntry s_commands[] = {
     { "c0_history",        handle_c0_history },
     { "capture_quads",     handle_capture_quads },
     { "get_quads",         handle_get_quads },
+#ifndef PSX_NO_DEBUG_TOOLS
+    { "disasm",            handle_disasm },
+#endif
     { "gte_state",         handle_gte_state },
     { "gte_ring_dump",     handle_gte_ring_dump },
     { "gte_intpl_dump",    handle_gte_intpl_dump },
