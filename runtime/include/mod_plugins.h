@@ -153,7 +153,8 @@ int psx_mod_host_write_ram(uint32_t address, const void* data, uint32_t bytes);
 /* PsyQ SpuWrite by DMA, completed synchronously: transfer address, DMA-write
  * transfer mode, the words through the SPU's DMA write path (address
  * advance and sample-IRQ checks), then transfer mode stop when stop_after.
- * spu_address 8-aligned, guest_source/bytes word aligned, within SPU RAM.
+ * spu_address 8-aligned, guest_source/bytes word aligned, at most 512 KiB;
+ * the transfer address wraps at the end of SPU RAM as on hardware.
  * Library bookkeeping (transfer callbacks, busy flags) stays the caller's. */
 int psx_mod_spu_upload(uint32_t spu_address, uint32_t guest_source,
                        uint32_t bytes, int stop_after);

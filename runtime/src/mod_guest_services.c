@@ -63,7 +63,7 @@ int psx_mod_host_write_ram(uint32_t address, const void* data, uint32_t bytes) {
 int psx_mod_spu_upload(uint32_t spu_address, uint32_t guest_source,
                        uint32_t bytes, int stop_after) {
     if ((spu_address & 7u) || (guest_source & 3u) || (bytes & 3u) ||
-        spu_address >= SPU_RAM_BYTES || bytes > SPU_RAM_BYTES - spu_address ||
+        spu_address >= SPU_RAM_BYTES || bytes > SPU_RAM_BYTES ||
         !ram_span(guest_source, bytes))
         return 0;
     spu_write(SPU_TRANSFER_ADDR, spu_address >> 3);

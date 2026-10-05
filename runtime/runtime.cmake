@@ -1,4 +1,4 @@
-﻿# Shared psxrecomp runtime CMake helpers.
+# Shared psxrecomp runtime CMake helpers.
 #
 # Include this from either the framework runtime build or a sibling game
 # project. SDL3 is the default; set -DPSX_SDL_BACKEND=SDL2 for the legacy
@@ -1333,6 +1333,10 @@ function(_psxrt_stage_mod_catalog target preloaded_dir)
            AND IS_DIRECTORY "${preloaded_dir}")
             list(APPEND _audit_roots "${preloaded_dir}")
         endif()
+        get_target_property(_extra_roots ${target} PSXRT_AUDIT_MOD_DIRS)
+        if(_extra_roots)
+            list(APPEND _audit_roots ${_extra_roots})
+        endif()
         add_test(NAME psx_mod_plugin_audit_${target}
             COMMAND $<TARGET_FILE:${target}> --audit-mod-plugins ${_audit_roots})
     endif()
@@ -1397,7 +1401,13 @@ function(psxrecomp_add_runtime_target target)
     # mods/builtin/packages) this target does not ship. They are left out of
     # <exe-dir>/mods/bundled entirely -- absent, not hidden -- so no packager
     # can ship them either. An id that is not a builtin fails configure.
-    set(multiValueArgs EXTRAS_SOURCES GAME_GENERATED_FULL_C EXCLUDE_BUILTIN_MODS)
+    #
+    # AUDIT_MOD_DIRS names further authored package trees (manifest.toml files
+    # are found recursively) that declare plugins this executable registers but
+    # no bundled catalog ships, e.g. development-only packages. They are
+    # audited, never staged.
+    set(multiValueArgs EXTRAS_SOURCES GAME_GENERATED_FULL_C EXCLUDE_BUILTIN_MODS
+        AUDIT_MOD_DIRS)
     cmake_parse_arguments(PSXRT "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
     # DEBUG_PORT and WINDOW_TITLE were previously required cmake-time defaults.
@@ -2003,7 +2013,14 @@ function(psxrecomp_add_runtime_target target)
     # letting it stage would have it wipe and re-stage the runtime's catalog
     # with only the framework half.
     if(NOT PSXRT_COSIM)
-        _psxrt_stage_mod_catalog("${target}" "${PSXRT_PRELOADED_MODS_DIR}"
+        foreach(_audit_dir IN LISTS PSXRT_AUDIT_MOD_DIRS)
+        if(NOT IS_DIRECTORY "${_audit_dir}")
+            message(FATAL_ERROR
+                "AUDIT_MOD_DIRS for target '${target}' is not a directory: ${_audit_dir}")
+        endif()
+    endforeach()
+    set_property(TARGET ${target} PROPERTY PSXRT_AUDIT_MOD_DIRS "${PSXRT_AUDIT_MOD_DIRS}")
+    _psxrt_stage_mod_catalog("${target}" "${PSXRT_PRELOADED_MODS_DIR}"
             ${PSXRT_EXCLUDE_BUILTIN_MODS})
     endif()
     endif()
