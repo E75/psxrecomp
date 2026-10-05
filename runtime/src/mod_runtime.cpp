@@ -1432,6 +1432,11 @@ extern "C" void mod_runtime_on_savestate_loaded(void) {
         applied = true;
     }
     s.main_applied = true;
+    for (const ModResolution::Plugin& plugin : s.plan.plugins) {
+        s.current_plugin = &plugin;
+        mod_invoke_savestate_plugin(plugin.id);
+        s.current_plugin = nullptr;
+    }
     if (applied)
         std::fprintf(stdout,
             "psxrecomp: reapplied mod plan %s after savestate restore\n",

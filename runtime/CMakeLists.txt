@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.20)
 project(psxrecomp-runtime C CXX)
 include(CTest)
 
@@ -66,6 +66,15 @@ if(BUILD_TESTING)
     set_tests_properties(netplay_libjuice_offline_other PROPERTIES
         PASS_REGULAR_EXPRESSION "recomp-net pins libjuice SHA256")
     if(NOT MSVC)
+        add_executable(host_snapshot_guard_test tests/test_host_snapshot_guard.c)
+        add_executable(fntrace_restore_handoff_test
+            tests/test_fntrace_restore_handoff.c src/fntrace.c)
+        foreach(test_target host_snapshot_guard_test fntrace_restore_handoff_test)
+            target_include_directories(${test_target} PRIVATE include src)
+            target_compile_options(${test_target} PRIVATE -O2 -flto -ffunction-sections -fdata-sections)
+            target_link_options(${test_target} PRIVATE -flto -Wl,--gc-sections)
+            add_test(NAME ${test_target} COMMAND ${test_target})
+        endforeach()
         add_executable(ws_world_scene_test tests/test_ws_world_scene.c
             src/psx_video_timing.c)
         target_include_directories(ws_world_scene_test PRIVATE include src)

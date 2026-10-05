@@ -22,6 +22,7 @@ static std::array<uint8_t, 2 * 1024 * 1024> ram;
 static int failures;
 static int activation_calls;
 static int plugin_calls;
+static int restore_calls;
 
 extern "C" uint8_t psx_read_byte(uint32_t address) {
     return ram[address & 0x1fffffu];
@@ -191,6 +192,11 @@ static void test_activation_plugin(void) {
 static int big_ram_activations;
 static void test_big_ram_activation(void) {
     big_ram_activations++;
+}
+
+static void test_restore_plugin(void) {
+    restore_calls++;
+    if (ram[0x1000] != 0xa1) failures++; /* main plan must be reapplied first */
 }
 
 static void check(bool value, const char* message) {
@@ -454,6 +460,10 @@ int main() {
     check(psx_mod_register_guest_function_plugin(
               "runtime.unselected-entry", 0x8FFF0004u, test_unselected_entry),
           "unselected callback implementation can register");
+    check(psx_mod_register_savestate_plugin("runtime.test-vblank", test_restore_plugin),
+          "restore callback must register through the C API");
+    check(!psx_mod_register_savestate_plugin("runtime.test-vblank", test_restore_plugin),
+          "duplicate restore callback must be rejected");
     check(PSXRecompV4::mod_runtime_initialize(
               root, "SLUS-RUNTIME", 0x80002000, {}, &error),
           error.c_str());
@@ -641,7 +651,12 @@ int main() {
     ram[0x1102] = 1; ram[0x1103] = 0;
     ram[0x1200] = 2; ram[0x1201] = 0;
     ram[0x1202] = 1; ram[0x1203] = 0x32;
+    const int activation_before_restore = activation_calls;
+    const int vblank_before_restore = plugin_calls;
     mod_runtime_on_savestate_loaded();
+    check(restore_calls == 1 && activation_calls == activation_before_restore &&
+              plugin_calls == vblank_before_restore,
+          "restore must rebind hooks without activation or a gameplay VBlank");
     check(ram[0x1000] == 0xa1 && ram[0x1003] == 0xa4 &&
               ram[0x1100] == 42 && ram[0x1102] == 43 &&
               ram[0x1200] == 1 && ram[0x1201] == 0x42 &&

@@ -519,6 +519,8 @@ bool mod_register_builtin_resolver(const std::string& id, ModBuiltinResolver res
 void mod_clear_builtin_resolvers_for_tests();
 bool mod_register_activation_plugin(const std::string& id, void (*callback)(void));
 bool mod_register_vblank_plugin(const std::string& id, void (*callback)(void));
+bool mod_register_savestate_plugin(const std::string& id, void (*callback)(void));
+void mod_invoke_savestate_plugin(const std::string& id);
 /* A function-entry hook is a trusted implementation like the others: manifests
  * select it by id, and it runs only while a resolved plan activates that id. */
 bool mod_register_function_entry_plugin(const std::string& id, uint32_t address,

@@ -33,6 +33,7 @@ std::map<std::string, ModBuiltinResolver>& builtin_resolvers() {
 }
 
 struct RegisteredPlugin {
+    void (*savestate)(void) = nullptr;
     PSXModActivationCallback activation = nullptr;
     PSXModVBlankCallback vblank = nullptr;
     /* Generated-function entry hooks, keyed by guest address. One id may
@@ -1479,7 +1480,7 @@ bool mod_register_function_filter_plugin(const std::string& id, uint32_t address
 bool mod_plugin_registered(const std::string& id) {
     const auto found = registered_plugins().find(id);
     return found != registered_plugins().end() &&
-        (found->second.activation || found->second.vblank ||
+        (found->second.activation || found->second.vblank || found->second.savestate ||
          !found->second.function_entries.empty() || !found->second.guest_functions.empty() ||
          !found->second.instructions.empty());
 }
@@ -1519,6 +1520,20 @@ std::vector<ModInstructionHook> mod_instruction_hooks(const std::string& id) {
     const auto found = registered_plugins().find(id);
     return found == registered_plugins().end()
         ? std::vector<ModInstructionHook>{} : found->second.instructions;
+}
+
+bool mod_register_savestate_plugin(const std::string& id, void (*callback)(void)) {
+    if (!valid_id(id) || !callback) return false;
+    RegisteredPlugin& plugin = registered_plugins()[id];
+    if (plugin.savestate) return false;
+    plugin.savestate = callback;
+    return true;
+}
+
+void mod_invoke_savestate_plugin(const std::string& id) {
+    const auto found = registered_plugins().find(id);
+    if (found != registered_plugins().end() && found->second.savestate)
+        found->second.savestate();
 }
 
 void mod_invoke_activation_plugin(const std::string& id) {
@@ -3952,4 +3967,10 @@ extern "C" int psx_mod_register_activation_plugin(
     const char* id, PSXModActivationCallback callback) {
     return id &&
         PSXRecompV4::mod_register_activation_plugin(id, callback) ? 1 : 0;
+}
+
+extern "C" int psx_mod_register_savestate_plugin(
+    const char* id, PSXModActivationCallback callback) {
+    return id &&
+        PSXRecompV4::mod_register_savestate_plugin(id, callback) ? 1 : 0;
 }
