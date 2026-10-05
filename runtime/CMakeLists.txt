@@ -23,6 +23,10 @@ psxrecomp_add_runtime_target(psx-runtime
 # (docs/ENHANCEMENTS.md G1.10). Titles get their <exe>_pgxp the same way.
 
 if(BUILD_TESTING)
+    add_executable(disasm_test tests/test_disasm.cpp src/disasm_shim.cpp
+        ../recompiler/src/mips_decoder.cpp)
+    target_include_directories(disasm_test PRIVATE include ../recompiler/include)
+    add_test(NAME disasm_test COMMAND disasm_test)
     # Netplay: which BIOS a match boots, and its wire helpers.
     add_executable(netplay_bios_settle_test
         tests/test_netplay_bios_settle.c
@@ -121,6 +125,10 @@ if(BUILD_TESTING)
     set(PSX_GL_READBACK_COMPILER_BIN "${_gl_test_default_bin}" CACHE PATH "GCC/MinGW bin for GL fixture")
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
+        add_test(NAME wtrace_dump_test COMMAND ${CMAKE_COMMAND} -E env
+            "CC=${CMAKE_C_COMPILER}" "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wtrace_dump.py")
+        set_tests_properties(wtrace_dump_test PROPERTIES SKIP_RETURN_CODE 77)
         add_test(NAME counted_mips_relocations_test COMMAND "${Python3_EXECUTABLE}"
             "${PSXRECOMP_ROOT}/tools/tests/test_counted_mips_relocations.py")
         add_test(NAME interp_mod_entry_guards_test COMMAND "${Python3_EXECUTABLE}"
@@ -392,6 +400,23 @@ if(BUILD_TESTING)
     target_include_directories(sio_dualshock_rumble_test PRIVATE include)
     add_test(NAME sio_dualshock_rumble_test COMMAND sio_dualshock_rumble_test)
     set_tests_properties(sio_dualshock_rumble_test PROPERTIES DISABLED TRUE)
+
+    add_executable(vr_pose_math_test tests/test_vr_pose_math.c src/vr_pose_math.c)
+    target_include_directories(vr_pose_math_test PRIVATE include)
+    if(NOT MSVC)
+        target_link_libraries(vr_pose_math_test PRIVATE m)
+    endif()
+    add_test(NAME vr_pose_math_test COMMAND vr_pose_math_test)
+
+    add_executable(projection_scale_config_test
+        tests/test_projection_scale_config.cpp src/projection_scale_config.cpp)
+    target_include_directories(projection_scale_config_test PRIVATE
+        include ../recompiler/lib/toml11)
+    add_test(NAME projection_scale_config_test COMMAND projection_scale_config_test)
+
+    add_executable(mod_controller_source_test tests/test_mod_controller_source.c src/mod_controller_source.c)
+    target_include_directories(mod_controller_source_test PRIVATE include)
+    add_test(NAME mod_controller_source_test COMMAND mod_controller_source_test)
 
     add_executable(gte_register_access_test
         tests/test_gte_register_access.cpp
@@ -1255,6 +1280,17 @@ if(BUILD_TESTING)
         add_test(NAME release_stage_cache_test
                  COMMAND ${Python3_EXECUTABLE}
                          ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_release_stage_cache.py)
+        # Overlay shards and BIOS modules are compiled for the RUNTIME's
+        # architecture: an x86_64 macOS runtime under Rosetta used to get arm64
+        # shards (arm64-only Xcode clang, no -arch) in its macos-x64 cache and
+        # ran every overlay interpreted. Pins the PSX_OVERLAY_ARCH_ABI handoff
+        # (autocompile.c), -arch on macOS, the refusal when the Python cannot
+        # load the runtime's architecture, and unchanged Windows/Linux commands;
+        # with a real cc it builds and loads each slice this Mac can run.
+        add_test(NAME overlay_compile_arch_test
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_overlay_compile_arch.py
+                         --cc ${CMAKE_C_COMPILER})
     endif()
 
     # Full card protocol regression: read, write, address echo, per-slot state,

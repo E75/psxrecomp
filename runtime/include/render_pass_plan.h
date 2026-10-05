@@ -192,6 +192,15 @@ void render_pass_journal_rollback(RenderPassJournal *j, uint16_t *vram,
                                   int vram_w);
 void render_pass_journal_free(RenderPassJournal *j);
 
+/* A published stereo pair may stay on screen only while the plugin keeps
+ * submitting. The pair is fresh while the guest clock is within
+ * RENDER_PASS_STEREO_MAX_AGE_VBLANKS vblanks after the pair's capture cycle
+ * (3x the 8-vblank maximum draw cadence). A clock behind the pair (savestate
+ * or rollback load) is stale. */
+#define RENDER_PASS_STEREO_MAX_AGE_VBLANKS 24u
+int render_pass_stereo_pair_fresh(uint64_t pair_cycle, uint64_t now_cycle,
+                                  uint32_t vblank_cycles);
+
 #ifdef __cplusplus
 }
 #endif

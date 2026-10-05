@@ -9,6 +9,8 @@ extern "C" {
 typedef void (*PSXModVBlankCallback)(void);
 typedef void (*PSXModActivationCallback)(void);
 struct CPUState;
+/* A callback that runs guest code inside psx_mod_render_pass() can be
+ * abandoned by a watchdog longjmp; see the note at psx_mod_render_pass(). */
 typedef void (*PSXModFunctionEntryCallback)(struct CPUState* cpu,
                                             uint32_t address);
 /* Return nonzero to finish this opt-in function with the callback's return
@@ -454,7 +456,14 @@ uint32_t psx_mod_render_pass_plan(uint32_t period_vblanks,
                                   uint32_t shown_after_vblanks,
                                   uint32_t* alpha_q16, uint32_t max);
 /* Returns 1 when the pass ran and its image was queued, 0 when it was refused
- * or rolled back (state is restored either way). */
+ * or rolled back (state is restored either way).
+ * A watchdog abort rolls the pass back by longjmp, past every frame between
+ * the watchdog and psx_mod_render_pass(): plugin callbacks, guest functions
+ * and function-entry hooks they called. Runtime nesting state (including the
+ * function-entry context) is restored, but plugin-owned state, held locks and
+ * C++ destructors in those frames are NOT unwound. A callback run inside a
+ * pass must keep nothing that needs cleanup (no locks, no RAII objects, no
+ * partially updated plugin state) across guest code, or tolerate the abort. */
 int psx_mod_render_pass(struct CPUState* cpu, const PSXModRenderPass* pass,
                         PSXModRenderPassFn fn, void* user);
 /*
@@ -482,6 +491,48 @@ enum {
     PSX_MOD_RENDER_PASS_BUSY = 6
 };
 uint32_t psx_mod_render_pass_status(void);
+/* Simultaneous stereo capture, independent of temporal interpolation. Each
+ * eye starts from the same guest state; CPU/RAM/devices/VRAM are restored
+ * before the other eye and on failure. Publish only after both succeed.
+ * The caller provides a draw-only callback at a main-thread frame boundary.
+ * period_vblanks (1..8) describes the game's draw cadence for whole-pair cost
+ * shedding. No alpha/time phase is used. Returns 1 for a published pair. */
+enum { PSX_MOD_EYE_LEFT = 0, PSX_MOD_EYE_RIGHT = 1 };
+typedef struct PSXModStereoFrame {
+    uint32_t struct_size;
+    uint32_t period_vblanks;
+    uint16_t x, y, w, h;
+} PSXModStereoFrame;
+typedef int (*PSXModStereoFn)(struct CPUState*, void*, uint32_t eye);
+int psx_mod_render_stereo(struct CPUState *cpu, const PSXModStereoFrame *frame,
+                          PSXModStereoFn fn, void *user);
+uint32_t psx_mod_render_stereo_status(void);
+/* 0 disables stereo output; 1 shows a complete pair side by side. Capture
+ * itself does not enable presentation. Default 0; applies to this session. */
+int psx_mod_set_stereo_presentation(uint32_t mode);
+/* Camera-space addition to RT*V+TR before RTPS/RTPT perspective division.
+ * Valid only inside a render callback. Replaces (never accumulates) the host
+ * offset and is restored automatically on completion or watchdog abort.
+ * Units are the game's GTE camera units; IPD/world-scale calibration is game
+ * specific. Zero is faithful. Guest TR registers are not modified. */
+int psx_mod_render_view_offset(int32_t x, int32_t y, int32_t z);
+/* Rigid camera transform after guest RT*V+TR, before division. Rotation is
+ * row-major Q12; translation uses camera units. Optional projection supplies
+ * focal lengths and centre deltas from guest OFX/OFY in Q16 pixel units.
+ * Identity rotation with projection=0 preserves the architectural path.
+ * projection=1 REPLACES the guest X/Y projection (guest H, widescreen squash and
+ * [video] fov_scale do not apply); projection_h_ref != 0 scales the focal lengths
+ * by (fov-scaled guest H)/ref. Valid only inside a render callback; restored with it. */
+typedef struct PSXModRenderView {
+    uint32_t struct_size;
+    int32_t rotation_q12[9], translation[3];
+    uint32_t projection;
+    uint32_t projection_h_ref; /* 0 absolute FOV; otherwise scale focal lengths by guest H/ref */
+    int32_t fx_q16, fy_q16, cx_delta_q16, cy_delta_q16;
+} PSXModRenderView;
+int psx_mod_render_view(const PSXModRenderView *view);
+
+
 
 /*
  * When the game flips relative to the pass point. PENDING (default, reset at
@@ -644,6 +695,25 @@ int psx_mod_set_controller_presentation_policy(
     PSXModControllerPresentationCallback callback,
     uint32_t initial_mode,
     int config_capable);
+
+/* Offline controller source owns a player's pad at normal input sampling.
+ * Mod-trusted like any mod code (arbitrary native code; the setter does no
+ * caller check). A declined/invalid sample delivers neutral, not the previous
+ * held input.
+ * Existing TCP overrides take priority; netplay/resim and eye redraws never
+ * invoke the source. The runtime keeps coherent SIO type requests/recording.
+ * Pass NULL to detach. Local keyboard/pad buttons remain merged for menus;
+ * the source owns sticks and type. No source leaves faithful defaults intact.
+ * Source and setter are main (emulation) thread only. Sources are sampled once
+ * per frame, only by the normal offline sampler: not in headless mode, not in
+ * netplay. The source's `analog` is the pad's capability; the final type still
+ * goes through the multitap rule, mod mode override and presentation policy.
+ * A bad struct_size or out-of-range value delivers neutral and logs to stderr. */
+typedef struct PSXModControllerState {
+    uint32_t struct_size, buttons, lx, ly, rx, ry, analog;
+} PSXModControllerState;
+typedef int (*PSXModControllerSource)(PSXModControllerState *state);
+int psx_mod_set_controller_source(uint32_t player, PSXModControllerSource source);
 
 /*
  * Register a C plugin before main() on the compilers supported by the runtime.

@@ -315,7 +315,19 @@ static void test_store_policy(void) {
     CHECK(render_pass_mmio_class(0x1F801820u, 0, 4) == RENDER_PASS_DROP_OTHER, "MDEC dropped");
 }
 
+static void test_stereo_pair_fresh(void) {
+    const uint32_t vb = 564480u;
+    const uint64_t c = 100000000ull;
+    CHECK(render_pass_stereo_pair_fresh(c, c, vb), "pair fresh on its own cycle");
+    CHECK(render_pass_stereo_pair_fresh(c, c + 8ull * vb, vb), "pair fresh across the slowest cadence");
+    CHECK(render_pass_stereo_pair_fresh(c, c + 24ull * vb, vb), "pair fresh at the age limit");
+    CHECK(!render_pass_stereo_pair_fresh(c, c + 24ull * vb + 1, vb),
+          "pair stale once the plugin stops submitting");
+    CHECK(!render_pass_stereo_pair_fresh(c, c - 1, vb), "clock behind pair (state load) is stale");
+}
+
 int main(void) {
+    test_stereo_pair_fresh();
     test_store_policy();
     test_counts_per_rate();
     test_shedding();
