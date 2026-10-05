@@ -281,7 +281,9 @@ class ToolTargetsRuntimeArch(unittest.TestCase):
                                      ('AMD64', 'mingw_i686_msvcrt_gnu', 'x86'),
                                      ('AMD64', 'mingw', 'x64'),
                                      ('ARM64', 'mingw', 'arm64'),
-                                     ('ARM64', 'win-arm32', 'unknown')):
+                                     ('ARM64', 'win-arm32', 'arm64'),
+                                     ('AMD64', 'win-unknown', 'x64'),
+                                     ('ARM64', 'custom-abi-tag', 'arm64')):
             with host('Windows', machine, build=build):
                 self.assertEqual(co.interpreter_arch(), want, (machine, build))
 
