@@ -1627,6 +1627,65 @@ extern "C" int psx_mod_read_disc_file(const char* path, void* buffer,
     } catch (...) { return 0; }
 }
 
+extern "C" int psx_mod_disc_file_extent(const char* path, uint32_t* lba,
+                                        uint32_t* size) {
+    using namespace PSXRecompV4;
+    if (lba) *lba = 0;
+    if (size) *size = 0;
+    if (!path || !*path || !lba || !size) return 0;
+    try {
+        const auto& s = state();
+        const auto& mount = s.effective_disc_path.empty() ? s.disc_path : s.effective_disc_path;
+        if (mount.empty()) return 0;
+        PS1::ISOReader reader;
+        uint32_t first = 0, bytes = 0;
+        bool directory = false;
+        if (!reader.Open(mount.string()) ||
+            !find_effective_file(reader, path, first, bytes, directory) ||
+            directory || !bytes || bytes > kMaxDiscFileBytes)
+            return 0;
+        *lba = first;
+        *size = bytes;
+        return 1;
+    } catch (...) { return 0; }
+}
+
+namespace PSXRecompV4 {
+/* Whole effective sectors, including the bytes after end-of-file in the last
+ * sector: a sector-granular read by the game receives exactly these. */
+bool mod_runtime_read_disc_file_sectors(const std::string& path, uint32_t max_bytes,
+                                        std::vector<uint8_t>& padded, uint32_t& lba,
+                                        uint32_t& size, std::string* error) {
+    padded.clear();
+    lba = size = 0;
+    auto fail = [&](const std::string& why) {
+        if (error) *error = path + ": " + why;
+        padded.clear();
+        return false;
+    };
+    try {
+        const auto& s = state();
+        const auto& mount = s.effective_disc_path.empty() ? s.disc_path : s.effective_disc_path;
+        if (mount.empty()) return fail("no disc mounted");
+        PS1::ISOReader reader;
+        bool directory = false;
+        if (!reader.Open(mount.string())) return fail("cannot open disc");
+        if (!find_effective_file(reader, path, lba, size, directory) || directory)
+            return fail("not found on the disc");
+        if (!size || size > kMaxDiscFileBytes || (max_bytes && size > max_bytes))
+            return fail("unsupported size " + std::to_string(size));
+        const uint32_t sectors = (size + 2047u) / 2048u;
+        padded.resize(size_t(sectors) * 2048u);
+        for (uint32_t i = 0; i < sectors; ++i)
+            if (!read_effective_user_sector(reader, lba + i, padded.data() + size_t(i) * 2048u))
+                return fail("unreadable sector " + std::to_string(lba + i));
+        return true;
+    } catch (const std::exception& e) {
+        return fail(e.what());
+    }
+}
+} // namespace PSXRecompV4
+
 extern "C" void mod_runtime_activate_plugins(void) {
     using namespace PSXRecompV4;
     RuntimeMods& s = state();
@@ -1952,6 +2011,17 @@ extern "C" int psx_mod_function_entry(CPUState* cpu, uint32_t address) {
 
 extern "C" int psx_mod_function_entry_active(void) {
     return PSXRecompV4::function_entry_depth != 0;
+}
+
+extern "C" void mod_runtime_function_entry_context_save(ModFunctionEntryContext *out) {
+    out->depth = PSXRecompV4::function_entry_depth;
+    out->plugin = PSXRecompV4::state().current_plugin;
+}
+
+extern "C" void mod_runtime_function_entry_context_restore(const ModFunctionEntryContext *in) {
+    PSXRecompV4::function_entry_depth = in->depth;
+    PSXRecompV4::state().current_plugin =
+        static_cast<const PSXRecompV4::ModResolution::Plugin *>(in->plugin);
 }
 
 /* Apply the committed plan's disc writes and overlays to one sector. The
