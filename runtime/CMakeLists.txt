@@ -276,6 +276,7 @@ if(BUILD_TESTING)
             tests/psx_ram_runtime_map_stubs.c
             src/memory.c
             src/dma.c
+            src/gpu_timeline.c
             src/boot_state.c
             src/psx_ram_geometry.c)
         target_include_directories(psx_ram_runtime_map_test PRIVATE include src)
@@ -296,6 +297,7 @@ if(BUILD_TESTING)
             tests/psx_ram_runtime_map_stubs.c
             src/memory.c
             src/dma.c
+            src/gpu_timeline.c
             src/boot_state.c
             src/psx_icache.c
             src/psx_ram_geometry.c)
@@ -481,7 +483,8 @@ if(BUILD_TESTING)
 
     add_executable(gpu_textured_dot_nw_shift_exec_test
         tests/test_gpu_textured_dot_nw_shift_exec.c
-        src/psx_video_timing.c)
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
     target_include_directories(gpu_textured_dot_nw_shift_exec_test PRIVATE
         include
         src)
@@ -500,7 +503,8 @@ if(BUILD_TESTING)
     add_executable(ws_auto_ui_untextured_exec_test
         tests/test_ws_auto_ui_untextured_exec.c
         src/ws_ui_group.c
-        src/psx_video_timing.c)
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
     target_include_directories(ws_auto_ui_untextured_exec_test PRIVATE
         include
         src)
@@ -516,7 +520,8 @@ if(BUILD_TESTING)
     add_executable(ws_shared_split_ui_exec_test
         tests/test_ws_shared_split_ui_exec.c
         src/ws_ui_group.c
-        src/psx_video_timing.c)
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
     target_include_directories(ws_shared_split_ui_exec_test PRIVATE include src)
     if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(ws_shared_split_ui_exec_test PRIVATE
@@ -527,9 +532,11 @@ if(BUILD_TESTING)
 
     add_executable(ws_view_anchor_test tests/test_ws_view_anchor.c)
     add_executable(ws_view_anchor_gpu_test tests/test_ws_view_anchor_gpu.c
-        src/psx_video_timing.c)
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
     add_executable(native_wide_projection_test tests/test_native_wide_projection.c
-        src/psx_video_timing.c)
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
     foreach(_anchor_test ws_view_anchor ws_view_anchor_gpu native_wide_projection)
         target_include_directories(${_anchor_test}_test PRIVATE include src)
         if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
@@ -715,24 +722,37 @@ if(BUILD_TESTING)
     add_executable(mod_packages_test
         tests/test_mod_packages.cpp
         src/mod_packages.cpp
+        src/mod_media.cpp src/iso_reader.cpp src/cue_sheet.cpp
         src/crc32.c
         src/psx_sha256.c)
     target_include_directories(mod_packages_test PRIVATE
         include
+        ../recompiler/include
         ../recompiler/lib/toml11)
+    target_link_libraries(mod_packages_test PRIVATE chdr-static)
     add_test(NAME mod_packages_test COMMAND mod_packages_test)
 
     add_executable(builtin_mod_manifests_test
         tests/test_builtin_mod_manifests.cpp
         src/mod_packages.cpp
+        src/mod_media.cpp src/iso_reader.cpp src/cue_sheet.cpp
         src/crc32.c
         src/psx_sha256.c)
     target_include_directories(builtin_mod_manifests_test PRIVATE
         include
+        ../recompiler/include
         ../recompiler/lib/toml11)
+    target_link_libraries(builtin_mod_manifests_test PRIVATE chdr-static)
     add_test(NAME builtin_mod_manifests_test
              COMMAND builtin_mod_manifests_test
                      "${CMAKE_CURRENT_SOURCE_DIR}/../mods/builtin/packages")
+
+    add_executable(mod_media_test
+        tests/test_mod_media.cpp src/mod_media.cpp src/iso_reader.cpp
+        src/cue_sheet.cpp src/psx_sha256.c)
+    target_include_directories(mod_media_test PRIVATE include ../recompiler/include)
+    target_link_libraries(mod_media_test PRIVATE chdr-static)
+    add_test(NAME mod_media_test COMMAND mod_media_test)
 
     add_executable(text_xlate_fix_only_test
         tests/test_text_xlate_fix_only.cpp
@@ -748,6 +768,7 @@ if(BUILD_TESTING)
         src/iso_reader_c.cpp
         src/mod_runtime.cpp
         src/mod_packages.cpp
+        src/mod_media.cpp
         src/disc_path.cpp
         src/cue_sheet.cpp
         src/iso_reader.cpp

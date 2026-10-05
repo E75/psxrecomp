@@ -160,6 +160,29 @@ static int test_inactive_filter(CPUState*, uint32_t) {
     ++inactive_filter_hits;
     return 1;
 }
+static int guest_function_hits;
+static int instruction_hits;
+static void test_instruction(CPUState* cpu, uint32_t) {
+    instruction_hits++;
+    cpu->gpr[5] = 0x80301008u;
+    if (psx_mod_finish_function(cpu)) failures++;
+}
+static void test_guest_function(CPUState* cpu, uint32_t) {
+    guest_function_hits++;
+    const uint32_t ra = cpu->gpr[31];
+    CPUState nested{};
+    nested.gpr[31] = 0x80007000u;
+    const int mode = entry_test_mode;
+    entry_test_mode = 1;
+    if (!psx_mod_function_entry(&nested, 0x80003000u) || nested.pc != nested.gpr[31]) failures++;
+    entry_test_mode = mode;
+    interrupted_entry_cpu = cpu;
+    mod_runtime_on_vblank();
+    interrupted_entry_cpu = nullptr;
+    if (!psx_mod_finish_function(cpu)) failures++;
+    cpu->gpr[2] = cpu->gpr[4] + 7u;
+    if (cpu->gpr[31] != ra) failures++;
+}
 
 static int guest_function_hits;
 static int instruction_hits;
@@ -187,6 +210,34 @@ static void test_guest_function(CPUState* cpu, uint32_t) {
 
 static void test_activation_plugin(void) {
     activation_calls++;
+}
+
+static const uint8_t* media_snapshot;
+static uint64_t media_size;
+static int media_access, foreign_media_access;
+static uint32_t mounted_lba;
+static int extent_ok, invalid_extent, foreign_extent;
+static void test_media_plugin(void) {
+    media_access = psx_mod_current_resource_bytes("rom", &media_snapshot, &media_size);
+    const uint8_t* foreign = nullptr;
+    uint64_t size = 0;
+    foreign_media_access = psx_mod_current_resource_bytes("private", &foreign, &size);
+    extent_ok=psx_mod_append_disc_extent("xa",0,2,&mounted_lba);
+    uint32_t bad=99;
+    invalid_extent=psx_mod_append_disc_extent("xa",1,2,&bad);
+    foreign_extent=psx_mod_append_disc_extent("private",0,1,&bad);
+}
+
+extern "C" {
+void* iso_open(const char*);
+void iso_close(void*);
+int iso_read_raw_sector(void*,uint32_t,uint8_t*,int);
+int iso_read_sector(void*,uint32_t,uint8_t*,int);
+int iso_read_subq(void*,uint32_t,uint8_t*,int,int*);
+uint32_t iso_sector_count(void*);
+int iso_track_count(void*);
+uint32_t iso_track_start_lba(void*,int);
+int iso_track_is_audio(void*,int);
 }
 
 static int big_ram_activations;
@@ -956,6 +1007,71 @@ int main() {
     check(PSXRecompV4::mod_runtime_commit(raw_path,&error),"reader mount raw disc");
     check(psx_mod_read_disc_file("S0/LEVEL.NSF",result.data(),(uint32_t)result.size(),&bytes) &&
           std::equal(result.begin(),result.end(),iso.begin()+22*2048),"raw and ISO reads identical");
+    /* Verified bytes are scoped to the committed feature, and do not depend
+     * on reopening an owner file after launch. No launcher is needed here. */
+    const auto media_root = root / "verified-media";
+    std::vector<uint8_t> rom(64, 0);
+    rom[0] = 0x80; rom[1] = 0x37; rom[2] = 0x12; rom[3] = 0x40;
+    rom[32] = 0x5a;
+    const auto rom_path = media_root / "owner.z64";
+    write_bytes(rom_path, rom);
+    std::vector<uint8_t> xa(2336*2);
+    xa[2]=xa[6]=0x64;xa[8]=0x52;
+    xa[2336+2]=xa[2336+6]=0xE4;xa[2336+8]=0x63;
+    const auto xa_path=media_root/"owner.xa";write_bytes(xa_path,xa);
+    write_text(media_root / "packages/media.test/1.0.0/manifest.toml",
+        "format_version = 8\nid = \"media.test\"\nversion = \"1.0.0\"\nname = \"Media Test\"\n"
+        "[[target]]\ngame_id = \"READER\"\n"
+        "[[feature]]\nid = \"active\"\nname = \"Active\"\ndefault_enabled = true\n"
+        "[[feature]]\nid = \"private\"\nname = \"Private\"\n"
+        "[[resource]]\nfeature = \"active\"\nid = \"rom\"\nlabel = \"ROM\"\n"
+        "format = \"n64-rom\"\nrequired = true\nsize = 64\nsha256 = \"" + sha256_hex(rom) + "\"\n"
+        "[[resource]]\nfeature = \"active\"\nid = \"xa\"\nlabel = \"XA\"\n"
+        "format = \"file\"\nrequired = true\nsize = 4672\nsha256 = \"" + sha256_hex(xa) + "\"\n"
+        "[[resource]]\nfeature = \"private\"\nid = \"private\"\nlabel = \"Private\"\n"
+        "format = \"n64-rom\"\nrequired = true\nsize = 64\nsha256 = \"" + sha256_hex(rom) + "\"\n"
+        "[[plugin]]\nfeature = \"active\"\nid = \"media.test.plugin\"\n");
+    write_text(media_root / "state.toml",
+        "format_version = 2\n[[feature]]\npackage_id = \"media.test\"\nid = \"active\"\nenabled = true\n"
+        "[feature.resources]\nrom = \"" + rom_path.generic_string() + "\"\nxa = \"" + xa_path.generic_string() + "\"\n");
+    check(psx_mod_register_activation_plugin("media.test.plugin", test_media_plugin), "register media consumer");
+    check(PSXRecompV4::mod_runtime_initialize(media_root, "READER", 0, {}, &error), "media initialize");
+    check(PSXRecompV4::mod_runtime_commit(iso_path, &error), "verify and commit owner media");
+    const uint8_t* unavailable = nullptr;
+    uint64_t unavailable_size = 0;
+    check(!psx_mod_current_resource_bytes("rom", &unavailable, &unavailable_size), "bytes unavailable outside plugin callback");
+    mod_runtime_activate_plugins();
+    check(media_access && media_size == rom.size() &&
+          std::equal(rom.begin(), rom.end(), media_snapshot), "plugin receives exact verified bytes");
+    check(!foreign_media_access, "inactive feature cannot supply bytes to another feature");
+    check(extent_ok && mounted_lba==24 && !invalid_extent && !foreign_extent,"activation mounts only owned bounded resource extents");
+    uint32_t bad_lba=1;
+    check(!psx_mod_append_disc_extent("xa",0,1,&bad_lba)&&!bad_lba,"late mounting refused");
+    void* mounted=iso_open(iso_path.string().c_str());
+    check(mounted&&iso_sector_count(mounted)==24,"BIOS sees original disc before activation is enabled");
+    mod_runtime_enable_disc_patches();
+    std::array<uint8_t,12> subq{};int valid=0;
+    check(iso_sector_count(mounted)==26&&iso_track_count(mounted)==2&&
+          iso_track_start_lba(mounted,2)==24&&!iso_track_is_audio(mounted,2),"appended extents expose one data track and leadout");
+    check(iso_read_raw_sector(mounted,24,sector.data(),sector.size())&&sector[12]==0&&sector[13]==2&&sector[14]==0x24&&sector[15]==2&&
+          std::equal(xa.begin(),xa.begin()+2336,sector.begin()+16),"native raw sector header and exact XA subheader/audio bytes");
+    check(iso_read_sector(mounted,25,sector.data(),sector.size())&&sector[0]==0x63,"cooked access resolves the same extent");
+    check(!iso_read_sector(mounted,26,sector.data(),sector.size())&&
+          !iso_read_raw_sector(mounted,24,sector.data(),2351),"extent end and short raw buffers rejected");
+    check(iso_read_subq(mounted,24,subq.data(),subq.size(),&valid)&&valid&&subq[0]==0x41&&subq[1]==2&&subq[5]==0,"appended data track has native subchannel position");
+    check(iso_read_sector(mounted,22,sector.data(),sector.size())&&sector[1]==7,"base sectors unchanged");
+    xa[8]=0xff;write_bytes(xa_path,xa);
+    check(iso_read_raw_sector(mounted,24,sector.data(),sector.size())&&sector[24]==0x52,"streaming uses verified snapshot after external file changes");
+    mod_runtime_activate_plugins();
+    check(mounted_lba==24&&iso_sector_count(mounted)==26,"reactivation has stable LBAs and no duplicate extents");
+    rom[32] ^= 1;
+    write_bytes(rom_path, rom);
+    check(media_snapshot && media_snapshot[32] == 0x5a, "committed bytes survive owner file changes");
+    check(!PSXRecompV4::mod_runtime_commit({}, &error), "new commit rejects modified media");
+    check(PSXRecompV4::mod_runtime_clear_for_netplay(&error), "netplay clears donor plan");
+    check(iso_sector_count(mounted)==24&&iso_track_count(mounted)==1&&
+          !iso_read_raw_sector(mounted,24,sector.data(),sector.size()),"clearing plan removes all donor sectors and restores TOC");
+    iso_close(mounted);
     fs::remove_all(root, ec);
     if (failures) return 1;
     std::cout << "mod runtime tests passed\n";
