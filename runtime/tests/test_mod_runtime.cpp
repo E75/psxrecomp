@@ -996,6 +996,15 @@ int main() {
             "offset = " + std::to_string(21 * 2048 + 10) + "\n"
             "expected = \"b80b0000\"\n"
             "replace = \"a00f0000\"\n"
+            "[[feature]]\n"
+            "id = \"huge\"\n"
+            "name = \"Huge\"\n"
+            "[[patch]]\n"
+            "feature = \"huge\"\n"
+            "target = \"disc_user\"\n"
+            "offset = " + std::to_string(21 * 2048 + 10) + "\n"
+            "expected = \"b80b0000\"\n"
+            "replace = \"00f82204\"\n"
             "[[patch]]\n"
             "feature = \"asset\"\n"
             "target = \"disc_user\"\n"
@@ -1034,6 +1043,18 @@ int main() {
         mod_runtime_enable_disc_patches();
         mod_runtime_patch_disc_sector(22, 0, drive_sector.data(), (uint32_t)drive_sector.size());
         check(drive_sector[5] == 0x5a, "enabled drive path applies the same plan");
+        /* Grown archives may exceed 64 MiB (an extended MMX6 ROCK_X6.DAT is
+         * 69,400,576 bytes); the bound is CD capacity, not a fixed cap. */
+        write_text(patched_root / "state.toml",
+            "format_version = 2\n"
+            "[[feature]]\n"
+            "package_id = \"reader.patch\"\n"
+            "id = \"huge\"\n"
+            "enabled = true\n");
+        check(PSXRecompV4::mod_runtime_initialize(patched_root, "READER", 0, {}, &error) &&
+                  PSXRecompV4::mod_runtime_commit(patched_iso, &error), "huge plan commit");
+        check(psx_mod_read_disc_file("S0/LEVEL.NSF", nullptr, 0, &bytes) && bytes == 69400576u,
+              "files grown past 64 MiB keep their effective size");
     }
     /* Verified bytes are scoped to the committed feature, and do not depend
      * on reopening an owner file after launch. No launcher is needed here. */

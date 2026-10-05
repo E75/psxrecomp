@@ -1516,6 +1516,10 @@ extern "C" int mod_runtime_read_disc_extent(uint32_t lba, int raw,
 static void patch_committed_disc_sector(uint32_t lba, int raw_sector,
                                         uint8_t* bytes, uint32_t size);
 
+/* The largest file a CD can hold (80-minute disc, 360,000 sectors). Mods may
+ * grow an archive past its original extent, e.g. into a padding file. */
+static constexpr uint32_t kMaxDiscFileBytes = 360000u * 2048u;
+
 /* One 2048-byte user-data sector of the effective disc: the committed plan's
  * raw and user-data writes/overlays applied. Form 2 (XA) sectors are refused. */
 static bool read_effective_user_sector(PS1::ISOReader& reader, uint32_t lba,
@@ -1603,7 +1607,7 @@ extern "C" int psx_mod_read_disc_file(const char* path, void* buffer,
         bool directory = false;
         if (!reader.Open(mount.string()) ||
             !find_effective_file(reader, path, lba, bytes, directory) ||
-            directory || !bytes || bytes > 64u * 1024u * 1024u)
+            directory || !bytes || bytes > kMaxDiscFileBytes)
             return 0;
         if (!buffer) { *size = bytes; return 1; }
         if (capacity < bytes) return 0;
