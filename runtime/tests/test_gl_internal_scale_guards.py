@@ -102,7 +102,7 @@ class GlScaleGuards(unittest.TestCase):
         self.assertIn("(nverts + 2 * nl) * 6 * sizeof(float)", flush)
         self.assertRegex(flush, r"if \(nl\) flat_batch_draw_hr_lines\(nverts, nl\);\n"
                                 r"\s*else glDrawArrays\((GL_TRIANGLES|fmode), 0, nverts\);")
-        self.assertIn("hiw_enqueue_geo(s_fb, nverts, semi, mask, mirror, 0)", flush)
+        self.assertIn("hiw_enqueue_geo(s_fb, nverts, semi, mask, mirror, s_fb_gate)", flush)
         wide = flush[flush.index("wide_target_begin("):]
         self.assertRegex(wide, r"glDrawArrays\((GL_TRIANGLES|fmode), 0, nverts\);")
         hr = body(GL, "static void flat_batch_draw_hr_lines(int nverts, int nl)")
@@ -143,7 +143,7 @@ class HiresWindowGuards(unittest.TestCase):
         for site, call in (("static void flush_tex_batch(void)",
                             "if (hiw_on() && hiw_enqueue_tex(nverts, semi, mirror, s_tb_gate)) mirror = 0;"),
                            ("static void flush_flat_batch(void)",
-                            "if (hiw_on() && hiw_enqueue_geo(s_fb, nverts, semi, mask, mirror, 0)) mirror = 0;"),
+                            "if (hiw_on() && hiw_enqueue_geo(s_fb, nverts, semi, mask, mirror, s_fb_gate)) mirror = 0;"),
                            ("static void gpu_geometry(", "mirror = 0;")):
             fn = body(GL, site)
             self.assertIn(call, fn, site)

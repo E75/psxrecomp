@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.20)
 project(psxrecomp-runtime C CXX)
 include(CTest)
 
@@ -66,6 +66,15 @@ if(BUILD_TESTING)
     set_tests_properties(netplay_libjuice_offline_other PROPERTIES
         PASS_REGULAR_EXPRESSION "recomp-net pins libjuice SHA256")
     if(NOT MSVC)
+        add_executable(host_snapshot_guard_test tests/test_host_snapshot_guard.c)
+        add_executable(fntrace_restore_handoff_test
+            tests/test_fntrace_restore_handoff.c src/fntrace.c)
+        foreach(test_target host_snapshot_guard_test fntrace_restore_handoff_test)
+            target_include_directories(${test_target} PRIVATE include src)
+            target_compile_options(${test_target} PRIVATE -O2 -flto -ffunction-sections -fdata-sections)
+            target_link_options(${test_target} PRIVATE -flto -Wl,--gc-sections)
+            add_test(NAME ${test_target} COMMAND ${test_target})
+        endforeach()
         add_executable(ws_world_scene_test tests/test_ws_world_scene.c
             src/psx_video_timing.c)
         target_include_directories(ws_world_scene_test PRIVATE include src)
@@ -267,6 +276,7 @@ if(BUILD_TESTING)
             tests/psx_ram_runtime_map_stubs.c
             src/memory.c
             src/dma.c
+            src/gpu_timeline.c
             src/boot_state.c
             src/psx_ram_geometry.c)
         target_include_directories(psx_ram_runtime_map_test PRIVATE include src)
@@ -287,6 +297,7 @@ if(BUILD_TESTING)
             tests/psx_ram_runtime_map_stubs.c
             src/memory.c
             src/dma.c
+            src/gpu_timeline.c
             src/boot_state.c
             src/psx_icache.c
             src/psx_ram_geometry.c)
@@ -420,6 +431,7 @@ if(BUILD_TESTING)
         src/psx_ram_geometry.c
         src/mod_runtime.cpp
         src/mod_packages.cpp
+        src/mod_media.cpp
         src/disc_path.cpp
         src/cue_sheet.cpp
         src/iso_reader.cpp
@@ -472,7 +484,8 @@ if(BUILD_TESTING)
 
     add_executable(gpu_textured_dot_nw_shift_exec_test
         tests/test_gpu_textured_dot_nw_shift_exec.c
-        src/psx_video_timing.c)
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
     target_include_directories(gpu_textured_dot_nw_shift_exec_test PRIVATE
         include
         src)
@@ -491,7 +504,8 @@ if(BUILD_TESTING)
     add_executable(ws_auto_ui_untextured_exec_test
         tests/test_ws_auto_ui_untextured_exec.c
         src/ws_ui_group.c
-        src/psx_video_timing.c)
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
     target_include_directories(ws_auto_ui_untextured_exec_test PRIVATE
         include
         src)
@@ -507,7 +521,8 @@ if(BUILD_TESTING)
     add_executable(ws_shared_split_ui_exec_test
         tests/test_ws_shared_split_ui_exec.c
         src/ws_ui_group.c
-        src/psx_video_timing.c)
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
     target_include_directories(ws_shared_split_ui_exec_test PRIVATE include src)
     if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(ws_shared_split_ui_exec_test PRIVATE
@@ -518,9 +533,11 @@ if(BUILD_TESTING)
 
     add_executable(ws_view_anchor_test tests/test_ws_view_anchor.c)
     add_executable(ws_view_anchor_gpu_test tests/test_ws_view_anchor_gpu.c
-        src/psx_video_timing.c)
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
     add_executable(native_wide_projection_test tests/test_native_wide_projection.c
-        src/psx_video_timing.c)
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
     foreach(_anchor_test ws_view_anchor ws_view_anchor_gpu native_wide_projection)
         target_include_directories(${_anchor_test}_test PRIVATE include src)
         if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
@@ -706,24 +723,37 @@ if(BUILD_TESTING)
     add_executable(mod_packages_test
         tests/test_mod_packages.cpp
         src/mod_packages.cpp
+        src/mod_media.cpp src/iso_reader.cpp src/cue_sheet.cpp
         src/crc32.c
         src/psx_sha256.c)
     target_include_directories(mod_packages_test PRIVATE
         include
+        ../recompiler/include
         ../recompiler/lib/toml11)
+    target_link_libraries(mod_packages_test PRIVATE chdr-static)
     add_test(NAME mod_packages_test COMMAND mod_packages_test)
 
     add_executable(builtin_mod_manifests_test
         tests/test_builtin_mod_manifests.cpp
         src/mod_packages.cpp
+        src/mod_media.cpp src/iso_reader.cpp src/cue_sheet.cpp
         src/crc32.c
         src/psx_sha256.c)
     target_include_directories(builtin_mod_manifests_test PRIVATE
         include
+        ../recompiler/include
         ../recompiler/lib/toml11)
+    target_link_libraries(builtin_mod_manifests_test PRIVATE chdr-static)
     add_test(NAME builtin_mod_manifests_test
              COMMAND builtin_mod_manifests_test
                      "${CMAKE_CURRENT_SOURCE_DIR}/../mods/builtin/packages")
+
+    add_executable(mod_media_test
+        tests/test_mod_media.cpp src/mod_media.cpp src/iso_reader.cpp
+        src/cue_sheet.cpp src/psx_sha256.c)
+    target_include_directories(mod_media_test PRIVATE include ../recompiler/include)
+    target_link_libraries(mod_media_test PRIVATE chdr-static)
+    add_test(NAME mod_media_test COMMAND mod_media_test)
 
     add_executable(text_xlate_fix_only_test
         tests/test_text_xlate_fix_only.cpp
@@ -739,6 +769,7 @@ if(BUILD_TESTING)
         src/iso_reader_c.cpp
         src/mod_runtime.cpp
         src/mod_packages.cpp
+        src/mod_media.cpp
         src/disc_path.cpp
         src/cue_sheet.cpp
         src/iso_reader.cpp
@@ -759,6 +790,31 @@ if(BUILD_TESTING)
         endif()
     endif()
     add_test(NAME mod_runtime_test COMMAND mod_runtime_test)
+
+    add_executable(mod_resident_test
+        tests/test_mod_resident.cpp
+        src/mod_resident.cpp
+        src/mod_runtime.cpp
+        src/mod_packages.cpp
+        src/mod_media.cpp
+        src/disc_path.cpp
+        src/cue_sheet.cpp
+        src/iso_reader.cpp
+        src/crc32.c
+        src/psx_sha256.c)
+    target_include_directories(mod_resident_test PRIVATE
+        include
+        ../recompiler/include
+        ../recompiler/lib/toml11)
+    target_link_libraries(mod_resident_test PRIVATE chdr-static)
+    if(WIN32)
+        if(MSVC)
+            target_link_options(mod_resident_test PRIVATE /STACK:16777216)
+        else()
+            target_link_options(mod_resident_test PRIVATE -Wl,--stack,16777216)
+        endif()
+    endif()
+    add_test(NAME mod_resident_test COMMAND mod_resident_test)
 
     if(WIN32)
         add_executable(autocompile_publication_test
