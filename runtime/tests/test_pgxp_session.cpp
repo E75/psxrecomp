@@ -82,6 +82,11 @@ extern "C" int gte_geometry_correction_lookup(uint32_t, int32_t*, int32_t*) {
     return 0;
 }
 
+/* The session harness has no GTE backend; pre-draw probes must link as a no-op. */
+extern "C" int gte_geometry_correction_lookup_probe(uint32_t, int32_t*, int32_t*) {
+    return 0;
+}
+
 /* ---- the runtime surface mod_runtime.cpp links against ------------------- */
 
 static std::array<uint8_t, 2 * 1024 * 1024> ram;
