@@ -3,6 +3,7 @@
 #endif
 
 #include "psx_netplay.h"
+#include "netplay_sim_pad_cache.h"
 
 #include "host_time.h"
 #include "memcard.h"
@@ -450,6 +451,13 @@ int  psx_netplay_host_spectates(void) { return 0; }
 int  psx_netplay_local_slot(void) { return -1; }
 int  psx_netplay_input_player(void) { return 0; }
 uint32_t psx_netplay_sim_tick(void) { return 0; }
+int psx_netplay_seat_count(void) { return 0; }
+int psx_netplay_sim_pad(int seat, PsxNetPad *out)
+{
+    (void)seat;
+    (void)out;
+    return 0;
+}
 int  psx_netplay_start(const PsxNetplayConfig *cfg)
 {
     (void)cfg;
@@ -2326,6 +2334,16 @@ void psx_netplay_pad_trace_dev(int card, int fallback, int sdl_start,
     }
 }
 
+/* A game plugin reads the exact seat row last published to SIO for this tick.
+ * Keep this host-side cache outside savestates: each admitted/replayed tick
+ * publishes it again, including sealed rollback authority overwrites. */
+static PsxNetplaySimPadCache s_sim_pad_cache;
+
+static void note_sim_pad(int slot, uint32_t tick, const PsxNetPad *pad)
+{
+    psx_netplay_sim_pad_cache_publish(&s_sim_pad_cache, slot, tick, pad);
+}
+
 static void apply_pad_slot(int slot, const PsxNetPad *pad)
 {
     if (slot < 0 || slot >= g_np.slot_count || slot >= NP_SLOT_CAP || !pad) return;
@@ -2429,7 +2447,6 @@ static void host_publish(rnet_u32 tick, const RNetInputSample *by_slot, int slot
 {
     int i;
     int n;
-    (void)tick;
     (void)ctx;
     if (!by_slot || slots <= 0) return;
     n = g_np.slot_count;
@@ -2440,6 +2457,7 @@ static void host_publish(rnet_u32 tick, const RNetInputSample *by_slot, int slot
         PsxNetPad pad;
         decode_pad(&by_slot[i], &pad);
         apply_pad_slot(i, &pad);
+        note_sim_pad(i, tick, &pad);
     }
 }
 
@@ -2466,6 +2484,7 @@ static void np_publish_hist_sio(uint32_t tick)
             continue;
         netplay_ih_frame_to_pad(&row, &pad);
         apply_pad_slot(i, &pad);
+        note_sim_pad(i, tick, &pad);
     }
 }
 
@@ -2474,7 +2493,6 @@ static void np_rb_apply_frame_slot(int slot, uint32_t tick, uint16_t buttons,
 {
     RNetRbFrame row;
     PsxNetPad pad;
-    (void)tick;
     memset(&row, 0, sizeof(row));
     row.tick = tick;
     row.buttons = buttons;
@@ -2485,6 +2503,7 @@ static void np_rb_apply_frame_slot(int slot, uint32_t tick, uint16_t buttons,
     netplay_ih_frame_to_pad(&row, &pad);
     force_session_pads_connected(g_np.slot_count);
     apply_pad_slot(slot, &pad);
+    note_sim_pad(slot, tick, &pad);
 }
 
 static void np_rb_bind_and_start(void)
@@ -3326,6 +3345,20 @@ uint32_t psx_netplay_sim_tick(void)
     return rnet_session_sim_tick(g_np.session);
 }
 
+int psx_netplay_seat_count(void)
+{
+    return psx_netplay_active() ? g_np.slot_count : 0;
+}
+
+int psx_netplay_sim_pad(int seat, PsxNetPad *out)
+{
+    if (!out || !psx_netplay_active() || seat < 0 || seat >= g_np.slot_count)
+        return 0;
+    return psx_netplay_sim_pad_cache_read(
+        &s_sim_pad_cache, seat, g_np.slot_count,
+        rnet_session_sim_tick(g_np.session), out);
+}
+
 void psx_netplay_stage_local(const PsxNetPad *pad)
 {
     /* Host in the gallery: its seat still publishes a row every tick (the
@@ -3640,6 +3673,7 @@ int psx_netplay_start(const PsxNetplayConfig *cfg)
 
     if (!cfg || !cfg->enabled) return -1;
     if (g_np.session) psx_netplay_shutdown();
+    psx_netplay_sim_pad_cache_reset(&s_sim_pad_cache);
 
     slots = cfg->slot_count;
     if (slots < 2) slots = 2;
@@ -4211,6 +4245,7 @@ void psx_netplay_cold_reset(void)
         }
     }
     g_local_pad_prev = 0xFFFFu;
+    psx_netplay_sim_pad_cache_reset(&s_sim_pad_cache);
     g_local_pad_have = 0;
     g_live_trace_prev = 0xFFFFu;
     g_live_trace_have = 0;
@@ -4712,13 +4747,13 @@ static int np_try_admit_gameplay(void)
 }
 
 /*
- * §95: rollback LOAD barrier admit — tip + hold-last invent, no INPUT_CONFIRM.
- * Delay-sync try_admit wait_confirm hung the slower peer after the faster one
- * applied and froze (guest LOADED, host stuck load_applying+wait_confirm).
+ * LOAD barrier admit — tip + hold-last invent, no INPUT_CONFIRM.
+ * Confirmed admission can hang the slower peer after the faster one applies
+ * and freezes, including when a graphical peer is paced behind headless peers.
  * Load will hard_resync at mutual ready; pads here only need guest cycles for
  * savestate_poll / one resume tick.
  */
-static int np_try_admit_load_barrier_rb(void)
+static int np_try_admit_load_barrier_unconfirmed(void)
 {
     rnet_u32 sim = rnet_session_sim_tick(g_np.session);
     rnet_u32 wire;
@@ -4800,31 +4835,27 @@ int psx_netplay_poll_admit(void)
 
     /* Staged load must run guest cycles — bypass starvation latch. ICE xfer
      * often leaves lead=D-1 and would otherwise block try_admit forever.
-     * §95: rollback must not use delay-sync confirm here. */
+     * Neither netplay mode can wait for confirmation from an already-frozen
+     * peer during the apply barrier. */
     if (g_np.xfer == NP_XFER_LOAD_APPLYING && savestate_pending()) {
         if (g_np.needs_advance)
             return 1;
-        if (g_np.rollback)
-            return np_try_admit_load_barrier_rb();
-        return np_try_admit_gameplay();
+        return np_try_admit_load_barrier_unconfirmed();
     }
 
-    /* Both peers: after mutual ready + sync, stay in LOAD_READY until admit
-     * succeeds. Dropping the barrier early on the host let it spin on confirm
-     * with FPS/present already "live". §95: rollback exits via tip invent. */
+    /* After mutual ready + sync, stay in LOAD_READY until a confirmed first
+     * tick is available. Rollback's invented rows are only needed while a
+     * slower peer is still applying the save; inventing the first resumed
+     * tick let peers run different inputs from the identical restored state. */
     if (g_np.xfer == NP_XFER_LOAD_READY) {
         if (g_np.load_sync_done && g_np.load_ready_replied && !g_np.needs_advance) {
             int admitted;
-            if (g_np.rollback)
-                admitted = np_try_admit_load_barrier_rb();
-            else {
-                sim = rnet_session_sim_tick(g_np.session);
-                admitted = rnet_session_try_admit(g_np.session, sim);
-                if (admitted)
-                    g_np.needs_advance = 1;
-                else
-                    force_session_pads_connected(g_np.slot_count);
-            }
+            sim = rnet_session_sim_tick(g_np.session);
+            admitted = rnet_session_try_admit(g_np.session, sim);
+            if (admitted)
+                g_np.needs_advance = 1;
+            else
+                force_session_pads_connected(g_np.slot_count);
             if (admitted) {
                 g_np.xfer = NP_XFER_NONE;
                 g_np.load_applied_local = 0;

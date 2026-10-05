@@ -122,6 +122,16 @@ int  psx_netplay_host_spectates(void);
 /* Resolved host player index used for local capture. */
 int  psx_netplay_input_player(void);
 uint32_t psx_netplay_sim_tick(void);
+/* Session seats, including any host gallery seat; zero when offline. */
+int psx_netplay_seat_count(void);
+/* Read the pad actually published for one session seat in the current
+ * simulation tick. This follows the delay-sync publisher and rollback's
+ * sealed-frame override of predicted history, so a trusted game plugin can
+ * use the same seat inputs that SIO sees when a title consumes more player
+ * commands than its SIO protocol exposes. Call on the emulation thread while
+ * guest code runs; returns 0 when netplay is off, the seat is absent, or no
+ * pad has been published for this tick. */
+int psx_netplay_sim_pad(int seat, PsxNetPad *out);
 
 /*
  * Snapshot for diagnostic dumps (starvation_dump.jsonl meta, etc.).
