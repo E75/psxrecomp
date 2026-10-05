@@ -80,6 +80,10 @@ int g_ws_tex_edge_pct=0;
 int psx_ws_prim_is_tagged(void){return 0;}
 void psx_ws_dbg_gate_frame_snapshot(void){}
 void gpu_depth24_upload_span_reset(void){}
+/* Guest clock the renderer's stereo-pair freshness reads; test stand-ins, as
+ * in test_gl_readback_region.c. */
+uint64_t psx_cycle_count=0;
+uint32_t g_psx_vblank_cycles=564480u;
 
 static uint16_t vram[1024*512], peek[1024*512];
 static int si_max_dim(void) { return s_gl_max_dim > 0 ? s_gl_max_dim : 1 << 30; }
