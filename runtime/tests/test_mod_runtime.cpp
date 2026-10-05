@@ -1072,6 +1072,98 @@ int main() {
     check(iso_sector_count(mounted)==24&&iso_track_count(mounted)==1&&
           !iso_read_raw_sector(mounted,24,sector.data(),sector.size()),"clearing plan removes all donor sectors and restores TOC");
     iso_close(mounted);
+    /* Plugin activation (native asset preparation) runs before the emulated
+     * drive's disc patches are enabled. Host reads must already return the
+     * committed plan's effective bytes, or a prepared cache would silently
+     * serve original assets under a modded plan. The drive path stays gated. */
+    {
+        const auto patched_root = root / "host-reader-patched";
+        const auto patched_iso = patched_root / "original.iso";
+        /* A byte past the original 3000-byte extent; a mod that grows the file
+         * through its directory record exposes it. */
+        std::vector<uint8_t> grown_iso = iso;
+        grown_iso[22 * 2048 + 3500] = 0x77;
+        write_bytes(patched_iso, grown_iso);
+        write_text(patched_root / "packages/reader.patch/1.0.0/manifest.toml",
+            "format_version = 5\n"
+            "id = \"reader.patch\"\n"
+            "version = \"1.0.0\"\n"
+            "name = \"Reader Patch\"\n"
+            "[[target]]\n"
+            "game_id = \"READER\"\n"
+            "disc_sha256 = \"" + sha256_hex(grown_iso) + "\"\n"
+            "[[feature]]\n"
+            "id = \"asset\"\n"
+            "name = \"Asset\"\n"
+            "[[feature]]\n"
+            "id = \"grow\"\n"
+            "name = \"Grow\"\n"
+            "[[patch]]\n"
+            "feature = \"grow\"\n"
+            "target = \"disc_user\"\n"
+            "offset = " + std::to_string(21 * 2048 + 10) + "\n"
+            "expected = \"b80b0000\"\n"
+            "replace = \"a00f0000\"\n"
+            "[[feature]]\n"
+            "id = \"huge\"\n"
+            "name = \"Huge\"\n"
+            "[[patch]]\n"
+            "feature = \"huge\"\n"
+            "target = \"disc_user\"\n"
+            "offset = " + std::to_string(21 * 2048 + 10) + "\n"
+            "expected = \"b80b0000\"\n"
+            "replace = \"00f82204\"\n"
+            "[[patch]]\n"
+            "feature = \"asset\"\n"
+            "target = \"disc_user\"\n"
+            "offset = " + std::to_string(22 * 2048 + 5) + "\n"
+            "expected = \"23\"\n"
+            "replace = \"5a\"\n");
+        write_text(patched_root / "state.toml",
+            "format_version = 2\n"
+            "[[feature]]\n"
+            "package_id = \"reader.patch\"\n"
+            "id = \"asset\"\n"
+            "enabled = true\n"
+            "[[feature]]\n"
+            "package_id = \"reader.patch\"\n"
+            "id = \"grow\"\n"
+            "enabled = true\n");
+        check(PSXRecompV4::mod_runtime_initialize(patched_root, "READER", 0, {}, &error),
+              "patched reader initialize");
+        check(PSXRecompV4::mod_runtime_commit(patched_iso, &error), "patched reader commit");
+        check(psx_mod_read_disc_file("S0/LEVEL.NSF", nullptr, 0, &bytes) && bytes == 4000,
+              "host disc reads resolve paths through patched directory records");
+        std::vector<uint8_t> effective(4000);
+        check(psx_mod_read_disc_file("S0/LEVEL.NSF", effective.data(),
+                                     (uint32_t)effective.size(), &bytes) &&
+                  bytes == 4000 && effective[5] == 0x5a && effective[3500] == 0x77 &&
+                  std::equal(effective.begin() + 6, effective.begin() + 3000,
+                             iso.begin() + 22 * 2048 + 6),
+              "host disc reads apply the committed plan before the drive is enabled");
+        check(!psx_mod_read_disc_file("S0", nullptr, 0, &bytes),
+              "effective lookup still rejects directories");
+        std::array<uint8_t, 2048> drive_sector{};
+        std::copy_n(iso.begin() + 22 * 2048, 2048, drive_sector.begin());
+        mod_runtime_patch_disc_sector(22, 0, drive_sector.data(), (uint32_t)drive_sector.size());
+        check(drive_sector[5] == 0x23,
+              "the emulated drive path stays original until disc patches are enabled");
+        mod_runtime_enable_disc_patches();
+        mod_runtime_patch_disc_sector(22, 0, drive_sector.data(), (uint32_t)drive_sector.size());
+        check(drive_sector[5] == 0x5a, "enabled drive path applies the same plan");
+        /* Grown archives may exceed 64 MiB (an extended MMX6 ROCK_X6.DAT is
+         * 69,400,576 bytes); the bound is CD capacity, not a fixed cap. */
+        write_text(patched_root / "state.toml",
+            "format_version = 2\n"
+            "[[feature]]\n"
+            "package_id = \"reader.patch\"\n"
+            "id = \"huge\"\n"
+            "enabled = true\n");
+        check(PSXRecompV4::mod_runtime_initialize(patched_root, "READER", 0, {}, &error) &&
+                  PSXRecompV4::mod_runtime_commit(patched_iso, &error), "huge plan commit");
+        check(psx_mod_read_disc_file("S0/LEVEL.NSF", nullptr, 0, &bytes) && bytes == 69400576u,
+              "files grown past 64 MiB keep their effective size");
+    }
     fs::remove_all(root, ec);
     if (failures) return 1;
     std::cout << "mod runtime tests passed\n";
