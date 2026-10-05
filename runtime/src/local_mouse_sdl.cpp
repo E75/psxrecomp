@@ -2,6 +2,7 @@
 #include "local_mouse_policy.h"
 #include "psx_keybinds.h"
 #include "host_osd.h"
+#include <cstdio>
 
 namespace {
 SDL_Window* window_ = nullptr;
@@ -86,7 +87,12 @@ bool control(uint64_t t, uint64_t now, psx::MouseControl control, bool down, boo
 } // namespace
 
 extern "C" int psx_mod_set_local_mouse_policy(const PSXModMousePolicy* policy) {
-    return state().install(policy) ? 1 : 0;
+    if (state().install(policy)) return 1;
+    std::fprintf(stderr, "psxrecomp: local mouse policy rejected (null/invalid, "
+                 "struct_size %u expected %u, or one is already registered)\n",
+                 policy ? (unsigned)policy->struct_size : 0u,
+                 (unsigned)sizeof(PSXModMousePolicy));
+    return 0;
 }
 void psx_local_mouse_clear() { state().clear(); host_ = {}; window_ = nullptr; }
 bool psx_local_mouse_installed() { return state().installed(); }
@@ -95,6 +101,8 @@ void psx_local_mouse_reset() {
     host_.connected = host_.analog = false;
 }
 void psx_local_mouse_begin(SDL_Window* window, bool live) {
+    // No policy: no host state to track, no per-frame global mouse polling.
+    if (!state().installed()) return;
     if (window_ && window_ != window) state().reset();
     window_ = window;
     host_.live = live;
@@ -191,6 +199,7 @@ bool psx_local_mouse_event(const SDL_Event& ev) {
     return false;
 }
 void psx_local_mouse_pad(bool connected, bool analog, uint16_t buttons, uint8_t& rx, uint8_t& ry) {
+    if (!state().installed()) return;
     host_.connected = connected;
     host_.analog = analog;
     host_.native_right = rx != 128 || ry != 128;

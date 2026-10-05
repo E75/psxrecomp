@@ -436,6 +436,11 @@ if(BUILD_TESTING)
     target_include_directories(mod_controller_source_test PRIVATE include)
     add_test(NAME mod_controller_source_test COMMAND mod_controller_source_test)
 
+    add_executable(pad_external_input_test
+        tests/test_pad_external_input.c src/pad_external_input.c)
+    target_include_directories(pad_external_input_test PRIVATE include src)
+    add_test(NAME pad_external_input_test COMMAND pad_external_input_test)
+
     add_executable(gte_register_access_test
         tests/test_gte_register_access.cpp
         src/gte.cpp

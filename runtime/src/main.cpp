@@ -33,6 +33,7 @@
 #include "psx_savestate_menu.h"
 #include "host_osd.h"
 #include "local_mouse_sdl.h"
+#include "pad_external_input.h"
 #include "host_keymap.h"
 #include "png_write.h"       /* png_write_rgb — present_shot readback */
 #include "overlay_capture.h"
@@ -5700,9 +5701,12 @@ static void apply_input_override_to_sio(int override_word) {
                            (uint8_t)(eff_analog ? 1 : 0));
 }
 
-/* Capture one SIO slot's host pad into a netplay/local blob. Returns 1 if a
- * device (or dev-any P1) is present; 0 leaves *out as released/disconnected. */
-static int capture_pad_slot(int s, PsxNetPad* out) {
+/* Capture one SIO slot's PHYSICAL host pad into a netplay/local blob. Returns
+ * 1 if a device (or dev-any P1) is present; 0 leaves *out as released/
+ * disconnected. `guarded` (savestate input guard) delivers neutral buttons and
+ * sticks but still resolves presence/type. No mouse or source side effects:
+ * those are layered on top by pad_ext_resolve(). */
+static int capture_pad_slot(int s, PsxNetPad* out, bool guarded) {
     if (!out) return 0;
     out->buttons = 0xFFFFu;
     out->lx = out->ly = out->rx = out->ry = 0x80u;
@@ -5714,10 +5718,7 @@ static int capture_pad_slot(int s, PsxNetPad* out) {
     /* Opt-in dev merge: P1 is driven by the keyboard AND every connected
      * controller (PSX_DEV_INPUT=1). Default is strict per-slot routing. */
     const bool dev_here = (dev_any_input_enabled() && s == 0);
-    if (p.kind == 0 && !dev_here) {
-        if (s == 0) psx_local_mouse_reset();
-        return 0;  /* no device in this port */
-    }
+    if (p.kind == 0 && !dev_here) return 0;  /* no device in this port */
 
     /* Resolve the pad type this frame FIRST — the effective analog/digital
      * state gates how the left stick is read for BOTH the button word and the
@@ -5742,8 +5743,7 @@ static int capture_pad_slot(int s, PsxNetPad* out) {
         s, player, mode, src, p, policy_buttons, st);
     const int eff_analog =
         effective_mode == PSXRecompV4::PAD_MODE_ANALOG ? 1 : 0;
-    if (savestate_input_guard_active()) {
-        if (s == 0) psx_local_mouse_reset();
+    if (guarded) {
         out->buttons = 0xFFFFu;
         out->lx = out->ly = out->rx = out->ry = 0x80u;
         out->analog = eff_analog ? 1u : 0u;
@@ -5790,7 +5790,6 @@ static int capture_pad_slot(int s, PsxNetPad* out) {
         st[0] = st[1] = st[2] = st[3] = 0x80;
     }
 
-    if (s == 0) psx_local_mouse_pad(true, eff_analog != 0, btn, st[2], st[3]);
     out->buttons = btn;
     out->lx = st[0]; out->ly = st[1]; out->rx = st[2]; out->ry = st[3];
     out->analog = eff_analog ? 1u : 0u;
@@ -6309,6 +6308,80 @@ done:
     freeze_heartbeat_set_paused(0);
 }
 
+/* Main-thread implementation of the PadExtHooks seams (see
+ * pad_external_input.h for the resolution order and precedence rule). */
+static int pad_ext_guard_active(void*) { return savestate_input_guard_active(); }
+static int pad_ext_capture_local(void*, int s, PsxNetPad* out, int guarded) {
+    return capture_pad_slot(s, out, guarded != 0);
+}
+static int pad_ext_source_sample(void*, int s, PSXModControllerState* st, int* released) {
+    return mod_controller_source_sample((uint32_t)s, st, released);
+}
+static void pad_ext_source_release(void*, int s, PsxNetPad* pad) {
+    /* Source detached/reset: deliver one neutral frame (even on a port with no
+     * device) and give the port back its real SIO connection/config state; a
+     * device resumes next frame. */
+    const bool dev_here = (dev_any_input_enabled() && s == 0);
+    const int boot_mode = assert_sio_pad_profile(s, dev_here);
+    pad->buttons = 0xffff;
+    pad->lx = pad->ly = pad->rx = pad->ry = 128;
+    pad->analog = pad_mode_boot_analog(boot_mode) ? 1 : 0;
+    pad->connected = 1;
+}
+static void pad_ext_source_resolve(void*, int s, const PSXModControllerState* source,
+                                   int guarded, PsxNetPad* pad) {
+    const bool dev_here = (dev_any_input_enabled() && s == 0);
+    pad->lx = (uint8_t)source->lx; pad->ly = (uint8_t)source->ly;
+    pad->rx = (uint8_t)source->rx; pad->ry = (uint8_t)source->ry;
+    pad->connected = 1;
+    /* Presentation goes through the same resolution as a physical pad: the
+     * source's `analog` is the device capability, then mod mode override,
+     * multitap rule and presentation policy. */
+    const PlayerInput& p = g_players[s];
+    int mode = effective_player_mode_for_sio(p, s);
+    if (g_mod_controller_mode_override[s] >= 0 &&
+        !(sio_pad_on_multitap(s) && !sio_get_multitap_analog()))
+        mode = g_mod_controller_mode_override[s];
+    if (!source->analog) mode = PSXRecompV4::PAD_MODE_DIGITAL;
+    uint8_t st[4] = { pad->lx, pad->ly, pad->rx, pad->ry };
+    int eff_mode = controller_policy_resolve_mode(
+        s, s + 1, mode, pad_sources_for(p, dev_here), p, pad->buttons, st);
+    if (!source->analog ||
+        (sio_pad_on_multitap(s) && !sio_get_multitap_analog()))
+        eff_mode = PSXRecompV4::PAD_MODE_DIGITAL;
+    pad->analog = eff_mode == PSXRecompV4::PAD_MODE_ANALOG ? 1 : 0;
+    if (!pad->analog)
+        pad->lx = pad->ly = pad->rx = pad->ry = 128;
+    if (guarded) {
+        pad->buttons = 0xffff;
+        pad->lx = pad->ly = pad->rx = pad->ry = 128;
+    }
+    /* The source occupies the port; config capability follows the same rule
+     * as a physical pad (apply_pad_slot_to_sio and the SIO layer keep multitap
+     * taps digital). */
+    const ModControllerPresentationPolicy& policy = g_mod_controller_policy[s];
+    sio_set_pad_connected(s, 1);
+    sio_set_pad_config_capable(
+        s, policy.callback ? policy.config_capable
+                           : mode != PSXRecompV4::PAD_MODE_DIGITAL);
+}
+static void pad_ext_mouse_reset(void*) { psx_local_mouse_reset(); }
+static void pad_ext_mouse_fold(void*, int connected, int analog, uint16_t buttons,
+                               uint8_t* rx, uint8_t* ry) {
+    psx_local_mouse_pad(connected != 0, analog != 0, buttons, *rx, *ry);
+}
+static PadExtHooks pad_ext_main_hooks(void) {
+    PadExtHooks h{};
+    h.guard_active = pad_ext_guard_active;
+    h.capture_local = pad_ext_capture_local;
+    h.source_sample = pad_ext_source_sample;
+    h.source_release = pad_ext_source_release;
+    h.source_resolve = pad_ext_source_resolve;
+    h.mouse_reset = pad_ext_mouse_reset;
+    h.mouse_fold = pad_ext_mouse_fold;
+    return h;
+}
+
 static void sample_pad_into_sio(int override) {
     /* Selfcheck fighter mash owns P1 when enabled (headless-safe). */
     if (override < 0) {
@@ -6326,67 +6399,10 @@ static void sample_pad_into_sio(int override) {
     if (n > PSX_MAX_PLAYERS) n = PSX_MAX_PLAYERS;
     const uint32_t consumer_sim =
         psx_start_consumer_enabled() ? psx_start_consumer_offline_frame() : 0u;
+    PadExtHooks hooks = pad_ext_main_hooks();
     for (int s = 0; s < n; s++) {
         PsxNetPad pad;
-        PSXModControllerState source;
-        int released = 0;
-        if (mod_controller_source_sample((uint32_t)s, &source, &released)) {
-            const bool dev_here = (dev_any_input_enabled() && s == 0);
-            if (released) {
-                /* Source detached/reset: deliver one neutral frame (even on a
-                 * port with no device) and give the port back its real SIO
-                 * connection/config state; a device resumes next frame. */
-                const int boot_mode = assert_sio_pad_profile(s, dev_here);
-                pad.buttons = 0xffff;
-                pad.lx = pad.ly = pad.rx = pad.ry = 128;
-                pad.analog = pad_mode_boot_analog(boot_mode) ? 1 : 0;
-                pad.connected = 1;
-            } else {
-                /* Sample physical buttons separately; its axes/type cannot
-                 * steer the source's virtual pad. Guards release every source
-                 * channel. */
-                PsxNetPad local;
-                const int have_local = capture_pad_slot(s, &local);
-                pad.buttons = (uint16_t)source.buttons;
-                if (have_local) pad.buttons &= local.buttons;
-                pad.lx = (uint8_t)source.lx; pad.ly = (uint8_t)source.ly;
-                pad.rx = (uint8_t)source.rx; pad.ry = (uint8_t)source.ry;
-                pad.connected = 1;
-                /* Presentation goes through the same resolution as a physical
-                 * pad: the source's `analog` is the device capability, then
-                 * mod mode override, multitap rule and presentation policy. */
-                const PlayerInput& p = g_players[s];
-                int mode = effective_player_mode_for_sio(p, s);
-                if (g_mod_controller_mode_override[s] >= 0 &&
-                    !(sio_pad_on_multitap(s) && !sio_get_multitap_analog()))
-                    mode = g_mod_controller_mode_override[s];
-                if (!source.analog) mode = PSXRecompV4::PAD_MODE_DIGITAL;
-                uint8_t st[4] = { pad.lx, pad.ly, pad.rx, pad.ry };
-                int eff_mode = controller_policy_resolve_mode(
-                    s, s + 1, mode, pad_sources_for(p, dev_here), p,
-                    pad.buttons, st);
-                if (!source.analog ||
-                    (sio_pad_on_multitap(s) && !sio_get_multitap_analog()))
-                    eff_mode = PSXRecompV4::PAD_MODE_DIGITAL;
-                pad.analog = eff_mode == PSXRecompV4::PAD_MODE_ANALOG ? 1 : 0;
-                if (!pad.analog)
-                    pad.lx = pad.ly = pad.rx = pad.ry = 128;
-                if (savestate_input_guard_active()) {
-                    pad.buttons = 0xffff;
-                    pad.lx = pad.ly = pad.rx = pad.ry = 128;
-                }
-                /* The source occupies the port; config capability follows the
-                 * same rule as a physical pad (apply_pad_slot_to_sio and the
-                 * SIO layer keep multitap taps digital). */
-                const ModControllerPresentationPolicy& policy =
-                    g_mod_controller_policy[s];
-                sio_set_pad_connected(s, 1);
-                sio_set_pad_config_capable(
-                    s, policy.callback
-                           ? policy.config_capable
-                           : mode != PSXRecompV4::PAD_MODE_DIGITAL);
-            }
-        } else if (!capture_pad_slot(s, &pad)) continue;  /* no device in this port */
+        if (!pad_ext_resolve(&hooks, s, &pad)) continue;  /* no device in this port */
         /* Push sticks every frame; request the pad type (digital/analog) through
          * the coherent channel so a policy switch is applied only at an idle,
          * non-config bus boundary (never mid-poll / mid-handshake). This is the
@@ -7405,16 +7421,22 @@ static bool drain_host_events() {
 }
 
 static bool local_mouse_live(int override_word) {
-    bool injected = override_word >= 0;
+    PadExtGate g{};
+    g.injected_input = override_word >= 0;
 #ifndef PSX_NO_DEBUG_TOOLS
     uint8_t axes[4];
-    injected = injected || debug_server_get_axis_override(axes) != 0;
+    g.injected_input = g.injected_input || debug_server_get_axis_override(axes) != 0;
 #endif
-    return !injected && !g_headless &&
-        !psx_netplay_active() && !psx_netplay_is_resimulating() &&
-        !psx_selfcheck_input_locked() && !psx_selfcheck_resim_active() &&
-        !g_psx_render_pass_active && !savestate_menu_open &&
-        !psx_rewind_is_open() && !savestate_input_guard_active();
+    g.headless = g_headless;
+    g.netplay_active = psx_netplay_active();
+    g.netplay_resim = psx_netplay_is_resimulating();
+    g.selfcheck_locked = psx_selfcheck_input_locked();
+    g.selfcheck_resim = psx_selfcheck_resim_active();
+    g.render_pass = g_psx_render_pass_active;
+    g.savestate_menu_open = savestate_menu_open;
+    g.rewind_open = psx_rewind_is_open();
+    g.input_guard = savestate_input_guard_active();
+    return pad_ext_live(&g) != 0;
 }
 
 static NetplayVblankEpilogue sdl_vblank_present_body(void) {
