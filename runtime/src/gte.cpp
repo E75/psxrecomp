@@ -362,23 +362,43 @@ extern "C" uint32_t gte_geometry_correction_hits(void) {
     return s_geom_hits;
 }
 
-extern "C" int gte_geometry_correction_lookup(uint32_t packed,
-                                                int32_t *x16, int32_t *y16) {
+static int gte_geometry_correction_lookup_impl(uint32_t packed,
+                                                int32_t *x16, int32_t *y16,
+                                                int count_stats) {
     if (s_speculative_depth != 0 || !s_geom_enabled || !s_geom_cache) return 0;
     int64_t slot = geom_slot(packed);
     if (slot < 0) return 0;
-    s_geom_lookups++;
+    if (count_stats) s_geom_lookups++;
     const GeomVertex &entry = s_geom_cache[slot];
-    if (entry.generation != s_geom_generation) { s_geom_miss_unrec++; return 0; }
+    if (entry.generation != s_geom_generation) {
+        if (count_stats) s_geom_miss_unrec++;
+        return 0;
+    }
     /* Ambiguity gate, as in both references (beetle gFlags == 1): if two
      * DIFFERENT sub-pixel positions rounded to this same pixel, we cannot tell
      * which one this packet means, and guessing is what makes a vertex inherit
      * a neighbour's fraction. Fall back to the faithful integer position. */
-    if (entry.ambiguous) { s_geom_miss_ambig++; return 0; }
+    if (entry.ambiguous) {
+        if (count_stats) s_geom_miss_ambig++;
+        return 0;
+    }
     if (x16) *x16 = entry.x16;
     if (y16) *y16 = entry.y16;
-    s_geom_hits++;
+    if (count_stats) s_geom_hits++;
     return 1;
+}
+
+extern "C" int gte_geometry_correction_lookup(uint32_t packed,
+                                                int32_t *x16, int32_t *y16) {
+    return gte_geometry_correction_lookup_impl(packed, x16, y16, 1);
+}
+
+/* Read-only variant used by instrumentation probes. A probe must not change
+ * the geometry-correction census that describes rendered vertices. */
+extern "C" int gte_geometry_correction_lookup_probe(uint32_t packed,
+                                                      int32_t *x16,
+                                                      int32_t *y16) {
+    return gte_geometry_correction_lookup_impl(packed, x16, y16, 0);
 }
 
 /* Render-pass checkpoint for the gte.cpp side of precision tracking: the

@@ -1112,6 +1112,51 @@ int test_render_view_parallax() {
     return 0;
 }
 
+int test_pgxp_probe_does_not_count_geometry_lookup() {
+    constexpr uint32_t packed = (80u << 16) | 160u;
+    constexpr int32_t x16 = (160 << 16) + 0x4000;
+    constexpr int32_t y16 = (80 << 16) + 0x2000;
+    const int fallback_was_enabled = pgxp_position_fallback();
+    gte_geometry_correction_set(1);
+    gte_test_seed_geometry(packed, x16, y16);
+    pgxp_set_position_fallback(1);
+
+    uint32_t lookups0 = 0, hits0 = 0, miss_unrecorded0 = 0, miss_ambiguous0 = 0;
+    gte_geometry_correction_stats(&lookups0, &hits0, &miss_unrecorded0,
+                                  &miss_ambiguous0);
+    if (pgxp_probe_precise_vertex(0xFFFFFFFFu, packed, 160, 80) !=
+        PGXP_SRC_FALLBACK)
+        return fail_value("PGXP fallback probe source", 0, 0, packed,
+                          PGXP_SRC_FALLBACK, PGXP_SRC_NATIVE);
+    uint32_t lookups1 = 0, hits1 = 0, miss_unrecorded1 = 0, miss_ambiguous1 = 0;
+    gte_geometry_correction_stats(&lookups1, &hits1, &miss_unrecorded1,
+                                  &miss_ambiguous1);
+    if (lookups1 != lookups0 || hits1 != hits0 ||
+        miss_unrecorded1 != miss_unrecorded0 ||
+        miss_ambiguous1 != miss_ambiguous0)
+        return fail_value("PGXP probe leaves geometry counters unchanged", 0, 0,
+                          packed, lookups0, lookups1);
+
+    int32_t got_x = 0, got_y = 0;
+    uint16_t got_z = 1;
+    if (pgxp_get_precise_vertex(0xFFFFFFFFu, packed, 160, 80,
+                                &got_x, &got_y, &got_z) != PGXP_SRC_FALLBACK ||
+        got_x != x16 || got_y != y16 || got_z != 0)
+        return fail_value("PGXP draw uses geometry fallback", 0, 0, packed,
+                          static_cast<uint32_t>(x16), static_cast<uint32_t>(got_x));
+    uint32_t lookups2 = 0, hits2 = 0, miss_unrecorded2 = 0, miss_ambiguous2 = 0;
+    gte_geometry_correction_stats(&lookups2, &hits2, &miss_unrecorded2,
+                                  &miss_ambiguous2);
+    gte_geometry_correction_set(0);
+    pgxp_set_position_fallback(fallback_was_enabled);
+    if (lookups2 != lookups1 + 1u || hits2 != hits1 + 1u ||
+        miss_unrecorded2 != miss_unrecorded1 ||
+        miss_ambiguous2 != miss_ambiguous1)
+        return fail_value("draw increments geometry counters", 0, 0, packed,
+                          lookups1 + 1u, lookups2);
+    return 0;
+}
+
 } // namespace
 
 /* Preserve projection precision (docs/ENHANCEMENTS.md G1.11) changes the
@@ -1287,6 +1332,7 @@ int main() {
     if (int rc = test_precise_nclip_is_title_scoped()) return rc;
     if (int rc = test_saturated_nclip_keeps_architectural_result()) return rc;
     if (int rc = test_precision_speculative_transaction()) return rc;
+    if (int rc = test_pgxp_probe_does_not_count_geometry_lookup()) return rc;
     if (int rc = test_preserve_projection_is_shadow_only()) return rc;
     if (int rc = test_pgxp_culling()) return rc;
     if (int rc = test_render_view_parallax()) return rc;

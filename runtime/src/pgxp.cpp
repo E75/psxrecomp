@@ -43,6 +43,8 @@
 /* gte.cpp — position-cache fallback tier (ambiguity-gated, G1.4 exact table) */
 extern "C" int gte_geometry_correction_lookup(uint32_t packed,
                                               int32_t *x16, int32_t *y16);
+extern "C" int gte_geometry_correction_lookup_probe(uint32_t packed,
+                                                    int32_t *x16, int32_t *y16);
 
 /* ------------------------------------------------------------------------- */
 /* Shadow storage                                                             */
@@ -1080,10 +1082,10 @@ static inline int32_t field_rebase(int32_t v16, uint32_t half, int32_t parsed) {
     return (int32_t)((int64_t)v16 + ((int64_t)as11 - as16) * 65536);
 }
 
-extern "C" int pgxp_get_precise_vertex(uint32_t addr, uint32_t packet_word,
-                                       int32_t int_x, int32_t int_y,
-                                       int32_t *x16, int32_t *y16,
-                                       uint16_t *sz) {
+static int pgxp_get_precise_vertex_impl(uint32_t addr, uint32_t packet_word,
+                                        int32_t int_x, int32_t int_y,
+                                        int32_t *x16, int32_t *y16,
+                                        uint16_t *sz, int probe) {
     s_stats.lookups++;
 
     int32_t px = 0, py = 0;
@@ -1105,8 +1107,10 @@ extern "C" int pgxp_get_precise_vertex(uint32_t addr, uint32_t packet_word,
         }
     }
 
-    if (!have && s_position_fallback &&
-        gte_geometry_correction_lookup(packet_word, &px, &py)) {
+    const int fallback_hit = !have && s_position_fallback &&
+        (probe ? gte_geometry_correction_lookup_probe(packet_word, &px, &py)
+               : gte_geometry_correction_lookup(packet_word, &px, &py));
+    if (fallback_hit) {
         pz = 0;                                /* fallback never carries depth */
         have = PGXP_SRC_FALLBACK;
     }
@@ -1149,13 +1153,21 @@ extern "C" int pgxp_get_precise_vertex(uint32_t addr, uint32_t packet_word,
     return have;
 }
 
+extern "C" int pgxp_get_precise_vertex(uint32_t addr, uint32_t packet_word,
+                                       int32_t int_x, int32_t int_y,
+                                       int32_t *x16, int32_t *y16,
+                                       uint16_t *sz) {
+    return pgxp_get_precise_vertex_impl(addr, packet_word, int_x, int_y,
+                                        x16, y16, sz, 0);
+}
+
 extern "C" int pgxp_probe_precise_vertex(uint32_t addr, uint32_t packet_word,
                                          int32_t int_x, int32_t int_y) {
     const PGXPStats saved = s_stats;
     int32_t x16, y16;
     uint16_t sz;
-    const int src = pgxp_get_precise_vertex(addr, packet_word, int_x, int_y,
-                                            &x16, &y16, &sz);
+    const int src = pgxp_get_precise_vertex_impl(addr, packet_word, int_x, int_y,
+                                                 &x16, &y16, &sz, 1);
     s_stats = saved;
     return src;
 }
