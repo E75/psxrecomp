@@ -21,7 +21,10 @@ def main():
     assert source.count('psx_mod_function_entry(cpu, addr)') == 1
     # Every interpreted entry reaches these calls: without an active hook they
     # must cost one load, never a call into the plugin table.
-    assert 'if (!forced && g_psx_mod_function_entry_hooks && psx_mod_function_entry(cpu, addr))\n            return 1;' in source
+    # A forced span replay (psx_mod_run_guest_span) runs inside a hook
+    # already: it must not re-enter the entry hooks, so the check leads.
+    assert ('if (!forced && g_psx_mod_function_entry_hooks && '
+            'psx_mod_function_entry(cpu, addr))\n            return 1;') in source
     assert 'if (g_psx_mod_function_entry_hooks &&\n' in source
     local_start = source.index('if (allow_local_dirty_flow && target != 0 &&')
     local_end = source.index('current_page = target_phys >> 12;', local_start)
@@ -35,6 +38,10 @@ def main():
     assert local.count('psx_mod_function_entry(cpu, target)') == 1
     assert local.index('overlay_loader_dispatch(cpu, target)') < local.index(
         'psx_mod_function_entry(cpu, target)') < local.index('pc = target;')
+    completion = local[local.index('if (g_psx_mod_function_entry_hooks &&'):]
+    completion = completion[:completion.index('pc = target;')]
+    assert 'g_dirty_interp_chain_target = cpu->pc;' in completion
+    assert 'OV_FPLOG_RET1();' in completion
     print('interpreter mod entry guards: PASS')
 
 

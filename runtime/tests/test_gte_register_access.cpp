@@ -3,6 +3,7 @@
 #include "pgxp.h"
 #include "projection_scale.hpp"
 #include "gte_view.h"
+#include "gte_nclip_stats.h"
 #include "render_pass_projection.h"
 #include <limits>
 extern "C" void gte_set_fov_scale(int, int);
@@ -70,6 +71,7 @@ static int g_test_netplay_active = 0;
 extern "C" int psx_netplay_active(void) { return g_test_netplay_active; }
 extern "C" {
 uint64_t s_frame_count = 0;
+uint32_t g_debug_last_store_pc = 0;
 }
 
 uint64_t g_test_cycle = 0;
@@ -665,6 +667,8 @@ int test_precise_nclip_is_title_scoped() {
         cpu.gte_data[12 + i] = packed[i];
         gte_test_seed_precise_projection(i, packed[i], x16[i], y16[i], 100);
     }
+    gte_nclip_stats_reset();
+    g_debug_last_store_pc = 0x80012340u;
     uint64_t hit0 = 0, fallback0 = 0, disagree0 = 0;
     gte_nclip_precise_stats(&hit0, &fallback0, &disagree0);
     gte_execute(&cpu, 0x06u);
@@ -674,9 +678,34 @@ int test_precise_nclip_is_title_scoped() {
         fallback1 != fallback0 || disagree1 != disagree0 + 1u)
         return fail_value("precise NCLIP preserves guest MAC0", 0, 0x06u,
                           0, 1u, cpu.gte_data[24]);
-    if (!gte_nclip_precise_bltz(1) || gte_nclip_precise_bltz(2))
+    /* The branch consumer sees the precise (negative) sign only for the MAC0
+     * the NCLIP produced; any other value keeps its native sign. Every branch
+     * shape tests this one sign. */
+    if (gte_nclip_exact_sign(1, 0x80011000u) != -1 ||
+        gte_nclip_exact_sign(2, 0x80011000u) != 1 ||
+        gte_nclip_exact_sign(0, 0x80011004u) != 0)
         return fail_value("title-scoped precise NCLIP predicate", 0, 0x06u,
                           0, 1u, 0u);
+    {
+        GteNclipSiteStat sites[GTE_NCLIP_STAT_CAP];
+        const int n = gte_nclip_site_stats(sites, GTE_NCLIP_STAT_CAP);
+        uint32_t evals = 0, flips = 0, falls = 0;
+        for (int i = 0; i < n; ++i)
+            if (sites[i].pc == 0x80011000u) {
+                evals = sites[i].evals; flips = sites[i].flips;
+                falls = sites[i].fallbacks;
+            }
+        if (evals != 2u || flips != 1u || falls != 1u)
+            return fail_value("exact NCLIP site attribution", 0, 0x06u,
+                              0, 2u, evals);
+        GteNclipFuncStat funcs[GTE_NCLIP_STAT_CAP];
+        const int nf = gte_nclip_func_stats(funcs, GTE_NCLIP_STAT_CAP);
+        uint32_t fn = 0, fd = 0;
+        for (int i = 0; i < nf; ++i)
+            if (funcs[i].func == 0x80012340u) { fn = funcs[i].nclips; fd = funcs[i].disagree; }
+        if (fn != 1u || fd != 1u)
+            return fail_value("NCLIP producer attribution", 0, 0x06u, 0, 1u, fn);
+    }
 
     /* A stale packed-word shadow must fail closed to the native sign and count
      * as a fallback, never as a precise hit. */
@@ -688,7 +717,7 @@ int test_precise_nclip_is_title_scoped() {
     g_test_precise_nclip_enabled = 0;
     if (cpu.gte_data[24] != 1u || hit2 != hit1 ||
         fallback2 != fallback1 + 1u || disagree2 != disagree1 ||
-        gte_nclip_precise_bltz(1))
+        gte_nclip_exact_sign(1, 0x80011000u) != 1)
         return fail_value("stale precise NCLIP falls back natively", 0, 0x06u,
                           0, 1u, cpu.gte_data[24]);
     return 0;
@@ -1083,6 +1112,51 @@ int test_render_view_parallax() {
     return 0;
 }
 
+int test_pgxp_probe_does_not_count_geometry_lookup() {
+    constexpr uint32_t packed = (80u << 16) | 160u;
+    constexpr int32_t x16 = (160 << 16) + 0x4000;
+    constexpr int32_t y16 = (80 << 16) + 0x2000;
+    const int fallback_was_enabled = pgxp_position_fallback();
+    gte_geometry_correction_set(1);
+    gte_test_seed_geometry(packed, x16, y16);
+    pgxp_set_position_fallback(1);
+
+    uint32_t lookups0 = 0, hits0 = 0, miss_unrecorded0 = 0, miss_ambiguous0 = 0;
+    gte_geometry_correction_stats(&lookups0, &hits0, &miss_unrecorded0,
+                                  &miss_ambiguous0);
+    if (pgxp_probe_precise_vertex(0xFFFFFFFFu, packed, 160, 80) !=
+        PGXP_SRC_FALLBACK)
+        return fail_value("PGXP fallback probe source", 0, 0, packed,
+                          PGXP_SRC_FALLBACK, PGXP_SRC_NATIVE);
+    uint32_t lookups1 = 0, hits1 = 0, miss_unrecorded1 = 0, miss_ambiguous1 = 0;
+    gte_geometry_correction_stats(&lookups1, &hits1, &miss_unrecorded1,
+                                  &miss_ambiguous1);
+    if (lookups1 != lookups0 || hits1 != hits0 ||
+        miss_unrecorded1 != miss_unrecorded0 ||
+        miss_ambiguous1 != miss_ambiguous0)
+        return fail_value("PGXP probe leaves geometry counters unchanged", 0, 0,
+                          packed, lookups0, lookups1);
+
+    int32_t got_x = 0, got_y = 0;
+    uint16_t got_z = 1;
+    if (pgxp_get_precise_vertex(0xFFFFFFFFu, packed, 160, 80,
+                                &got_x, &got_y, &got_z) != PGXP_SRC_FALLBACK ||
+        got_x != x16 || got_y != y16 || got_z != 0)
+        return fail_value("PGXP draw uses geometry fallback", 0, 0, packed,
+                          static_cast<uint32_t>(x16), static_cast<uint32_t>(got_x));
+    uint32_t lookups2 = 0, hits2 = 0, miss_unrecorded2 = 0, miss_ambiguous2 = 0;
+    gte_geometry_correction_stats(&lookups2, &hits2, &miss_unrecorded2,
+                                  &miss_ambiguous2);
+    gte_geometry_correction_set(0);
+    pgxp_set_position_fallback(fallback_was_enabled);
+    if (lookups2 != lookups1 + 1u || hits2 != hits1 + 1u ||
+        miss_unrecorded2 != miss_unrecorded1 ||
+        miss_ambiguous2 != miss_ambiguous1)
+        return fail_value("draw increments geometry counters", 0, 0, packed,
+                          lookups1 + 1u, lookups2);
+    return 0;
+}
+
 } // namespace
 
 /* Preserve projection precision (docs/ENHANCEMENTS.md G1.11) changes the
@@ -1258,6 +1332,7 @@ int main() {
     if (int rc = test_precise_nclip_is_title_scoped()) return rc;
     if (int rc = test_saturated_nclip_keeps_architectural_result()) return rc;
     if (int rc = test_precision_speculative_transaction()) return rc;
+    if (int rc = test_pgxp_probe_does_not_count_geometry_lookup()) return rc;
     if (int rc = test_preserve_projection_is_shadow_only()) return rc;
     if (int rc = test_pgxp_culling()) return rc;
     if (int rc = test_render_view_parallax()) return rc;

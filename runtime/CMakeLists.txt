@@ -23,6 +23,10 @@ psxrecomp_add_runtime_target(psx-runtime
 # (docs/ENHANCEMENTS.md G1.10). Titles get their <exe>_pgxp the same way.
 
 if(BUILD_TESTING)
+    add_executable(disasm_test tests/test_disasm.cpp src/disasm_shim.cpp
+        ../recompiler/src/mips_decoder.cpp)
+    target_include_directories(disasm_test PRIVATE include ../recompiler/include)
+    add_test(NAME disasm_test COMMAND disasm_test)
     # Netplay: which BIOS a match boots, and its wire helpers.
     add_executable(netplay_bios_settle_test
         tests/test_netplay_bios_settle.c
@@ -66,6 +70,15 @@ if(BUILD_TESTING)
     set_tests_properties(netplay_libjuice_offline_other PROPERTIES
         PASS_REGULAR_EXPRESSION "recomp-net pins libjuice SHA256")
     if(NOT MSVC)
+        add_executable(host_snapshot_guard_test tests/test_host_snapshot_guard.c)
+        add_executable(fntrace_restore_handoff_test
+            tests/test_fntrace_restore_handoff.c src/fntrace.c)
+        foreach(test_target host_snapshot_guard_test fntrace_restore_handoff_test)
+            target_include_directories(${test_target} PRIVATE include src)
+            target_compile_options(${test_target} PRIVATE -O2 -flto -ffunction-sections -fdata-sections)
+            target_link_options(${test_target} PRIVATE -flto -Wl,--gc-sections)
+            add_test(NAME ${test_target} COMMAND ${test_target})
+        endforeach()
         add_executable(ws_world_scene_test tests/test_ws_world_scene.c
             src/psx_video_timing.c)
         target_include_directories(ws_world_scene_test PRIVATE include src)
@@ -112,6 +125,10 @@ if(BUILD_TESTING)
     set(PSX_GL_READBACK_COMPILER_BIN "${_gl_test_default_bin}" CACHE PATH "GCC/MinGW bin for GL fixture")
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
+        add_test(NAME wtrace_dump_test COMMAND ${CMAKE_COMMAND} -E env
+            "CC=${CMAKE_C_COMPILER}" "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wtrace_dump.py")
+        set_tests_properties(wtrace_dump_test PROPERTIES SKIP_RETURN_CODE 77)
         add_test(NAME counted_mips_relocations_test COMMAND "${Python3_EXECUTABLE}"
             "${PSXRECOMP_ROOT}/tools/tests/test_counted_mips_relocations.py")
         add_test(NAME interp_mod_entry_guards_test COMMAND "${Python3_EXECUTABLE}"
@@ -267,6 +284,7 @@ if(BUILD_TESTING)
             tests/psx_ram_runtime_map_stubs.c
             src/memory.c
             src/dma.c
+            src/gpu_timeline.c
             src/boot_state.c
             src/psx_ram_geometry.c)
         target_include_directories(psx_ram_runtime_map_test PRIVATE include src)
@@ -287,6 +305,7 @@ if(BUILD_TESTING)
             tests/psx_ram_runtime_map_stubs.c
             src/memory.c
             src/dma.c
+            src/gpu_timeline.c
             src/boot_state.c
             src/psx_icache.c
             src/psx_ram_geometry.c)
@@ -401,6 +420,7 @@ if(BUILD_TESTING)
     target_include_directories(projection_scale_config_test PRIVATE
         include ../recompiler/lib/toml11)
     add_test(NAME projection_scale_config_test COMMAND projection_scale_config_test)
+
     add_executable(mod_controller_source_test tests/test_mod_controller_source.c src/mod_controller_source.c)
     target_include_directories(mod_controller_source_test PRIVATE include)
     add_test(NAME mod_controller_source_test COMMAND mod_controller_source_test)
@@ -443,6 +463,7 @@ if(BUILD_TESTING)
         src/psx_ram_geometry.c
         src/mod_runtime.cpp
         src/mod_packages.cpp
+        src/mod_media.cpp
         src/disc_path.cpp
         src/cue_sheet.cpp
         src/iso_reader.cpp
@@ -495,7 +516,8 @@ if(BUILD_TESTING)
 
     add_executable(gpu_textured_dot_nw_shift_exec_test
         tests/test_gpu_textured_dot_nw_shift_exec.c
-        src/psx_video_timing.c)
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
     target_include_directories(gpu_textured_dot_nw_shift_exec_test PRIVATE
         include
         src)
@@ -514,7 +536,8 @@ if(BUILD_TESTING)
     add_executable(ws_auto_ui_untextured_exec_test
         tests/test_ws_auto_ui_untextured_exec.c
         src/ws_ui_group.c
-        src/psx_video_timing.c)
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
     target_include_directories(ws_auto_ui_untextured_exec_test PRIVATE
         include
         src)
@@ -530,7 +553,8 @@ if(BUILD_TESTING)
     add_executable(ws_shared_split_ui_exec_test
         tests/test_ws_shared_split_ui_exec.c
         src/ws_ui_group.c
-        src/psx_video_timing.c)
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
     target_include_directories(ws_shared_split_ui_exec_test PRIVATE include src)
     if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(ws_shared_split_ui_exec_test PRIVATE
@@ -541,9 +565,11 @@ if(BUILD_TESTING)
 
     add_executable(ws_view_anchor_test tests/test_ws_view_anchor.c)
     add_executable(ws_view_anchor_gpu_test tests/test_ws_view_anchor_gpu.c
-        src/psx_video_timing.c)
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
     add_executable(native_wide_projection_test tests/test_native_wide_projection.c
-        src/psx_video_timing.c)
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
     foreach(_anchor_test ws_view_anchor ws_view_anchor_gpu native_wide_projection)
         target_include_directories(${_anchor_test}_test PRIVATE include src)
         if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
@@ -729,24 +755,37 @@ if(BUILD_TESTING)
     add_executable(mod_packages_test
         tests/test_mod_packages.cpp
         src/mod_packages.cpp
+        src/mod_media.cpp src/iso_reader.cpp src/cue_sheet.cpp
         src/crc32.c
         src/psx_sha256.c)
     target_include_directories(mod_packages_test PRIVATE
         include
+        ../recompiler/include
         ../recompiler/lib/toml11)
+    target_link_libraries(mod_packages_test PRIVATE chdr-static)
     add_test(NAME mod_packages_test COMMAND mod_packages_test)
 
     add_executable(builtin_mod_manifests_test
         tests/test_builtin_mod_manifests.cpp
         src/mod_packages.cpp
+        src/mod_media.cpp src/iso_reader.cpp src/cue_sheet.cpp
         src/crc32.c
         src/psx_sha256.c)
     target_include_directories(builtin_mod_manifests_test PRIVATE
         include
+        ../recompiler/include
         ../recompiler/lib/toml11)
+    target_link_libraries(builtin_mod_manifests_test PRIVATE chdr-static)
     add_test(NAME builtin_mod_manifests_test
              COMMAND builtin_mod_manifests_test
                      "${CMAKE_CURRENT_SOURCE_DIR}/../mods/builtin/packages")
+
+    add_executable(mod_media_test
+        tests/test_mod_media.cpp src/mod_media.cpp src/iso_reader.cpp
+        src/cue_sheet.cpp src/psx_sha256.c)
+    target_include_directories(mod_media_test PRIVATE include ../recompiler/include)
+    target_link_libraries(mod_media_test PRIVATE chdr-static)
+    add_test(NAME mod_media_test COMMAND mod_media_test)
 
     add_executable(text_xlate_fix_only_test
         tests/test_text_xlate_fix_only.cpp
@@ -762,6 +801,7 @@ if(BUILD_TESTING)
         src/iso_reader_c.cpp
         src/mod_runtime.cpp
         src/mod_packages.cpp
+        src/mod_media.cpp
         src/disc_path.cpp
         src/cue_sheet.cpp
         src/iso_reader.cpp
@@ -782,6 +822,31 @@ if(BUILD_TESTING)
         endif()
     endif()
     add_test(NAME mod_runtime_test COMMAND mod_runtime_test)
+
+    add_executable(mod_resident_test
+        tests/test_mod_resident.cpp
+        src/mod_resident.cpp
+        src/mod_runtime.cpp
+        src/mod_packages.cpp
+        src/mod_media.cpp
+        src/disc_path.cpp
+        src/cue_sheet.cpp
+        src/iso_reader.cpp
+        src/crc32.c
+        src/psx_sha256.c)
+    target_include_directories(mod_resident_test PRIVATE
+        include
+        ../recompiler/include
+        ../recompiler/lib/toml11)
+    target_link_libraries(mod_resident_test PRIVATE chdr-static)
+    if(WIN32)
+        if(MSVC)
+            target_link_options(mod_resident_test PRIVATE /STACK:16777216)
+        else()
+            target_link_options(mod_resident_test PRIVATE -Wl,--stack,16777216)
+        endif()
+    endif()
+    add_test(NAME mod_resident_test COMMAND mod_resident_test)
 
     if(WIN32)
         add_executable(autocompile_publication_test
@@ -959,6 +1024,10 @@ if(BUILD_TESTING)
     add_executable(gpu_sw_edges_test tests/test_gpu_sw_edges.c)
     target_include_directories(gpu_sw_edges_test PRIVATE src)
     add_test(NAME gpu_sw_edges_test COMMAND gpu_sw_edges_test)
+
+    add_executable(gpu_uv_test tests/test_gpu_uv.c)
+    target_include_directories(gpu_uv_test PRIVATE src)
+    add_test(NAME gpu_uv_test COMMAND gpu_uv_test)
 
     add_executable(gpu_vk_upload_alignment_test
         tests/test_gpu_vk_upload_alignment.c)
@@ -1222,6 +1291,17 @@ if(BUILD_TESTING)
         add_test(NAME release_stage_cache_test
                  COMMAND ${Python3_EXECUTABLE}
                          ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_release_stage_cache.py)
+        # Overlay shards and BIOS modules are compiled for the RUNTIME's
+        # architecture: an x86_64 macOS runtime under Rosetta used to get arm64
+        # shards (arm64-only Xcode clang, no -arch) in its macos-x64 cache and
+        # ran every overlay interpreted. Pins the PSX_OVERLAY_ARCH_ABI handoff
+        # (autocompile.c), -arch on macOS, the refusal when the Python cannot
+        # load the runtime's architecture, and unchanged Windows/Linux commands;
+        # with a real cc it builds and loads each slice this Mac can run.
+        add_test(NAME overlay_compile_arch_test
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_overlay_compile_arch.py
+                         --cc ${CMAKE_C_COMPILER})
     endif()
 
     # Full card protocol regression: read, write, address echo, per-slot state,

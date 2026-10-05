@@ -229,19 +229,26 @@ extern uint32_t gte_geometry_correction_hits(void);
 extern void     gte_geometry_correction_stats(uint32_t *lookups, uint32_t *hits,
                                               uint32_t *miss_unrecorded,
                                               uint32_t *miss_ambiguous);
+/* Same position-cache lookup without changing geometry-correction counters;
+ * reserved for non-rendering probes that inspect a vertex before drawing. */
+extern int      gte_geometry_correction_lookup_probe(uint32_t packed,
+                                                      int32_t *x16,
+                                                      int32_t *y16);
 
 /* Exact NCLIP audit coverage: precise = all three SXY shadows are coherent and
  * word-validated; fallback = native integer-only; disagreements counts cases
  * where sub-pixel and guest-visible integer signs differ. MAC0 stays native. */
 extern void     gte_nclip_precise_stats(uint64_t *hits, uint64_t *fallbacks,
                                         uint64_t *disagreements);
-/* Title-scoped widescreen cull consumer. Returns the exact tracked NCLIP sign
- * only when it belongs to the supplied native MAC0; otherwise preserves the
- * native comparison. This does not change guest-visible GTE state. */
-extern int      gte_nclip_precise_bltz(int32_t native_mac0);
 extern int      gte_nclip_native_wide_sign(int32_t native_mac0, int* sign);
 extern int      gte_nclip_native_wide_previous_sign(int32_t native_mac0, int* sign);
 extern int psx_ws_nclip_branch(uint32_t pc, uint32_t instr, int32_t mac0, int vanilla);
+/* Title-scoped widescreen cull consumer ([widescreen.cull] nclip_exact_sites).
+ * Returns the sign (-1/0/1) the branch at `pc` should test: the exact tracked
+ * NCLIP sign only when it belongs to the supplied native MAC0, otherwise the
+ * native sign. Counts per-site use (gte_nclip_stats.h). Does not change
+ * guest-visible GTE state. */
+extern int32_t  gte_nclip_exact_sign(int32_t native_mac0, uint32_t pc);
 
 /* PGXP dataflow-shadowing hook macros (PGXP_LOAD/STORE/ALU/MULDIV/COP2).
  * The emitter writes them unconditionally; they expand to real calls only

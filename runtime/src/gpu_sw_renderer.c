@@ -446,7 +446,8 @@ static inline float bilinear_center_shift_for_target(const RTarget *t) {
 
 static void sw_tri_uv_limits(const int *xs, const int *ys,
                              const int *us, const int *vs) {
-    psx_uv_tri_limits(xs, ys, us, vs, g_uv_lim);
+    if (g_perspective_valid) psx_uv_tri_world_limits(us, vs, g_uv_lim);
+    else psx_uv_tri_limits(xs, ys, us, vs, g_uv_lim);
 }
 
 static void sw_rect_uv_limits(int u0, int v0, int u1, int v1) {

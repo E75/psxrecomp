@@ -409,12 +409,24 @@ def ensure_emitters(
     Generate & rebuild without a pre-staged setup-host SDK.
     """
     if not force:
+        # With the framework's recompiler sources present, always run the
+        # (incremental) build: a binary that merely exists may predate the
+        # sources -- a submodule moved to another revision -- and would emit
+        # code for the old framework without a word (a hook site listed in
+        # game.toml silently missing). Ninja makes the up-to-date case cheap.
+        # Without sources (an SDK pack), the staged binaries are the only ones.
         try:
-            game, bios = find_emitters(project_root)
-            progress.log(f"Emitters ready: {game}, {bios}")
-            return game, bios
+            recompiler_source_dir(project_root)
+            have_sources = True
         except FileNotFoundError:
-            pass
+            have_sources = False
+        if not have_sources:
+            try:
+                game, bios = find_emitters(project_root)
+                progress.log(f"Emitters ready: {game}, {bios}")
+                return game, bios
+            except FileNotFoundError:
+                pass
 
     progress.phase(
         "emitters",

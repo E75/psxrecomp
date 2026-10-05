@@ -410,6 +410,37 @@ int main() {
           "an implementation exposes exactly the hooks it registered");
     check(mod_function_entry_hooks("test.missing").empty(),
           "an unregistered implementation exposes no hooks");
+    /* Audit: a hook registered under a sub-id of the package's declared
+     * plugin can never be activated by a plan and must be reported. */
+    check(mod_register_function_entry_plugin("test.entry.hud", 0x80020000u, entry_hook),
+          "sub-id function-entry plugin must register");
+    {
+        const fs::path audit_root = root / "audit-authored";
+        write_text(audit_root / "entry.mod/1.0.0/manifest.toml",
+                   "format_version = 5\n"
+                   "id = \"entry.mod\"\n"
+                   "version = \"1.0.0\"\n"
+                   "name = \"Entry Mod\"\n"
+                   "resolver = \"declarative\"\n"
+                   "[[target]]\n"
+                   "game_id = \"SLUS-TEST\"\n"
+                   "[[feature]]\n"
+                   "id = \"entry\"\n"
+                   "name = \"Entry Plugin\"\n"
+                   "[[plugin]]\n"
+                   "feature = \"entry\"\n"
+                   "id = \"test.entry\"\n");
+        const ModPluginAudit audit = mod_audit_registered_plugins({audit_root});
+        check(audit.errors.empty() && audit.manifests == 1,
+              "audit must read every authored manifest");
+        check(std::find(audit.declared.begin(), audit.declared.end(),
+                        "test.entry") != audit.declared.end(),
+              "audit must collect declared [[plugin]] ids");
+        check(audit.undeclared.size() == 1 && audit.undeclared[0] == "test.entry.hud",
+              "audit must report exactly the registered-but-undeclared id");
+        const ModPluginAudit missing = mod_audit_registered_plugins({root / "absent"});
+        check(!missing.errors.empty(), "audit must report an unreadable root");
+    }
     mod_clear_plugins_for_tests();
     ModResolution entry_unavailable = reload.resolve("SLUS-TEST");
     check(!entry_unavailable.ok,
@@ -2109,6 +2140,55 @@ int main() {
         mod_clear_plugins_for_tests();
     }
 
+    {
+        const auto media_root = root / "media-catalog";
+        const auto manifest_path = media_root / "packages/media.mod/1.0.0/manifest.toml";
+        std::vector<uint8_t> rom(64);
+        rom[0] = 0x80; rom[1] = 0x37; rom[2] = 0x12; rom[3] = 0x40;
+        const auto owner = media_root / "owner.z64";
+        const auto moved = media_root / "moved.v64";
+        write_bytes(owner, rom);
+        const std::string declaration =
+            "id = \"media.mod\"\nversion = \"1.0.0\"\nname = \"Media\"\n"
+            "[[target]]\ngame_id = \"SLUS-TEST\"\n"
+            "[[feature]]\nid = \"arena\"\nname = \"Arena\"\n"
+            "[[resource]]\nfeature = \"arena\"\nid = \"rom\"\nlabel = \"ROM\"\n"
+            "format = \"n64-rom\"\nrequired = true\nsize = 64\nsha256 = \"" + sha256_hex(rom) + "\"\n";
+        write_text(manifest_path, "format_version = 8\n" + declaration);
+        ModPackageManager media(media_root);
+        check(media.scan(&error) && media.scan_errors().empty(), "verified-media manifest parses");
+        const auto stock_plan = media.resolve("SLUS-TEST");
+        check(stock_plan.ok && stock_plan.resources.empty(), "disabled donor mod needs no media");
+        check(media.set_feature_enabled("media.mod", "arena", true, &error), error.c_str());
+        check(!media.resolve("SLUS-TEST").ok, "enabled donor mod without media cannot launch");
+        check(media.set_feature_resource_path("media.mod", "arena", "rom", owner, &error), error.c_str());
+        auto pinned = media.resolve("SLUS-TEST");
+        check(pinned.ok && pinned.resources.size() == 1 && pinned.resources[0].bytes &&
+              *pinned.resources[0].bytes == rom, "plan contains verified canonical bytes");
+        auto swapped = rom;
+        for (size_t i = 0; i < swapped.size(); i += 2) std::swap(swapped[i], swapped[i + 1]);
+        write_bytes(moved, swapped);
+        check(media.set_feature_resource_path("media.mod", "arena", "rom", moved, &error), error.c_str());
+        check(media.resolve("SLUS-TEST").fingerprint == pinned.fingerprint,
+              "donor fingerprint depends on canonical identity rather than path or byte order");
+        swapped[24] ^= 1;
+        write_bytes(moved, swapped);
+        check(!media.resolve("SLUS-TEST").ok, "wrong same-size media blocks plan");
+        fs::remove(moved);
+        check(!media.resolve("SLUS-TEST").ok, "removed media blocks a new plan");
+        check(media.set_feature_enabled("media.mod", "arena", false, &error), error.c_str());
+        const auto restored = media.resolve("SLUS-TEST");
+        check(restored.ok && restored.resources.empty() && restored.fingerprint == stock_plan.fingerprint,
+              "disabling donor mod restores the exact stock plan");
+        write_text(manifest_path, "format_version = 7\n" + declaration);
+        ModPackage invalid;
+        check(!ModPackageManager::read_manifest(manifest_path, invalid, &error),
+              "old manifest version cannot silently ignore donor verification");
+        auto negative_size = declaration;
+        negative_size.replace(negative_size.find("size = 64"), 9, "size = -1");
+        write_text(manifest_path, "format_version = 8\n" + negative_size);
+        check(!ModPackageManager::read_manifest(manifest_path, invalid, &error), "negative media size rejected");
+    }
     fs::remove_all(root, ec);
     if (failures) {
         std::cerr << failures << " mod package test(s) failed\n";

@@ -267,7 +267,10 @@ void emission() {
           "exactly one clamp emitted");
     check(at != std::string::npos && at >= 5 &&
               out.compare(at - 5, 5, "\n    ") == 0 &&
-              out.find("\n    cpu->gpr[10] =", at) != std::string::npos,
+              (out.find("\n    cpu->gpr[10] =", at) != std::string::npos ||
+               /* PGXP-aliasing form: the source is captured before the write. */
+               out.find("\n    { uint32_t _pgx1 = cpu->gpr[2]; cpu->gpr[10] =", at) !=
+                   std::string::npos),
           "the clamp and the guard share the statement indent");
 
     // The addiu form clamps the source the slot index is computed from.

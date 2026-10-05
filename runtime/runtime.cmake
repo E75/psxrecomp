@@ -353,8 +353,8 @@ set(PSXRECOMP_RUNTIME_SOURCES
     ${PSXRECOMP_ROOT}/runtime/src/gpu_render.c
     ${PSXRECOMP_ROOT}/runtime/src/gpu_gl_renderer.c
     ${PSXRECOMP_ROOT}/runtime/src/psx_openxr.c
-    ${PSXRECOMP_ROOT}/runtime/src/vr_pose_math.c
     ${PSXRECOMP_ROOT}/runtime/src/mod_controller_source.c
+    ${PSXRECOMP_ROOT}/runtime/src/vr_pose_math.c
     ${PSXRECOMP_ROOT}/runtime/src/gpu_vk_renderer.c
     ${PSXRECOMP_ROOT}/runtime/src/dma_gpu_ll.c
     ${PSXRECOMP_ROOT}/runtime/src/dma.c
@@ -425,6 +425,8 @@ set(PSXRECOMP_RUNTIME_SOURCES
     ${PSXRECOMP_ROOT}/runtime/src/psx_icache.c
     ${PSXRECOMP_ROOT}/runtime/src/starvation_ring.c
     ${PSXRECOMP_ROOT}/runtime/src/latency_ring.c
+    ${PSXRECOMP_ROOT}/runtime/src/present_image_ring.c
+    ${PSXRECOMP_ROOT}/runtime/src/gpu_timeline.c
     ${PSXRECOMP_ROOT}/runtime/src/data_shards.c
     ${PSXRECOMP_ROOT}/runtime/src/load_accel.c
     ${PSXRECOMP_ROOT}/runtime/src/card_read_summary.c
@@ -443,7 +445,10 @@ set(PSXRECOMP_RUNTIME_SOURCES
     ${PSXRECOMP_ROOT}/runtime/src/mod_builtin_bezel.c
     ${PSXRECOMP_ROOT}/runtime/src/mod_builtin_ram.c
     ${PSXRECOMP_ROOT}/runtime/src/mod_packages.cpp
+    ${PSXRECOMP_ROOT}/runtime/src/mod_media.cpp
     ${PSXRECOMP_ROOT}/runtime/src/mod_runtime.cpp
+    ${PSXRECOMP_ROOT}/runtime/src/mod_resident.cpp
+    ${PSXRECOMP_ROOT}/runtime/src/mod_guest_services.c
     ${PSXRECOMP_ROOT}/runtime/src/mod_texture_banks.c
     ${PSXRECOMP_ROOT}/runtime/src/psx_keybinds.c
     ${PSXRECOMP_ROOT}/runtime/src/psx_bios_backend.c
@@ -457,6 +462,13 @@ set(PSXRECOMP_RUNTIME_SOURCES
     # (sljit Tier-2 in-process JIT backend removed 2026-07-15 — was disabled by
     # default since 2026-06-25; gaps fall to the interpreter, gcc/tcc unaffected.)
 )
+# TCP `disasm` command only (debug_server.c); stripped with the rest of the TCP
+# server when PSX_DEBUG_TOOLS is OFF.
+if(PSX_DEBUG_TOOLS)
+    list(APPEND PSXRECOMP_RUNTIME_SOURCES
+        ${PSXRECOMP_ROOT}/recompiler/src/mips_decoder.cpp
+        ${PSXRECOMP_ROOT}/runtime/src/disasm_shim.cpp)
+endif()
 
 # Optional delay-sync netplay (recomp-net). Auto-discovers a sibling checkout
 # (…/recomp-net next to the game repo or next to psxrecomp). Override with
@@ -1082,6 +1094,15 @@ function(_psxrt_finalize_mod_catalog_guards)
             VERBATIM)
         add_dependencies("${_guard_target}" "${_stage_target}")
         add_dependencies(${_t} "${_guard_target}")
+        # Siblings can share one output directory (above; and every
+        # PSX_PGXP_VARIANT clone sits beside its base). Each staging step
+        # wipes and rewrites mods/bundled, so under a parallel build one
+        # sibling's wipe raced the other's staging or check. Stage siblings
+        # one after another: each after the previous one staged and verified.
+        if(_i GREATER 0)
+            add_dependencies("${_stage_target}" "${_prev_guard_target}")
+        endif()
+        set(_prev_guard_target "${_guard_target}")
     endforeach()
 
     # One ctest, registered against the first staging target's output
@@ -1312,6 +1333,25 @@ function(_psxrt_stage_mod_catalog target preloaded_dir)
         ${_readme_copy}
         COMMENT "Staging mod catalog for ${target} (${_n_ids} package(s) -> mods/bundled)"
         VERBATIM)
+    # Every trusted plugin the executable registers must be selectable by an
+    # authored manifest [[plugin]] id; the resolved plan activates plugins by
+    # manifest id only, so an undeclared id (typically a hook registered under
+    # a sub-id of its package's plugin) is dead code that fails silently.
+    # Audits the AUTHORED trees, so developer packages a release catalog
+    # strips still count as declarations.
+    if(BUILD_TESTING)
+        set(_audit_roots "${PSXRECOMP_ROOT}/mods/builtin")
+        if(NOT preloaded_dir STREQUAL "" AND NOT preloaded_dir STREQUAL "NONE"
+           AND IS_DIRECTORY "${preloaded_dir}")
+            list(APPEND _audit_roots "${preloaded_dir}")
+        endif()
+        get_target_property(_extra_roots ${target} PSXRT_AUDIT_MOD_DIRS)
+        if(_extra_roots)
+            list(APPEND _audit_roots ${_extra_roots})
+        endif()
+        add_test(NAME psx_mod_plugin_audit_${target}
+            COMMAND $<TARGET_FILE:${target}> --audit-mod-plugins ${_audit_roots})
+    endif()
 
     set_property(GLOBAL APPEND PROPERTY PSXRECOMP_MOD_CATALOG_TARGETS "${target}")
     set_property(GLOBAL APPEND PROPERTY PSXRECOMP_MOD_CATALOG_MANIFESTS "${_manifest}")
@@ -1373,7 +1413,13 @@ function(psxrecomp_add_runtime_target target)
     # mods/builtin/packages) this target does not ship. They are left out of
     # <exe-dir>/mods/bundled entirely -- absent, not hidden -- so no packager
     # can ship them either. An id that is not a builtin fails configure.
-    set(multiValueArgs EXTRAS_SOURCES GAME_GENERATED_FULL_C EXCLUDE_BUILTIN_MODS)
+    #
+    # AUDIT_MOD_DIRS names further authored package trees (manifest.toml files
+    # are found recursively) that declare plugins this executable registers but
+    # no bundled catalog ships, e.g. development-only packages. They are
+    # audited, never staged.
+    set(multiValueArgs EXTRAS_SOURCES GAME_GENERATED_FULL_C EXCLUDE_BUILTIN_MODS
+        AUDIT_MOD_DIRS)
     cmake_parse_arguments(PSXRT "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
     # DEBUG_PORT and WINDOW_TITLE were previously required cmake-time defaults.
@@ -1979,7 +2025,14 @@ function(psxrecomp_add_runtime_target target)
     # letting it stage would have it wipe and re-stage the runtime's catalog
     # with only the framework half.
     if(NOT PSXRT_COSIM)
-        _psxrt_stage_mod_catalog("${target}" "${PSXRT_PRELOADED_MODS_DIR}"
+        foreach(_audit_dir IN LISTS PSXRT_AUDIT_MOD_DIRS)
+        if(NOT IS_DIRECTORY "${_audit_dir}")
+            message(FATAL_ERROR
+                "AUDIT_MOD_DIRS for target '${target}' is not a directory: ${_audit_dir}")
+        endif()
+    endforeach()
+    set_property(TARGET ${target} PROPERTY PSXRT_AUDIT_MOD_DIRS "${PSXRT_AUDIT_MOD_DIRS}")
+    _psxrt_stage_mod_catalog("${target}" "${PSXRT_PRELOADED_MODS_DIR}"
             ${PSXRT_EXCLUDE_BUILTIN_MODS})
     endif()
     endif()

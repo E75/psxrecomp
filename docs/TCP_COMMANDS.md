@@ -56,7 +56,8 @@ Columns: **N** = native, **D** = DuckStation oracle.
 | `present_shot` | ✓ |   | `path` | PNG of the **composed present surface** — the frame after the backend fits the display buffer to the window, so it carries the presented aspect. ⚠ every other capture resolves the display buffer *before* that fit: on a 508×256 display in a 4:3 window they answer 508×256 while the player sees 640×480. Use this one for anything aspect-shaped (widescreen, letterbox), where a pre-fit buffer would hide the very stage the change touches. Staged and fulfilled on the next present, so the ack means *queued* — poll `present_shot_seq`. Unavailable headless and on the Vulkan backend (its swapchain has no readback hook) |
 | `present_shot_seq` | ✓ |   | — | Completion counter for `present_shot`, plus `wrote` (1 = that completion produced a PNG). Sample before staging, poll until `seq` moves. Advances on success *and* failure, so the poll always terminates |
 | `gl_interp` | ✓ |   | — | OpenGL frame-rate presenter ([FRAME_RATE.md](FRAME_RATE.md)): enabled/suspended, host and target Hz, swaps, `source` (`vblank`/`flip`), `flip_period`, `captures` (new source frames) and `duplicates` (VBlanks that re-presented the same frame) |
-| `render_pass_stats` | ✓ |   | — | Render passes ([RENDER_PASSES.md](RENDER_PASSES.md)): plans, phases wanted/planned (shedding), passes, rollbacks (`nesting_repairs`: watchdog aborts whose skipped frame exits the restore undid), dropped device stores by class, `verify_mismatch` under `PSX_RENDER_PASS_VERIFY=1`, host-time split per pass, smoothed pass cost (`cost_us`; `cost_rewarms`: estimates no pass had run on for a while, measured again), presents made from pass images (`late_presents`: held past the frame's planned end because the next flip was late; `expired`: frames whose images stopped showing after several frame lengths without a flip), pass image textures allocated (`image_textures`, `image_bytes`), `status` (`psx_mod_render_pass_status`: 0 ready, 1 no presenter, 2 backend, 3 disabled, 4 session, 5 fast-forward, 6 busy), `backups_reused` (passes that reused the previous pass's VRAM backup) |
+| `render_pass_stats` | ✓ |   | — | Render passes ([RENDER_PASSES.md](RENDER_PASSES.md)): plans, phases wanted/planned (shedding), passes, rollbacks (`nesting_repairs`: watchdog aborts whose skipped frame exits the restore undid), dropped device stores by class, `verify_mismatch` under `PSX_RENDER_PASS_VERIFY=1`, host-time split per pass, smoothed pass cost (`cost_us`; `cost_rewarms`: estimates no pass had run on for a while, measured again), presents made from pass images (`late_presents`: held past the frame's planned end because the next flip was late; `expired`: frames whose images stopped showing after several frame lengths without a flip), pass image textures allocated (`image_textures`, `image_bytes`), `status` (`psx_mod_render_pass_status`: 0 ready, 1 no presenter, 2 backend, 3 disabled, 4 session, 5 fast-forward, 6 busy), `backups_reused` (passes that reused the previous pass's VRAM backup), `spans` / `span_failures` and the last failure `span_fail` (`psx_mod_run_guest_span`: reason, exit PC, `$ra`, PC after a call that did not return) |
+| `window_size` | ✓ |   | `w`, `h` | Resize the game window as a player would (Fit / adaptive widescreen follow it): window-shaped checks in `--hidden-window` runs. Pair with `present_shot` |
 | `render_pass_dump` | ✓ |   | `path`, `count` | Write the images (the game's own frame, then each pass in phase order) of the next `count` frames that get passes as `<path>/g<frame>_<index>_a<phase q16>.png` |
 | `render_pass_refuse` | ✓ |   | `on` | Make the OpenGL backend decline render passes (`status` 2, BACKEND), as a renderer mode without them would; tests a plugin's fallback. `PSX_RENDER_PASS_REFUSE=1` does the same from start |
 | `geom_correction` |   | ✓ | — | `[video] geometry_correction` / `perspective_texturing` engagement: enable flag plus free-running `geometry_vertex_hits` and `perspective_triangles` totals. Both enhancements silently fall back to the faithful path on anything they cannot prove is projected geometry, so a zero counter with the flag on means the title never qualifies — sample twice and diff for a rate. Also `texture_correction`. Its `pgxp` object adds the engine's per-lookup counters, the `position_fallback` / `preserve_projection` / `culling` switches, `ppp_produced` and `ppp_window_fallback` (exact projections outside the agreement window, shadowed with the IR path instead), geometry-corrected triangles split into `tri_precise` / `tri_mixed` / `tri_native` (the mixed share is the mesh-cracking exposure), `rect_bypass` / `rect_partial` (fully / partly precise textured quads that matched the 2D rectangle shortcut; only the former leave it) and `nclip_precise` / `nclip_disagree` / `nclip_corrected` (NCLIPs with an exact determinant, whose exact sign differs from the integer one, and that precise culling corrected); `ENHANCEMENTS.md` G1.11/G1.12 |
@@ -430,9 +431,9 @@ The TCP server is the canonical instrumentation surface. Rule 3 in `CLAUDE.md` i
 
 ## Complete command index (generated)
 
-**332 commands registered** — 319 on the native server (`runtime/src/debug_server.c`), 61 on the Beetle server (`runtime/src/beetle_debug_server.c`).
+**344 commands registered** — 331 on the native server (`runtime/src/debug_server.c`), 61 on the Beetle server (`runtime/src/beetle_debug_server.c`).
 
-62 of 332 have prose above; **270 are index-only**. An index-only command still works — it just has no description here yet. Send it `{"cmd":"<name>"}` and read the reply, or find its `handle_*` function in the server source.
+63 of 344 have prose above; **281 are index-only**. An index-only command still works — it just has no description here yet. Send it `{"cmd":"<name>"}` and read the reply, or find its `handle_*` function in the server source.
 
 Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this block has drifted from the code.
 
@@ -452,6 +453,7 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `call_focus_stats` | ✓ |  |  |
 | `callret_watch` | ✓ |  | ✓ |
 | `capture_freeze` | ✓ |  |  |
+| `capture_mark` | ✓ |  |  |
 | `capture_quads` | ✓ |  |  |
 | `card_buffer_dump` | ✓ |  |  |
 | `card_data_writes` | ✓ |  |  |
@@ -504,6 +506,7 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `dirty_insn_log` | ✓ |  |  |
 | `dirty_ram_stats` | ✓ |  | ✓ |
 | `dirty_ram_unsupported` | ✓ |  |  |
+| `disasm` | ✓ |  |  |
 | `disc_select` | ✓ |  |  |
 | `disp_ring` | ✓ |  |  |
 | `dispatch_check` | ✓ |  |  |
@@ -569,6 +572,7 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `gpu_opcodes` | ✓ |  |  |
 | `gpu_ring_stats` | ✓ |  |  |
 | `gpu_state` | ✓ |  | ✓ |
+| `gpu_timeline` | ✓ |  |  |
 | `gte_frame_stats` | ✓ |  |  |
 | `gte_intpl_dump` | ✓ |  |  |
 | `gte_latch_dump` | ✓ |  |  |
@@ -603,6 +607,8 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `mmio_clear` | ✓ |  | ✓ |
 | `mmio_dump` | ✓ |  | ✓ |
 | `mmx6_freshfix` | ✓ |  |  |
+| `mod_counters` | ✓ |  |  |
+| `nclip_stats` | ✓ |  |  |
 | `openxr_control` | ✓ |  |  |
 | `openxr_hands` | ✓ |  |  |
 | `openxr_hands_override` | ✓ |  |  |
@@ -639,9 +645,13 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `pc_probe_clear` | ✓ |  |  |
 | `pc_probe_dump` | ✓ |  |  |
 | `pgxp` | ✓ |  | ✓ |
+| `pgxp_miss_ring` | ✓ |  |  |
+| `pgxp_shadow` | ✓ |  |  |
 | `phase_hot` | ✓ |  |  |
 | `phase_profile` | ✓ |  |  |
 | `ping` | ✓ | ✓ | ✓ |
+| `present_image_ring_get` | ✓ |  |  |
+| `present_image_ring_stats` | ✓ |  |  |
 | `present_ring` | ✓ |  |  |
 | `present_shot` | ✓ |  | ✓ |
 | `present_shot_seq` | ✓ |  | ✓ |
@@ -658,6 +668,7 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `render_pass_dump` | ✓ |  | ✓ |
 | `render_pass_refuse` | ✓ |  | ✓ |
 | `render_pass_stats` | ✓ |  | ✓ |
+| `resident_status` | ✓ |  |  |
 | `restore_trace` | ✓ |  |  |
 | `restore_trace_clear` | ✓ |  |  |
 | `restore_trace_window` | ✓ |  |  |
@@ -730,6 +741,7 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `watch` | ✓ |  | ✓ |
 | `wide_full` | ✓ |  |  |
 | `wide_shot` | ✓ |  |  |
+| `window_size` | ✓ |  | ✓ |
 | `write_ram` | ✓ |  | ✓ |
 | `ws_aspect` | ✓ |  |  |
 | `ws_aspect_cone_site` | ✓ |  |  |
@@ -744,6 +756,7 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `ws_hud_mode` | ✓ |  |  |
 | `ws_margin` | ✓ |  |  |
 | `ws_nw` | ✓ |  |  |
+| `ws_tag_stats` | ✓ |  |  |
 | `ws_ui_groups` | ✓ |  |  |
 | `wtrace_add` | ✓ |  |  |
 | `wtrace_all_dump` | ✓ | ✓ |  |
@@ -772,3 +785,6 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `xprobe_watch` | ✓ |  |  |
 
 <!-- END AUTOGENERATED COMMAND INDEX -->
+
+`wtrace_dump pc_lo=<hex> pc_hi=<hex>` filters the recorded producer PC, masked to the physical address (KSEG0/KSEG1/KUSEG alias, like `addr_lo`/`addr_hi`), with inclusive lower and exclusive upper bounds, before limiting results. Omitted bounds match every entry; DMA entries use their recorded initiator, and a DMA whose initiator is unknown (0) never matches an explicit PC bound. Address/frame/order filters still apply.
+`disasm addr=<hex> count=<1..256>` inspects aligned guest instructions; default count is 16. Resolved targets use the guest PC. Unknown words are shown verbatim.
