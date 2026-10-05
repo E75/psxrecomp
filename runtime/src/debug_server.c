@@ -8221,9 +8221,12 @@ static void handle_render_pass_stats(int id, const char *json)
     uint64_t gd[10], image_bytes = 0;
     uint32_t image_textures;
     char failure_json[2048];
+    char abort_detail_json[sizeof st.last_abort_detail * 6 + 1];
     DirtyRamSpanFailure sf;
     render_pass_get_stats(&st);
     dirty_ram_span_last_failure(&sf);
+    json_escape_string(abort_detail_json, sizeof abort_detail_json,
+                       st.last_abort_detail);
     const RenderPassFailure *f = &st.last_failure;
     const GLRenderPassBeginDiag *b = &f->gl;
     if (!f->reason) {
@@ -8273,7 +8276,7 @@ static void handle_render_pass_stats(int id, const char *json)
              "\"argument_refused\":%llu,\"status_refused\":%llu,"
              "\"begin_refused\":%llu,\"checkpoint_refused\":%llu,"
              "\"spans\":%llu,\"span_failures\":%llu,"
-             "\"last_failure\":%s,"
+             "\"last_failure\":%s,\"last_abort_detail\":\"%s\","
              "\"span_fail\":{\"reason\":%u,\"pc\":\"0x%08X\",\"start\":\"0x%08X\","
              "\"stop\":\"0x%08X\",\"ra\":\"0x%08X\",\"after\":\"0x%08X\","
              "\"insns\":%llu}}",
@@ -8307,7 +8310,7 @@ static void handle_render_pass_stats(int id, const char *json)
              (unsigned long long)st.argument_refused, (unsigned long long)st.status_refused,
              (unsigned long long)st.begin_refused, (unsigned long long)st.checkpoint_refused,
              (unsigned long long)st.spans, (unsigned long long)st.span_failures,
-             failure_json,
+             failure_json, abort_detail_json,
              (unsigned)sf.reason, (unsigned)sf.pc, (unsigned)sf.start_pc,
              (unsigned)sf.stop_pc, (unsigned)sf.ra, (unsigned)sf.after,
              (unsigned long long)sf.insns);

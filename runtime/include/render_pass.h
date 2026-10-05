@@ -48,6 +48,7 @@ typedef struct RenderPassStats {
     uint64_t watchdog;        /* of which: guest-cycle watchdog overruns */
     uint64_t vram_leaks;      /* GPU writes outside the declared rect (dropped) */
     uint64_t nesting_repairs; /* aborts whose skipped exits the restore undid */
+    char last_abort_detail[192]; /* skipped host exits; latched until session reset */
     uint64_t verify_checks;   /* PSX_RENDER_PASS_VERIFY comparisons */
     uint64_t verify_mismatch; /* ... that found a difference */
     uint64_t spans;           /* psx_mod_run_guest_span calls that reached stop */
