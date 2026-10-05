@@ -207,6 +207,14 @@ if(BUILD_TESTING)
     add_test(NAME launcher_pad_mode_resolve_test
              COMMAND launcher_pad_mode_resolve_test)
 
+    # Presentation-only mod input must not be sourced from disconnected,
+    # peer-synchronized, or rollback-replayed pad state.
+    add_executable(mod_local_input_scope_test
+        tests/test_mod_local_input_scope.c)
+    target_include_directories(mod_local_input_scope_test PRIVATE src)
+    add_test(NAME mod_local_input_scope_test
+             COMMAND mod_local_input_scope_test)
+
     # COP0.CAUSE IP2 must mirror the INTC line combinationally, never latch.
     add_executable(cause_ip2_combinational_test
         tests/test_cause_ip2_combinational.c)
