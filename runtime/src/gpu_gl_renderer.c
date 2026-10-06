@@ -2496,17 +2496,27 @@ static int wide_fast_center_valid(void) {
     return s_wide_fast && gpu_ws_netplay_local_viewport_width() <= 0 &&
         !gpu_ws_background_requires_full_composite();
 }
+/* The one predicate for "the wide surface's centre columns [g_wide_off,
+ * g_wide_off+native_w) are the canonical framebuffer, unshifted". A camera view
+ * (glb_wide_set_view: anchored or shifted reveal) translates every world draw by
+ * view_shift, so the canonical frame no longer lands at g_wide_off; the mirror
+ * then draws the whole surface and no site may skip it or copy the canonical
+ * frame over it. Every centre skip and every centre copy (present AND render
+ * pass capture) must ask this, never wide_fast_center_valid() alone. */
+static int wide_center_is_canonical(void) {
+    return wide_fast_center_valid() && !view_enabled;
+}
 static void wide_blit_center(GLuint wide_fbo, int base_x, int disp_y, int disp_h); /* def below */
 /* True if [lo,hi] (canonical draw-x) lies strictly inside the 4:3 frame, so the
  * prim adds nothing to either reveal margin and its mirror can be skipped. */
 static int mirror_x_center_only(int lo, int hi) {
-    if (!wide_fast_center_valid() || view_enabled) return 0;
+    if (!wide_center_is_canonical()) return 0;
     int base = g_wide_cur_base, native_w = g_wide_w - 2 * g_wide_off;
     if (native_w <= 0) return 0;
     return (lo >= base) && (hi < base + native_w);
 }
 static int mirror_geo_center_only(const int *xs, int n) {
-    if (!wide_fast_center_valid() || view_enabled) return 0;
+    if (!wide_center_is_canonical()) return 0;
     int lo = xs[0], hi = xs[0];
     for (int i = 1; i < n; i++) { if (xs[i] < lo) lo = xs[i]; if (xs[i] > hi) hi = xs[i]; }
     return mirror_x_center_only(lo, hi);
@@ -2679,7 +2689,7 @@ static int    s_cw_batches = 0, s_cw_wide_sets = 0, s_cw_wide_cfgs = 0,
 /* Textured-batch variant of mirror_x_center_only: scan the queued verts' x
  * (attr 0, stride TEXV). Defined here so s_tb / TEXV are in scope. */
 static int mirror_batch_center_only(int nverts) {
-    if (!wide_fast_center_valid() || nverts <= 0) return 0;
+    if (!wide_center_is_canonical() || nverts <= 0) return 0;
     float flo = s_tb[0], fhi = s_tb[0];
     for (int i = 1; i < nverts; i++) {
         float x = s_tb[i * TEXV];
@@ -3036,7 +3046,7 @@ static int   s_fbl_n = 0;
 static int   s_fb_gate = 0;
 
 static int mirror_flat_batch_center_only(int nverts) {
-    if (!wide_fast_center_valid() || nverts <= 0) return 0;
+    if (!wide_center_is_canonical() || nverts <= 0) return 0;
     float flo = s_fb[0], fhi = s_fb[0];
     for (int i = 1; i < nverts; i++) {
         float x = s_fb[i * 6];
@@ -6354,7 +6364,7 @@ static void pass_capture_into(GLuint tex, const PassGen *g) {
         GLuint wf = pass_wide_fbo_for(g->x);
         int native_w = g_wide_w - 2 * g_wide_off;
         if (!wf) return;
-        if (wide_fast_center_valid() && native_w > 0) {
+        if (wide_center_is_canonical() && native_w > 0) {
             p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, s_hr_fbo);
             p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, wf);
             glDisable(GL_SCISSOR_TEST);
@@ -7708,7 +7718,7 @@ void gl_renderer_present_vram(int disp_x, int disp_y, int w, int h, int linear,
  * x-translated by the reveal offset. No-op when s_wide_fast is off (then the
  * mirror drew the full surface, as before). Shared by both present paths. */
 static void wide_blit_center(GLuint wide_fbo, int base_x, int disp_y, int disp_h) {
-    if (!wide_fast_center_valid() || view_enabled || g_wide_w <= 0) return;
+    if (!wide_center_is_canonical() || g_wide_w <= 0) return;
     int native_w = g_wide_w - 2 * g_wide_off;
     if (native_w <= 0) return;
     int S = s_out_scale;
