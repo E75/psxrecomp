@@ -133,6 +133,22 @@ int psx_netplay_seat_count(void);
  * pad has been published for this tick. */
 int psx_netplay_sim_pad(int seat, PsxNetPad *out);
 
+/* Presentation-only local view. A title whose netplay mode draws every seat's
+ * view into one frame on every peer (so guest state stays identical) asks the
+ * present path to show only this peer's view: a rectangle of the display area
+ * in guest pixels, relative to the GP1(05h) display start. The present path
+ * scales it to the window at 4:3. Host state only: never serialized, never
+ * visible to the guest. A request lapses a few simulation ticks after the
+ * last renewal, so the title renews it every frame its multi-view screen is
+ * up. Ignored while netplay is off. */
+void psx_netplay_present_local_view(uint32_t x, uint32_t y,
+                                    uint32_t w, uint32_t h);
+/* 1 and the rectangle while a current request fits a display of
+ * display_w x display_h. */
+int psx_netplay_local_view(uint32_t display_w, uint32_t display_h,
+                           uint32_t *x, uint32_t *y,
+                           uint32_t *w, uint32_t *h);
+
 /*
  * Snapshot for diagnostic dumps (starvation_dump.jsonl meta, etc.).
  * arch_out: "off" | "p2p" | "host_relay" | "server_relay" (never NULL when

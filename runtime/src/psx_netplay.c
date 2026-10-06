@@ -4,6 +4,7 @@
 
 #include "psx_netplay.h"
 #include "netplay_sim_pad_cache.h"
+#include "netplay_local_view.h"
 
 #include "host_time.h"
 #include "memcard.h"
@@ -456,6 +457,26 @@ int psx_netplay_sim_pad(int seat, PsxNetPad *out)
 {
     (void)seat;
     (void)out;
+    return 0;
+}
+void psx_netplay_present_local_view(uint32_t x, uint32_t y,
+                                    uint32_t w, uint32_t h)
+{
+    (void)x;
+    (void)y;
+    (void)w;
+    (void)h;
+}
+int psx_netplay_local_view(uint32_t display_w, uint32_t display_h,
+                           uint32_t *x, uint32_t *y,
+                           uint32_t *w, uint32_t *h)
+{
+    (void)display_w;
+    (void)display_h;
+    (void)x;
+    (void)y;
+    (void)w;
+    (void)h;
     return 0;
 }
 int  psx_netplay_start(const PsxNetplayConfig *cfg)
@@ -2338,6 +2359,8 @@ void psx_netplay_pad_trace_dev(int card, int fallback, int sdl_start,
  * Keep this host-side cache outside savestates: each admitted/replayed tick
  * publishes it again, including sealed rollback authority overwrites. */
 static PsxNetplaySimPadCache s_sim_pad_cache;
+/* Host-only presentation request; see psx_netplay_present_local_view. */
+static PsxNetplayLocalView s_local_view;
 
 static void note_sim_pad(int slot, uint32_t tick, const PsxNetPad *pad)
 {
@@ -3359,6 +3382,27 @@ int psx_netplay_sim_pad(int seat, PsxNetPad *out)
         rnet_session_sim_tick(g_np.session), out);
 }
 
+void psx_netplay_present_local_view(uint32_t x, uint32_t y,
+                                    uint32_t w, uint32_t h)
+{
+    if (!psx_netplay_active())
+        return;
+    (void)psx_netplay_local_view_set(&s_local_view,
+                                     rnet_session_sim_tick(g_np.session),
+                                     x, y, w, h);
+}
+
+int psx_netplay_local_view(uint32_t display_w, uint32_t display_h,
+                           uint32_t *x, uint32_t *y,
+                           uint32_t *w, uint32_t *h)
+{
+    if (!psx_netplay_active())
+        return 0;
+    return psx_netplay_local_view_get(&s_local_view,
+                                      rnet_session_sim_tick(g_np.session),
+                                      display_w, display_h, x, y, w, h);
+}
+
 void psx_netplay_stage_local(const PsxNetPad *pad)
 {
     /* Host in the gallery: its seat still publishes a row every tick (the
@@ -3674,6 +3718,7 @@ int psx_netplay_start(const PsxNetplayConfig *cfg)
     if (!cfg || !cfg->enabled) return -1;
     if (g_np.session) psx_netplay_shutdown();
     psx_netplay_sim_pad_cache_reset(&s_sim_pad_cache);
+    psx_netplay_local_view_reset(&s_local_view);
 
     slots = cfg->slot_count;
     if (slots < 2) slots = 2;
@@ -4246,6 +4291,7 @@ void psx_netplay_cold_reset(void)
     }
     g_local_pad_prev = 0xFFFFu;
     psx_netplay_sim_pad_cache_reset(&s_sim_pad_cache);
+    psx_netplay_local_view_reset(&s_local_view);
     g_local_pad_have = 0;
     g_live_trace_prev = 0xFFFFu;
     g_live_trace_have = 0;

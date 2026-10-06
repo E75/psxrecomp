@@ -141,6 +141,27 @@ at Native is a supported match. Only the GL present surface changes; the 1×
 software authority, the digests and the rollback snapshots are the same on every
 peer. Widescreen and frame-rate mods, by contrast, are cleared for netplay.
 
+### Each peer's own view (presentation only)
+
+Some titles draw every player's view into one frame (split screen, or a link
+mode that renders all seats). Online, every peer still renders and digests
+that identical frame; only what its window shows changes:
+
+- `game.toml [netplay] local_viewport = "vertical_split"`: during netplay, seat
+  0 or 1 presents its own half of a detected vertical split.
+- `psx_netplay_present_local_view(x, y, w, h)` (`psx_netplay.h`): a trusted
+  game plugin names this peer's rectangle of the display area (guest pixels,
+  relative to the GP1(05h) display start), usually from
+  `psx_netplay_local_slot()`. The present path shows that rectangle alone,
+  scaled to the window at 4:3, from the GL internal-resolution surface (or the
+  software frame). The request lasts a few simulation ticks
+  (`PSX_NETPLAY_LOCAL_VIEW_HOLD`), so the plugin renews it every frame its
+  multi-view screen is up and menus fall back to the full frame by
+  themselves. It wins over `local_viewport`, never reaches the guest or a
+  savestate, and is ignored offline. The headless present-image ring records
+  the same rectangle, which is how a harness checks it. Vulkan, which netplay
+  replaces with the software present, ignores it.
+
 ---
 
 ## Connectivity: ICE, TURN, SFU, LAN
