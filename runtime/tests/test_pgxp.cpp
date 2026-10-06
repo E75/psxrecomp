@@ -132,6 +132,25 @@ int main(void) {
         CHECK(x == (161 << 16) && y == (81 << 16) && z == 0);
     }
 
+    /* --- DMA/host rewrite of the identical word: equal bits are not the
+     * same projection, so memory.c drops the shadow by provenance; a
+     * render pass rolls the drop back with the rest of its writes --- */
+    produce_at(ADDR_A);
+    pgxp_invalidate_word(0xA0100000u);           /* a mirror of ADDR_A     */
+    CHECK(lookup(ADDR_A, PACKED, 160, 80, nullptr, nullptr, nullptr) ==
+          PGXP_SRC_NATIVE);
+    produce_at(ADDR_A);
+    CHECK(lookup(ADDR_A, PACKED, 160, 80, nullptr, nullptr, nullptr) ==
+          PGXP_SRC_DATAFLOW);
+    pgxp_checkpoint_begin();
+    pgxp_invalidate_word(ADDR_A);
+    CHECK(lookup(ADDR_A, PACKED, 160, 80, nullptr, nullptr, nullptr) ==
+          PGXP_SRC_NATIVE);
+    pgxp_checkpoint_rollback();
+    CHECK(lookup(ADDR_A, PACKED, 160, 80, nullptr, nullptr, nullptr) ==
+          PGXP_SRC_DATAFLOW);
+    pgxp_invalidate_word(0x1F000000u);           /* untracked: no slot     */
+
     /* --- LW/SW roundtrip: packet copied by the CPU keeps provenance --- */
     produce_at(ADDR_A);
     psx_pgxp_load(nullptr, LW(1, 8), ADDR_A, PACKED);

@@ -322,6 +322,29 @@ if(BUILD_TESTING)
             $<IF:$<PLATFORM_ID:Darwin>,-Wl$<COMMA>-dead_strip,-Wl$<COMMA>--gc-sections>)
         target_link_libraries(isc_store_test PRIVATE ZLIB::ZLIB)
         add_test(NAME isc_store_test COMMAND isc_store_test)
+
+        # DMA and host stores drop the PGXP shadow of the words they touch
+        # (an identical word is not proof of the same projection): the REAL
+        # memory.c store paths against the REAL pgxp.cpp engine. Same link
+        # doubles as isc_store_test, minus the PGXP one.
+        add_executable(pgxp_untracked_store_test
+            tests/test_pgxp_untracked_store.c
+            tests/psx_ram_runtime_map_stubs.c
+            src/memory.c
+            src/dma.c
+            src/gpu_timeline.c
+            src/boot_state.c
+            src/pgxp.cpp
+            src/psx_ram_geometry.c)
+        target_include_directories(pgxp_untracked_store_test PRIVATE include src)
+        target_compile_definitions(pgxp_untracked_store_test PRIVATE
+            PSX_STUBS_REAL_PGXP=1)
+        target_compile_options(pgxp_untracked_store_test PRIVATE
+            -O2 -flto -ffunction-sections -fdata-sections -Wno-lto-type-mismatch)
+        target_link_options(pgxp_untracked_store_test PRIVATE -flto -Wno-lto-type-mismatch
+            $<IF:$<PLATFORM_ID:Darwin>,-Wl$<COMMA>-dead_strip,-Wl$<COMMA>--gc-sections>)
+        target_link_libraries(pgxp_untracked_store_test PRIVATE ZLIB::ZLIB)
+        add_test(NAME pgxp_untracked_store_test COMMAND pgxp_untracked_store_test)
     endif()
 
     # Loadable BIOS backends (psx_bios_module.h): the host loader against

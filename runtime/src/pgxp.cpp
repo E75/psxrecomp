@@ -17,14 +17,15 @@
  * halves); the GPU asks for the precise position of a GP0 vertex word by the
  * packet's RAM address.
  *
- * The single safety invariant: a shadow is only ever BELIEVED after
- * validation against the actual guest word it claims to describe. Anything
- * that writes guest state without a hook (DMA, memcpy loaders, un-hooked
- * instructions) simply leaves a stale shadow behind, and the next validation
- * drops it. We never model side effects — overwrite and validate only. The
- * one accepted hole (shared with the reference implementations): an untracked
- * writer storing the byte-identical word keeps the shadow alive, which is
- * harmless because the position it describes is still that word.
+ * The safety invariant: a shadow is only ever BELIEVED after validation
+ * against the actual guest word it claims to describe, and only while no
+ * writer it did not see has replaced that word. A matching word alone does
+ * not prove provenance: two projections that round to the same integer X/Y
+ * carry different fractions and depths. So every CPU write of a GPR or
+ * memory word runs a hook that carries or resets its shadow, and DMA / host
+ * stores drop the shadow of each word they touch (pgxp_invalidate_word, from
+ * memory.c). Validation still catches any other writer that changes the
+ * word. We never model side effects — overwrite, invalidate, validate.
  *
  * Everything here is host-only and visual-only: guest-visible state is never
  * read back from shadows, shadows are dropped on savestate/rewind, and the
@@ -370,6 +371,12 @@ static inline void pv_reset(PGXPValue *pv, uint32_t value) {
 }
 
 static inline void pv_kill(PGXPValue *pv) { pv->gen = 0; }
+
+extern "C" void pgxp_invalidate_word(uint32_t addr) {
+    if (!g_pgxp_active) return;
+    PGXPValue *pv = pgxp_ptr_w(addr);       /* a render pass rolls it back */
+    if (pv) pv_kill(pv);
+}
 
 /* ------------------------------------------------------------------------- */
 /* Instruction field helpers                                                  */
