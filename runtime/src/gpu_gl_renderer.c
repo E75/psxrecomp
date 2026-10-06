@@ -9161,6 +9161,21 @@ static int dyn_apply(int snew) {
             wst_all(i);   /* colour only */
         }
     }
+    /* 5b. The copy/stencil scratch back to its size for a surface allocated
+     *     at snew (alloc_hr_targets): the step grew it to the old level's
+     *     rects, and every tiled stencil rebuild renders into it. */
+    {
+        int hw = VRAM_W * snew, hh = VRAM_H * snew;
+        int sw = snew <= 2 ? hw : (hw < GL_SCRATCH_TILE ? hw : GL_SCRATCH_TILE);
+        int sh = snew <= 2 ? hh : (hh < GL_SCRATCH_TILE ? hh : GL_SCRATCH_TILE);
+        if (s_scratch_w > sw || s_scratch_h > sh) {
+            p_glActiveTexture(PSXGL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, s_scratch_tex);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, sw, sh, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            s_scratch_w = sw; s_scratch_h = sh;
+        }
+    }
     const uint64_t t5 = dyn_mark();
     /* 6. The new scale. */
     s_hr_scale = s_out_scale = snew;
