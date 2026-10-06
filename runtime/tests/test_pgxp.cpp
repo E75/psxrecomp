@@ -148,6 +148,24 @@ int main(void) {
     CHECK(lookup(ADDR_B, 0xDEADBEEFu, 0, 0, nullptr, nullptr, nullptr) ==
           PGXP_SRC_NATIVE);
 
+    /* --- coprocessor reads replace the GPR: a word equal to the vertex the
+     * register held is still not that vertex (MFC0 decodes through the ALU
+     * hook, CFC2 through the COP2 hook) --- */
+    {
+        const uint32_t mfc0 = (0x10u << 26) | (8u << 16) | (12u << 11);
+        produce_at(ADDR_A);
+        psx_pgxp_load(nullptr, LW(1, 8), ADDR_A, PACKED);
+        psx_pgxp_alu(nullptr, mfc0, PACKED, 0, 0);
+        psx_pgxp_store(nullptr, SW(1, 8), ADDR_B, PACKED);
+        CHECK(lookup(ADDR_B, PACKED, 160, 80, nullptr, nullptr, nullptr) ==
+              PGXP_SRC_NATIVE);
+        psx_pgxp_load(nullptr, LW(1, 8), ADDR_A, PACKED);
+        psx_pgxp_cop2(nullptr, enc_cop2(0x02, 8, 31), PACKED, 0);  /* CFC2 */
+        psx_pgxp_store(nullptr, SW(1, 8), ADDR_B, PACKED);
+        CHECK(lookup(ADDR_B, PACKED, 160, 80, nullptr, nullptr, nullptr) ==
+              PGXP_SRC_NATIVE);
+    }
+
     /* --- MOVE idiom (memory mode, no cpu_mode needed) --- */
     produce_at(ADDR_A);
     psx_pgxp_load(nullptr, LW(1, 8), ADDR_A, PACKED);

@@ -855,7 +855,7 @@ extern "C" void psx_pgxp_alu(struct CPUState *cpu, uint32_t instr,
         }
         return;
     }
-    default:                                   /* SLTI/SLTIU: not a vertex    */
+    default:                                   /* SLTI/SLTIU, MFC0/CFC0: reset */
         pv_reset(dst, result);
         return;
     }
