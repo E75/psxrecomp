@@ -574,6 +574,15 @@ struct RuntimeConfig {
     // default; PSX_RENDER_THREAD=0/1 overrides.
     bool                  video_render_thread = false;
 
+    // frame_generation: with render_thread, the render thread draws
+    // in-between frames at the display's refresh from the last two game
+    // frames' draw lists when it has time to spare (never by running guest
+    // code). The real frames are unchanged and come first; a breaker turns
+    // generation off for seconds after a late frame. Adds up to one game
+    // frame of latency (docs/FRAME_GENERATION.md). Off by default;
+    // PSX_FRAME_GEN=0/1 overrides.
+    bool                  video_frame_generation = false;
+
     // low_latency_input: re-sample the pad after the wall-clock pacer (just
     // before present) so the next CPU frame reads near-fresh input instead of
     // input ~one frame stale. Default on. vsync: present/swap mode —

@@ -234,12 +234,59 @@ static void test_stop_while_held(void) {
     rt_stop();
 }
 
+/* 6. Timed work (frame generation's hook): an exec asks for a tick 5 ms out
+ * while the ring then goes idle; the idle render thread wakes for it (not
+ * only when records arrive), holds the context, and each tick can ask for
+ * the next. Ticks never run before their deadline. */
+static _Atomic int tick_count, tick_early, tick_no_ctx, tick_off_thread;
+static uint64_t tick_due;
+static uint64_t fake_tick(void *user, uint64_t now) {
+    (void)user;
+    if (now < tick_due) atomic_fetch_add(&tick_early, 1);
+    if (atomic_load(&ctx_owner) != 2) atomic_fetch_add(&tick_no_ctx, 1);
+    if (!rt_on_render_thread()) atomic_fetch_add(&tick_off_thread, 1);
+    int n = atomic_fetch_add(&tick_count, 1) + 1;
+    if (n >= 4) return 0;
+    tick_due = now + 2000000u;
+    return tick_due;
+}
+static void tick_exec(void *user, const RtCmd *c, const void *payload) {
+    fake_exec(user, c, payload);
+    if (c->op == OP_PRESENT) {
+        tick_due = rt_now_ns() + 5000000u;
+        rt_tick_at(tick_due);
+    }
+}
+static void test_tick(void) {
+    reset_state();
+    atomic_store(&tick_count, 0);
+    g_max_frames = 2;
+    RtConfig cfg = { 1u << 20, 2, tick_exec, fake_ctx, NULL, fake_tick };
+    CHECK(rt_start(&cfg), "start with tick");
+    void *p = rt_cmd_begin(OP_PRESENT, 0, 16);
+    CHECK(p != NULL, "present record");
+    rt_cmd_commit();
+    rt_frame_end();
+    const uint64_t t0 = rt_now_ns();
+    while (atomic_load(&tick_count) < 4 && rt_now_ns() - t0 < 2000000000ull) sleep_us(500);
+    const uint64_t el = rt_now_ns() - t0;
+    CHECK(atomic_load(&tick_count) == 4, "four ticks while idle (%d)", atomic_load(&tick_count));
+    CHECK(el >= 10000000u, "ticks waited for their deadlines (%.1f ms)", (double)el * 1e-6);
+    CHECK(atomic_load(&tick_early) == 0, "no tick before its deadline");
+    CHECK(atomic_load(&tick_no_ctx) == 0 && atomic_load(&tick_off_thread) == 0,
+          "ticks on the render thread, holding the context");
+    sleep_us(20000);
+    CHECK(atomic_load(&tick_count) == 4, "no tick after 0 was returned");
+    rt_stop();
+}
+
 int main(void) {
     test_order_and_wrap();
     test_oversize();
     test_backpressure();
     test_acquire_release();
     test_stop_while_held();
+    test_tick();
     printf("checks=%d failures=%d\n", checks, failures);
     return failures ? 1 : 0;
 }
