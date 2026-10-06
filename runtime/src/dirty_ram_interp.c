@@ -2384,7 +2384,9 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
     case 0x23: { /* LW */
         uint32_t addr = cpu->gpr[rs] + (uint32_t)simm;
         if (addr & 3) return interp_exception(cpu, 4, addr, pc);  /* LoadAddressError */
-        if (psx_ws_is_cull_plane_nx_site(pc))
+        if (psx_ws_is_local_viewport_width_site(pc))
+            cpu->gpr[rt] = (uint32_t)psx_ws_local_viewport_width((int32_t)psx_cyc_load_word(cpu, addr, rt, 1u << rs));
+        else if (psx_ws_is_cull_plane_nx_site(pc))
             /* Side-plane normal-X: inverse-aspect scale while revealed. */
             cpu->gpr[rt] = (uint32_t)psx_ws_plane_nx(
                 (int32_t)psx_cyc_load_word(cpu, addr, rt, 1u << rs));

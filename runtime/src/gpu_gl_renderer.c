@@ -2489,7 +2489,10 @@ static int wide_fast_center_valid(void) {
     /* An explicitly stretched sky differs inside the canonical viewport too.
      * Keep the full composite for those scenes, including later foreground
      * draws. Tags are installed before DMA, so no earlier center draws skip. */
-    return s_wide_fast && !gpu_ws_background_requires_full_composite();
+    // The native split seam occupies canonical edge columns that the expanded
+    // camera renders as world. Copying those columns reinstates the divider.
+    return s_wide_fast && gpu_ws_netplay_local_viewport_width() <= 0 &&
+        !gpu_ws_background_requires_full_composite();
 }
 static void wide_blit_center(GLuint wide_fbo, int base_x, int disp_y, int disp_h); /* def below */
 /* True if [lo,hi] (canonical draw-x) lies strictly inside the 4:3 frame, so the

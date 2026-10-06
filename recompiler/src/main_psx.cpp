@@ -234,6 +234,7 @@ static int psxrecomp_game_main(int argc, char** argv) {
     std::set<uint32_t>    ws_cull_negsub;       // [widescreen.cull] negsub_sites
     std::set<uint32_t>    ws_cull_vxrange;      // [widescreen.cull] vxrange_sites
     std::set<uint32_t>    ws_cull_depth;        // [widescreen.cull] depth_sites
+    std::set<uint32_t>    netplay_local_viewport_width_sites;
     std::set<uint32_t>    ws_cull_plane_nx;     // [widescreen.cull] plane_nx_sites
     std::set<uint32_t>    ws_cull_xclip_load;   // [widescreen.cull] xclip_load_sites
     std::set<uint32_t>    ws_cull_nclip_keep;   // [widescreen.cull] nclip_keep_sites
@@ -310,6 +311,7 @@ static int psxrecomp_game_main(int argc, char** argv) {
         ws_cull_vxrange.insert(cfg.ws_cull_vxrange_sites.begin(), cfg.ws_cull_vxrange_sites.end());
         ws_cull_depth.insert(cfg.ws_cull_depth_sites.begin(), cfg.ws_cull_depth_sites.end());
         ws_cull_plane_nx.insert(cfg.ws_cull_plane_nx_sites.begin(), cfg.ws_cull_plane_nx_sites.end());
+        netplay_local_viewport_width_sites.insert(cfg.netplay_local_viewport_width_sites.begin(), cfg.netplay_local_viewport_width_sites.end());
         ws_cull_xclip_load.insert(cfg.ws_cull_xclip_load_sites.begin(), cfg.ws_cull_xclip_load_sites.end());
         ws_cull_nclip_keep.insert(cfg.ws_cull_nclip_keep_sites.begin(), cfg.ws_cull_nclip_keep_sites.end());
         ws_cull_nclip_exact.insert(cfg.ws_cull_nclip_exact_sites.begin(), cfg.ws_cull_nclip_exact_sites.end());
@@ -418,6 +420,7 @@ static int psxrecomp_game_main(int argc, char** argv) {
         ws_cull_vxrange.insert(wscfg.ws_cull_vxrange_sites.begin(), wscfg.ws_cull_vxrange_sites.end());
         ws_cull_depth.insert(wscfg.ws_cull_depth_sites.begin(), wscfg.ws_cull_depth_sites.end());
         ws_cull_plane_nx.insert(wscfg.ws_cull_plane_nx_sites.begin(), wscfg.ws_cull_plane_nx_sites.end());
+        netplay_local_viewport_width_sites.insert(wscfg.netplay_local_viewport_width_sites.begin(), wscfg.netplay_local_viewport_width_sites.end());
         ws_cull_xclip_load.insert(wscfg.ws_cull_xclip_load_sites.begin(), wscfg.ws_cull_xclip_load_sites.end());
         ws_cull_nclip_keep.insert(wscfg.ws_cull_nclip_keep_sites.begin(), wscfg.ws_cull_nclip_keep_sites.end());
         ws_cull_nclip_exact.insert(wscfg.ws_cull_nclip_exact_sites.begin(), wscfg.ws_cull_nclip_exact_sites.end());
@@ -1489,6 +1492,7 @@ static int psxrecomp_game_main(int argc, char** argv) {
     codegen_config.ws_cull_vxrange_sites = ws_cull_vxrange;
     codegen_config.ws_cull_depth_sites = ws_cull_depth;
     codegen_config.ws_cull_plane_nx_sites = ws_cull_plane_nx;
+    codegen_config.netplay_local_viewport_width_sites = netplay_local_viewport_width_sites;
     codegen_config.ws_cull_xclip_load_sites = ws_cull_xclip_load;
     codegen_config.ws_cull_nclip_keep_sites = ws_cull_nclip_keep;
     codegen_config.ws_cull_nclip_exact_sites = ws_cull_nclip_exact;

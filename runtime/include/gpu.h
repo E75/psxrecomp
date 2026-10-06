@@ -98,6 +98,11 @@ void gpu_get_draw_area(GpuDrawArea* out);
  * areas. Presentation-only helpers use this to expand a local split-screen
  * viewport without changing the underlying framebuffer or netplay hashes. */
 int  gpu_last_frame_vertical_split_screen(void);
+int32_t psx_ws_local_viewport_width(int32_t vanilla);
+void gpu_ws_set_local_viewport_width_sites(const uint32_t *sites, int count);
+/* The title's local viewport uses the native-wide per-camera renderer. */
+void gpu_ws_set_local_viewport_native_wide(int enabled);
+int psx_ws_is_local_viewport_width_site(uint32_t pc);
 void gpu_vertical_split_debug(int *active, int *left_age, int *right_age);
 uint16_t gpu_vram_peek(int x, int y);
 

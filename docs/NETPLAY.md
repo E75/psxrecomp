@@ -318,3 +318,36 @@ Generate & rebuild / prepare flows should point at the **`.cue`**, not a lone
 
 This document will grow as N-way rollback confirmation, SFU soak on 5P titles,
 and further ICE/SFU policy land.
+
+## Per-peer full-screen views
+
+`[netplay].local_viewport = "vertical_split"` presents the camera belonging to
+the peer's mapped controller port, including lobby seat reordering.
+`local_viewport_aspect = "16:9"` fixes the presentation aspect independently
+of monitor size. `local_viewport_renderer = "projection"` widens projection
+inside the native split framebuffer; `native_wide` selects the separate wide
+compositor. Offline rendering keeps the title's original renderer choice.
+
+`local_viewport_aspect = "fixed"` uses the admitted mod plan's 21:9 choice or
+defaults to 16:9. It disables adaptive resizing for the session. Enhanced
+native-wide local views present their per-camera surface directly through GL,
+including both double-buffer bands, and retain the full composite rather than
+copying canonical split-divider columns into it. Trusted title plugins may opt
+into forward-netplay render passes; rollback resimulation stays excluded (see
+[RENDER_PASSES.md](RENDER_PASSES.md)).
+
+Projection uses the PSX display's pixel aspect: each half of a 4:3 display
+spans 2:3, so a 16:9 local view needs a 3/8 horizontal projection ratio.
+The GL path presents the selected high-resolution FBO half directly.
+Source-guarded HUD groups drawn in a full-display area and spanning the seam
+are copied completely into both halves, preserving glyphs and shadows.
+
+Titles may configure `local_viewport_state_addr` and
+`local_viewport_state_values` to release the crop immediately during modal
+menus. V82 uses its modal-menu flag at 0x8006B4F0 (running value 0). Its
+`local_viewport_width_sites = ["0x8001C248", "0x8002E01C"]` identifies exact
+LW sites for terrain/object frusta. The generated and dirty-RAM paths apply
+the same inverse projection ratio to half-display widths while unsplit is
+active; ordinary widths, pause and offline execution remain unchanged.
+Regenerate title code after changing these sites. At most 16 unique aligned
+main-RAM sites are allowed, and they require the projection renderer.

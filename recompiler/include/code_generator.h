@@ -152,6 +152,7 @@ struct CodeGenConfig {
     // plane_nx_sites). The configured lw routes through the runtime helper
     // (inverse-aspect scale while revealed, identity at 4:3).
     std::set<uint32_t> ws_cull_plane_nx_sites;
+    std::set<uint32_t> netplay_local_viewport_width_sites;
 
     // Per-primitive X-reject bound load sites ([widescreen.cull]
     // xclip_load_sites). The configured lw routes through the runtime helper

@@ -1278,6 +1278,27 @@ std::string CodeGenerator::translate_instruction_core(uint32_t addr, uint32_t in
         }
         // Overlay variant at the same address: leave nonmatching code unchanged.
     }
+    // Exact LW sites that build each unsplit camera's horizontal frustum.
+    if (config_.netplay_local_viewport_width_sites.count(addr)) {
+        if (opcode == 0x23) {  // lw
+            uint32_t rs = get_rs(instr), rt = get_rt(instr);
+            int16_t offset = get_imm16(instr);
+            std::string laddr = (offset == 0)
+                ? reg_name(rs)
+                : fmt::format("{} + {}", reg_name(rs), (int)offset);
+            uint32_t mask = 1u << rs;
+            return fmt::format("{} = (uint32_t)psx_ws_local_viewport_width((int32_t)psx_cyc_load_word(cpu, {}, {}, 0x{:X}u));"
+                               "  /* unsplit camera frustum width */{}",
+                               reg_name(rt), laddr, rt, mask, comment);
+        }
+        if (!config_.overlay_mode) {
+            fmt::print(stderr, "ERROR: [netplay] local_viewport_width site 0x{:08X} is not "
+                       "lw (opcode 0x{:02X})\n", addr, opcode);
+            std::exit(1);
+        }
+        // Overlay variant at the same address: leave nonmatching code unchanged.
+    }
+
     // Side frustum-plane normal-X load: `lw rt,off(rs)` reads the nx of a
     // plane sign-tested per corner (dot = nx*px + nz*pz). The helper scales
     // nx by the inverse aspect factor (4*den)/(3*num) while revealed, which
@@ -3589,6 +3610,8 @@ void CodeGenerator::emit_runtime_externs(std::ostream& ss) const {
     ss << "extern void psx_ws_mmx6_bg_stage_init(void);    /* ws 2D stage reveal invalidation (gpu.c) */\n";
     ss << "extern int  psx_ws_x_margin(void);  /* widescreen cull-margin term (gpu.c) */\n";
     ss << "extern int32_t psx_ws_player_x_bound(int32_t vanilla);  /* typed gameplay X bound */\n";
+    if (!config_.netplay_local_viewport_width_sites.empty())
+        ss << "extern int32_t psx_ws_local_viewport_width(int32_t vanilla);  /* netplay unsplit frustum width */\n";
     ss << "extern int32_t psx_ws_screen_x_bound(int32_t vanilla);  /* typed screen-pixel X bound */\n";
     ss << "extern int  psx_ws_cull_sltiu(uint32_t sx, uint32_t imm);  /* ws auto screen-x cull (gpu.c) */\n";
     ss << "extern int  psx_ws_cull_slti(uint32_t sx, uint32_t imm);   /* ws cull signed right edge (gpu.c) */\n";

@@ -9858,13 +9858,15 @@ static const char *write_wide_png(const char *path, int *out_w, int *out_h)
     if (di.disabled || di.width == 0 || di.height == 0) return "display disabled";
 
     int scale = gr_scale(); if (scale < 1) scale = 1;
-    int present_w = (int)di.width + extra;
+    int local_width = gpu_ws_netplay_local_viewport_width();
+    int base_x = local_width > 0 ? gpu_ws_netplay_local_viewport_base_x() : (int)di.display_x;
+    int present_w = local_width > 0 ? local_width : (int)di.width + extra;
     int W = present_w * scale, H = (int)di.height * scale;
 
     uint32_t *buf = (uint32_t *)malloc((size_t)W * H * sizeof(uint32_t));
     if (!buf) return "alloc failed";
     int n = gr_render_wide_display(buf, W * (int)sizeof(uint32_t),
-                                   (int)di.display_x, (int)di.display_y, (int)di.height);
+                                   base_x, (int)di.display_y, (int)di.height);
     if (n <= 0) { free(buf); return "no wide surface for displayed buffer"; }
 
     /* ARGB8888 (0xAARRGGBB) -> RGB, written in the buffer's row order (so the
