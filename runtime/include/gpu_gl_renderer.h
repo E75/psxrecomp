@@ -43,6 +43,9 @@ void gl_renderer_set_interpolation_blend(int blend_mode);
 /* Blend source: 0 = every guest VBlank is a source frame (default),
  * 1 = only real display flips are (psx_mod_set_frame_interpolation_source). */
 void gl_renderer_set_interpolation_source(int source);
+/* 1 = present only pictures that change (PSX_MOD_FRAME_PRESENT_CHANGED,
+ * psx_mod_set_frame_interpolation_present); 0 = every output deadline. */
+void gl_renderer_set_interpolation_present(int changed_only);
 void gl_renderer_interpolation_source_diag(int *source, uint32_t *flip_period,
                                            uint64_t *captures,
                                            uint64_t *duplicates);
@@ -93,8 +96,12 @@ void     gl_renderer_pass_service_presents(void);
 /* promotions, presents, blended presents, expired, unmatched flips, presents
  * made between VBlanks, smoothed pass cost (us), images in the shown frame,
  * presents past the frame's planned end (the next flip was late; the newest
- * image held), stale pass-cost estimates measured again. */
-void     gl_renderer_pass_diag(uint64_t out[10]);
+ * image held), stale pass-cost estimates measured again, presents refused
+ * for going back in game time (PSX_MOD_FRAME_PRESENT_CHANGED). */
+void     gl_renderer_pass_diag(uint64_t out[11]);
+/* Presents skipped because they would show the picture already on screen
+ * (PSX_MOD_FRAME_PRESENT_CHANGED). */
+uint64_t gl_renderer_present_dups(void);
 /* Out-of-rect VRAM writes journaled and rolled back (lifetime count). */
 uint64_t gl_renderer_pass_journaled(void);
 /* Passes that reused the previous pass's VRAM backup (lifetime count). */

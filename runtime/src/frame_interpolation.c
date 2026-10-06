@@ -43,10 +43,14 @@ int frame_interpolation_schedule_begin_phase(FrameInterpolationSchedule *schedul
 
     /* Re-anchor after startup, clock discontinuity, or a sustained overrun.
      * Normal guest work lands after the prior deadline but before the next one;
-     * retaining the old anchor makes that work consume the pacing budget. */
+     * retaining the old anchor makes that work consume the pacing budget, and
+     * a stall is paid back by later intervals that do not wait, as the stock
+     * pacer does (forgiving it sooner would lose guest time that a run
+     * without interpolation keeps). */
     if (schedule->source_deadline <= 0.0 ||
         now_d + source_period < schedule->source_deadline ||
-        now_d > schedule->source_deadline + source_period * 4.0) {
+        now_d > schedule->source_deadline +
+                    source_period * FRAME_INTERP_CATCHUP_MAX_PERIODS) {
         schedule->frame_start = now_d;
         schedule->source_deadline = now_d + source_period;
         schedule->next_present_deadline = now_d + target_period;
@@ -128,6 +132,67 @@ void frame_flip_tracker_reset(FrameFlipTracker *tracker) {
     tracker->since_flip = 0;
     tracker->period = 1;
     tracker->frames = 0;
+}
+
+int frame_interpolation_present_time_is_monotonic(
+    const FrameInterpolationPresentTime *last, uint64_t source_frame,
+    uint32_t phase_q16) {
+    if (!last || !last->valid) return 1;
+    if (source_frame > last->source_frame) return 1;
+    if (source_frame < last->source_frame) return 0;
+    return phase_q16 >= last->phase_q16;
+}
+
+void frame_interpolation_present_time_record(
+    FrameInterpolationPresentTime *last, uint64_t source_frame,
+    uint32_t phase_q16) {
+    if (!last) return;
+    last->source_frame = source_frame;
+    last->phase_q16 = phase_q16 > 65536u ? 65536u : phase_q16;
+    last->valid = 1;
+}
+
+void frame_interpolation_present_time_reset(FrameInterpolationPresentTime *last) {
+    if (!last) return;
+    last->source_frame = 0;
+    last->phase_q16 = 0;
+    last->valid = 0;
+}
+
+void frame_interpolation_present_history_time(uint64_t captures, int valid,
+                                               float alpha, uint64_t *source,
+                                               uint32_t *phase) {
+    if (!source || !phase) return;
+    if (valid >= 2 && captures > 0) {
+        if (alpha < 0.f) alpha = 0.f;
+        if (alpha > 1.f) alpha = 1.f;
+        *source = captures - 1;
+        *phase = (uint32_t)(alpha * 65536.0f + 0.5f);
+    } else {
+        *source = captures;
+        *phase = 0;
+    }
+}
+
+uint32_t frame_interpolation_present_pass_phase(const uint32_t *phases,
+                                                 uint32_t lo, uint32_t hi,
+                                                 float weight) {
+    if (!phases) return 0;
+    if (lo == hi) return phases[lo];
+    if (weight < 0.f) weight = 0.f;
+    if (weight > 1.f) weight = 1.f;
+    return (uint32_t)((double)phases[lo] * (1.0 - (double)weight) +
+                      (double)phases[hi] * (double)weight + 0.5);
+}
+
+int frame_interpolation_present_emit(FrameInterpolationPresentTime *last,
+                                     uint64_t source, uint32_t phase,
+                                     int (*swap)(void *), void *user) {
+    if (!swap || !frame_interpolation_present_time_is_monotonic(last, source, phase))
+        return -1;
+    if (!swap(user)) return 0;
+    frame_interpolation_present_time_record(last, source, phase);
+    return 1;
 }
 
 int frame_flip_is_new_frame(int geometry_changed, int history_empty,

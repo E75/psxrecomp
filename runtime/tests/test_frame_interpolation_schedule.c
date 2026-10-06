@@ -277,6 +277,24 @@ int main(void) {
           frame_interpolation_schedule_end(&schedule) == end + 16666u,
           "guest work must consume, not extend, the next source interval");
 
+    /* A stall is paid back, not forgiven, within the stock pacer's window
+     * (frame_pacing.c FRAME_PACER_CATCHUP_MAX_PERIODS = 12): the anchor holds
+     * 11 periods late and the next intervals run back to back; past 12 it
+     * resets. */
+    frame_interpolation_schedule_reset(&schedule);
+    (void)run_interval(&schedule, 4000000u, 60.0, 120.0, NULL, NULL);
+    end = frame_interpolation_schedule_end(&schedule);
+    CHECK(frame_interpolation_schedule_begin(
+              &schedule, end + 11u * 16667u, 1000000u, 60.0, 120.0) &&
+          (frame_interpolation_schedule_end(&schedule) == end + 16667u ||
+           frame_interpolation_schedule_end(&schedule) == end + 16666u),
+          "11 periods late: the anchor holds, the debt is paid back");
+    end = frame_interpolation_schedule_end(&schedule);
+    CHECK(frame_interpolation_schedule_begin(
+              &schedule, end + 13u * 16667u, 1000000u, 60.0, 120.0) &&
+          frame_interpolation_schedule_end(&schedule) > end + 13u * 16667u,
+          "13 periods late: the anchor resets (the debt is forgiven)");
+
     CHECK(!frame_interpolation_schedule_begin(
                &schedule, 0u, 0u, 60.0, 120.0),
           "zero host frequency should be rejected");

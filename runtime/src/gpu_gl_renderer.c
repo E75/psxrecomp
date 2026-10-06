@@ -484,6 +484,8 @@ static FrameFlipTracker s_interp_flip;
 static int           s_interp_origin_x = -1, s_interp_origin_y = -1;
 static double        s_interp_phase_lo = 0.0, s_interp_phase_hi = 1.0;
 static uint64_t      s_interp_duplicates = 0;
+/* The last interp_capture took a new source frame (not a repeat). */
+static int           s_interp_last_new = 0;
 /* PSX_MOD_FRAME_INTERPOLATION_HOLD: no crossfade, repeat the newest frame
  * wherever render passes supply no in-between image. */
 static int           s_interp_hold = 0;
@@ -491,7 +493,38 @@ static void pass_gens_invalidate(void);
 static void pass_note_new_frame(int origin_x, int origin_y, int source_path,
                                 int pw, int ph);
 static void pass_apply_promotion(void);
-static int pass_gen_present(uint64_t deadline);
+/* What one output deadline shows: a pass generation's image(s) or the game
+ * frame history. Two equal choices put the same picture on screen. */
+typedef struct PresentChoice {
+    int      kind;            /* 0 none, 1 pass generation, 2 frame history */
+    uint64_t content;         /* generation serial / capture count */
+    uint64_t source_frame;    /* monotonically captured game-frame number */
+    uint32_t phase_q16;       /* game-time within source_frame, 0..65536 */
+    GLuint   a, b;            /* textures, crossfaded by t (weight of b) */
+    uint32_t lo, hi;          /* their slots / history indices */
+    float    t;
+    int      blend_mode;
+    double   p;               /* phase inside a pass generation */
+} PresentChoice;
+/* The picture on screen when the last swap was an interpolation present
+ * (kind 0: unknown -- any other swap clears it, gl_swap_with_osd). */
+static PresentChoice s_last_choice;
+/* PSX_MOD_FRAME_PRESENT_CHANGED (psx_mod_set_frame_interpolation_present):
+ * an output that would show the picture already on screen is skipped, a
+ * repeated frame is not copied for hold-last again, presents never go back
+ * in game time, and HOLD holds between two pass images. Off by default. */
+static int      s_present_changed = 0;
+static FrameInterpolationPresentTime s_present_time;
+static uint64_t s_present_time_rejects;
+static int      s_present_time_trace;
+/* Presents skipped because they would show the picture already on screen. */
+static uint64_t s_present_dups = 0;
+/* Guest VBlanks in a row that presented nothing (the picture did not
+ * change); at PRESENT_REFRESH_INTERVALS one is presented anyway. */
+#define PRESENT_REFRESH_INTERVALS 4
+static int      s_intervals_unpresented = 0;
+static int pass_gen_choose(uint64_t deadline, PresentChoice *c);
+static void pass_count_present(const PresentChoice *c);
 static int stereo_present(int w, int h);
 static void stereo_resources_release(void);
 static void stereo_invalidate(void);
@@ -5647,6 +5680,10 @@ static void interp_reset_history_unlocked(void) {
     s_interp_origin_x = s_interp_origin_y = -1;
     s_interp_phase_lo = 0.0;
     s_interp_phase_hi = 1.0;
+    s_last_choice.kind = 0;
+    frame_interpolation_present_time_reset(&s_present_time);
+    s_present_time_rejects = 0;
+    s_intervals_unpresented = 0;
     pass_gens_invalidate();
 }
 
@@ -5662,6 +5699,8 @@ void gl_renderer_set_interpolation(int enabled, double host_hz, double target_hz
                   effective_hz >= source_hz && effective_hz <= 1000.0) ? 1 : 0;
     const char *diag = getenv("PSX_GL_INTERP_DIAG");
     s_interp_diag = diag && diag[0] && diag[0] != '0';
+    const char *trace = getenv("PSX_GL_PRESENT_TIME_TRACE");
+    s_present_time_trace = trace && trace[0] && trace[0] != '0';
     if (active != s_interp_enabled || source_hz != s_interp_source_hz ||
         effective_hz != s_interp_target_hz)
         interp_reset_history_unlocked();
@@ -5764,6 +5803,7 @@ static int interp_capture(GLuint fbo, int x, int y, int w, int h,
                                         &s_interp_phase_lo, &s_interp_phase_hi);
         if (!new_frame) {
             s_interp_duplicates++;
+            s_interp_last_new = 0;
             return 1;
         }
         pass_note_new_frame(origin_x, origin_y, source_path, pw, ph);
@@ -5816,6 +5856,7 @@ static int interp_capture(GLuint fbo, int x, int y, int w, int h,
     s_interp_force_4_3 = force_4_3;
     s_interp_source_path = source_path;
     s_interp_captures++;
+    s_interp_last_new = 1;
     return 1;
 }
 
@@ -5876,11 +5917,66 @@ static int interp_present_pair(GLuint a, GLuint b, float t, int blend_mode) {
     return 1;
 }
 
-static int interp_present(float alpha) {
+/* The output at `deadline` (frame-history blend weight `alpha`): the
+ * promoted pass generation's image when one applies, else the game frames. */
+static void present_choose(uint64_t deadline, float alpha, PresentChoice *c) {
+    memset(c, 0, sizeof *c);
+    if (pass_gen_choose(deadline, c)) return;
     if (s_interp_hold) alpha = 1.0f;
-    return interp_present_pair(s_interp_tex[s_interp_prev],
-                               s_interp_tex[s_interp_cur], alpha,
-                               s_interp_blend_mode);
+    c->kind = 2;
+    c->content = s_interp_captures;
+    frame_interpolation_present_history_time(s_interp_captures,
+        s_interp_valid, alpha, &c->source_frame, &c->phase_q16);
+    c->lo = (uint32_t)s_interp_prev;
+    c->hi = (uint32_t)s_interp_cur;
+    c->a = s_interp_tex[s_interp_prev];
+    c->b = s_interp_tex[s_interp_cur];
+    c->t = alpha;
+    c->blend_mode = s_interp_blend_mode;
+}
+
+static int present_choice_same(const PresentChoice *x, const PresentChoice *y) {
+    return x->kind != 0 && x->kind == y->kind && x->content == y->content &&
+           x->lo == y->lo && x->hi == y->hi && x->t == y->t &&
+           x->blend_mode == y->blend_mode;
+}
+
+static int present_choice_swap(void *user) {
+    const PresentChoice *c = (const PresentChoice *)user;
+    return interp_present_pair(c->a, c->b, c->t, c->blend_mode);
+}
+
+/* Draw and swap one choice. With PSX_MOD_FRAME_PRESENT_CHANGED a choice
+ * older in game time than the picture on screen (a delayed pass generation)
+ * is refused before it is drawn (frame_interpolation_present_emit). */
+static int present_choice_draw(const PresentChoice *c) {
+    int result;
+    if (c->kind == 0) return 0;
+    if (s_present_changed) {
+        result = frame_interpolation_present_emit(&s_present_time,
+            c->source_frame, c->phase_q16, present_choice_swap, (void *)c);
+    } else {
+        result = present_choice_swap((void *)c);
+        if (result)
+            frame_interpolation_present_time_record(&s_present_time,
+                                                    c->source_frame, c->phase_q16);
+    }
+    if (result < 0) {
+        s_present_time_rejects++;
+        return 0;
+    }
+    if (!result) return 0;
+    if (s_present_time_trace) {
+        fprintf(stdout, "psxrecomp: present-time swap=%llu source_frame=%llu "
+                "phase_q16=%u kind=%s generation=%llu\n",
+                (unsigned long long)s_interp_swaps,
+                (unsigned long long)c->source_frame, c->phase_q16,
+                c->kind == 1 ? "pass" : "history",
+                (unsigned long long)(c->kind == 1 ? c->content : 0));
+    }
+    if (c->kind == 1) pass_count_present(c);
+    s_last_choice = *c;
+    return 1;
 }
 
 static void interp_wait_until(uint64_t deadline, uint64_t frequency) {
@@ -5914,14 +6010,47 @@ static void interp_present_source_interval(void) {
         return;
     pass_apply_promotion();
 
-    while (frame_interpolation_schedule_next(
-               &s_interp_schedule, SDL_GetPerformanceCounter(),
-               &deadline, &alpha)) {
-        interp_wait_until(deadline, frequency);
-        latency_ring_mark(LAT_SWAP_BEGIN);
-        if (!pass_gen_present(deadline))
-            (void)interp_present(alpha);
-        latency_ring_mark(LAT_SWAP_END);
+    {
+        /* With PSX_MOD_FRAME_PRESENT_CHANGED only what changes the picture
+         * is presented: an output that would show what is already on screen
+         * is skipped, without waiting for its deadline (vsync is off, so the
+         * screen keeps it), and the host time goes to the game and to render
+         * passes. A picture that never changes (a game that stops flipping)
+         * is still presented every PRESENT_REFRESH_INTERVALS guest VBlanks,
+         * and once per VBlank while the on-screen display changes, so
+         * overlays keep updating. */
+        int presented = 0;
+        int force = !s_present_changed || host_osd_needs_present() ||
+                    s_intervals_unpresented + 1 >= PRESENT_REFRESH_INTERVALS;
+        while (frame_interpolation_schedule_next(
+                   &s_interp_schedule, SDL_GetPerformanceCounter(),
+                   &deadline, &alpha)) {
+            PresentChoice c;
+            present_choose(deadline, alpha, &c);
+            if (s_present_changed && present_choice_same(&c, &s_last_choice) &&
+                !(force && !presented)) {
+                s_present_dups++;
+                continue;
+            }
+            interp_wait_until(deadline, frequency);
+            latency_ring_mark(LAT_SWAP_BEGIN);
+            if (present_choice_draw(&c)) presented = 1;
+            latency_ring_mark(LAT_SWAP_END);
+        }
+        if (!presented) {
+            /* A host catching up after a stall reaches this VBlank after all
+             * of its output deadlines: a new game frame is still shown, now,
+             * as the stock presenter would. */
+            PresentChoice c;
+            present_choose(SDL_GetPerformanceCounter(),
+                           (float)s_interp_phase_hi, &c);
+            if (force || !present_choice_same(&c, &s_last_choice)) {
+                latency_ring_mark(LAT_SWAP_BEGIN);
+                if (present_choice_draw(&c)) presented = 1;
+                latency_ring_mark(LAT_SWAP_END);
+            }
+        }
+        s_intervals_unpresented = presented ? 0 : s_intervals_unpresented + 1;
     }
     interp_wait_until(frame_interpolation_schedule_end(&s_interp_schedule),
                       frequency);
@@ -5977,6 +6106,8 @@ typedef struct PassGen {
     uint32_t period;              /* guest VBlanks the frame stays on screen */
     int      shown;               /* built for a frame already on screen */
     double   t_start, t_len;      /* host ticks, set on promotion */
+    uint64_t serial;              /* promotion count: identifies its images */
+    uint64_t source_frame;        /* source frame this generation represents */
 } PassGen;
 static int      s_pass_flip_shown = 0;
 static PassGen  s_pgen[2];
@@ -6967,7 +7098,16 @@ static int stereo_present(int w, int h) {
 /* Draw two presented images crossfaded (t = weight of b) into the window. */
 static int interp_present_pair(GLuint a, GLuint b, float t, int blend_mode);
 
-static int pass_gen_present(uint64_t deadline) {
+static void pass_count_present(const PresentChoice *c) {
+    s_pgen_presents++;
+    if (c->lo != c->hi) s_pgen_blends++;
+    /* A frame's own last deadline falls at p = 1 (the end of its planned
+     * VBlanks); one past it by more than 1/64 is in a VBlank it was not
+     * planned to cover. */
+    if (c->p > 1.0 + 1.0 / 64.0) s_pgen_late++;
+}
+
+static int pass_gen_choose(uint64_t deadline, PresentChoice *c) {
     PassGen *g = &s_pgen[s_pgen_cur];
     uint32_t lo = 0, hi = 0;
     float t = 0.0f;
@@ -6985,15 +7125,24 @@ static int pass_gen_present(uint64_t deadline) {
         s_pgen_expired++;
         return 0;
     }
-    if (!interp_present_pair(s_pgen_tex[s_pgen_cur][lo],
-                             s_pgen_tex[s_pgen_cur][hi], t, 0))
-        return 0;
-    s_pgen_presents++;
-    if (lo != hi) s_pgen_blends++;
-    /* A frame's own last deadline falls at p = 1 (the end of its planned
-     * VBlanks); one past it by more than 1/64 is in a VBlank it was not
-     * planned to cover. */
-    if (p > 1.0 + 1.0 / 64.0) s_pgen_late++;
+    /* HOLD with PSX_MOD_FRAME_PRESENT_CHANGED: no crossfade anywhere.
+     * Between two images (a phase whose pass did not fit) the newest one at
+     * or before the deadline stays up. */
+    if (s_present_changed && s_interp_hold && lo != hi) {
+        hi = lo;
+        t = 0.0f;
+    }
+    c->kind = 1;
+    c->content = g->serial;
+    c->source_frame = g->source_frame;
+    c->phase_q16 = frame_interpolation_present_pass_phase(g->phase, lo, hi, t);
+    c->lo = lo;
+    c->hi = hi;
+    c->a = s_pgen_tex[s_pgen_cur][lo];
+    c->b = s_pgen_tex[s_pgen_cur][hi];
+    c->t = t;
+    c->blend_mode = 0;
+    c->p = p;
     return 1;
 }
 
@@ -7005,15 +7154,23 @@ void gl_renderer_pass_service_presents(void) {
     while (frame_interpolation_schedule_due(
                &s_interp_schedule, SDL_GetPerformanceCounter(),
                s_interp_schedule.frame_end + sp, &deadline)) {
+        PresentChoice c;
+        if (!pass_gen_choose(deadline, &c)) break;
+        if (s_present_changed && present_choice_same(&c, &s_last_choice)) {
+            /* Already on screen: nothing to draw for this deadline. */
+            s_present_dups++;
+            frame_interpolation_schedule_consume(&s_interp_schedule);
+            continue;
+        }
         latency_ring_mark(LAT_SWAP_BEGIN);
-        if (!pass_gen_present(deadline)) { latency_ring_mark(LAT_SWAP_END); break; }
+        if (!present_choice_draw(&c)) { latency_ring_mark(LAT_SWAP_END); break; }
         latency_ring_mark(LAT_SWAP_END);
         frame_interpolation_schedule_consume(&s_interp_schedule);
         s_pgen_early++;
     }
 }
 
-void gl_renderer_pass_diag(uint64_t out[10]) {
+void gl_renderer_pass_diag(uint64_t out[11]) {
     out[0] = s_pgen_promotions;
     out[1] = s_pgen_presents;
     out[2] = s_pgen_blends;
@@ -7025,6 +7182,19 @@ void gl_renderer_pass_diag(uint64_t out[10]) {
     out[7] = (uint64_t)s_pgen[s_pgen_cur].n;
     out[8] = s_pgen_late;
     out[9] = s_pass_cost_rewarms;
+    out[10] = s_present_time_rejects;
+}
+
+uint64_t gl_renderer_present_dups(void) { return s_present_dups; }
+
+void gl_renderer_set_interpolation_present(int changed_only) {
+    changed_only = changed_only ? 1 : 0;
+    if (changed_only != s_present_changed) {
+        s_last_choice.kind = 0;
+        s_intervals_unpresented = 0;
+        frame_interpolation_present_time_reset(&s_present_time);
+    }
+    s_present_changed = changed_only;
 }
 
 uint64_t gl_renderer_pass_journaled(void) { return s_pj_total; }
@@ -7132,6 +7302,8 @@ static void pass_apply_promotion(void) {
             p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, 0);
         }
         s_pgen_promotions++;
+        g->serial = s_pgen_promotions;
+        g->source_frame = s_interp_captures;
         if (s_pdump_left > 0) pass_dump_generation(s_pgen_cur);
     }
 }
@@ -7278,6 +7450,9 @@ static void present_image_ring_capture_gl(void) {
 #endif
 
 static void gl_swap_with_osd(void) {
+    /* Whatever this swap shows, the presenter's record of the picture on
+     * screen is stale now; present_choice_draw sets it again after its own. */
+    s_last_choice.kind = 0;
     openxr_present_native(); /* Copy guest content before host-only overlays. */
     s_native_surface_pending=0; /* Hold-last/resim cannot reuse a native source. */
 #ifndef PSX_NO_DEBUG_TOOLS
@@ -7609,8 +7784,11 @@ void gl_renderer_present_vram(int disp_x, int disp_y, int w, int h, int linear,
         present_dirty_test(disp_x, disp_y, disp_x + w - 1, disp_y + h - 1));
     if (interp_pair) {
         /* Temporal blending owns this stock frame interval. Capture hold-last
-         * before pacing; every blend and Swap remains on this context/thread. */
-        hold_capture_native_fbo(src_fbo, src_x, disp_y, w, h, force_4_3, linear);
+         * before pacing (with PSX_MOD_FRAME_PRESENT_CHANGED a repeated frame
+         * is already held); every blend and Swap remains on this
+         * context/thread. */
+        if (!s_present_changed || s_interp_last_new)
+            hold_capture_native_fbo(src_fbo, src_x, disp_y, w, h, force_4_3, linear);
         interp_present_source_interval();
         gl_perf_present_exit(0);
         present_dirty_rect(disp_x, disp_y, disp_x + w - 1, disp_y + h - 1, 0);
@@ -7752,7 +7930,8 @@ int gl_renderer_present_wide_fbo(int disp_x, int disp_y, int disp_h, int linear)
         disp_x, disp_y,
         present_dirty_test(0, disp_y, VRAM_W - 1, disp_y + disp_h - 1));
     if (interp_pair) {
-        hold_capture_native_fbo(fbo, 0, disp_y, g_wide_w, disp_h, 0, linear);
+        if (!s_present_changed || s_interp_last_new)   /* a repeat is held */
+            hold_capture_native_fbo(fbo, 0, disp_y, g_wide_w, disp_h, 0, linear);
         interp_present_source_interval();
         gl_perf_present_exit(1);
         present_dirty_rect(0, disp_y, VRAM_W - 1, disp_y + disp_h - 1, 0);

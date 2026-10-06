@@ -137,6 +137,9 @@ if(BUILD_TESTING)
             "${PSXRECOMP_ROOT}/tools/tests/test_counted_mips_relocations.py")
         add_test(NAME interp_mod_entry_guards_test COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_interp_mod_entry_guards.py")
+        add_test(NAME frame_interpolation_present_time_wiring_test
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_frame_interpolation_present_time_wiring.py")
         add_test(NAME mirror_pc_preserved_guards_test COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mirror_pc_preserved_guards.py")
         add_test(NAME segment_miss_wiring_test COMMAND "${Python3_EXECUTABLE}"
@@ -966,6 +969,26 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME frame_interpolation_schedule_test
              COMMAND frame_interpolation_schedule_test)
+
+    add_executable(frame_interpolation_present_time_test
+        tests/test_frame_interpolation_present_time.c
+        src/frame_interpolation.c)
+    target_include_directories(frame_interpolation_present_time_test PRIVATE include)
+    if(NOT MSVC)
+        target_link_libraries(frame_interpolation_present_time_test PRIVATE m)
+    endif()
+    add_test(NAME frame_interpolation_present_time_test
+             COMMAND frame_interpolation_present_time_test)
+
+    add_executable(frame_interpolation_present_emit_test
+        tests/test_frame_interpolation_present_emit.c
+        src/frame_interpolation.c)
+    target_include_directories(frame_interpolation_present_emit_test PRIVATE include)
+    if(NOT MSVC)
+        target_link_libraries(frame_interpolation_present_emit_test PRIVATE m)
+    endif()
+    add_test(NAME frame_interpolation_present_emit_test
+             COMMAND frame_interpolation_present_emit_test)
 
     add_executable(render_pass_plan_test
         tests/test_render_pass_plan.c

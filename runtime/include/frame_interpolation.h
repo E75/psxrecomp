@@ -21,7 +21,12 @@ typedef struct FrameInterpolationSchedule {
 
 /* Plan one stock guest-frame interval. Presentation deadlines remain anchored
  * across calls so guest work consumes part of the interval instead of slowing
- * the simulation. Returns zero when the rates or host clock are invalid. */
+ * the simulation. A host that falls behind catches up (intervals run without
+ * waiting) until it is FRAME_INTERP_CATCHUP_MAX_PERIODS source periods late,
+ * the same window as the stock frame pacer (frame_pacing.c); only then is the
+ * debt forgiven and the anchor reset. Returns zero when the rates or host
+ * clock are invalid. */
+#define FRAME_INTERP_CATCHUP_MAX_PERIODS 12.0
 int frame_interpolation_schedule_begin(FrameInterpolationSchedule *schedule,
                                        uint64_t now, uint64_t frequency,
                                        double source_hz, double target_hz);
@@ -72,6 +77,35 @@ typedef struct FrameFlipTracker {
     uint32_t period;      /* P */
     uint32_t frames;      /* new frames seen (saturating) */
 } FrameFlipTracker;
+
+/* Monotonic game-time stamp for a composed presentation. source_frame counts
+ * newly captured game frames; phase_q16 is 0..65536 within the transition to
+ * the next one. A delayed render-pass generation must not replace a newer
+ * frame already shown on screen. */
+typedef struct FrameInterpolationPresentTime {
+    uint64_t source_frame;
+    uint32_t phase_q16;
+    int valid;
+} FrameInterpolationPresentTime;
+
+int frame_interpolation_present_time_is_monotonic(
+    const FrameInterpolationPresentTime *last, uint64_t source_frame,
+    uint32_t phase_q16);
+void frame_interpolation_present_time_record(
+    FrameInterpolationPresentTime *last, uint64_t source_frame,
+    uint32_t phase_q16);
+void frame_interpolation_present_time_reset(FrameInterpolationPresentTime *last);
+void frame_interpolation_present_history_time(uint64_t captures, int valid,
+                                               float alpha, uint64_t *source,
+                                               uint32_t *phase);
+uint32_t frame_interpolation_present_pass_phase(const uint32_t *phases,
+                                                 uint32_t lo, uint32_t hi,
+                                                 float weight);
+/* The same admission/emission seam used by the GL presenter. An image is
+ * recorded only after its swap callback succeeds. */
+int frame_interpolation_present_emit(FrameInterpolationPresentTime *last,
+                                     uint64_t source, uint32_t phase,
+                                     int (*swap)(void *), void *user);
 
 void frame_flip_tracker_reset(FrameFlipTracker *tracker);
 /* Whether a presented VBlank shows a new guest frame (the tracker's

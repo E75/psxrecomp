@@ -141,11 +141,22 @@ assert re.search(r"if \(want && s_pass_cost_w == s_interp_w && "
     "and the re-measuring plan must ask for one pass")
 # A frame on screen longer than planned (a lagging tick) must hold its newest
 # pass image, never fall back to the older capture (render_pass_plan_test).
-pgp = definition(gl, "pass_gen_present")
+pgp = definition(gl, "pass_gen_choose")
 assert "render_pass_gen_select(g->phase, g->n, p, &lo, &hi, &t)" in pgp, (
     "pass images must be selected through the tested late-flip rule")
 assert "render_pass_select(" not in pgp and "0.5 / (double)g->period" not in pgp, (
     "no early expiry of a late frame's images")
+# HOLD never crossfades between two pass images, but only for a title that
+# asked for changed-only presents (PSX_MOD_FRAME_PRESENT_CHANGED).
+assert "if (s_present_changed && s_interp_hold && lo != hi) {" in pgp, (
+    "HOLD holds the earlier pass image only under PSX_MOD_FRAME_PRESENT_CHANGED")
+# A present that would show the picture already on screen is skipped only
+# under PSX_MOD_FRAME_PRESENT_CHANGED, with a periodic refresh.
+psi = definition(gl, "interp_present_source_interval")
+assert "if (s_present_changed && present_choice_same(&c, &s_last_choice) &&" in psi \
+    and "!(force && !presented)" in psi and \
+    "int force = !s_present_changed || host_osd_needs_present() ||" in psi, (
+    "duplicate presents are skipped only when the title opted in")
 cls = body(plan, "int render_pass_mmio_class(")
 for dev in ("RENDER_PASS_DROP_SPU", "RENDER_PASS_DROP_CD",
             "RENDER_PASS_DROP_TIMER"):

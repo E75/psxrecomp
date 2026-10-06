@@ -238,7 +238,9 @@ one being built for the next flip. A generation becomes current when the
 FLIP source sees the display flip to its rect; from that interval's start
 its phases map onto host time. At each output deadline the newest image at
 or before the deadline's phase is shown, crossfaded into the next one when
-passes were shed. Deadlines that fall due while passes run are presented
+passes were shed (with `HOLD` and `PSX_MOD_FRAME_PRESENT_CHANGED`,
+[FRAME_RATE.md](FRAME_RATE.md), held until the next one instead, and an
+image older in game time than the one on screen is never shown). Deadlines that fall due while passes run are presented
 between passes, so the frame on screen keeps moving. A frame that stays on
 screen longer than the plan's period (a lagging tick: three VBlanks instead
 of two) holds its newest image until the next flip, as a late stock frame

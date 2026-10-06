@@ -8210,11 +8210,12 @@ static void handle_gl_interp(int id, const char *json)
     send_fmt("{\"id\":%d,\"ok\":true,\"enabled\":%d,\"suspended\":%d,\"history\":%d,"
              "\"host_hz\":%.3f,\"target_hz\":%.3f,\"swaps\":%llu,"
              "\"source\":\"%s\",\"flip_period\":%u,\"captures\":%llu,"
-             "\"duplicates\":%llu}",
+             "\"duplicates\":%llu,\"present_dups\":%llu}",
              id, enabled, suspended, history, host_hz, target_hz,
              (unsigned long long)swaps, source ? "flip" : "vblank",
              (unsigned)flip_period, (unsigned long long)captures,
-             (unsigned long long)duplicates);
+             (unsigned long long)duplicates,
+             (unsigned long long)gl_renderer_present_dups());
 }
 
 /* render_pass_stats: host-timed render passes (docs/RENDER_PASSES.md).
@@ -8224,7 +8225,7 @@ static void handle_render_pass_stats(int id, const char *json)
 {
     (void)json;
     RenderPassStats st;
-    uint64_t gd[10], image_bytes = 0;
+    uint64_t gd[11], image_bytes = 0;
     uint32_t image_textures;
     char failure_json[2048];
     char abort_detail_json[sizeof st.last_abort_detail * 6 + 1];
@@ -8275,6 +8276,7 @@ static void handle_render_pass_stats(int id, const char *json)
              "\"promotions\":%llu,\"pass_presents\":%llu,"
              "\"blended_presents\":%llu,\"expired\":%llu,\"late_presents\":%llu,"
              "\"unmatched_flips\":%llu,\"early_presents\":%llu,"
+             "\"nonmonotonic_rejects\":%llu,"
              "\"cost_us\":%llu,\"cost_rewarms\":%llu,\"frame_images\":%llu,"
              "\"journaled\":%llu,"
              "\"image_textures\":%u,\"image_bytes\":%llu,\"status\":%u,"
@@ -8306,6 +8308,7 @@ static void handle_render_pass_stats(int id, const char *json)
              (unsigned long long)gd[2], (unsigned long long)gd[3],
              (unsigned long long)gd[8],
              (unsigned long long)gd[4], (unsigned long long)gd[5],
+             (unsigned long long)gd[10],
              (unsigned long long)gd[6], (unsigned long long)gd[9],
              (unsigned long long)gd[7],
              (unsigned long long)gl_renderer_pass_journaled(),

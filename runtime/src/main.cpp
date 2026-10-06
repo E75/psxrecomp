@@ -1600,6 +1600,7 @@ static void reset_mod_owned_presentation(void) {
     g_bezel_path.clear();
     g_frame_interpolation_blend = g_frame_interpolation_blend_default;
     g_frame_interpolation_source = PSX_MOD_FRAME_SOURCE_VBLANK;
+    gl_renderer_set_interpolation_present(0);
     /* The PGXP mod's request: only this session's activation may set it; the
      * renderer setup takes it and combines it with the [video] baseline
      * (pgxp_session.h). */
@@ -1725,6 +1726,23 @@ extern "C" int psx_mod_set_frame_interpolation_source(uint32_t source) {
     std::fprintf(stdout, "psxrecomp: frame-interpolation source = %s\n",
         source == PSX_MOD_FRAME_SOURCE_FLIP
             ? "guest frame flips" : "every guest VBlank");
+    return 1;
+}
+
+extern "C" int psx_mod_set_frame_interpolation_present(uint32_t mode) {
+    if (mode != PSX_MOD_FRAME_PRESENT_EVERY &&
+        mode != PSX_MOD_FRAME_PRESENT_CHANGED) {
+        std::fprintf(stderr,
+            "psxrecomp: mod rejected invalid frame-interpolation present mode %u\n",
+            (unsigned)mode);
+        return 0;
+    }
+    /* Presenter state, not session configuration: live from the next
+     * present; reset_mod_owned_presentation() sets EVERY again. */
+    gl_renderer_set_interpolation_present(mode == PSX_MOD_FRAME_PRESENT_CHANGED);
+    std::fprintf(stdout, "psxrecomp: frame-interpolation presents = %s\n",
+        mode == PSX_MOD_FRAME_PRESENT_CHANGED ? "changed pictures only"
+                                              : "every output deadline");
     return 1;
 }
 

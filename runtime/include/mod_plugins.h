@@ -374,6 +374,15 @@ int psx_mod_set_native_vblank_rate(uint32_t frames_per_second);
  */
 int psx_mod_set_frame_interpolation(uint32_t frames_per_second);
 /*
+ * The highest rate psx_mod_set_frame_interpolation() takes. Together with
+ * PSX_MOD_FRAME_PRESENT_CHANGED (below) and render passes it means "as many
+ * in-between frames as fit": every image is shown at its own time, an output
+ * that would show the picture already on screen is not presented, and vsync
+ * stays off, so above the display's refresh some images are dropped (or
+ * tear where nothing composites the window).
+ */
+#define PSX_MOD_FRAME_INTERPOLATION_UNLIMITED 1000u
+/*
  * Choose how the OpenGL presenter combines completed frames. Linear is a
  * full-frame crossfade. Motion-adaptive retains temporal blending for
  * small temporal changes but switches large changes cleanly to reduce the
@@ -408,6 +417,24 @@ enum {
     PSX_MOD_FRAME_SOURCE_FLIP = 1
 };
 int psx_mod_set_frame_interpolation_source(uint32_t source);
+/*
+ * Choose which outputs the OpenGL presenter draws. EVERY (the default, reset
+ * at every session start) draws one picture per output deadline. CHANGED
+ * draws only pictures that differ from the one on screen: vsync is off, so
+ * the screen keeps it, and the host time a repeat would take (waiting for its
+ * deadline, the draw, the swap) goes to the game and to render passes. A
+ * picture that never changes is still presented every 4th guest VBlank, so
+ * the on-screen display keeps updating. With CHANGED a repeated frame is not
+ * copied for hold-last again, HOLD holds each render-pass image until the
+ * next one instead of crossfading where a pass was shed, and an image older
+ * in game time than the one on screen (a late render-pass generation) is
+ * never presented.
+ */
+enum {
+    PSX_MOD_FRAME_PRESENT_EVERY = 0,
+    PSX_MOD_FRAME_PRESENT_CHANGED = 1
+};
+int psx_mod_set_frame_interpolation_present(uint32_t mode);
 
 /*
  * Host-timed render passes: true in-between frames for a game whose logic
