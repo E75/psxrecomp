@@ -227,6 +227,11 @@ struct ModResource {
     bool required = false;
     uint64_t size = 0;
     std::string sha256;
+    // Source inputs are launcher configuration, not guest resources. A shared
+    // key stores one path across packages; derived resources never get pickers.
+    std::string shared_source;
+    bool input_only = false;
+    bool hidden = false;
 };
 
 struct ModDerivedDisc {
@@ -271,6 +276,7 @@ struct ModPackage {
     std::string source_name;
     std::string source_url;
     std::string resolver = "declarative";
+    std::string prepare;
     std::string save_compatibility = "shared";
     /* Default channel for features that do not declare their own. */
     ModChannel channel = ModChannel::Stable;
@@ -291,6 +297,19 @@ struct ModPackage {
     std::vector<ModResource> resources;
     std::vector<ModDerivedDisc> derived_discs;
 };
+
+struct ModPrepareContext {
+    const ModPackage& package;
+    std::string feature_id;
+    std::filesystem::path disc_path;
+    std::filesystem::path cache_root;
+    std::filesystem::path application_dir;
+    std::map<std::string, std::filesystem::path> inputs;
+};
+using ModMediaPreparer = std::function<bool(const ModPrepareContext&,
+    std::map<std::string, std::filesystem::path>&, std::string&)>;
+// Implementations are linked trusted code. A manifest cannot execute a command.
+bool mod_register_media_preparer(const std::string& id, ModMediaPreparer callback);
 
 struct ModFeatureSelection {
     bool enabled = false;
@@ -420,6 +439,10 @@ public:
     bool scan(std::string* error = nullptr);
     bool load_state(std::string* error = nullptr);
     bool save_state(std::string* error = nullptr) const;
+    bool prepare_resources(const std::string& game_id,
+                           const std::filesystem::path& disc_path,
+                           const std::filesystem::path& cache_root,
+                           std::string* error = nullptr);
 
     bool install_archive(const std::filesystem::path& archive,
                          std::string* installed_id = nullptr,
@@ -476,9 +499,12 @@ public:
                                      const std::string& feature_id,
                                      const std::string& option_id) const;
 
+    // Defer prepared resources only for launcher diagnostics, never execution
+    // or fingerprints. A commit prepares first, then resolves without deferral.
     ModResolution resolve(const std::string& game_id,
                           const std::string& exe_sha256 = {},
-                          const std::string& disc_sha256 = {}) const;
+                          const std::string& disc_sha256 = {},
+                          bool defer_prepared_resources = false) const;
 
     static bool read_manifest(const std::filesystem::path& path, ModPackage& out,
                               std::string* error = nullptr);
@@ -519,6 +545,7 @@ private:
     std::vector<std::string> scan_errors_;
     std::map<std::string, std::map<std::string, ModPackage>> packages_;
     std::map<std::string, ModSelection> selections_;
+    std::map<std::string, std::filesystem::path> sources_;
 };
 
 bool mod_register_builtin_resolver(const std::string& id, ModBuiltinResolver resolver);

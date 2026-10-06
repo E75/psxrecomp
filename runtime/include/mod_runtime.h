@@ -19,6 +19,9 @@ bool mod_runtime_initialize(const std::filesystem::path& root,
                             std::string* error = nullptr);
 bool mod_runtime_commit(const std::filesystem::path& disc_path = {},
                         std::string* error = nullptr);
+/* Prepare enabled media without installing a guest plan or saving choices. */
+bool mod_runtime_prepare_resources(const std::filesystem::path& disc_path,
+                                   std::string* error = nullptr);
 /* Drop the in-session mod plan for a netplay launch without rewriting the
  * user's persisted offline selection on disk. Netplay is always vanilla for
  * now (no synced mod plans). */
@@ -71,6 +74,11 @@ int mod_runtime_read_disc_extent(uint32_t lba, int raw_sector,
                                  uint8_t* bytes, uint32_t size);
 uint32_t mod_runtime_disc_extent_start(void);
 uint32_t mod_runtime_disc_sector_count(uint32_t base_count);
+int mod_runtime_cdda_track_count(void); /* zero when no playlist is active */
+uint32_t mod_runtime_cdda_track_start(int track); /* zero = lead-out */
+/* 0 unavailable, 1 copied external PCM, 2 mapped to mounted-disc LBA. */
+int mod_runtime_read_cdda_sector(uint32_t lba, uint8_t* bytes, uint32_t size,
+                                 uint32_t* source_lba);
 
 #ifdef __cplusplus
 }

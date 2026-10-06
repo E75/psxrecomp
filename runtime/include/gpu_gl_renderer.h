@@ -278,6 +278,12 @@ int gl_renderer_fit_wide_aspect(int disp_w, int *num, int *den);
  * than cap_px. Debug/verification only (screenshot_hires under GL). */
 int gl_renderer_read_display_hires(int x, int y, int w, int h, uint32_t *out,
                                    int cap_px, int *ow, int *oh);
+/* Capture the presented OpenGL surface at internal resolution with an output
+ * pitch, without writing CPU VRAM (the --headless-opengl presentation ring).
+ * depth24 scanout, or a rect the GL surface cannot serve, falls back to the
+ * CPU-mirror resolve. The backend's render_display_hires is unchanged. */
+int gl_renderer_capture_display_hires(uint32_t *out, int pitch_bytes,
+                                      int x, int y, int w, int h);
 
 void gl_renderer_shutdown(void);
 

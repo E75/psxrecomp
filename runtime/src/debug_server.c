@@ -18,6 +18,7 @@
 #include <time.h>
 #include "debug_server.h"
 #include "psx_video_timing.h"
+#include "psx_netplay.h"
 #include "psx_bss.h"
 #include "nd_intro_ot.h"
 #include "latency_ring.h"
@@ -7978,6 +7979,29 @@ static void handle_input_route_status(int id, const char *json)
 /* Named plugin counters (psx_mod_counter_add), always on:
  *   {"cmd":"mod_counters"}
  * -> counters: [{name, count, last_frame}], overflow. */
+/* Read-only view of the live session and its existing hash-confirm watermark. */
+static void handle_netplay_status(int id, const char *json)
+{
+    (void)json;
+    char arch[32], stall[64];
+    int max_players = 0, players = 0, lead = 0;
+    uint32_t tick = 0, bad_tick = 0, local_hash = 0, remote_hash = 0;
+    psx_netplay_diag_snapshot(arch, sizeof(arch), &max_players, &players);
+    psx_netplay_admit_wait_info(stall, sizeof(stall), &tick, &lead);
+    int desync = psx_netplay_input_desync(&bad_tick, &local_hash, &remote_hash);
+    char out[768];
+    snprintf(out, sizeof(out), "{\"id\":%d,\"ok\":true,\"active\":%d,\"host\":%d,"
+          "\"rollback\":%d,\"architecture\":\"%s\",\"max_players\":%d,"
+          "\"players\":%d,\"tick\":%u,\"resolved_through\":%u,"
+          "\"stall\":\"%s\",\"remote_lead\":%d,\"desync\":%d,"
+          "\"desync_tick\":%u,\"local_hash\":%u,\"remote_hash\":%u}",
+          id, psx_netplay_active(), psx_netplay_is_host(),
+          psx_netplay_rollback_mode(), arch, max_players, players, tick,
+          psx_netplay_resolved_through(), stall, lead, desync,
+          bad_tick, local_hash, remote_hash);
+    debug_server_send_line(out);
+}
+
 static void handle_mod_counters(int id, const char *json)
 {
     extern int psx_mod_counters_snapshot(const char **names, uint64_t *counts,
@@ -14891,6 +14915,7 @@ static const CmdEntry s_commands[] = {
     { "ws_tag_stats",      handle_ws_tag_stats },
     { "mod_counters",      handle_mod_counters },
     { "resident_status",   handle_resident_status },
+    { "netplay_status",    handle_netplay_status },
     { "capture_mark",      handle_capture_mark },
     { "present_image_ring_stats", handle_present_image_ring_stats },
     { "present_image_ring_get",   handle_present_image_ring_get },

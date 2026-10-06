@@ -67,6 +67,8 @@ namespace {
 struct RuntimeMods {
     struct DiscExtent { uint32_t lba, count; const uint8_t* data; };
     std::vector<DiscExtent> disc_extents;
+    struct AudioTrack { uint32_t lba, count, source_lba; const uint8_t* data; };
+    std::vector<AudioTrack> audio_tracks;
     uint32_t extent_start = 0;
     bool activating = false;
     ModPackageManager manager;
@@ -990,7 +992,7 @@ int provider_feature_resource_count(void*, const char* package_id,
     return (int)std::count_if(
         package->resources.begin(), package->resources.end(),
         [&](const ModResource& resource) {
-            return resource.feature_id == feature_id;
+            return resource.feature_id == feature_id && !resource.hidden;
         });
 }
 
@@ -1001,7 +1003,7 @@ int provider_feature_resource_get(void*, const char* package_id,
     const ModPackage* package = selected_package(package_id);
     if (!package) return 0;
     for (const ModResource& resource : package->resources) {
-        if (resource.feature_id != feature_id) continue;
+        if (resource.feature_id != feature_id || resource.hidden) continue;
         if (index-- != 0) continue;
         const std::filesystem::path path =
             state().manager.feature_resource_path(
@@ -1114,7 +1116,7 @@ int mutate(Callback callback) {
     }
     if (!state().disc_path.empty())
         state().validation = state().manager.resolve(
-            state().game_id, state().exe_sha256, state().disc_sha256);
+            state().game_id, state().exe_sha256, state().disc_sha256, true);
     else
         state().validation = {};
     state().error.clear();
@@ -1228,6 +1230,7 @@ bool mod_runtime_initialize(const std::filesystem::path& root,
     s.manager.set_root({});
     clear_function_entry_hooks();
     s.disc_extents.clear();
+    s.audio_tracks.clear();
     s.extent_start = 0;
     s.plan = {};
     s.validation = {};
@@ -1284,6 +1287,7 @@ bool mod_runtime_clear_for_netplay(std::string* error) {
     }
     clear_function_entry_hooks();
     s.disc_extents.clear();
+    s.audio_tracks.clear();
     s.extent_start = 0;
     s.plan = {};
     s.validation = {};
@@ -1301,16 +1305,36 @@ bool mod_runtime_clear_for_netplay(std::string* error) {
     return true;
 }
 
+
+bool mod_runtime_prepare_resources(const std::filesystem::path& disc_path, std::string* error) {
+    RuntimeMods& s = state();
+    if (!s.initialized) return true;
+    std::filesystem::path media_cache;
+#if defined(_WIN32)
+    if (const char* local = std::getenv("LOCALAPPDATA")) media_cache = local;
+#else
+    if (const char* cache = std::getenv("XDG_CACHE_HOME")) media_cache = cache;
+    else if (const char* home_dir = std::getenv("HOME")) media_cache = std::filesystem::path(home_dir) / ".cache";
+#endif
+    if (media_cache.empty()) media_cache = std::filesystem::temp_directory_path();
+    media_cache /= "psxrecomp/imports";
+    if (!s.manager.prepare_resources(s.game_id, disc_path, media_cache, &s.error)) {
+        if (error) *error = s.error;
+        return false;
+    }
+    return true;
+}
+
 bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* error) {
     RuntimeMods& s = state();
     if (!s.initialized) return true;
     if (disc_path != s.disc_path) {
-        std::string hash_error;
-        std::string digest;
+        std::string hash_error, digest;
         if (!sha256_file(disc_path, digest, &hash_error)) digest.clear();
         s.disc_path = disc_path;
         s.disc_sha256 = std::move(digest);
     }
+    if (!mod_runtime_prepare_resources(disc_path, error)) return false;
     ModResolution plan =
         s.manager.resolve(s.game_id, s.exe_sha256, s.disc_sha256);
     s.validation = plan;
@@ -1359,6 +1383,7 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* err
      * its function-entry hooks until mod_runtime_activate_plugins(). */
     clear_function_entry_hooks();
     s.disc_extents.clear();
+    s.audio_tracks.clear();
     s.extent_start = 0;
     s.plan = std::move(plan);
     build_disc_index(s);
@@ -1494,6 +1519,90 @@ extern "C" int psx_mod_append_disc_extent(const char* resource_id,
 extern "C" uint32_t mod_runtime_disc_extent_start(void) {
     const auto& s=PSXRecompV4::state();
     return s.disc_enabled && !s.disc_extents.empty() ? s.extent_start : 0;
+}
+
+static int append_audio_track(uint32_t count, uint32_t source,
+        const uint8_t* data, uint32_t* first_lba) {
+    auto& s=PSXRecompV4::state();
+    if(first_lba) *first_lba=0;
+    if(!s.activating || !first_lba || !count || s.audio_tracks.size()>=98) return 0;
+    const uint32_t start=s.audio_tracks.empty()?150:
+        s.audio_tracks.back().lba+s.audio_tracks.back().count;
+    if(uint64_t(start)+count+150>=450000) return 0;
+    s.audio_tracks.push_back({start,count,source,data});
+    *first_lba=start;
+    return 1;
+}
+static int append_resource_audio_track(const char* resource_id,
+        uint64_t offset, uint32_t count, uint32_t* first_lba) {
+    if(first_lba) *first_lba=0;
+    const uint8_t* data=nullptr; uint64_t size=0;
+    if(!PSXRecompV4::state().activating || !first_lba || !count ||
+       !psx_mod_current_resource_bytes(resource_id,&data,&size) ||
+       offset>size || uint64_t(count)*2352>size-offset) return 0;
+    return append_audio_track(count,0,data+offset,first_lba);
+}
+static int append_disc_audio_track(uint32_t track,
+        uint32_t* first_lba, uint32_t* sector_count) {
+    if(first_lba) *first_lba=0;
+    if(sector_count) *sector_count=0;
+    auto& s=PSXRecompV4::state();
+    if(!s.activating || !first_lba || !sector_count) return 0;
+    try {
+        PS1::ISOReader reader;
+        const auto& mount=s.effective_disc_path.empty()?s.disc_path:s.effective_disc_path;
+        if(!reader.Open(mount.string()) || track<1 || track>uint32_t(reader.TrackCount()) ||
+           !reader.TrackIsAudio(track)) return 0;
+        const auto start=reader.TrackStartLBA(track);
+        const auto end=track<uint32_t(reader.TrackCount())?
+            reader.TrackPregapLBA(track+1):reader.GetSectorCount();
+        if(end<=start || !append_audio_track(end-start,start,nullptr,first_lba)) return 0;
+        *sector_count=end-start; return 1;
+    } catch(...) { return 0; }
+}
+extern "C" int psx_mod_append_cdda_tracks(const PSXModCDDATrack* tracks,
+        uint32_t count, uint32_t* first_lbas, uint32_t* sector_counts) {
+    if(!count || count>98 || !first_lbas || !sector_counts) return 0;
+    std::fill_n(first_lbas,count,0);std::fill_n(sector_counts,count,0);
+    auto& s=PSXRecompV4::state();
+    if(!s.activating || !tracks || s.audio_tracks.size()+count>98) return 0;
+    const auto previous=s.audio_tracks.size();
+    bool success=true;
+    try {
+        for(uint32_t i=0;i<count && success;++i) {
+            const auto& t=tracks[i];
+            if(t.resource_id) {
+                success=!t.disc_track && append_resource_audio_track(t.resource_id,
+                    t.byte_offset,t.sector_count,&first_lbas[i]);
+                if(success)sector_counts[i]=t.sector_count;
+            }else success=!t.byte_offset && !t.sector_count &&
+                append_disc_audio_track(t.disc_track,&first_lbas[i],&sector_counts[i]);
+        }
+    }catch(...){success=false;}
+    if(!success){
+        s.audio_tracks.resize(previous);
+        std::fill_n(first_lbas,count,0);std::fill_n(sector_counts,count,0);
+    }
+    return success;
+}
+extern "C" int mod_runtime_cdda_track_count(void) {
+    const auto& s=PSXRecompV4::state();
+    return s.disc_enabled && !s.audio_tracks.empty()?int(s.audio_tracks.size()+1):0;
+}
+extern "C" uint32_t mod_runtime_cdda_track_start(int track) {
+    if(!mod_runtime_cdda_track_count()) return 0;
+    const auto& tracks=PSXRecompV4::state().audio_tracks;
+    if(track==0) return tracks.back().lba+tracks.back().count;
+    return track>=2 && size_t(track-2)<tracks.size()?tracks[track-2].lba:0;
+}
+extern "C" int mod_runtime_read_cdda_sector(uint32_t lba, uint8_t* bytes,
+        uint32_t size, uint32_t* source_lba) {
+    if(!bytes || size<2352 || !source_lba || !mod_runtime_cdda_track_count()) return 0;
+    for(const auto& t:PSXRecompV4::state().audio_tracks) if(lba>=t.lba && lba-t.lba<t.count) {
+        if(t.data) { std::memcpy(bytes,t.data+uint64_t(lba-t.lba)*2352,2352); return 1; }
+        *source_lba=t.source_lba+lba-t.lba; return 2;
+    }
+    return 0;
 }
 extern "C" uint32_t mod_runtime_disc_sector_count(uint32_t base_count) {
     const auto& s=PSXRecompV4::state();
@@ -1694,6 +1803,7 @@ extern "C" void mod_runtime_activate_plugins(void) {
     psx_ram_reset_size_request();
     if (!s.initialized || !s.plan.ok) return;
     s.disc_extents.clear();
+    s.audio_tracks.clear();
     s.extent_start = 0;
     s.activating = true;
     for (const ModResolution::Plugin& plugin : s.plan.plugins) {

@@ -81,6 +81,7 @@ typedef struct RenderStereoStats {
     const char *last_failed_reason; /* latched across later successes */
 } RenderStereoStats;
 void render_stereo_get_stats(RenderStereoStats *out);
+int render_pass_netplay_enabled(void);
 
 #ifdef __cplusplus
 }

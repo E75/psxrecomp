@@ -2189,6 +2189,57 @@ int main() {
         write_text(manifest_path, "format_version = 8\n" + negative_size);
         check(!ModPackageManager::read_manifest(manifest_path, invalid, &error), "negative media size rejected");
     }
+
+    {
+        const auto folder = root / "shared-preparation";
+        const auto source = folder / "source.iso", replacement = folder / "replacement.iso";
+        const auto asset = folder / "cache/asset.dat";
+        const std::vector<uint8_t> data{1,2,3,4};
+        write_bytes(source, data);write_bytes(replacement, data);write_bytes(asset, data);
+        for(const char* id : {"cars", "music"}) {
+            std::string manifest = "format_version = 9\nid = \"" + std::string(id) +
+                "\"\nversion = \"1.0.0\"\nname = \"Import\"\nprepare = \"test.media\"\n"
+                "[[target]]\ngame_id = \"SLUS-TEST\"\n"
+                "[[feature]]\nid = \"content\"\nname = \"Content\"\n"
+                "[[resource]]\nfeature = \"content\"\nid = \"source\"\nlabel = \"Disc\"\n"
+                "input_only = true\nshared_source = \"game.original\"\nrequired = true\n"
+                "[[resource]]\nfeature = \"content\"\nid = \"asset\"\nlabel = \"Asset\"\n"
+                "hidden = true\nrequired = true\nsize = 4\nsha256 = \"" + sha256_hex(data) + "\"\n";
+            write_text(folder / "bundled" / id / "1.0.0/manifest.toml", manifest);
+        }
+        ModPackageManager manager(folder);
+        check(manager.scan(&error) && manager.scan_errors().empty(), "source/preparation catalog parses");
+        check(manager.set_feature_resource_path("cars", "content", "source", source, &error), error.c_str());
+        check(manager.feature_resource_path("music", "content", "source") == source, "source picker prefills sibling package");
+        check(manager.set_feature_resource_path("music", "content", "source", replacement, &error), error.c_str());
+        check(manager.feature_resource_path("cars", "content", "source") == replacement, "source sharing works in both directions");
+        check(manager.save_state(&error), error.c_str());
+        ModPackageManager reload(folder);check(reload.scan(&error) && reload.load_state(&error), error.c_str());
+        check(reload.feature_resource_path("cars", "content", "source") == replacement, "shared binding survives restart");
+        int calls = 0;bool fail = false;
+        check(mod_register_media_preparer("test.media",[&](const ModPrepareContext& context,
+            std::map<std::string,fs::path>& output,std::string& reason){
+            ++calls;
+            check(context.disc_path == source, "preparer inherits main disc picker");
+            check(context.inputs.at("source") == replacement, "preparer receives shared source");
+            if(fail){reason="invalid input";return false;}
+            output["asset"] = asset;return true;
+        }), "trusted preparer registered");
+        check(reload.prepare_resources("SLUS-TEST", source, folder/"cache", &error) && calls==0, "disabled imports do not prepare media");
+        check(reload.set_feature_enabled("cars", "content", true, &error), error.c_str());
+        check(reload.resolve("SLUS-TEST", {}, {}, true).ok,
+              "launcher preview does not request generated asset paths");
+        check(!reload.resolve("SLUS-TEST").ok,
+              "runtime still rejects content before preparation");
+        check(reload.prepare_resources("SLUS-TEST", source, folder/"cache", &error), error.c_str());
+        auto prepared = reload.resolve("SLUS-TEST");
+        check(prepared.ok && prepared.resources.size()==1 && prepared.resources[0].id=="asset", "only derived assets enter runtime plan");
+        const auto before = reload.feature_resource_path("cars", "content", "asset");
+        fail=true;check(!reload.prepare_resources("SLUS-TEST", source, folder/"cache", &error), "failed preparation refuses launch");
+        check(reload.feature_resource_path("cars", "content", "asset")==before, "failed preparation preserves prior bindings");
+        write_bytes(asset, {4,3,2,1});check(!reload.resolve("SLUS-TEST").ok, "corrupt derived output fails engine verification");
+    }
+
     fs::remove_all(root, ec);
     if (failures) {
         std::cerr << failures << " mod package test(s) failed\n";

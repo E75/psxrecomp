@@ -25,6 +25,7 @@ int psx_ws_prim_is_tagged(void){return 0;}
 void gpu_depth24_upload_span_reset(void){}
 /* Netplay unsplit view and forward-pass opt-in: off in these fixtures. */
 int gpu_ws_netplay_local_viewport_width(void){return 0;}
+int render_pass_netplay_enabled(void){return 0;}
 void frame_interpolation_schedule_reset(FrameInterpolationSchedule *p){memset(p,0,sizeof(*p));}
 void frame_flip_tracker_reset(FrameFlipTracker *p){memset(p,0,sizeof(*p));p->period=1;}
 static int checks,failures;
@@ -258,6 +259,37 @@ static void verify_wide_overlay_band(void) {
  free(wide);
  glb_set_draw_area(0,0,1023,511);glb_wide_disable_target();glb_wide_configure(0,0);
 }
+static void verify_presentation_capture(void) {
+ const int w=7*s_scale,h=3*s_scale,stride=w+3;
+ uint32_t *out=malloc((size_t)stride*h*4);
+ s_cpu_auth_dual=1;
+ glb_set_draw_area(0,0,1023,511);glb_set_mask_bits(0,0);glb_set_semi_transparency(0,0);
+ glb_draw_flat_rect(53,61,7,1,0x001f);
+ glb_draw_flat_rect(53,62,7,2,0x03e0);
+ flush_flat_batch();flush_tex_batch();flush_cpu_upload();
+ // Deliberately distinct CPU authority. No upload debt: capture must read FBO.
+ image[61*1024+53]=0x7c00;
+ memcpy(oracle,image,sizeof(image));
+ for(int i=0;i<stride*h;i++)out[i]=0x12345678;
+ GLuint pack=0;p_glGenBuffers(1,&pack);p_glBindBuffer(GL_PIXEL_PACK_BUFFER,pack);
+ p_glBufferData(GL_PIXEL_PACK_BUFFER,1024,NULL,0x88E1);
+ glPixelStorei(PSXGL_PACK_ROW_LENGTH,19);glPixelStorei(GL_PACK_ALIGNMENT,8);
+ GLint before_fbo;glGetIntegerv(0x8CAA,&before_fbo);
+ check(gl_renderer_capture_display_hires(out,stride*4,53,61,7,3)==w*h,"presentation capture scaled count");
+ check((out[0]&0x00ffffff)>=0x00f00000 && !(out[0]&0xffff),"capture reads GL red, not CPU blue");
+ check((out[(h-1)*stride]&0xff00)>=0xf000 && !(out[(h-1)*stride]&0xff00ff),"capture retains native row orientation");
+ for(int y=0;y<h;y++)check(out[y*stride+w]==0x12345678,"capture respects pitch padding");
+ check(!memcmp(image,oracle,sizeof(image)),"capture leaves canonical CPU VRAM unchanged");
+ GLint value;glGetIntegerv(0x88ED,&value);check(value==(GLint)pack,"capture restores PBO");
+ glGetIntegerv(0x8CAA,&value);check(value==before_fbo,"capture restores read FBO");
+ glGetIntegerv(PSXGL_PACK_ROW_LENGTH,&value);check(value==19,"capture restores row length");
+ glGetIntegerv(GL_PACK_ALIGNMENT,&value);check(value==8,"capture restores alignment");
+ check(!gl_renderer_capture_display_hires(out,4,53,61,7,3),"capture rejects short pitch");
+ check(glGetError()==GL_NO_ERROR,"capture GL error");
+ p_glBindBuffer(GL_PIXEL_PACK_BUFFER,0);((void (APIENTRY *)(GLsizei,const GLuint *))SDL_GL_GetProcAddress("glDeleteBuffers"))(1,&pack);
+ glPixelStorei(PSXGL_PACK_ROW_LENGTH,0);glPixelStorei(GL_PACK_ALIGNMENT,4);
+ s_cpu_auth_dual=0;free(out);
+}
 int main(int argc,char **argv){
  int scale=argc>1?atoi(argv[1]):1;
  if(SDL_Init(SDL_INIT_VIDEO)!=0)return 2;
@@ -404,6 +436,7 @@ int main(int argc,char **argv){
  free(wide_pixels);
  for(test_full_composite=0;test_full_composite<2;test_full_composite++)verify_wide_overlay_band();
  test_full_composite=0;
+ verify_presentation_capture();
  printf("checks=%d failures=%d\n",checks,failures);
  gl_renderer_shutdown();SDL_DestroyWindow(win);SDL_Quit();return failures?1:0;
 }

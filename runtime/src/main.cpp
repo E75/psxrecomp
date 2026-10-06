@@ -1343,6 +1343,8 @@ static int           g_headless       = 0;   /* debug/CI frontend: no SDL window
  * presentation features without putting a window on the desktop; drive it
  * over TCP like --headless. */
 static int           g_hidden_window  = 0;
+static int           g_headless_opengl = 0;   /* explicit GL validation; fail instead of fallback */
+static SDL_Window*   s_headless_gl_window = nullptr; /* separate from the host input/present window */
 
 /* FMV instant-skip via the game's OWN end-of-movie path. Tomba's MDEC player
  * (FUN_8001efe8) tears a movie down when the streamed frame number reaches that
@@ -3778,6 +3780,7 @@ static void teardown_game_session_keep_lobby(void) {
     sdl_texture_width = sdl_texture_height = 0;
     if (sdl_renderer) { SDL_DestroyRenderer(sdl_renderer); sdl_renderer = nullptr; }
     if (sdl_window) { SDL_DestroyWindow(sdl_window); sdl_window = nullptr; }
+    if (s_headless_gl_window) { SDL_DestroyWindow(s_headless_gl_window); s_headless_gl_window = nullptr; }
     if (sdl_pixel_buf) { std::free(sdl_pixel_buf); sdl_pixel_buf = nullptr; }
     sdl_pixel_buf_capacity = 0;
     /* Rematch must re-run force_sw (and prefer CPU-auth GL present again). */
@@ -7290,6 +7293,20 @@ static void headless_present_image_ring_capture(void) {
                 return;
             }
         }
+    }
+    /* Capture GL's real FBO, including the selected projection half, without
+     * feeding readback into canonical netplay VRAM or its state hashes. */
+    if (g_headless_opengl) {
+        int slot = netplay_local_viewport_slot();
+        int cw = slot >= 0 ? (int)di.width / 2 : (int)di.width;
+        int cx = (int)di.display_x + (slot == 1 ? (int)di.width - cw : 0);
+        int scale = gr_scale();
+        w = cw * scale; h = (int)di.height * scale;
+        buf.resize((size_t)w * h);
+        if (gl_renderer_capture_display_hires(buf.data(), w * 4, cx, (int)di.display_y,
+                                              cw, (int)di.height) != w * h) return;
+        present_image_ring_push_argb((uint32_t)s_frame_count, buf.data(), w, h, w);
+        return;
     }
     w = (int)di.width; h = (int)di.height;
     buf.resize((size_t)w * h);
@@ -13838,6 +13855,7 @@ int main(int argc, char** argv) {
      *   --headless          skip SDL window/audio; use TCP screenshots/state
      *   --hidden-window     full presenter in a never-shown window (TCP-driven
      *                       tests of interpolation / render passes)
+     *   --headless-opengl   hidden GL context, no audio/controllers; require actual GL
      *   --netplay           enable delay-sync LAN (also PSX_NETPLAY=1)
      *   --net-slot N        local player slot (0|1)
      *   --net-input-player N  host device to sample (0=P1, 1=P2; default auto)
@@ -13875,6 +13893,10 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--launcher") == 0) {
             force_launcher = true;
         } else if (std::strcmp(argv[i], "--no-launcher") == 0) {
+            force_no_launcher = true;
+        } else if (std::strcmp(argv[i], "--headless-opengl") == 0) {
+            g_headless = 1;
+            g_headless_opengl = 1;
             force_no_launcher = true;
         } else if (std::strcmp(argv[i], "--headless") == 0) {
             g_headless = 1;
@@ -16273,6 +16295,7 @@ session_reboot:
         std::fflush(stdout);
     }
     memory_init(bios_path_str.c_str());
+    if (g_headless_opengl) g_video_renderer = 1;
 #ifndef PSX_HAVE_VULKAN
     /* Vulkan was not compiled in (PSX_ENABLE_VULKAN=OFF or no SDK found).
      * Refuse a vulkan request from ANY source (config / CLI / launcher seed)
@@ -16322,18 +16345,16 @@ session_reboot:
         /* Select the renderer backend BEFORE gpu_init() (which runs gr_init ->
          * the backend's init on the VRAM buffer). Software is the default and
          * the fallback; an unavailable OpenGL backend reverts to software.
-         * Headless never creates a window or GPU context, so a GPU backend
-         * would only rasterize through its software fallback while refusing
-         * the context-bound services (native-wide compositing, hi-res
-         * readback). Select the software backend it would really run, so
-         * headless validation exercises the same wide compositor as a window. */
-        const int backend_renderer = g_headless ? 0 : g_video_renderer;
+         * Ordinary headless has no context and uses software. The explicit
+         * hidden-OpenGL mode creates a context below and refuses fallback. */
+        const int backend_renderer = g_headless && !g_headless_opengl ? 0 : g_video_renderer;
         gr_set_backend(backend_renderer == 2 ? GR_BACKEND_VULKAN :
                        backend_renderer == 1 ? GR_BACKEND_OPENGL :
                                                GR_BACKEND_SOFTWARE);
         std::fprintf(stdout, "psxrecomp: renderer backend requested: %s%s\n",
                      backend_renderer == 2 ? "vulkan" :
                      backend_renderer == 1 ? "opengl" : "software",
+                     g_headless_opengl ? " (hidden context)" :
                      g_headless && g_video_renderer != 0 ? " (headless)" : "");
     }
     gpu_init();
@@ -16704,7 +16725,42 @@ session_reboot:
 #endif
 
   if (g_headless) {
-    std::fprintf(stdout, "psxrecomp: headless frontend enabled\n");
+    if (g_headless_opengl) {
+        /* VIDEO only: no audio device, game-controller enumeration or host
+         * input sampling. Keep sdl_window null so adaptive sizing and hotkeys
+         * cannot use this invisible validation surface as a player window. */
+        if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+            std::fprintf(stderr, "psxrecomp: hidden OpenGL SDL init failed: %s\n", SDL_GetError());
+            return 1;
+        }
+        configure_core_gl_context_attributes();
+        s_headless_gl_window = SDL_CreateWindow("psxrecomp hidden OpenGL validation",
+            SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 640, 480,
+            SDL_WINDOW_HIDDEN | SDL_WINDOW_OPENGL);
+        if (!s_headless_gl_window) {
+            std::fprintf(stderr, "psxrecomp: hidden OpenGL window failed: %s\n", SDL_GetError());
+            SDL_Quit();
+            return 1;
+        }
+        gl_renderer_set_swap_interval(0);
+        g_gl_active = gl_renderer_init_context(s_headless_gl_window) != 0;
+        if (!g_gl_active || gr_backend() != GR_BACKEND_OPENGL ||
+            !(SDL_GetWindowFlags(s_headless_gl_window) & SDL_WINDOW_HIDDEN)) {
+            std::fprintf(stderr, "psxrecomp: hidden OpenGL validation unavailable; refusing fallback\n");
+            if (g_gl_active) gl_renderer_shutdown();
+            SDL_DestroyWindow(s_headless_gl_window);
+            s_headless_gl_window = nullptr;
+            SDL_Quit();
+            return 1;
+        }
+        if (!netplay_cpu_auth_gpu()) g_video_scale = gr_scale();
+        gl_renderer_set_interpolation(0, 0, 0, 59.94, 0);
+        latency_ring_set_backend("opengl");
+        latency_ring_set_present_mode(0);
+        std::fprintf(stdout, "psxrecomp: hidden OpenGL headless enabled (backend=opengl hidden=1 audio=0 controllers=0)\n");
+    } else {
+        std::fprintf(stdout, "psxrecomp: headless frontend enabled\n");
+    }
   } else {
     /* ---- SDL init ---- */
     /* Scale quality governs SDL's logical-size -> window scaling. Linear when
@@ -17575,6 +17631,8 @@ session_reboot:
     SDL_DestroyTexture(sdl_texture);   /* NULL-safe in GL mode */
     SDL_DestroyRenderer(sdl_renderer); /* NULL-safe in GL mode */
     SDL_DestroyWindow(sdl_window);
+    SDL_DestroyWindow(s_headless_gl_window);
+    s_headless_gl_window = nullptr;
     SDL_Quit();
 
     return 0;

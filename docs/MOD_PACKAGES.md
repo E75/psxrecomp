@@ -924,6 +924,25 @@ Plan replacement or netplay clearing removes the extents; base sectors remain
 unchanged. The game plugin supplies its own file lookup, names and stream
 selection. Donor bytes remain external and are covered by the resource fingerprint.
 
+Trusted activation callbacks can also append an audio-only playlist with
+`psx_mod_append_cdda_tracks(tracks, count, first_lbas, sector_counts)`.
+Each `PSXModCDDATrack` either names an owned verified resource plus a byte
+offset/count of raw 2352-byte stereo PCM sectors, or names an audio track on
+the mounted disc. A batch succeeds completely or leaves the previous playlist
+unchanged. Outputs are deterministic; late calls, non-audio disc tracks,
+invalid resource ranges, more than 98 audio tracks and the CD MSF limit are
+rejected. Mounted-track slices exclude INDEX00 pregaps.
+
+The playlist supplies the CD controller's audio TOC (data placeholder track 1,
+audio tracks 2 onward, track 0 lead-out). Filesystem and XA LBAs remain on
+the original data timeline. The native CD controller still performs playback,
+reports, volume mixing and save-state serialization; no host playback clock
+is introduced. Plan replacement/reactivation clears the playlist, and a
+disabled plan follows the existing disc reader unchanged. Titles own native
+menu integration and must relocate fixed-size TOC/name buffers before exposing
+more tracks. `cdrom_trace_dump` reports audio sectors as `cdda_sector`, with
+the virtual LBA in `val` and track number in `w`.
+
 
 Verified resource fingerprints include format, canonical size and SHA-256,
 rather than the selected path, so moving identical media or changing N64 byte
@@ -1005,3 +1024,31 @@ GPU reset and savestate restore discard this host-only history. A save loaded
 directly into a frozen loading frame cannot recreate wide reveal strips absent
 from the canonical saved framebuffer. `ws_scene_hold_test` covers long holds,
 menu release, delayed buffer flips, retained 4:3 scenes, FMV and timeline reset.
+
+
+## Shared source media and automatic preparation (format 9)
+
+A linked trusted preparer lets a title accept source discs/ROMs and prepare
+verified resources before committing a launch. Manifests name registered code;
+they cannot name executable commands. Set package `prepare = "provider.id"`.
+
+A `[[resource]]` with `input_only = true` is a picker for preparation input,
+not a runtime resource. `shared_source = "game.original"` stores one path in
+`[sources]` in mods/state.toml; every package with that key shows that same path.
+Changing either picker updates the shared binding. Earlier per-feature paths
+are used as migration defaults. Source paths never affect runtime fingerprints.
+
+Derived resources declare `hidden = true` plus their expected `size` and
+`sha256`. The launcher omits their pickers. The preparer receives the selected
+main-page disc, source inputs, application directory and user cache root. It
+returns declared output paths; the normal resolver then verifies and snapshots
+their bytes. All active preparers must succeed before new bindings are published.
+Disabled features perform no preparation. Preparation also runs for implicit
+requirements and the committed netplay selection. Cache files and donor media
+remain user-owned and outside the bundled package directory.
+
+Register via `mod_register_media_preparer` in mod_packages.h. Ship any worker
+and its runtime dependencies with the title: players should only supply media.
+The `prepare_resources` method is separate from read-only `resolve`, so editing
+launcher settings does not trigger conversions. Runtime activation still sees
+only fully verified immutable resources.

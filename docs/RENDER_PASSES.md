@@ -19,6 +19,7 @@ uint32_t psx_mod_render_pass_plan(uint32_t period_vblanks,
 int psx_mod_render_pass(struct CPUState *cpu, const PSXModRenderPass *pass,
                         PSXModRenderPassFn fn, void *user);
 uint32_t psx_mod_render_pass_status(void);
+int psx_mod_set_render_pass_netplay(int allowed);
 ```
 
 Call both from an emulation-thread function-entry hook at the point where
@@ -29,7 +30,7 @@ flip to frame n. For a PsyQ double-buffered loop that is the entry of the
 Register that hook with `psx_mod_register_function_entry_plugin()` under the
 plugin's manifest `[[plugin]]` id (see [MOD_PACKAGES.md](MOD_PACKAGES.md)):
 it then runs only while the resolved mod plan activates the plugin, so never
-while the package is disabled or in netplay. Register once, for example from
+while the package is disabled. Register once, for example from
 the plugin's constructor; a repeated id and address returns 0. Entry hooks
 also fire for the guest functions a pass itself calls, the plugin's own
 included, so a hook that plans passes must ignore entries made inside one.
@@ -61,9 +62,17 @@ budget aside (an empty plan while it says `READY` was shed for time):
 | `NO_PRESENTER` (1) | not OpenGL, interpolation off or suspended (FMV), or not the FLIP source | until the presenter changes |
 | `BACKEND` (2) | the renderer declines passes in its current mode | while that mode lasts |
 | `DISABLED` (3) | switched off after repeated faults | the session |
-| `SESSION` (4) | netplay, rollback, rewind, load/save replay, self-check resimulation | transient |
+| `SESSION` (4) | netplay without opt-in, rollback resimulation, rewind, load/save replay, self-check resimulation | transient |
 | `FAST_FORWARD` (5) | manual fast-forward, turbo-through-loads, FMV auto-skip, TCP turbo | transient |
 | `BUSY` (6) | inside an exception, a pass or a GPU DMA walk, or no frame captured since the presenter's history restarted (a display mode change) | transient |
+
+A title with a verified multiplayer draw boundary can opt in with
+`psx_mod_set_render_pass_netplay(1)`. This allows forward netplay frames on
+the dual-raster backend. Render-pass draws bypass the authoritative software
+rasterizer; CPU VRAM stays unchanged, and uploads/fills/copies remain journaled
+and restored. Rollback resimulation still refuses passes. Session reset clears
+the opt-in. Native-wide local cameras must use the GPU-direct presenter so its
+flip history and extra images describe the same surface as ordinary gameplay.
 
 A plugin that relies on passes should not leave the player on stock-rate
 frames while a lasting reason holds: it can switch the presenter to a

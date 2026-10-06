@@ -24,12 +24,17 @@ namespace PSXRecompV4 {
 namespace {
 
 constexpr uint32_t kMinFormatVersion = 1;
-constexpr uint32_t kMaxFormatVersion = 8;
+constexpr uint32_t kMaxFormatVersion = 9;
 constexpr uint64_t kMaxArchiveBytes = 256ull * 1024ull * 1024ull;
 constexpr uint32_t kMaxArchiveFiles = 4096;
 
 std::map<std::string, ModBuiltinResolver>& builtin_resolvers() {
     static std::map<std::string, ModBuiltinResolver> value;
+    return value;
+}
+
+std::map<std::string, ModMediaPreparer>& media_preparers() {
+    static std::map<std::string, ModMediaPreparer> value;
     return value;
 }
 
@@ -1438,6 +1443,10 @@ std::string fingerprint_text(const std::string& text) {
 
 } // namespace
 
+bool mod_register_media_preparer(const std::string& id, ModMediaPreparer callback) {
+    return valid_id(id) && callback && media_preparers().emplace(id, std::move(callback)).second;
+}
+
 bool mod_register_builtin_resolver(const std::string& id, ModBuiltinResolver resolver) {
     if (!valid_id(id) || !resolver) return false;
     return builtin_resolvers().emplace(id, std::move(resolver)).second;
@@ -1673,6 +1682,7 @@ void ModPackageManager::set_root(fs::path mods_root) {
     root_ = std::move(mods_root);
     packages_.clear();
     selections_.clear();
+    sources_.clear();
 }
 
 bool ModPackageManager::read_manifest(const fs::path& path, ModPackage& out,
@@ -1735,6 +1745,9 @@ bool ModPackageManager::read_manifest(const fs::path& path, ModPackage& out,
         if (out.save_compatibility != "shared" && out.save_compatibility != "isolated")
             throw std::runtime_error("save_compatibility must be shared or isolated");
 
+        out.prepare = toml::find_or<std::string>(cfg, "prepare", "");
+        if (!out.prepare.empty() && (out.format_version < 9 || !valid_id(out.prepare)))
+            throw std::runtime_error("media preparation requires format_version 9 and a valid provider id");
         if (cfg.contains("target")) {
             for (const toml::value& v : toml::find(cfg, "target").as_array()) {
                 ModTarget target;
@@ -1919,6 +1932,15 @@ bool ModPackageManager::read_manifest(const fs::path& path, ModPackage& out,
                         throw std::runtime_error("invalid verified media identity or format");
                     resource.size = static_cast<uint64_t>(size);
                 }
+                resource.shared_source = toml::find_or<std::string>(v, "shared_source", "");
+                resource.input_only = toml::find_or<bool>(v, "input_only", false);
+                resource.hidden = toml::find_or<bool>(v, "hidden", false);
+                if ((resource.input_only || resource.hidden || !resource.shared_source.empty()) && out.format_version < 9)
+                    throw std::runtime_error("source bindings require format_version 9");
+                if (!resource.shared_source.empty() && (!resource.input_only || !valid_id(resource.shared_source)))
+                    throw std::runtime_error("shared_source requires an input resource and valid id");
+                if (resource.input_only && out.prepare.empty())
+                    throw std::runtime_error("source inputs require a trusted preparer");
                 if (!find_feature(out, resource.feature_id))
                     throw std::runtime_error(
                         "resource references unknown feature");
@@ -2713,6 +2735,7 @@ bool ModPackageManager::scan(std::string* error) {
 
 bool ModPackageManager::load_state(std::string* error) {
     selections_.clear();
+    sources_.clear();
     const fs::path path = root_ / "state.toml";
     if (!fs::exists(path)) return true;
     try {
@@ -2720,6 +2743,12 @@ bool ModPackageManager::load_state(std::string* error) {
         const int64_t version = toml::find<int64_t>(cfg, "format_version");
         if (version != 1 && version != 2)
             throw std::runtime_error("unsupported state format_version");
+        if (cfg.contains("sources")) {
+            for (const auto& [id, value] : toml::find(cfg, "sources").as_table()) {
+                if (!valid_id(id) || !value.is_string()) throw std::runtime_error("invalid shared source binding");
+                sources_[id] = toml::get<std::string>(value);
+            }
+        }
         if (cfg.contains("package")) {
             for (const toml::value& v : toml::find(cfg, "package").as_array()) {
                 const std::string id = toml::find<std::string>(v, "id");
@@ -2809,6 +2838,11 @@ bool ModPackageManager::save_state(std::string* error) const {
         return false;
     }
     out << "format_version = 2\n";
+    if (!sources_.empty()) {
+        out << "\n[sources]\n";
+        for (const auto& [id, path] : sources_)
+            out << quote_toml(id) << " = " << quote_toml(path.string()) << "\n";
+    }
     for (const auto& [id, selection] : selections_) {
         out << "\n[[package]]\n";
         out << "id = " << quote_toml(id) << "\n";
@@ -3171,9 +3205,8 @@ bool ModPackageManager::set_feature_resource_path(
                 : "selected resource path is not a file");
         return false;
     }
-    selections_[package_id]
-        .features[feature_id]
-        .resources[resource_id] = path.string();
+    if (!resource->shared_source.empty()) sources_[resource->shared_source] = path;
+    else selections_[package_id].features[feature_id].resources[resource_id] = path.string();
     return true;
 }
 
@@ -3231,6 +3264,25 @@ fs::path ModPackageManager::feature_resource_path(
     const std::string& resource_id) const {
     const ModPackage* package = selected_package(package_id);
     if (!package) return {};
+    const auto* resource = find_resource(*package, feature_id, resource_id);
+    if (resource && !resource->shared_source.empty()) {
+        const auto source = sources_.find(resource->shared_source);
+        if (source != sources_.end()) return source->second;
+        // Adopt an earlier per-feature selection as the visible default. The
+        // next edit persists one shared binding and wins over every old value.
+        for (const auto& [id, versions] : packages_) {
+            (void)versions;
+            const auto* other = selected_package(id);
+            if (!other) continue;
+            const auto selected = selections_.find(id);
+            if (selected == selections_.end()) continue;
+            for (const auto& r : other->resources) if(r.shared_source == resource->shared_source) {
+                auto path = effective_resource_path(*other, selected->second, r.feature_id, r.id);
+                if (!path.empty()) return path;
+            }
+        }
+        return {};
+    }
     const auto found = selections_.find(package_id);
     const ModSelection blank;
     return effective_resource_path(
@@ -3374,9 +3426,54 @@ std::string ModPackageManager::feature_option_value(
         feature_id, option_id);
 }
 
+bool ModPackageManager::prepare_resources(const std::string& game_id,
+    const fs::path& disc_path, const fs::path& cache_root, std::string* error) {
+    auto effective = effective_selections(nullptr, nullptr, nullptr);
+    auto pending = selections_;
+    try {
+        for (const auto& [id, versions] : packages_) {
+            (void)versions;
+            const auto* package = selected_package(id);
+            if (!package || package->prepare.empty()) continue;
+            bool target = std::any_of(package->targets.begin(), package->targets.end(),
+                [&](const ModTarget& t){return t.game_id == "*" || t.game_id == game_id;});
+            if (!target) continue;
+            for (const auto& feature : package->features) {
+                if (!is_feature_enabled(*package, effective[id], feature)) continue;
+                const auto provider = media_preparers().find(package->prepare);
+                if (provider == media_preparers().end())
+                    throw std::runtime_error(package->name + ": media preparer is not installed");
+                ModPrepareContext context{*package, feature.id, disc_path, cache_root, root_.parent_path(), {}};
+                for (const auto& r : package->resources) if (r.feature_id == feature.id && r.input_only) {
+                    auto path = feature_resource_path(id, feature.id, r.id);
+                    if (path.empty() && r.required)
+                        throw std::runtime_error(package->name + ": select " + r.label);
+                    context.inputs[r.id] = path;
+                }
+                std::map<std::string, fs::path> outputs;
+                std::string reason;
+                if (!provider->second(context, outputs, reason))
+                    throw std::runtime_error(package->name + ": " + reason);
+                for (const auto& [name, path] : outputs) {
+                    const auto* resource = find_resource(*package, feature.id, name);
+                    if (!resource || resource->input_only || resource->sha256.empty())
+                        throw std::runtime_error("preparer returned an undeclared or unverified output");
+                    pending[id].features[feature.id].resources[name] = path.string();
+                }
+                for (const auto& r : package->resources)
+                    if (r.feature_id == feature.id && !r.input_only && r.required && !outputs.count(r.id))
+                        throw std::runtime_error(package->name + ": preparer omitted " + r.label);
+            }
+        }
+    } catch (const std::exception& ex) { set_error(error, ex.what()); return false; }
+    selections_ = std::move(pending);
+    return true;
+}
+
 ModResolution ModPackageManager::resolve(const std::string& game_id,
                                          const std::string& exe_sha256,
-                                         const std::string& disc_sha256) const {
+                                         const std::string& disc_sha256,
+                                         bool defer_prepared_resources) const {
     ModResolution result;
     /* Everything below reads the EFFECTIVE selection: the player's state plus
      * the features active [[requirement]]s derive. selections itself is never
@@ -3797,6 +3894,10 @@ ModResolution ModPackageManager::resolve(const std::string& game_id,
             result.plugins.push_back(std::move(resolved));
         }
         for (const ModResource& resource : package->resources) {
+            // Launcher previews must not ask players to select files that the
+            // preparer creates on Play. Runtime commits always validate them.
+            if (resource.input_only ||
+                (defer_prepared_resources && !package->prepare.empty())) continue;
             const ModFeature* feature =
                 find_feature(*package, resource.feature_id);
             if (!feature ||
