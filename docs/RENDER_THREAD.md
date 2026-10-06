@@ -179,8 +179,6 @@ resolution controller (roadmap Phase 1.2), not of this layer.
 - Converting the remaining sync points to recorded commands (texture banks,
   render passes, CPU/hold presents). Each is correct as a sync point.
 - Making replay cheaper (batching across records, fewer GL state changes).
-- Windows: `render_thread.c` has a Win32 path (SRW lock, condition variable,
-  `CreateThread`) that is compile-untested; the unit test is POSIX-only.
 - Diagnostic rings written by both threads (`latency_ring`, `gpu_timeline`)
   can interleave entries; they are diagnostics only.
 
@@ -206,6 +204,10 @@ resolution controller (roadmap Phase 1.2), not of this layer.
   mistakes: replay reading the tags live, staging uploads from the guest
   array, dropping the stream state.
 - `video_enhancement_settings_test`: the key defaults off and parses.
+- Windows (MinGW): the runtime builds with the Win32 path of
+  `render_thread.c` (SRW lock, condition variable, `CreateThread`), and
+  `render_thread_test` and `gl_render_thread_test` run there (the GL test
+  exits 77, a CTest skip, on a host with no GL 3.3 context).
 - In game (R4, see the PR): `tools/fp_identity.py` guest identity render
   thread off vs on under `--headless-opengl`, and A/B frame rates from a race
   savestate at Native, 4K and Match display, 4:3 and widescreen.
