@@ -11,9 +11,9 @@ assert "static int           g_hotkey_pad_rewind = 1272;" in MAIN
 assert "static int           g_hotkey_pad_save_state_menu = 2040;" in MAIN
 assert "PSX_HOTKEY_PAD_IS_BUTTON_COMBO" in MAIN
 assert "PSX_HOTKEY_PAD_SELECT_R3" in MAIN
-assert "static int hotkey_pad_binding_down(int binding)" in MAIN
-assert "SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_BACK)" in MAIN
-assert "return hotkey_pad_binding_down(g_hotkey_pad_rewind);" in MAIN
+assert "static int hotkey_shortcut_down(int shortcut, int binding)" in MAIN
+assert "psx_hotkey_pad_down(binding, direct, SDL_CONTROLLER_BUTTON_BACK," in MAIN
+assert "return hotkey_shortcut_down(PSX_ASSIST_BIND_REWIND, g_hotkey_pad_rewind);" in MAIN
 assert "(btn & PAD_SELECT) == 0 && (btn & PAD_L3) == 0" not in MAIN
 assert (
     "SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_BACK) &&\n"
@@ -47,7 +47,7 @@ assert "g_frame_period_ms / (double)mult" in MAIN
 assert "static int           g_hotkey_pad_fast_forward = 1528;" in MAIN
 assert "PSX_HOTKEY_PAD_SELECT_L1" in MAIN
 assert "PSX_ASSIST_BIND_FAST_FORWARD" in MAIN
-assert "            hotkey_pad_binding_down(g_hotkey_pad_fast_forward)) {" in MAIN
+assert "hotkey_shortcut_down(PSX_ASSIST_BIND_FAST_FORWARD, g_hotkey_pad_fast_forward)) {" in MAIN
 assert MAIN.count("ls.assist_pad_bind[PSX_ASSIST_BIND_FAST_FORWARD]") == \
     MAIN.count("ls.assist_pad_bind[PSX_ASSIST_BIND_SAVE_STATE_MENU]")
 assert '"Fast-forward",' in MAIN

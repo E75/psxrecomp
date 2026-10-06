@@ -7826,10 +7826,40 @@ static void handle_unwatch(int id, const char *json)
     send_err(id, "watchpoint not found");
 }
 
+/* Host-pad layer (set_input {"layer":"host"}): a virtual P1 gamepad that
+ * feeds stage 1 of the normal offline input path (and host shortcut
+ * polling) instead of replacing it, so title transforms, direct shortcuts
+ * and trigger values see it like a physical pad. Persistent until
+ * clear_input. A plain override still wins while armed. */
+static int s_host_layer = 0;
+static uint16_t s_host_buttons = 0xFFFF;
+static uint8_t s_host_axes[4] = { 0x80, 0x80, 0x80, 0x80 };
+static uint8_t s_host_lt = 0, s_host_rt = 0;
+
+static uint8_t clamp_u8_arg(int v, uint8_t dflt) {
+    if (v < 0) return dflt;
+    return (uint8_t)(v > 255 ? 255 : v);
+}
+
 static void handle_set_input(int id, const char *json)
 {
     char val_str[32];
+    char layer[16];
     const int pad_type = json_get_int(json, "pad_type", -1);
+    if (json_get_str(json, "layer", layer, sizeof(layer)) &&
+        strcmp(layer, "host") == 0) {
+        s_host_buttons = json_get_str(json, "buttons", val_str, sizeof(val_str))
+            ? (uint16_t)hex_to_u32(val_str) : (uint16_t)0xFFFF;
+        s_host_axes[0] = clamp_u8_arg(json_get_int(json, "lx", -1), 0x80);
+        s_host_axes[1] = clamp_u8_arg(json_get_int(json, "ly", -1), 0x80);
+        s_host_axes[2] = clamp_u8_arg(json_get_int(json, "rx", -1), 0x80);
+        s_host_axes[3] = clamp_u8_arg(json_get_int(json, "ry", -1), 0x80);
+        s_host_lt = clamp_u8_arg(json_get_int(json, "lt", -1), 0);
+        s_host_rt = clamp_u8_arg(json_get_int(json, "rt", -1), 0);
+        s_host_layer = 1;
+        send_ok(id);
+        return;
+    }
     if (!json_get_str(json, "buttons", val_str, sizeof(val_str))) {
         send_err(id, "missing buttons"); return;
     }
@@ -7898,7 +7928,9 @@ static void handle_pad_status(int id, const char *json)
              "\"slot1\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s,\"type\":%d,\"sticks\":[%u,%u,%u,%u],"
              "\"negcon\":[%u,%u,%u],\"mode_locked\":%s},"
              "\"override\":%d,\"override_frames\":%d,\"override_pad_type\":%d,"
-             "\"override_axes\":[%u,%u,%u,%u],\"override_axes_valid\":%s}\n",
+             "\"override_axes\":[%u,%u,%u,%u],\"override_axes_valid\":%s,"
+             "\"host_layer\":%s,\"host_buttons\":\"0x%04X\",\"host_axes\":[%u,%u,%u,%u],"
+             "\"host_lt\":%u,\"host_rt\":%u}\n",
              id, pad0,
              pad0, sio_get_pad_connected(0) ? "true" : "false", sio_get_pad_analog(0) ? "true" : "false",
              sio_get_pad_analog(0),
@@ -7910,7 +7942,10 @@ static void handle_pad_status(int id, const char *json)
              neg1[0], neg1[1], neg1[2], sio_get_pad_mode_locked(1) ? "true" : "false",
              s_input_override, s_input_frames, s_pad_type_override,
              s_axis_st[0], s_axis_st[1], s_axis_st[2], s_axis_st[3],
-             s_axis_override ? "true" : "false");
+             s_axis_override ? "true" : "false",
+             s_host_layer ? "true" : "false", s_host_buttons,
+             s_host_axes[0], s_host_axes[1], s_host_axes[2], s_host_axes[3],
+             s_host_lt, s_host_rt);
 }
 
 static void handle_clear_input(int id, const char *json)
@@ -7924,6 +7959,10 @@ static void handle_clear_input(int id, const char *json)
     s_axis_override  = 0;
     s_pad_type_override = -1;
     s_axis_st[0] = s_axis_st[1] = s_axis_st[2] = s_axis_st[3] = 0x80;
+    s_host_layer = 0;
+    s_host_buttons = 0xFFFF;
+    s_host_axes[0] = s_host_axes[1] = s_host_axes[2] = s_host_axes[3] = 0x80;
+    s_host_lt = s_host_rt = 0;
     send_ok(id);
 }
 
@@ -16108,6 +16147,17 @@ int debug_server_get_axis_override(unsigned char st[4])
     if (!s_axis_override) return 0;
     st[0] = s_axis_st[0]; st[1] = s_axis_st[1];
     st[2] = s_axis_st[2]; st[3] = s_axis_st[3];
+    return 1;
+}
+
+int debug_server_get_host_pad(uint16_t *buttons, uint8_t st[4], uint8_t *lt,
+                              uint8_t *rt)
+{
+    if (!s_host_layer) return 0;
+    if (buttons) *buttons = s_host_buttons;
+    if (st) memcpy(st, s_host_axes, 4);
+    if (lt) *lt = s_host_lt;
+    if (rt) *rt = s_host_rt;
     return 1;
 }
 

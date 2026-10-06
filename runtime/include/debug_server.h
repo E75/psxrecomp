@@ -209,6 +209,13 @@ int debug_server_get_axis_override(unsigned char st[4]);
  * 2=JogCon. */
 int debug_server_get_pad_type_override(void);
 
+/* Host-pad layer (set_input {"layer":"host", buttons, lx..ry, lt, rt}): a
+ * virtual P1 gamepad feeding the normal offline input path and host shortcut
+ * polling. Returns 1 while armed (until clear_input) and fills the PSX
+ * active-low word, sticks and trigger values (0..255). */
+int debug_server_get_host_pad(uint16_t *buttons, uint8_t st[4], uint8_t *lt,
+                              uint8_t *rt);
+
 /* TCP-controlled turbo mode. When enabled the frontend skips presentation and
  * wall-clock pacing at vblank, matching the keyboard TAB turbo path. */
 int debug_server_turbo_enabled(void);
