@@ -192,6 +192,7 @@ STUBS_C = r"""
 #include "gpu.h"
 #include "gpu_render.h"
 #include "cpu_state.h"
+#include "pgxp.h"
 #include "color_lut.h"
 #include "ws_aspect_cone_math.h"
 #include "ws_ui_group.h"
@@ -263,6 +264,7 @@ int gte_precision_load_word(uint32_t addr, uint32_t packed,
 void pgxp_invalidate_all(void) {}
 void pgxp_invalidate_word(uint32_t addr) { (void)addr; }
 void pgxp_note_triangle(int precise) { (void)precise; }
+void pgxp_note_triangle_detail(const PGXPTriRecord *rec) { (void)rec; }
 void pgxp_note_rect_bypass(int all_precise) { (void)all_precise; }
 int pgxp_probe_precise_vertex(uint32_t addr, uint32_t packet_word,
                               int32_t int_x, int32_t int_y)

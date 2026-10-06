@@ -66,6 +66,33 @@ int main() {
     CHECK(!emission_ends_on_preprocessor_directive("x = 1; /* #endif in a comment */"),
           "a '#' that is not the line's first token is not a directive");
 
+    /* COP2 register transfers all carry their PGXP_COP2 hook - the control
+     * forms too, so the engine can follow vertex halves packed into a matrix
+     * row (CTC2) through MVMVA and back (CFC2). A transfer to $zero writes no
+     * register and stays unhooked. */
+    {
+        const auto hooked = [](uint32_t instr) {
+            std::string code = "stmt;";
+            PSXRecomp::append_pgxp_hooks(instr, code);
+            return code;
+        };
+        const uint32_t mfc2 = 0x4805C800u;   /* mfc2 a1, $25   */
+        const uint32_t cfc2 = 0x4845C800u;   /* cfc2 a1, $25   */
+        const uint32_t mtc2 = 0x48994800u;   /* mtc2 t9, $9    */
+        const uint32_t ctc2 = 0x48C34000u;   /* ctc2 v1, $8    */
+        const uint32_t cfc2_zero = 0x4840C800u;   /* cfc2 zero, $25 */
+        CHECK(hooked(mfc2).find("PGXP_COP2(0x4805C800u, cpu->gpr[5], 0u);") != std::string::npos,
+              "MFC2 carries PGXP_COP2 with its destination value");
+        CHECK(hooked(cfc2).find("PGXP_COP2(0x4845C800u, cpu->gpr[5], 0u);") != std::string::npos,
+              "CFC2 carries PGXP_COP2 with its destination value");
+        CHECK(hooked(mtc2).find("PGXP_COP2(0x48994800u, cpu->gpr[25], 0u);") != std::string::npos,
+              "MTC2 carries PGXP_COP2 with its source value");
+        CHECK(hooked(ctc2).find("PGXP_COP2(0x48C34000u, cpu->gpr[3], 0u);") != std::string::npos,
+              "CTC2 carries PGXP_COP2 with its source value");
+        CHECK(hooked(cfc2_zero) == "stmt;",
+              "a CFC2 to $zero writes no register and is not hooked");
+    }
+
     std::printf(failures ? "FAILED (%d)\n" : "ALL PASS\n", failures);
     return failures ? 1 : 0;
 }

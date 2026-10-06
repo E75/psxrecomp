@@ -1176,6 +1176,40 @@ default-on mod corrected textures, unticking it did nothing, and ticking it
 kept texture correction on after the player switched the mod off. Netplay
 then runs with PGXP fully off.
 
+### G1.13 — CPU-built vertices: the GTE as a multiplier, and word copies (2026-10-06)
+
+**Symptom.** Ape Escape with the PGXP mod: thin light/dark lines along the
+ground's grid edges at high internal resolution (bead beads-eio.3.274; present
+on the shipped f7f0ad10 pin, not a regression). Isolation on one savestate:
+PGXP off, or `geometry` off with texture correction on, removes them; texture
+correction off, nearest filtering, frame smoothing off do not. The
+`pgxp_tri_ring` showed whole ground cells drawn native next to precise
+neighbours and decals (0.9 px apart on the same projected vertex).
+
+**Two producers dropped precision.** The `pgxp_store_ring` pinned both:
+1. *Subdivided near cells* (0x8001DB74). Edge midpoints are the projection of
+   the 3D midpoint, computed on the CPU: CTC2 packs two tracked X (or Y)
+   halves into a light-matrix row, MVMVA weights them by the vertex depths,
+   MFC2 reads MAC, ADDU adds a rounding bias, DIV by the depth sum, MFLO, SH.
+   CTC2 / CFC2 had no hook and MULT/DIV recorded imprecise results.
+2. *The terrain grid* (0x80044B00) copies projected corners with the
+   unaligned-copy idiom `lwl/lwr` + `swl/swr` on aligned addresses, which the
+   engine treated as untrackable.
+
+**Fix (cpu-mode).** A scalar tier: registers carry an optional full-range
+precise value beside their half shadows. CTC2 / CFC2 are hooked (codegen 18;
+the BIOS emitter fingerprint now covers `pgxp_hook_emitter`), MVMVA recomputes
+its rows from the precise matrix halves / IR / translation and leaves scalars
+on MAC1-3 / IR1-3, and MFC2, ADD/SUB(I)(U), shifts, MULT/DIV, MF/MT HI/LO and
+OR-moves carry them; SH / SW turn a scalar that fits back into a coordinate
+half. The guest rounded that arithmetic its own way, so such halves are
+marked derived (`PGXP_F_DX/DY`): the GPU believes them within (-1, +2) px of
+the guest integer and the tolerance clamp ignores the guest's own rounding
+pixel. LWL at byte 3 / LWR at byte 0 (and SWL / SWR likewise) move the whole
+word and copy its shadow. Result in the Fossil Field scene: every ground
+triangle dataflow-precise, `tri_mixed` from ~10% of triangles to 474 of 2.05M,
+seams gone (`test_pgxp` pins the sequence).
+
 ## IR1 — Internal resolution presets (Native … 8K) and the GL scale ceiling (2026-09-26)
 
 **What the player gets.** Settings → Display → **Internal resolution**: Native,

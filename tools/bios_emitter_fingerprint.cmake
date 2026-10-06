@@ -35,6 +35,8 @@ set(_files
     recompiler/src/full_function_emitter.cpp
     recompiler/src/full_function_emitter.h
     recompiler/src/strict_translator.cpp
+    recompiler/src/pgxp_hook_emitter.cpp
+    recompiler/src/pgxp_hook_emitter.h
     recompiler/src/main_bios.cpp
     recompiler/src/function_discovery.cpp
     recompiler/src/bios_address_model.cpp

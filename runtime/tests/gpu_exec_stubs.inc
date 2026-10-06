@@ -162,6 +162,7 @@ int pgxp_probe_precise_vertex(uint32_t addr, uint32_t packet_word,
     return test_word_precise(addr) ? PGXP_SRC_DATAFLOW : PGXP_SRC_NATIVE;
 }
 void pgxp_note_triangle(int precise) { (void)precise; }
+void pgxp_note_triangle_detail(const PGXPTriRecord *rec) { (void)rec; }
 void pgxp_note_rect_bypass(int all_precise) {
     if (all_precise) g_test_rect_bypass++;
     else             g_test_rect_partial++;
