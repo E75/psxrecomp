@@ -323,6 +323,7 @@ typedef struct GlDynresStats {
      * the reseed, the rects back, the native-wide surfaces. */
     double   last_ms, last_prep_ms, last_seed_ms, last_rects_ms, last_wide_ms;
     int      last_rects;                /* rects kept at full detail */
+    uint64_t wide_reallocs;             /* native-wide surfaces reallocated at a step */
 } GlDynresStats;
 void gl_renderer_dynres_stats(GlDynresStats *out);
 /* Host time the renderer spent, as running totals in performance-counter
