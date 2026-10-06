@@ -62,8 +62,9 @@
  *     gl_renderer_pass_begin opens nothing there: a pass backs up and restores
  *     only the authoritative surface, never the window's tiles.
  *   - mode "steps" (dynamic resolution, argv: scale = the ceiling, then a
- *     comma list of levels, then "fresh" or "chain"): the surfaces stay
- *     allocated at the ceiling and the scale steps at run time.
+ *     comma list of levels, then "fresh" or "chain"): the hr surface stays
+ *     allocated at the ceiling, the native-wide surface at the current level
+ *     (reallocated at each step), and the scale steps at run time.
  *     "fresh" steps before anything is drawn, then renders the scene: the
  *     runner requires the native digest, the frame at S and the wide surface
  *     to equal the fixed-scale run at the final level (rendering into the
@@ -978,15 +979,17 @@ static uint64_t steps_wide_digest(uint32_t **keep) {
     return d;
 }
 
-/* The native-wide surface is allocated at the ceiling, whatever the level
- * when it was created: a later step up must not outgrow it. */
-static void steps_check_wide_alloc(int ceiling) {
+/* The native-wide surface is allocated at the level it renders at (not the
+ * ceiling, whose size every render pass would load and store on
+ * GL-on-Metal), and a step reallocates it at the new level. */
+static void steps_check_wide_alloc(int level) {
     GLint tw = 0, th = 0;
     glBindTexture(GL_TEXTURE_2D, s_wide_tex[0]);
     glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &tw);
     glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &th);
     glBindTexture(GL_TEXTURE_2D, 0);
-    check(tw == 426 * ceiling && th == 512 * ceiling, "wide surface allocated at the ceiling");
+    check(tw == 426 * level && th == 512 * level && s_wide_as[0] == level,
+          "wide surface allocated at the level");
 }
 
 static int steps_main(int ceiling, int window, const char *chain, int fresh) {
@@ -1018,7 +1021,7 @@ static int steps_main(int ceiling, int window, const char *chain, int fresh) {
         uint64_t digest = steps_native_digest(1);
         uint64_t hires = steps_hires_digest(0, 0, FRAME_W, FRAME_H);
         steps_wide_part();
-        steps_check_wide_alloc(ceiling);   /* created below the ceiling */
+        steps_check_wide_alloc(s_out_scale);   /* created below the ceiling */
         uint64_t wide = steps_wide_digest(NULL);
         check(glGetError() == GL_NO_ERROR, "GL error");
         printf("level=%d\n", s_out_scale);
@@ -1030,7 +1033,7 @@ static int steps_main(int ceiling, int window, const char *chain, int fresh) {
     }
     scene();
     steps_wide_part();
-    steps_check_wide_alloc(ceiling);
+    steps_check_wide_alloc(ceiling);   /* the level is the ceiling here */
     /* A back buffer with its own content, the draw area while stepping. */
     glb_set_draw_area(0, STEPS_BACK_Y, FRAME_W - 1, STEPS_BACK_Y + FRAME_H - 1);
     glb_wide_disable_target();
@@ -1062,6 +1065,7 @@ static int steps_main(int ceiling, int window, const char *chain, int fresh) {
         char label[128];
         snprintf(label, sizeof label, "step %dx -> %dx applied", sold, snew);
         check(ok && s_out_scale == snew && s_hr_scale == snew, label);
+        steps_check_wide_alloc(snew);
         GlDynresStats st;
         gl_renderer_dynres_stats(&st);
         uint64_t d1 = steps_native_digest(0);

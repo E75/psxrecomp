@@ -449,11 +449,11 @@ static int           s_hr_scale = 1;
 /* Dynamic internal resolution ([video] dynamic_resolution; the step block
  * near the end of this file). 0 = off, and then every surface is allocated at
  * the scale it renders at, exactly as before. Otherwise the scale the hr
- * surface and the native-wide surfaces were allocated at (the ceiling): the
- * current level (s_hr_scale == s_out_scale, never above it) renders into
- * their lower-left VRAM*S corner. Only allocation and the present's
- * normalised UVs read it; everything else keeps taking the two scales above
- * at use. */
+ * surface was allocated at (the ceiling): the current level (s_hr_scale ==
+ * s_out_scale, never above it) renders into its lower-left VRAM*S corner.
+ * Only allocation and the present's normalised UVs read it; everything else
+ * keeps taking the two scales above at use. Native-wide surfaces are
+ * allocated at the level instead (s_wide_as) and reallocated at each step. */
 static int           s_alloc_scale = 0;
 /* The scale a surface rendering at `cur` is (to be) allocated at. */
 static inline int    alloc_scale_for(int cur) {
@@ -827,6 +827,12 @@ static int    s_wide_base[WIDE_MAX_SURF];    /* base_x per surface (-1 = free) *
 /* Native rows [y0, y1) each surface has presented (dynamic resolution: the
  * rows a scale step rescales; y1 <= y0 = none yet, then all of them). */
 static int    s_dyn_wide_y0[WIDE_MAX_SURF], s_dyn_wide_y1[WIDE_MAX_SURF];
+/* The scale each surface is allocated at. Dynamic resolution allocates a wide
+ * surface at the level it renders at (not the ceiling) and reallocates it at
+ * every step: on Apple's GL-on-Metal every render pass into an attachment
+ * loads and stores the whole attachment, so a surface allocated at the
+ * ceiling costs the ceiling's bandwidth at every level. */
+static int    s_wide_as[WIDE_MAX_SURF];
 static int    g_wide_w        = 0;           /* wide width (native px); 0 = disabled */
 static int    g_wide_off      = 0;           /* centering OFFSET (native px) */
 static GLuint g_wide_cur      = 0;           /* active mirror FBO (0 = no mirror) */
@@ -5782,9 +5788,41 @@ static void wide_free_all(void) {
         if (s_wide_tex[i]) { glDeleteTextures(1, &s_wide_tex[i]); s_wide_tex[i] = 0; }
         if (s_wide_rb[i])  { p_glDeleteRenderbuffers(1, &s_wide_rb[i]); s_wide_rb[i] = 0; }
         s_wide_base[i] = -1;
+        s_wide_as[i] = 0;
         wst_clear(i);
     }
     g_wide_cur = 0;
+}
+
+/* Create a native-wide surface (colour texture, depth-stencil RB, FBO) at
+ * scale S, cleared to black with a zero stencil. 0 on failure (nothing left
+ * allocated). */
+static int wide_alloc_surface(int S, GLuint *tex, GLuint *rb, GLuint *fbo) {
+    int w = g_wide_w * S, h = VRAM_H * S;
+    s_cw_fbo_creates++;
+    *tex = make_tex(GL_RGBA8, w, h, GL_RGBA, GL_UNSIGNED_BYTE);
+    /* Depth-stencil RB, same as the hr FBO: the stencil carries the PSX
+     * mask-bit mirror for the wide surface, and (the hard lesson) a
+     * stencil-less FBO turns every stencil-enabled mirror draw into ~0.6ms of
+     * driver-side work — the 16:9 GL perf collapse. */
+    p_glGenRenderbuffers(1, rb);
+    p_glBindRenderbuffer(PSXGL_RENDERBUFFER, *rb);
+    p_glRenderbufferStorage(PSXGL_RENDERBUFFER, PSXGL_DEPTH24_STENCIL8, w, h);
+    if (!make_fbo(fbo, *tex, *rb)) {
+        glDeleteTextures(1, tex); *tex = 0;
+        p_glDeleteRenderbuffers(1, rb); *rb = 0;
+        *fbo = 0;
+        return 0;
+    }
+    /* Clear to black so unwritten margins are clean (not stale). */
+    p_glBindFramebuffer(PSXGL_FRAMEBUFFER, *fbo);
+    glDisable(GL_SCISSOR_TEST);
+    glClearColor(0, 0, 0, 0);
+    glClearStencil(0);
+    glStencilMask(0xFF);
+    glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    p_glBindFramebuffer(PSXGL_FRAMEBUFFER, 0);
+    return 1;
 }
 
 /* Lazily allocate (or find) the wide FBO+tex for base_x. Returns the FBO id, or
@@ -5801,8 +5839,8 @@ static GLuint wide_fbo_for(int base_x) {
      * Refuse that with one log line instead of failing mid-draw: the frame
      * then presents 4:3 through the CPU path at 1x, without the native-wide
      * margins. */
-    /* Dynamic resolution: allocated at the ceiling (alloc_scale_for), like
-     * the hr surface, so a step never reallocates it. */
+    /* Dynamic resolution: the limit is checked at the ceiling
+     * (alloc_scale_for), which every level may step up to. */
     const int AS = alloc_scale_for(s_out_scale);
     if (s_gl_max_dim > 0 &&
         ((int64_t)g_wide_w * AS > s_gl_max_dim ||
@@ -5817,29 +5855,13 @@ static GLuint wide_fbo_for(int base_x) {
     }
     for (int i = 0; i < WIDE_MAX_SURF; i++) {
         if (!s_wide_fbo[i]) {
-            int w = g_wide_w * AS, h = VRAM_H * AS;
-            s_cw_fbo_creates++;
-            s_wide_tex[i] = make_tex(GL_RGBA8, w, h, GL_RGBA, GL_UNSIGNED_BYTE);
-            /* Depth-stencil RB, same as the hr FBO: the stencil carries the
-             * PSX mask-bit mirror for the wide surface, and (the hard lesson)
-             * a stencil-less FBO turns every stencil-enabled mirror draw into
-             * ~0.6ms of driver-side work — the 16:9 GL perf collapse. */
-            p_glGenRenderbuffers(1, &s_wide_rb[i]);
-            p_glBindRenderbuffer(PSXGL_RENDERBUFFER, s_wide_rb[i]);
-            p_glRenderbufferStorage(PSXGL_RENDERBUFFER, PSXGL_DEPTH24_STENCIL8, w, h);
-            if (!make_fbo(&s_wide_fbo[i], s_wide_tex[i], s_wide_rb[i])) {
-                glDeleteTextures(1, &s_wide_tex[i]); s_wide_tex[i] = 0;
-                p_glDeleteRenderbuffers(1, &s_wide_rb[i]); s_wide_rb[i] = 0;
+            /* Allocated at the level it renders at; a dynamic-resolution step
+             * reallocates it (dyn_apply). The limit above is checked at the
+             * ceiling, so no step can exceed it. */
+            if (!wide_alloc_surface(s_out_scale, &s_wide_tex[i], &s_wide_rb[i],
+                                    &s_wide_fbo[i]))
                 return 0;
-            }
-            /* Clear to black so unwritten margins are clean (not stale). */
-            p_glBindFramebuffer(PSXGL_FRAMEBUFFER, s_wide_fbo[i]);
-            glDisable(GL_SCISSOR_TEST);
-            glClearColor(0, 0, 0, 0);
-            glClearStencil(0);
-            glStencilMask(0xFF);
-            glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-            p_glBindFramebuffer(PSXGL_FRAMEBUFFER, 0);
+            s_wide_as[i] = s_out_scale;
             s_wide_base[i] = base_x;
             s_dyn_wide_y0[i] = s_dyn_wide_y1[i] = 0;   /* nothing presented yet */
             wst_clear(i);   /* colour and stencil cleared together */
@@ -8599,9 +8621,10 @@ static int present_wide_fbo_impl(int disp_x, int disp_y, int disp_h, int linear)
     }
     if (!s_ctx || !s_raster_ok || g_wide_w <= 0) return 0;
     GLuint fbo = 0, tex = 0;
+    int wide_as = 0;
     for (int i = 0; i < WIDE_MAX_SURF; i++)
         if (s_wide_fbo[i] && s_wide_base[i] == disp_x) {
-            fbo = s_wide_fbo[i]; tex = s_wide_tex[i];
+            fbo = s_wide_fbo[i]; tex = s_wide_tex[i]; wide_as = s_wide_as[i];
             if (s_alloc_scale) {   /* the rows a scale step rescales */
                 int y0 = disp_y < 0 ? 0 : disp_y;
                 int y1 = disp_y + disp_h > VRAM_H ? VRAM_H : disp_y + disp_h;
@@ -8661,8 +8684,10 @@ static int present_wide_fbo_impl(int disp_x, int disp_y, int disp_h, int linear)
         s_last_dw = g_wide_w; s_last_dh = disp_h;
         return 1;
     }
-    present_target_quad(tex, present_alloc_extent(g_wide_w, s_out_scale),
-                        present_alloc_extent(VRAM_H, s_out_scale),
+    /* The surface is allocated at its own scale (s_wide_as), the level. */
+    const float wext = (wide_as > s_out_scale && s_out_scale >= 1)
+                           ? (float)wide_as / (float)s_out_scale : 1.0f;
+    present_target_quad(tex, (float)g_wide_w * wext, (float)VRAM_H * wext,
                         0, disp_y, g_wide_w, disp_h, linear, lx, ly, lw, lh, 1, 1, s_out_scale);
     pres_record(GL_PRES_WIDE, disp_x, disp_y, g_wide_w, disp_h, lx, ly, lw, lh);
     gpu_timeline_note(GTL_PRESENT, GTL_PATH_WIDE_FBO,
@@ -9044,8 +9069,35 @@ static int dyn_apply(int snew) {
             if (!s_wide_fbo[i]) continue;
             int y0 = s_dyn_wide_y0[i], y1 = s_dyn_wide_y1[i];
             if (y1 <= y0) { y0 = 0; y1 = VRAM_H; }
-            dyn_rescale_in_place(s_wide_fbo[i], g_wide_w, (const int (*)[2])cols, nc,
-                                 y0, y1, sold, snew);
+            /* Reallocated at the new level (s_wide_as): the same rows and
+             * columns rescaled from the old surface into a cleared new one.
+             * If the allocation fails, a step down rescales in place as
+             * before and the surface keeps its larger allocation; a step up
+             * past it drops the surface (recreated at the next target). */
+            GLuint ntex = 0, nrb = 0, nfbo = 0;
+            if (wide_alloc_surface(snew, &ntex, &nrb, &nfbo)) {
+                for (int c = 0; c < nc; c++)
+                    if (cols[c][1] > cols[c][0])
+                        dyn_rescale_rect(s_wide_tex[i], cols[c][0] * sold, y0 * sold, sold,
+                                         nfbo, cols[c][0], y0, cols[c][1] - cols[c][0],
+                                         y1 - y0, snew);
+                if (g_wide_cur == s_wide_fbo[i]) g_wide_cur = nfbo;
+                p_glDeleteFramebuffers(1, &s_wide_fbo[i]);
+                glDeleteTextures(1, &s_wide_tex[i]);
+                p_glDeleteRenderbuffers(1, &s_wide_rb[i]);
+                s_wide_fbo[i] = nfbo; s_wide_tex[i] = ntex; s_wide_rb[i] = nrb;
+                s_wide_as[i] = snew;
+                s_dyn_stats.wide_reallocs++;
+            } else if (snew <= s_wide_as[i]) {
+                dyn_rescale_in_place(s_wide_fbo[i], g_wide_w, (const int (*)[2])cols, nc,
+                                     y0, y1, sold, snew);
+            } else {
+                if (g_wide_cur == s_wide_fbo[i]) g_wide_cur = 0;
+                p_glDeleteFramebuffers(1, &s_wide_fbo[i]); s_wide_fbo[i] = 0;
+                glDeleteTextures(1, &s_wide_tex[i]); s_wide_tex[i] = 0;
+                p_glDeleteRenderbuffers(1, &s_wide_rb[i]); s_wide_rb[i] = 0;
+                s_wide_base[i] = -1; s_wide_as[i] = 0;
+            }
             wst_all(i);   /* colour only */
         }
     }
