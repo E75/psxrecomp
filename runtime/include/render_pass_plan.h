@@ -167,6 +167,27 @@ int    render_pass_admission_pct(int internal_scale, int override_pct);
  * cost. */
 double render_pass_probe_min(double busy, double reserve, double vblank,
                              int internal_scale);
+/* The same two policies keyed on whether the GPU is the limit (`gpu_heavy`)
+ * instead of on the scale: the functions above are these with gpu_heavy =
+ * internal_scale > 3. Dynamic resolution moves the scale at run time, and a
+ * threshold on a moving scale would be a second resolution controller, so
+ * there the renderer passes what it measured (RenderPassGpuPressure). */
+int    render_pass_admission_pct_for(int gpu_heavy, int override_pct);
+double render_pass_probe_min_for(double busy, double reserve, double vblank,
+                                 int gpu_heavy);
+
+/* Measured GPU pressure for the two policies above: a plan the GPU fence
+ * refused (the GPU still on the game's frame) or that found the guest
+ * slipping behind its schedule (the pace guard's cut) is an event; the GPU
+ * counts as the limit until RENDER_PASS_GPU_CALM_PLANS plans in a row have
+ * seen none. It starts as the limit: the larger share is earned. */
+#define RENDER_PASS_GPU_CALM_PLANS 60u
+typedef struct RenderPassGpuPressure {
+    unsigned calm;                  /* plans since the last event */
+    int      started;
+} RenderPassGpuPressure;
+void render_pass_gpu_pressure_note(RenderPassGpuPressure *p, int event);
+int  render_pass_gpu_pressure_heavy(const RenderPassGpuPressure *p);
 
 /* Host cost of one pass at one presented image size under leftover-time
  * planning (the renderer starts a new one when the size changes). Passes are
@@ -220,6 +241,33 @@ double render_pass_leftover_cost_estimate(const RenderPassLeftoverCost *cost);
  * leftover time and planned none for cost. Returns 1 when one pass should be
  * tried anyway (planned with an unknown cost, stopped at the deadline). */
 int    render_pass_leftover_cost_probe_due(RenderPassLeftoverCost *cost);
+
+/* Pass costs per presented image size. A dynamic-resolution step or a change
+ * of the native-wide aspect (Fit to Window) changes the size; switching back
+ * to a size seen before restores what was learnt there instead of measuring
+ * again from nothing (an unknown cost only tries one pass a plan, and an
+ * estimate that prices plans out waits for a probe). Up to
+ * RENDER_PASS_COST_CACHE sizes, the least recently used one replaced. */
+#define RENDER_PASS_COST_CACHE 8u
+typedef struct RenderPassCostEntry {
+    int                    w, h;
+    unsigned long long     used;
+    RenderPassCost         cost;
+    RenderPassLeftoverCost lcost;
+} RenderPassCostEntry;
+typedef struct RenderPassCostCache {
+    RenderPassCostEntry e[RENDER_PASS_COST_CACHE];
+    unsigned            n;
+    unsigned long long  clock;
+} RenderPassCostCache;
+/* Make w x h the current size: the current costs (*cur_w x *cur_h, when that
+ * is a size and anything was learnt) are stored, then the entry for w x h is
+ * loaded into *cost and *lcost, or both are cleared. A probe in flight is not
+ * carried across (its pass belongs to the old size). Returns 1 when an entry
+ * for w x h was found. *cur_w and *cur_h become w and h. */
+int render_pass_cost_cache_switch(RenderPassCostCache *cache, int *cur_w, int *cur_h,
+                                  RenderPassCost *cost, RenderPassLeftoverCost *lcost,
+                                  int w, int h);
 
 /* Store policy inside a pass (memory.c): -1 = the MMIO store may reach its
  * device (GP0; GP1 DMA mode 0x04 / info 0x10; GPU and OTC DMA channels;

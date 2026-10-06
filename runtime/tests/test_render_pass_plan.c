@@ -503,9 +503,89 @@ static void test_leftover_cost(void) {
     }
 }
 
+/* The admission share and probe minimum keyed on measured GPU pressure match
+ * the scale-keyed ones (above 3x = the GPU is the limit), and the pressure
+ * starts heavy, relaxes after RENDER_PASS_GPU_CALM_PLANS calm plans and is
+ * heavy again at the next event. */
+static void test_measured_admission(void) {
+    RenderPassGpuPressure p;
+    unsigned i;
+    for (int sc = 1; sc <= 16; sc++) {
+        CHECK(render_pass_admission_pct(sc, 0) ==
+              render_pass_admission_pct_for(sc > 3, 0),
+              "admission by scale is admission by pressure (scale > 3)");
+        CHECK(render_pass_probe_min(4.0, 3.0, 16.0, sc) ==
+              render_pass_probe_min_for(4.0, 3.0, 16.0, sc > 3),
+              "probe minimum by scale is by pressure (scale > 3)");
+    }
+    CHECK(render_pass_admission_pct_for(1, 0) == 50 &&
+          render_pass_admission_pct_for(0, 0) == 65 &&
+          render_pass_admission_pct_for(1, 80) == 80,
+          "admission: 50 when the GPU is the limit, 65 otherwise, override wins");
+    memset(&p, 0, sizeof p);
+    CHECK(render_pass_gpu_pressure_heavy(&p), "pressure: heavy before any plan");
+    for (i = 0; i + 1 < RENDER_PASS_GPU_CALM_PLANS; i++)
+        render_pass_gpu_pressure_note(&p, 0);
+    CHECK(render_pass_gpu_pressure_heavy(&p), "pressure: still heavy one plan short");
+    render_pass_gpu_pressure_note(&p, 0);
+    CHECK(!render_pass_gpu_pressure_heavy(&p), "pressure: calm after the calm plans");
+    for (i = 0; i < 1000; i++) render_pass_gpu_pressure_note(&p, 0);
+    CHECK(!render_pass_gpu_pressure_heavy(&p), "pressure: stays calm");
+    render_pass_gpu_pressure_note(&p, 1);
+    CHECK(render_pass_gpu_pressure_heavy(&p), "pressure: an event makes it heavy");
+    CHECK(render_pass_gpu_pressure_heavy(NULL), "pressure: none known is heavy");
+}
+
+/* Costs are kept per image size: switching back restores them; a size
+ * never learnt starts empty; a probe in flight is not carried; nothing is
+ * stored for a size that learnt nothing; the least recently used size is
+ * replaced when the cache is full. */
+static void test_cost_cache(void) {
+    RenderPassCostCache cache;
+    RenderPassCost cost;
+    RenderPassLeftoverCost lcost;
+    int w = 0, h = 0, i;
+    memset(&cache, 0, sizeof cache);
+    memset(&cost, 0, sizeof cost);
+    memset(&lcost, 0, sizeof lcost);
+    CHECK(render_pass_cost_cache_switch(&cache, &w, &h, &cost, &lcost, 960, 720) == 0 &&
+          w == 960 && h == 720, "cache: first size, nothing known");
+    CHECK(cache.n == 0, "cache: nothing stored for no size");
+    render_pass_leftover_cost_add(&lcost, 4.0, 0);
+    render_pass_cost_add(&cost, 3.0, 0);
+    lcost.probing = 1;
+    CHECK(render_pass_cost_cache_switch(&cache, &w, &h, &cost, &lcost, 1280, 720) == 0,
+          "cache: a new size is unknown");
+    CHECK(lcost.kept == 0 && cost.kept == 0 && lcost.ema == 0.0,
+          "cache: a new size starts empty");
+    CHECK(cache.n == 1, "cache: the learnt size was stored");
+    /* 1280x720 learns nothing; back to 960x720. */
+    CHECK(render_pass_cost_cache_switch(&cache, &w, &h, &cost, &lcost, 960, 720) == 1,
+          "cache: the old size is found");
+    CHECK(cache.n == 1, "cache: an unlearnt size is not stored");
+    CHECK(lcost.kept == 1 && lcost.ema == 4.0 && cost.kept == 1 && !lcost.probing,
+          "cache: costs restored, probe dropped");
+    CHECK(render_pass_cost_cache_switch(&cache, &w, &h, &cost, &lcost, 960, 720) == 1 &&
+          lcost.ema == 4.0, "cache: the same size is a no-op");
+    /* Fill: sizes 100..108 wide, each learnt. 960x720 is the oldest. */
+    for (i = 0; i <= (int)RENDER_PASS_COST_CACHE; i++) {
+        render_pass_cost_cache_switch(&cache, &w, &h, &cost, &lcost, 100 + i, 100);
+        render_pass_leftover_cost_add(&lcost, (double)(10 + i), 0);
+    }
+    CHECK(cache.n == RENDER_PASS_COST_CACHE, "cache: bounded");
+    render_pass_cost_cache_switch(&cache, &w, &h, &cost, &lcost, 50, 50);
+    CHECK(render_pass_cost_cache_switch(&cache, &w, &h, &cost, &lcost, 960, 720) == 0,
+          "cache: the least recently used size was replaced");
+    CHECK(render_pass_cost_cache_switch(&cache, &w, &h, &cost, &lcost, 100 + (int)RENDER_PASS_COST_CACHE, 100) == 1 &&
+          lcost.ema == (double)(10 + RENDER_PASS_COST_CACHE),
+          "cache: a recent size is still there");
+}
+
 int main(void) {
     test_leftover_and_reserve();
     test_resolution_admission();
+    test_measured_admission();
+    test_cost_cache();
     test_leftover_cost();
     test_stereo_pair_fresh();
     test_store_policy();

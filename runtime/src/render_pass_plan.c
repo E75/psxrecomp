@@ -221,17 +221,37 @@ double render_pass_reserve_update(double reserve, double sample) {
     return reserve + (sample - reserve) * RENDER_PASS_RESERVE_DECAY;
 }
 
-int render_pass_admission_pct(int internal_scale, int override_pct) {
+int render_pass_admission_pct_for(int gpu_heavy, int override_pct) {
     if (override_pct >= 5 && override_pct <= 100) return override_pct;
-    return internal_scale <= 3 ? 65 : 50;
+    return gpu_heavy ? 50 : 65;
+}
+
+int render_pass_admission_pct(int internal_scale, int override_pct) {
+    return render_pass_admission_pct_for(internal_scale > 3, override_pct);
+}
+
+double render_pass_probe_min_for(double busy, double reserve, double vblank,
+                                 int gpu_heavy) {
+    double normal = (busy > 0.0 ? busy : 0.0) + (reserve > 0.0 ? reserve : 0.0);
+    double minimum = (gpu_heavy ? 2.0 : 1.0) * normal;
+    if (minimum < 0.25 * vblank) minimum = 0.25 * vblank;
+    return minimum;
 }
 
 double render_pass_probe_min(double busy, double reserve, double vblank,
                              int internal_scale) {
-    double normal = (busy > 0.0 ? busy : 0.0) + (reserve > 0.0 ? reserve : 0.0);
-    double minimum = (internal_scale <= 3 ? 1.0 : 2.0) * normal;
-    if (minimum < 0.25 * vblank) minimum = 0.25 * vblank;
-    return minimum;
+    return render_pass_probe_min_for(busy, reserve, vblank, internal_scale > 3);
+}
+
+void render_pass_gpu_pressure_note(RenderPassGpuPressure *p, int event) {
+    if (!p) return;
+    if (!p->started) { p->started = 1; p->calm = 0; }
+    if (event) p->calm = 0;
+    else if (p->calm < RENDER_PASS_GPU_CALM_PLANS) p->calm++;
+}
+
+int render_pass_gpu_pressure_heavy(const RenderPassGpuPressure *p) {
+    return !p || p->calm < RENDER_PASS_GPU_CALM_PLANS;
 }
 
 static unsigned probe_limit(const RenderPassLeftoverCost *cost) {
@@ -318,6 +338,52 @@ int render_pass_leftover_cost_probe_due(RenderPassLeftoverCost *cost) {
     cost->waited = 0;
     cost->probing = 1;
     return 1;
+}
+
+int render_pass_cost_cache_switch(RenderPassCostCache *cache, int *cur_w, int *cur_h,
+                                  RenderPassCost *cost, RenderPassLeftoverCost *lcost,
+                                  int w, int h) {
+    unsigned i, slot;
+    int found = 0;
+    if (!cache || !cur_w || !cur_h || !cost || !lcost) return 0;
+    if (*cur_w == w && *cur_h == h) return 1;
+    cache->clock++;
+    if (*cur_w > 0 && *cur_h > 0 &&
+        (cost->kept || lcost->kept || lcost->bound > 0.0)) {
+        /* Store the current size: its own entry, a free one, or the least
+         * recently used one. */
+        slot = cache->n;
+        for (i = 0; i < cache->n; i++)
+            if (cache->e[i].w == *cur_w && cache->e[i].h == *cur_h) { slot = i; break; }
+        if (slot == cache->n) {
+            if (cache->n < RENDER_PASS_COST_CACHE) {
+                cache->n++;
+            } else {
+                slot = 0;
+                for (i = 1; i < cache->n; i++)
+                    if (cache->e[i].used < cache->e[slot].used) slot = i;
+            }
+        }
+        cache->e[slot].w = *cur_w;
+        cache->e[slot].h = *cur_h;
+        cache->e[slot].used = cache->clock;
+        cache->e[slot].cost = *cost;
+        cache->e[slot].lcost = *lcost;
+        cache->e[slot].lcost.probing = 0;
+    }
+    memset(cost, 0, sizeof *cost);
+    memset(lcost, 0, sizeof *lcost);
+    for (i = 0; i < cache->n; i++)
+        if (cache->e[i].w == w && cache->e[i].h == h) {
+            *cost = cache->e[i].cost;
+            *lcost = cache->e[i].lcost;
+            cache->e[i].used = cache->clock;
+            found = 1;
+            break;
+        }
+    *cur_w = w;
+    *cur_h = h;
+    return found;
 }
 
 int render_pass_mmio_class(uint32_t phys, uint32_t val, uint32_t width) {
