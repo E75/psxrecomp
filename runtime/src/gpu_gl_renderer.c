@@ -430,6 +430,8 @@ static int           s_hiw_grows = 0;           /* tile allocations (diagnostic)
 static int  hiw_on(void);
 static const HiwTile *hiw_ensure(int x0, int x1);
 static void hiw_flush_queue(void);
+static void wst_rebuild(int i, int defer);
+static int  wide_fast_center_valid(void);
 static GLuint make_tex(GLenum internal, int w, int h, GLenum fmt, GLenum type);
 static int  make_fbo(GLuint *out_fbo, GLuint color_tex, GLuint stencil_rb);
 static GLenum s_last_fbo_status;
@@ -750,6 +752,83 @@ uint64_t gl_renderer_wide_triangle_recovery_count(void) {
  * surface: local_x = vram_x - base_x + OFFSET. Same as SW wide_dx(). */
 static int view_enabled, view_shift, view_pad_left, view_pad_right;
 static inline int wide_dx(void) { return g_wide_off + view_shift - g_wide_cur_base; }
+
+/* Wide-surface mask stencil: the rect (wide-local native px, [x0,x1) x
+ * [y0,y1)) where a surface's stencil may differ from its alpha (bit 15), per
+ * surface. At S > 1 the rebuild (rebuild_mask_stencils) covers only this rect
+ * instead of the whole surface: the stencil equals alpha everywhere else, so
+ * rebuilding it there would change nothing. Every write that can leave the
+ * stencil behind alpha adds to it: a mirror draw without the mask check (its
+ * bbox), the centre splice (wide_blit_center, colour only), a scale step's
+ * in-place rescale and a render pass's restore (colour only), a new surface.
+ * Clears write both and add nothing. While the centre is spliced from the hr
+ * surface at every present (wide_fast_center_valid), the centre columns'
+ * stencil is never observed (their pixels are overwritten before anything
+ * reads them), so a rebuild leaves the centre part stale and it is rebuilt
+ * only if a mask-checked mirror draw meets it with the splice off
+ * (wide_stencil_ready). A whole-surface rebuild was the cost of every
+ * GP0(E6h) mask-check enable at high internal scales (R4 2P VS: ~85% of the
+ * emulation thread at 10x, waiting on Metal command buffers). */
+static int    s_wst_x0[WIDE_MAX_SURF], s_wst_y0[WIDE_MAX_SURF];
+static int    s_wst_x1[WIDE_MAX_SURF], s_wst_y1[WIDE_MAX_SURF];
+static uint64_t s_wst_rebuilds = 0, s_wst_px = 0, s_wst_deferred = 0;
+static int wide_index(GLuint fbo) {
+    for (int i = 0; fbo && i < WIDE_MAX_SURF; i++)
+        if (s_wide_fbo[i] == fbo) return i;
+    return -1;
+}
+static void wst_add(int i, int x0, int y0, int x1, int y1) {
+    if (i < 0 || i >= WIDE_MAX_SURF) return;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > g_wide_w) x1 = g_wide_w;
+    if (y1 > VRAM_H) y1 = VRAM_H;
+    if (x1 <= x0 || y1 <= y0) return;
+    if (s_wst_x1[i] <= s_wst_x0[i] || s_wst_y1[i] <= s_wst_y0[i]) {
+        s_wst_x0[i] = x0; s_wst_y0[i] = y0; s_wst_x1[i] = x1; s_wst_y1[i] = y1;
+        return;
+    }
+    if (x0 < s_wst_x0[i]) s_wst_x0[i] = x0;
+    if (y0 < s_wst_y0[i]) s_wst_y0[i] = y0;
+    if (x1 > s_wst_x1[i]) s_wst_x1[i] = x1;
+    if (y1 > s_wst_y1[i]) s_wst_y1[i] = y1;
+}
+static void wst_all(int i) { wst_add(i, 0, 0, g_wide_w, VRAM_H); }
+static void wst_clear(int i) { s_wst_x0[i] = s_wst_y0[i] = s_wst_x1[i] = s_wst_y1[i] = 0; }
+/* A mirror draw of `n` vertices (x at v[0], y at v[1], `stride` floats
+ * apart, canonical VRAM px) into surface `fbo`, shifted by dx and stretched
+ * by (scale, centre) exactly as GEO_VS/TEX_VS do; check: the mask check it
+ * was drawn under (checked draws keep the stencil equal to alpha). The bbox
+ * is widened by 2 px each way for sub-pixel positions and line quads. */
+static void wst_note_draw(GLuint fbo, const float *v, int n, int stride,
+                          int dx, float scale, float centre, int check) {
+    if (check || n <= 0) return;
+    int i = wide_index(fbo);
+    if (i < 0) return;
+    float lo = v[0], hi = v[0], ylo = v[1], yhi = v[1];
+    for (int k = 1; k < n; k++) {
+        float x = v[(size_t)k * stride], y = v[(size_t)k * stride + 1];
+        if (x < lo) lo = x; if (x > hi) hi = x;
+        if (y < ylo) ylo = y; if (y > yhi) yhi = y;
+    }
+    if (scale != 1.0f) {   /* monotonic in x: transform the ends */
+        float t[2] = { lo, hi };
+        for (int k = 0; k < 2; k++) {
+            float xb = t[k];
+            if (scale < 0.0f) {
+                float s = -scale, h = ((float)g_wide_w / 2.0f) / s;
+                float l = centre - h, r = centre + h;
+                if (xb < l) xb = l + (xb - l) * s; else if (xb > r) xb = r + (xb - r) * s;
+            } else {
+                xb = (xb - centre) * scale + centre;
+            }
+            t[k] = xb;
+        }
+        lo = t[0]; hi = t[1];
+    }
+    wst_add(i, (int)floorf(lo) + dx - 2, (int)floorf(ylo) - 2,
+            (int)ceilf(hi) + dx + 3, (int)ceilf(yhi) + 3);
+}
 
 /* ---- dirty-rect helpers ------------------------------------------------- */
 static void rect_clear(DirtyRect *r) { r->set = 0; }
@@ -1921,6 +2000,7 @@ static void rebuild_mask_stencils(void) {
         for (int i = 0; i < WIDE_MAX_SURF; i++) {
             if (s_wide_fbo[i])
                 rebuild_target_stencil(s_wide_fbo[i], g_wide_w * s_out_scale, hh);
+            wst_clear(i);
         }
     } else {
         /* S > 1: only primitives can leave stencil behind alpha, so rebuild
@@ -1944,15 +2024,57 @@ static void rebuild_mask_stencils(void) {
                         (s_stencil_stale.y1 - s_stencil_stale.y0 + 1) * s_out_scale);
             }
         }
-        for (int i = 0; i < WIDE_MAX_SURF; i++) {
-            if (s_wide_fbo[i])
-                rebuild_target_stencil_tiled(s_wide_fbo[i], g_wide_w * s_out_scale,
-                                             VRAM_H * s_out_scale, 0, 0,
-                                             g_wide_w * s_out_scale, VRAM_H * s_out_scale);
-        }
+        /* Wide surfaces: their stale rects (s_wst_*), the centre columns
+         * left for later while the centre is spliced from hr. */
+        int defer = wide_fast_center_valid() && !view_enabled;
+        for (int i = 0; i < WIDE_MAX_SURF; i++)
+            if (s_wide_fbo[i]) wst_rebuild(i, defer);
     }
     rect_clear(&s_stencil_stale);
     s_stencil_valid = 1;
+}
+
+/* Rebuild surface i's stale stencil rect (S > 1). defer: leave the centre
+ * columns [g_wide_off, g_wide_w - g_wide_off) stale (see s_wst_*). */
+static void wst_rebuild_rect(int i, int x0, int x1, int y0, int y1) {
+    if (x1 <= x0 || y1 <= y0) return;
+    int S = s_out_scale;
+    rebuild_target_stencil_tiled(s_wide_fbo[i], g_wide_w * S, VRAM_H * S,
+                                 x0 * S, y0 * S, (x1 - x0) * S, (y1 - y0) * S);
+    s_wst_rebuilds++;
+    s_wst_px += (uint64_t)(x1 - x0) * (uint64_t)(y1 - y0);
+}
+static void wst_rebuild(int i, int defer) {
+    int x0 = s_wst_x0[i], x1 = s_wst_x1[i], y0 = s_wst_y0[i], y1 = s_wst_y1[i];
+    if (x1 <= x0 || y1 <= y0) return;
+    int cl = g_wide_off, cr = g_wide_w - g_wide_off;
+    if (!defer || cl <= 0 || cr <= cl) {
+        wst_rebuild_rect(i, x0, x1, y0, y1);
+        wst_clear(i);
+        return;
+    }
+    wst_rebuild_rect(i, x0, x1 < cl ? x1 : cl, y0, y1);   /* left margin */
+    wst_rebuild_rect(i, x0 > cr ? x0 : cr, x1, y0, y1);   /* right margin */
+    if (x1 > cl && x0 < cr) {   /* the centre part stays stale */
+        s_wst_x0[i] = x0 > cl ? x0 : cl;
+        s_wst_x1[i] = x1 < cr ? x1 : cr;
+        s_wst_deferred++;
+    } else {
+        wst_clear(i);
+    }
+}
+
+/* Before a mirror draw into the current wide surface: under the mask check
+ * with the centre splice off, the stencil it tests must be current
+ * everywhere, including a centre part a rebuild left stale. Called before
+ * any GL state for the draw is set (it binds its own). */
+static void wide_stencil_ready(void) {
+    if (!g_wide_cur || !s_mask_check || s_out_scale <= 1) return;
+    int i = wide_index(g_wide_cur);
+    if (i < 0 || s_wst_x1[i] <= s_wst_x0[i] || s_wst_y1[i] <= s_wst_y0[i]) return;
+    if (wide_fast_center_valid() && !view_enabled) return;
+    hiw_flush_queue();
+    wst_rebuild(i, 0);
 }
 
 /* ---- windowed high-resolution surface: mirror plumbing ------------------ */
@@ -2962,6 +3084,7 @@ static void hiw_flush_queue(void) {
 
 static void flush_tex_batch(void) {
     if (s_tb_n == 0) return;
+    wide_stencil_ready();   /* before any of this batch's GL state */
     int nverts = s_tb_n, semi = s_tb_semi;
     s_tb_n = 0;                             /* clear first: re-entrancy safe */
     double cw_t0 = cw_ms();
@@ -2990,6 +3113,11 @@ static void flush_tex_batch(void) {
      * frame, so it is never treated as centre-only. */
     int mirror = g_wide_cur && s_ws_ablate != 1 &&
                  !(s_tb_gate == 0 && mirror_batch_center_only(nverts));
+    if (mirror) {   /* the stencil it may leave behind alpha */
+        float sc, ce;
+        wide_bd_scale(s_tb_gate, &sc, &ce);
+        wst_note_draw(g_wide_cur, s_tb, nverts, TEXV, wide_dx(), sc, ce, s_mask_check);
+    }
     /* Windowed high-resolution surface: the same batch at S, queued and
      * replayed in one render pass at the next sync point (see s_hq), with its
      * native-wide mirror. No-op unless that mode is engaged. */
@@ -3066,6 +3194,7 @@ static void flat_batch_draw_hr_lines(int nverts, int nl) {
 
 static void flush_flat_batch(void) {
     if (s_fb_n == 0) return;
+    wide_stencil_ready();   /* before any of this batch's GL state */
     int nverts = s_fb_n, semi = s_fb_semi, mask = s_fb_mask, nl = s_fbl_n;
     GLenum fmode = s_fb_mode;
     s_fb_n = 0;
@@ -3085,6 +3214,11 @@ static void flush_flat_batch(void) {
     else glDrawArrays(fmode, 0, nverts);
     int mirror = g_wide_cur && !s_wide_suppress && s_ws_ablate != 1 &&
                  !(!g_ws_bd_stretch_on && mirror_flat_batch_center_only(nverts));
+    if (mirror) {
+        float sc, ce;
+        wide_bd_scale(s_fb_gate, &sc, &ce);
+        wst_note_draw(g_wide_cur, s_fb, nverts, 6, wide_dx(), sc, ce, s_mask_check);
+    }
     if (hiw_on() && hiw_enqueue_geo(s_fb, nverts, semi, mask, mirror, s_fb_gate)) mirror = 0;
 
     if (mirror) {
@@ -3255,6 +3389,7 @@ static void gpu_geometry(GLenum mode, const int *xs, const int *ys,
         if (is_line && s_hr_scale > 1) {
             draw_mode = GL_TRIANGLES; draw_verts = quad; draw_n = 6;
         }
+        wide_stencil_ready();   /* before any of this draw's GL state */
         hr_begin(1);
         if (semi >= 0) apply_psx_blend(semi); else glDisable(GL_BLEND);
         mask_stencil(s_mask_set);
@@ -3273,6 +3408,11 @@ static void gpu_geometry(GLenum mode, const int *xs, const int *ys,
         }
         int mirror = g_wide_cur && !s_wide_suppress && s_ws_ablate != 1 &&
                      !(!g_ws_bd_stretch_on && mirror_geo_center_only(xs, n));
+        if (mirror) {
+            float sc, ce;
+            wide_bd_scale(bd_prim_gate(xs, n, 0), &sc, &ce);
+            wst_note_draw(g_wide_cur, verts, n, 6, wide_dx(), sc, ce, s_mask_check);
+        }
         if (hiw_on() &&
             hiw_enqueue_geo(draw_mode == GL_TRIANGLES && is_line ? quad : verts,
                             draw_n, semi, s_mask_set, mirror, bd_prim_gate(xs, n, 0)))
@@ -3532,7 +3672,9 @@ static void gpu_flat_rect(int x,int y,int w,int h,uint16_t c,int semi) {
          * for the full-width wide pass so blend/scissor/program state is
          * clean. */
         if (s_ws_ablate != 1) {
+            wide_stencil_ready();
             hiw_flush_queue();   /* windowed: queued wide mirrors land first */
+            if (!s_mask_check) wst_add(wide_index(g_wide_cur), 0, y, g_wide_w, y + h);
             hr_begin(0);
             gl_perf_mirror_begin();
             wide_flat_rect_direct(0, y, g_wide_w, h, c, semi);
@@ -5113,6 +5255,7 @@ static void wide_free_all(void) {
         if (s_wide_tex[i]) { glDeleteTextures(1, &s_wide_tex[i]); s_wide_tex[i] = 0; }
         if (s_wide_rb[i])  { p_glDeleteRenderbuffers(1, &s_wide_rb[i]); s_wide_rb[i] = 0; }
         s_wide_base[i] = -1;
+        wst_clear(i);
     }
     g_wide_cur = 0;
 }
@@ -5172,6 +5315,7 @@ static GLuint wide_fbo_for(int base_x) {
             p_glBindFramebuffer(PSXGL_FRAMEBUFFER, 0);
             s_wide_base[i] = base_x;
             s_dyn_wide_y0[i] = s_dyn_wide_y1[i] = 0;   /* nothing presented yet */
+            wst_clear(i);   /* colour and stencil cleared together */
             return s_wide_fbo[i];
         }
     }
@@ -6570,10 +6714,13 @@ static void transaction_restore(void) {
               GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
     pass_blit(s_pb_raw_fbo, s_raw_fbo, 0, 0, s_pass_x, s_pass_y, s_pass_w,
               s_pass_h, GL_COLOR_BUFFER_BIT);
-    if (s_pb_wide_src && s_pb_wide_src == pass_wide_fbo_for(s_pass_x))
+    if (s_pb_wide_src && s_pb_wide_src == pass_wide_fbo_for(s_pass_x)) {
         pass_blit(s_pb_wide_fbo, s_pb_wide_src, 0, 0, 0, s_pass_y * S,
                   g_wide_w * S, s_pass_h * S,
                   GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        /* The backed-up stencil may predate a rebuild inside the pass. */
+        wst_add(wide_index(s_pb_wide_src), 0, s_pass_y, g_wide_w, s_pass_y + s_pass_h);
+    }
     for (int row = 0; row < s_pass_h; row++)
         memcpy(s_vram + (size_t)(s_pass_y + row) * VRAM_W + s_pass_x,
                s_pb_cpu + (size_t)row * s_pass_w,
@@ -7502,6 +7649,8 @@ static void wide_blit_center(GLuint wide_fbo, int base_x, int disp_y, int disp_h
     if (native_w <= 0) return;
     int S = s_out_scale;
     (void)disp_y; (void)disp_h;
+    /* Colour only: the centre's stencil is left behind (see s_wst_*). */
+    wst_add(wide_index(wide_fbo), g_wide_off, 0, g_wide_off + native_w, VRAM_H);
     /* Copy the canonical framebuffer column into the wide surface CENTRE over the
      * FULL VRAM height, not just the current display band [disp_y, disp_y+disp_h].
      * The wide surface holds BOTH vertical double-buffer bands (Ape flips
@@ -7990,6 +8139,7 @@ static int dyn_apply(int snew) {
             if (y1 <= y0) { y0 = 0; y1 = VRAM_H; }
             dyn_rescale_in_place(s_wide_fbo[i], g_wide_w, (const int (*)[2])cols, nc,
                                  y0, y1, sold, snew);
+            wst_all(i);   /* colour only */
         }
     }
     const uint64_t t5 = dyn_mark();
