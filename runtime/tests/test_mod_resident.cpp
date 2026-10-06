@@ -56,6 +56,9 @@ extern "C" void gpu_ws_set_adaptive_backdrop_preload(int) {}
 extern "C" int gpu_ws_configured_x_reveal(void) { return 0; }
 extern "C" void gpu_ws_tag_hud_prim(uint32_t, int) {}
 extern "C" void gpu_ws_tag_screen_mask_quad(uint32_t) {}
+extern "C" { uint64_t s_frame_count = 0; }
+static uint64_t cycles;
+extern "C" uint64_t psx_get_cycle_count(void) { return cycles; }
 extern "C" void gpu_ws_tag_radial_screen_mask_quad(uint32_t, float) {}
 /* mod_runtime.cpp's lobby netplay commit reads the negotiated match caps.
  * No lobby match is negotiated in this test. */
@@ -99,6 +102,11 @@ static int derive(PSXResidentSink* sink, uint32_t file, const uint8_t* data, uin
         if (!psx_resident_emit(sink, file, 9, nullptr, first->data(), (uint32_t)first->size())) return 0;
     }
     return 1;
+}
+
+static std::string events(uint64_t lo, uint64_t hi, uint32_t max) {
+    std::vector<char> b(1 << 20);
+    return psx_resident_events_json(b.data(), (uint32_t)b.size(), lo, hi, max) ? std::string(b.data()) : "";
 }
 
 static std::string status() {
@@ -260,6 +268,51 @@ int main() {
     check(a && size == 4096 && padded == 4096 && a[3500] == 0xEE && !psx_resident_file_stock(pack, 0),
           "grown file read through its patched directory record");
     check(status().find("\"modified\":2") != std::string::npos, "status counts modified files");
+
+    /* An unwritable cache keeps the pack in memory: the loader path depends
+     * on the disc and plan only. A regular file where the title folder
+     * belongs makes every cache write fail. */
+    const fs::path blocked = root / "blocked";
+    write_bytes(blocked / "ResidentTest", {1});
+#ifdef _WIN32
+    _putenv_s("PSX_RESIDENT_CACHE", blocked.string().c_str());
+#else
+    setenv("PSX_RESIDENT_CACHE", blocked.string().c_str(), 1);
+#endif
+    pack = psx_resident_prepare(&spec);
+    check(pack && psx_resident_file(pack, 1, nullptr, nullptr), "unwritable cache still prepares");
+    check(status().find("prepared (memory only:") != std::string::npos, "memory-only state reported");
+    check(fs::is_regular_file(blocked / "ResidentTest"), "no cache written over the blocker");
+#ifdef _WIN32
+    _putenv_s("PSX_RESIDENT_CACHE", (root / "cache").string().c_str());
+#else
+    setenv("PSX_RESIDENT_CACHE", (root / "cache").string().c_str(), 1);
+#endif
+
+    /* Service ring: frame window, newest-first selection, oldest-first
+     * output, eviction past capacity. */
+    check(events(0, UINT64_MAX, 10).find("\"total\":0") != std::string::npos, "empty ring");
+    for (uint32_t i = 0; i < 20; i++) {
+        s_frame_count = 100 + i;
+        cycles = 1000 * i;
+        psx_resident_record(i & 1 ? "rt.read" : "rt.begin", i & 1 ? UINT32_MAX : i, 22 + i, 2048 * i, i % 3 != 0);
+    }
+    const std::string window = events(105, 107, 100);
+    check(window.find("\"seq\":5,\"frame\":105,\"cycle\":5000,\"op\":\"rt.read\",\"file\":-1,\"lba\":27,\"bytes\":10240,\"served\":1}") != std::string::npos &&
+          window.find("\"seq\":7") != std::string::npos && window.find("\"seq\":4,") == std::string::npos &&
+          window.find("\"seq\":8,") == std::string::npos, "frame window inclusive");
+    check(window.find("\"seq\":5") < window.find("\"seq\":6"), "oldest first");
+    const std::string newest = events(0, UINT64_MAX, 2);
+    check(newest.find("\"seq\":18") != std::string::npos && newest.find("\"seq\":19") != std::string::npos &&
+          newest.find("\"seq\":17") == std::string::npos, "count keeps the newest");
+    check(events(106, 106, 10).find("\"served\":0") != std::string::npos, "declined requests kept");
+    std::vector<char> tiny(16);
+    check(!psx_resident_events_json(tiny.data(), 16, 0, UINT64_MAX, 10), "small buffer refused");
+    for (uint32_t i = 0; i < 9000; i++) psx_resident_record("rt.flood", 0, i, 0, 1);
+    const std::string all = events(0, UINT64_MAX, 100000);
+    check(all.find("\"total\":9020,\"capacity\":8192") != std::string::npos &&
+          all.find("\"seq\":828,") != std::string::npos && all.find("\"seq\":827,") == std::string::npos,
+          "oldest entries evicted");
 
     /* Guest-range guard. */
     for (uint32_t i = 0; i < 64; i++) ram[0x1000 + i] = (uint8_t)(i ^ 0x5a);

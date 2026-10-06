@@ -8068,6 +8068,42 @@ static void handle_resident_status(int id, const char *json)
     send_err(id, "resident status too large");
 }
 
+/* Always-on resident-loading service ring (psx_resident_record):
+ *   {"cmd":"resident_events","frame_lo":a,"frame_hi":b,"count":n}
+ * -> total, capacity, entries [{seq, frame, cycle, op, file, lba, bytes,
+ *    served}] oldest first: the newest `count` (default 4096) whose guest
+ *    frame lies in [frame_lo, frame_hi] (defaults: everything held). */
+static void handle_resident_events(int id, const char *json)
+{
+    extern int psx_resident_events_json(char *out, uint32_t capacity,
+                                        uint64_t frame_lo, uint64_t frame_hi,
+                                        uint32_t max);
+    const int lo = json_get_int(json, "frame_lo", 0);
+    const int hi = json_get_int(json, "frame_hi", -1);
+    const int count = json_get_int(json, "count", 4096);
+    if (count <= 0) { send_err(id, "count must be positive"); return; }
+    for (uint32_t cap = 65536u; cap <= (1u << 24); cap *= 4u) {
+        char *events = (char *)malloc(cap);
+        if (!events) break;
+        if (psx_resident_events_json(events, cap, lo < 0 ? 0u : (uint64_t)lo,
+                                     hi < 0 ? UINT64_MAX : (uint64_t)hi,
+                                     (uint32_t)count)) {
+            char *buf = (char *)malloc(cap + 64u);
+            if (buf) {
+                /* events is an object; splice id/ok into it. */
+                snprintf(buf, cap + 64u, "{\"id\":%d,\"ok\":true,%s", id, events + 1);
+                debug_server_send_line(buf);
+                free(buf);
+            }
+            free(events);
+            if (!buf) send_err(id, "alloc failed");
+            return;
+        }
+        free(events);
+    }
+    send_err(id, "resident events too large");
+}
+
 static void handle_ws_hud_mode(int id, const char *json)
 {
     int v = json_get_int(json, "tag_rects", -1);
@@ -15010,6 +15046,7 @@ static const CmdEntry s_commands[] = {
     { "mod_counters",      handle_mod_counters },
     { "resident_status",   handle_resident_status },
     { "netplay_status",    handle_netplay_status },
+    { "resident_events",   handle_resident_events },
     { "capture_mark",      handle_capture_mark },
     { "present_image_ring_stats", handle_present_image_ring_stats },
     { "present_image_ring_get",   handle_present_image_ring_get },
