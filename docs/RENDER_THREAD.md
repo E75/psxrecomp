@@ -176,9 +176,15 @@ resolution (below), not of this layer.
 ## Dynamic resolution (`[video] dynamic_resolution`)
 
 Opt-in as before (`dynamic_resolution = true`, `dynamic_resolution_min`;
-`PSX_DYNRES=0/1`, `PSX_DYNRES_MIN` for one run); no new keys. The surfaces
-are allocated at the configured internal resolution (the ceiling, e.g. Match
-display) and the level steps between that and the minimum. With the render
+`PSX_DYNRES=0/1`, `PSX_DYNRES_MIN` for one run); no new keys. The hr
+(VRAM) surface is allocated at the configured internal resolution (the
+ceiling, e.g. Match display) and the level steps between that and the
+minimum. The native-wide surfaces are allocated at the current level and
+reallocated at every step (the presented rows and margins rescaled from the
+old surface into the new one): on Apple's GL-on-Metal every render pass into
+an attachment loads and stores the whole attachment, so a wide surface held
+at the ceiling cost the ceiling's bandwidth at every level (R4 2P VS: about
+4 s at 35-40 Hz after the race starts at a 10x ceiling, see the PR). With the render
 thread off nothing changes: the emulation thread's wall-time controller
 (`dynres_*` in `dynamic_resolution.c`) decides. With it on, the guest's
 frame no longer pays for GL, so its wall time says nothing about whether the

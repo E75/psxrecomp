@@ -9556,7 +9556,7 @@ extern "C" int psx_dynres_status_json(char *out, int cap) {
         "\"held_windows\":%llu,\"steps\":%llu,\"deferred\":%llu,\"last_from\":%d,"
         "\"last_to\":%d,\"last_ms\":%.3f,\"last_interval_ms\":%.3f,\"last_prep_ms\":%.3f,"
         "\"last_seed_ms\":%.3f,\"last_rects_ms\":%.3f,\"last_wide_ms\":%.3f,"
-        "\"step_cost_ms\":%.3f,\"down_blocked_s\":%.1f,\"up_blocked\":{%s}",
+        "\"wide_reallocs\":%llu,\"step_cost_ms\":%.3f,\"down_blocked_s\":%.1f,\"up_blocked\":{%s}",
         g_dynres.active ? 1 : 0, dynres_requested(), st.ceiling,
         g_dynres.active ? c.floor : 0, st.level, st.level * g_video_ref_lines, c.forced,
         c.last_load, c.last_late, c.last_vblank_hz, c.f,
@@ -9565,7 +9565,7 @@ extern "C" int psx_dynres_status_json(char *out, int cap) {
         c.windows, c.held_windows, (unsigned long long)st.steps,
         (unsigned long long)st.deferred, st.last_from, st.last_to, st.last_ms,
         g_dynres.step_interval_ms, st.last_prep_ms, st.last_seed_ms, st.last_rects_ms,
-        st.last_wide_ms, c.step_cost_s * 1000.0,
+        st.last_wide_ms, (unsigned long long)st.wide_reallocs, c.step_cost_s * 1000.0,
         c.down_block_until > now_s ? c.down_block_until - now_s : 0.0, blocked);
 }
 
