@@ -634,7 +634,7 @@ static int render_transaction(struct CPUState *cpu, const PSXModRenderPass *pass
     uint64_t t0, t1, tb, tg, te, tr, hash_before = 0, hash_after = 0;
     uint64_t cycles_before;
     uint32_t leaks;
-    int ok = 0, open, reuse;
+    int ok = 0, open, reuse, begun;
     volatile int ran = 0;   /* set between setjmp and a possible longjmp */
     static uint32_t s_leaks_before;
     uint32_t status;
@@ -689,16 +689,29 @@ static int render_transaction(struct CPUState *cpu, const PSXModRenderPass *pass
             s_restored_cycle == psx_cycle_count &&
             s_restored_stores == g_guest_store_count;
     /* Frame N's own image is captured by the first pass after a plan. */
-    if (!(eye >= 0 ? gl_renderer_stereo_begin(pass->x, pass->y, pass->w,
-                                               pass->h, reuse)
-                    : gl_renderer_pass_begin(pass->x, pass->y, pass->w,
-                                               pass->h, open, s_plan_period, reuse))) {
+    begun = eye >= 0 ? (gl_renderer_stereo_begin(pass->x, pass->y, pass->w,
+                                                pass->h, reuse) ? 1 : 0)
+                     : gl_renderer_pass_begin(pass->x, pass->y, pass->w,
+                                              pass->h, open, s_plan_period, reuse);
+    if (begun == 0) {
         gl_renderer_pass_begin_diag(&s_attempt.gl);
         s_stats.begin_refused++;
         return pass_refuse(s_attempt.gl.reason ? s_attempt.gl.reason : "gl_begin",
                            s_attempt.gl.status);
     }
     s_open_generation = 0;
+    if (begun < 0) {
+        /* Out of time while copying the rect out (leftover planning):
+         * nothing was drawn, nothing to restore. The whole pass would have
+         * cost at least the whole copy, extrapolated from the part made. */
+        double done = gl_renderer_pass_backup_done();
+        double took = (double)(gl_renderer_perf_ticks() - t0);
+        if (done < 0.25) done = 0.25;
+        gl_renderer_pass_note_cost((uint64_t)(took / done), 1);
+        s_stats.cut++;
+        gl_renderer_pass_service_presents();
+        return 0;
+    }
     s_leaks_before = gl_renderer_pass_leaks();
 
     if (!checkpoint_save(cpu)) {

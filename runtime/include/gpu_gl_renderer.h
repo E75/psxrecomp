@@ -106,6 +106,9 @@ int      gl_renderer_pass_may_start(void);
 double   gl_renderer_pass_time_left(void);
 /* Close a pass whose guest code never ran (nothing to capture or restore). */
 void     gl_renderer_pass_abandon(void);
+/* Fraction of the last pass's backup copy made before it ran out of time
+ * (gl_renderer_pass_begin returned -1; leftover planning only). */
+double   gl_renderer_pass_backup_done(void);
 /* Leftover planning: mean budget of plans that wanted passes (ms), the
  * reserve (ms), passes skipped for time, passes cut at the deadline, probes;
  * how late the emulation thread resumed at a planned frame's start with

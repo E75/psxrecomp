@@ -220,6 +220,7 @@ uint32_t gl_renderer_pass_plan(uint32_t p, uint32_t s, uint32_t *a,
     return 0;
 }
 static int s_open_passes, s_kept, s_begin_ok = 1, s_diag_null;
+static int s_begin_out_of_time;
 void gl_renderer_pass_begin_diag(GLRenderPassBeginDiag *out) {
     memset(out, 0, sizeof *out);
     if (s_diag_null) return;
@@ -233,6 +234,7 @@ int gl_renderer_pass_begin(int x, int y, int w, int h, int open_gen,
     (void)x; (void)y; (void)w; (void)h; (void)open_gen; (void)period;
     (void)reuse_backup;
     if (!s_begin_ok) return 0;
+    if (s_begin_out_of_time) return -1;   /* ran out of time copying out */
     s_open_passes++;
     return 1;
 }
@@ -253,6 +255,7 @@ void gl_renderer_pass_note_cost(uint64_t t, int cut) {
     if (cut) s_cost_cuts++;
 }
 void gl_renderer_pass_abandon(void) { s_open_passes--; }
+double gl_renderer_pass_backup_done(void) { return 0.5; }
 int gl_renderer_pass_may_start(void) { return s_may_start; }
 double gl_renderer_pass_time_left(void) {
     if (s_deadline_polls < 0) return 1e18;
@@ -838,6 +841,24 @@ static void test_deadline(void) {
         CHECK(st.cut == st0.cut + 1 && st.aborted == st0.aborted &&
               s_open_passes == opened && !g_psx_render_pass_active,
               "abandoned without its guest code, counted as cut, closed");
+    }
+
+    /* Out of time while copying the rect out (the banded backup): nothing
+     * opened, nothing to restore; a cut whose cost is the copy extrapolated,
+     * never a refusal. */
+    {
+        int opened = s_open_passes;
+        render_pass_get_stats(&st0);
+        s_cost_cuts = 0;
+        s_begin_out_of_time = 1;
+        CHECK(psx_mod_render_pass(&cpu, &pass, never_fn, NULL) == 0,
+              "out of time in the copy: not run");
+        s_begin_out_of_time = 0;
+        render_pass_get_stats(&st);
+        CHECK(st.cut == st0.cut + 1 && st.aborted == st0.aborted &&
+              st.begin_refused == st0.begin_refused && s_cost_cuts == 1 &&
+              s_open_passes == opened && !g_psx_render_pass_active,
+              "a copy out of time is a cut, not a refusal");
     }
 
     /* A pass inside its deadline is kept. */

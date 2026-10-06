@@ -191,6 +191,7 @@ uint32_t gl_renderer_pass_leaks(void) { return 0; }
 int gl_renderer_pass_verify_vram(void) { return 1; }
 void gl_renderer_pass_note_cost(uint64_t t, int cut) { (void)t; (void)cut; }
 void gl_renderer_pass_abandon(void) { s_open_passes--; }
+double gl_renderer_pass_backup_done(void) { return 1.0; }
 int gl_renderer_pass_may_start(void) { return 1; }
 double gl_renderer_pass_time_left(void) { return 1e18; }
 void gl_renderer_pass_set_leftover(int on) { (void)on; }

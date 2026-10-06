@@ -184,6 +184,14 @@ assert "psx_cycle_freeze_set_poll(deadline_near, deadline_overrun);" in rpt and 
     "capture and restore still take")
 assert "note_fault" not in definition(rp, "deadline_overrun"), (
     "a pass stopped at its deadline is not a fault")
+# A leftover-planned pass copies its rect out in bands with the deadline
+# checked between them (slow in some drivers: stencil, first use, large
+# scales); stereo and the idle-time planner copy in one blit.
+tb = gl[gl.index("static int transaction_begin("):]
+tb = tb[:tb.index("\nbacked_up:")]
+assert tb.count("pass_backup_blit(") == 2 and "banded = !stereo && s_pass_leftover;" in tb, (
+    "leftover-planned backups must be banded copies with deadline checks")
+assert "if (begun < 0) {" in rpt, "a copy that ran out of time is a cut, not a refusal"
 assert "volatile int ran = 0;" in rpt and "gl_renderer_pass_abandon();" in rpt, (
     "a pass whose guest code never ran has nothing to restore")
 # A frame on screen longer than planned (a lagging tick) must hold its newest

@@ -309,6 +309,16 @@ use only time the game leaves free, so they never delay its frame:
   sets `last_failure` or `last_abort_detail`). A pass stopped before its
   guest code ran is closed without a restore. Stereo eye pairs have no
   deadline.
+- **Bounded copy.** A pass's first step copies the rect (with stencil) out
+  of the GPU's surfaces, which some drivers make slow (on macOS GL the first
+  stencil blit of a process builds its pipeline, about 5 ms; at 4K the
+  copies took 15-20 ms). The hr and native-wide copies are made in 8 row
+  bands, a band started only while the deadline leaves 1.25x the time the
+  previous one took; out of time, the pass is abandoned (nothing drawn,
+  nothing restored), counted as cut, and its cost bounded by the whole copy
+  extrapolated from the part made. A presenter set up for passes (HOLD,
+  FLIP) makes one 4x4 stencil blit at its first VBlank, so no pass pays the
+  pipeline build.
 - **Cost.** Learnt only from passes that fit: the first completed pass sets
   the average and later ones move it; plans use the average plus twice its
   smoothed deviation. A cut pass is a lower bound. A pass of unknown cost is

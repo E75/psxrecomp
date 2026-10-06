@@ -562,6 +562,15 @@ static uint64_t s_idle_total = 0;      /* monotonic idle-wait ticks */
 static uint32_t s_since_tight = 0;
 static uint32_t s_passes_this_interval = 0;
 static uint64_t s_pass_behind = 0;     /* plans refused: no slack lately */
+/* The driver's first stencil blit in a process builds its pipeline (about
+ * 5 ms on macOS); a presenter set up for leftover-planned render passes
+ * (HOLD, FLIP) does one tiny blit at its first VBlank, long before a race,
+ * so no pass pays it. */
+static int      s_pass_pipeline_warm = 0;
+static void pass_warm_pipeline(void);
+/* How much of the current pass's backup copy was made (1 = all of it): a
+ * pass that ran out of time while copying is abandoned without a restore. */
+static double   s_pass_backup_done = 1.0;
 static int pass_gpu_caught_up(void);
 static void pass_note_interval_end(uint64_t resume, double frame_end);
 static void pass_note_vblank_late(double late, double vblank_ticks);
@@ -6103,6 +6112,9 @@ static void interp_present_source_interval(void) {
         }
         s_intervals_unpresented = presented ? 0 : s_intervals_unpresented + 1;
     }
+    if (s_pass_leftover && s_interp_hold && s_interp_source == 1 &&
+        !s_pass_pipeline_warm)
+        pass_warm_pipeline();
     if (s_pass_leftover && p_glFenceSync && p_glDeleteSync) {
         if (s_present_fence) p_glDeleteSync(s_present_fence);
         s_present_fence = p_glFenceSync(PSXGL_SYNC_GPU_COMMANDS_COMPLETE, 0);
@@ -6898,6 +6910,31 @@ typedef struct PassJournal {
 static PassJournal s_pj[PASS_JOURNAL_MAX];
 static uint64_t s_pj_total = 0;
 
+/* A backup copy at the start of a leftover-planned pass, in
+ * PASS_BACKUP_STRIPS row bands. Nothing has been drawn yet, so a pass that
+ * runs out of time here is simply abandoned (no restore). A band is started
+ * only while the deadline leaves at least the time the previous band took,
+ * so the copy, which a driver can make slow (stencil, first use, a large
+ * internal resolution), does not run past it. Returns the fraction copied
+ * (1 = done). */
+#define PASS_BACKUP_STRIPS 8
+static double pass_backup_blit(GLuint src, GLuint dst, int sx, int sy,
+                               int w, int h, GLbitfield mask) {
+    int band = (h + PASS_BACKUP_STRIPS - 1) / PASS_BACKUP_STRIPS, y0;
+    double last = 0.0;
+    if (band < 1) band = 1;
+    for (y0 = 0; y0 < h; y0 += band) {
+        int bh = h - y0 < band ? h - y0 : band;
+        uint64_t t0;
+        if (y0 > 0 && gl_renderer_pass_time_left() < last)
+            return (double)y0 / (double)h;
+        t0 = SDL_GetPerformanceCounter();
+        pass_blit(src, dst, sx, sy + y0, 0, y0, w, bh, mask);
+        last = (double)(SDL_GetPerformanceCounter() - t0) * 1.25;
+    }
+    return 1.0;
+}
+
 static void pass_free_color_fbo(GLuint *tex, GLuint *rb, GLuint *fbo,
                                 int *w, int *h) {
     if (s_ctx) {
@@ -6912,6 +6949,18 @@ static void pass_free_color_fbo(GLuint *tex, GLuint *rb, GLuint *fbo,
 
 /* Context teardown (gl_renderer_shutdown): free the pass images, backups
  * and journal, and forget their names so a new context makes fresh ones. */
+static void pass_warm_pipeline(void) {
+    GLuint tex = 0, rb = 0, fbo = 0;
+    int w = 0, h = 0;
+    s_pass_pipeline_warm = 1;
+    if (!s_hr_fbo || !p_glBlitFramebuffer) return;
+    if (pass_make_color_fbo(&tex, &rb, &fbo, &w, &h, 4, 4, GL_RGBA8, GL_RGBA,
+                            GL_UNSIGNED_BYTE))
+        pass_blit(s_hr_fbo, fbo, 0, 0, 0, 0, 4, 4,
+                  GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    pass_free_color_fbo(&tex, &rb, &fbo, &w, &h);
+}
+
 static void pass_resources_release(void) {
     psx_openxr_shutdown();
     if(s_ctx) {
@@ -6938,6 +6987,7 @@ static void pass_resources_release(void) {
     s_pb_valid = 0;
     if (s_present_fence && p_glDeleteSync && s_ctx) p_glDeleteSync(s_present_fence);
     s_present_fence = NULL;
+    s_pass_pipeline_warm = 0;
 }
 
 static int pass_journal_protect(int x, int y, int w, int h) {
@@ -6979,7 +7029,7 @@ static void pass_journal_rollback(void) {
 
 static int transaction_begin(int x, int y, int w, int h, int open_gen,
                               uint32_t period_vblanks, int reuse_backup, int stereo) {
-    int S = s_hr_scale, gi, wide, tw, th;
+    int S = s_hr_scale, gi, wide, tw, th, banded;
     PassGen *g;
     memset(&s_pass_begin_diag, 0, sizeof s_pass_begin_diag);
     s_pass_begin_diag.status = stereo ? gl_renderer_stereo_unavailable()
@@ -7062,8 +7112,21 @@ static int transaction_begin(int x, int y, int w, int h, int open_gen,
                              &s_pb_raw_w, &s_pb_raw_h, w, h, PSXGL_R16UI,
                              PSXGL_RED_INTEGER, GL_UNSIGNED_SHORT))
         return pass_begin_refuse("backup_raw");
-    pass_blit(s_hr_fbo, s_pb_hr_fbo, x * S, y * S, 0, 0, w * S, h * S,
-              GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    banded = !stereo && s_pass_leftover;
+    if (!banded) {
+        pass_blit(s_hr_fbo, s_pb_hr_fbo, x * S, y * S, 0, 0, w * S, h * S,
+                  GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    } else {
+        /* A leftover-planned pass has a deadline: copy in bands, abandon
+         * when out of time (pass_backup_blit). Returns -1: not a refusal. */
+        s_pass_backup_done = pass_backup_blit(s_hr_fbo, s_pb_hr_fbo, x * S,
+                                              y * S, w * S, h * S,
+                                              GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        if (s_pass_backup_done < 1.0) {
+            s_pass_backup_done *= 0.5;   /* of the hr and the wide copy */
+            return -1;
+        }
+    }
     pass_blit(s_raw_fbo, s_pb_raw_fbo, x, y, 0, 0, w, h, GL_COLOR_BUFFER_BIT);
     s_pb_wide_src = g_wide_w > 0 ? pass_wide_fbo_for(x) : 0;
     if (s_pb_wide_src) {
@@ -7072,9 +7135,21 @@ static int transaction_begin(int x, int y, int w, int h, int open_gen,
                                  &s_pb_wide_w, &s_pb_wide_h, g_wide_w * S,
                                  h * S, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE))
             return pass_begin_refuse("backup_wide");
-        pass_blit(s_pb_wide_src, s_pb_wide_fbo, 0, y * S, 0, 0, g_wide_w * S,
-                  h * S, GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        if (!banded) {
+            pass_blit(s_pb_wide_src, s_pb_wide_fbo, 0, y * S, 0, 0,
+                      g_wide_w * S, h * S,
+                      GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        } else {
+            s_pass_backup_done = pass_backup_blit(s_pb_wide_src, s_pb_wide_fbo,
+                                                  0, y * S, g_wide_w * S, h * S,
+                                                  GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+            if (s_pass_backup_done < 1.0) {
+                s_pass_backup_done = 0.5 + 0.5 * s_pass_backup_done;
+                return -1;
+            }
+        }
     }
+    s_pass_backup_done = 1.0;
     if (s_pb_cpu_cap < (size_t)w * (size_t)h) {
         free(s_pb_cpu);
         s_pb_cpu = (uint16_t *)malloc((size_t)w * (size_t)h * sizeof(uint16_t));
@@ -7119,6 +7194,10 @@ void gl_renderer_pass_abandon(void) {
     s_pj_cpu.n = 0;
     s_pb_valid = 1;
 }
+
+/* Fraction of the last pass's backup copy that was made before it ran out of
+ * time (1 = all). */
+double gl_renderer_pass_backup_done(void) { return s_pass_backup_done; }
 
 static void transaction_restore(void) {
     int S = s_hr_scale, gi = 1 - s_pgen_cur;
