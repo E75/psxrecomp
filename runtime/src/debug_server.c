@@ -9755,11 +9755,13 @@ static void disp_ring_capture(void)
      * just the display rect + one small readback); CPU VRAM otherwise (the
      * software backend's authoritative surface). Runs on the present thread,
      * where the GL context is current. */
-    extern int gl_renderer_fbo_peek(int x, int y, int w_, int h_, uint16_t *out);
+    /* Deferred: with the render thread on, the readback is recorded at this
+     * point of the command stream and filled in by the render thread (ring
+     * readers sync first), instead of a per-frame sync point. */
     int got = 0;
     if (di.display_x + w <= 1024 && di.display_y + h <= 512)
-        got = gl_renderer_fbo_peek((int)di.display_x, (int)di.display_y,
-                                   (int)w, (int)h, e->px);
+        got = gl_renderer_fbo_peek_deferred((int)di.display_x, (int)di.display_y,
+                                            (int)w, (int)h, e->px);
     if (!got) {
         for (uint32_t y = 0; y < h; y++)
             for (uint32_t x = 0; x < w; x++)
@@ -9767,7 +9769,7 @@ static void disp_ring_capture(void)
                     gpu_vram_peek((int)(di.display_x + x), (int)(di.display_y + y));
     }
     /* Full-VRAM aux capture (same GL-truth/CPU-truth split as the display). */
-    if (!gl_renderer_fbo_peek(0, 0, 1024, 512, e->vram)) {
+    if (!gl_renderer_fbo_peek_deferred(0, 0, 1024, 512, e->vram)) {
         const uint16_t *v = gpu_get_vram();
         memcpy(e->vram, v, (size_t)1024 * 512 * sizeof(uint16_t));
     }
@@ -9778,6 +9780,7 @@ static void disp_ring_capture(void)
  * (1024x512 row-major). */
 static void handle_display_ring_aux(int id, const char *json)
 {
+    gl_renderer_render_thread_sync("display_ring");
     int f = json_get_int(json, "frame", -1);
     if (f < 0) { send_err(id, "missing frame"); return; }
     char path[512];
@@ -9799,6 +9802,7 @@ static void handle_display_ring_aux(int id, const char *json)
 
 static void handle_display_ring_stats(int id, const char *json)
 {
+    gl_renderer_render_thread_sync("display_ring");
     (void)json;
     uint32_t oldest = 0, newest = 0;
     int n = 0;
@@ -9816,6 +9820,7 @@ static void handle_display_ring_stats(int id, const char *json)
 
 static void handle_display_ring_get(int id, const char *json)
 {
+    gl_renderer_render_thread_sync("display_ring");
     int f = json_get_int(json, "frame", -1);
     if (f < 0) { send_err(id, "missing frame"); return; }
     char path[512];
@@ -10401,8 +10406,22 @@ void debug_server_capture_mark(void)
     s_capture_wide_ok = write_wide_png(s_capture_wide_path, NULL, NULL) == NULL;
     s_capture_frozen = 1;
     gpu_gp0_ring_set_frozen(1);
+    gl_renderer_render_thread_sync("capture_mark");
     present_image_ring_set_frozen(1);
     gpu_timeline_set_frozen(1);
+}
+
+/* Render thread ([video] render_thread, docs/RENDER_THREAD.md):
+ *   {"cmd":"render_thread"} -> active, held, frames produced/consumed, presents
+ *   (and stale presents skipped), sync points (acquires) with the most recent
+ *   reasons, backpressure / ring-full waits, render busy/idle time.
+ * Reading it is not a sync point. */
+static void handle_render_thread(int id, const char *json)
+{
+    (void)json;
+    char buf[4096];
+    if (gl_renderer_render_thread_json(buf, sizeof buf) <= 0) buf[0] = 0;
+    send_fmt("{\"id\":%d,\"ok\":true,%s}", id, buf[0] ? buf : "\"active\":0");
 }
 
 /* Presented-image ring (see present_image_ring.h):
@@ -10411,6 +10430,7 @@ void debug_server_capture_mark(void)
 static void handle_present_image_ring_stats(int id, const char *json)
 {
     (void)json;
+    gl_renderer_render_thread_sync("present_image_ring");  /* render thread writes it */
     uint32_t lo = 0, hi = 0, seq_lo = 0, seq_hi = 0; int n = 0;
     present_image_ring_span(&lo, &hi, &n);
     present_image_ring_sequence_span(&seq_lo, &seq_hi);
@@ -10421,6 +10441,7 @@ static void handle_present_image_ring_stats(int id, const char *json)
 }
 static void handle_present_image_ring_get(int id, const char *json)
 {
+    gl_renderer_render_thread_sync("present_image_ring");
     int f = json_get_int(json, "frame", -1);
     int seq = json_get_int(json, "sequence", -1);
     char path[512];
@@ -10462,6 +10483,7 @@ static void handle_capture_mark(int id, const char *json)
     } else if (strcmp(op, "status")) { send_err(id, "op must be status|mark|release"); return; }
     uint32_t oldest = 0, newest = 0;
     gpu_gp0_ring_frame_span(&oldest, &newest);
+    gl_renderer_render_thread_sync("display_ring");
     uint32_t d_old = UINT32_MAX, d_new = 0;
     for (int i = 0; i < DISP_RING_CAP; i++) {
         if (!s_disp_ring[i].valid) continue;
@@ -15475,6 +15497,7 @@ static const CmdEntry s_commands[] = {
     { "resident_events",   handle_resident_events },
     { "capture_mark",      handle_capture_mark },
     { "present_image_ring_stats", handle_present_image_ring_stats },
+    { "render_thread",     handle_render_thread },
     { "present_image_ring_get",   handle_present_image_ring_get },
     { "kernel_bless",      handle_kernel_bless },
     { "ws_aspect",         handle_ws_aspect },
