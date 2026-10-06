@@ -317,6 +317,37 @@ def main():
         if got[0][3] is None or got[1][3] is None or got[1][3] >= got[0][3]:
             print(f"FAIL twin {label} {s}x: batching on did not draw fewer batches:", got)
             ok = False
+    # Native-wide mirror queue and stale-rect wide stencil rebuild: the same
+    # native VRAM, frame at S and wide surface with each off (the previous
+    # immediate mirrors and whole-surface rebuilds) and on.
+    ab_envs = (("default", {}), ("queue-off", {"PSX_GL_WIDE_QUEUE": "0"}),
+               ("stencil-full", {"PSX_GL_WIDE_STENCIL_FULL": "1"}),
+               ("both-off", {"PSX_GL_WIDE_QUEUE": "0", "PSX_GL_WIDE_STENCIL_FULL": "1"}))
+    ab_runs = [("wmask", s, fast, {}) for s in (1, 3, 9) for fast in ("0", "1")]
+    ab_runs += [("wmask", 9, fast, {"PSX_GL_HIRES_WINDOW": "1"}) for fast in ("0", "1")]
+    ab_runs += [("lines", 9, None, {}), ("twin", 9, "1", {}), ("scene", 3, None, {}),
+                ("scene", 9, None, {})]
+    for mode, s, arg, extra in ab_runs:
+        got = {}
+        for name, ab in ab_envs:
+            e = dict(env)
+            e.update(extra)
+            e.update(ab)
+            cmd = [dest / "probe", s, mode] + ([arg] if arg is not None else [])
+            r = run(cmd, env=e)
+            parsed = parse_run(r.stdout)
+            if r.returncode or not parsed or parsed[1]:
+                print(f"wide a/b {mode} {s} {arg} {name}: exit={r.returncode}",
+                      r.stdout.strip().splitlines()[-3:], r.stderr.strip()[-600:])
+                ok = False
+            got[name] = (parsed[2] if parsed else None, parse_hires(r.stdout),
+                         parse_hires(r.stdout, "wide"))
+        same = len(set(got.values())) == 1 and None not in got["default"][1:]
+        print(f"wide a/b {mode} {s}x {arg or ''}{' window' if extra else ''}:",
+              "same" if same else got)
+        if not same:
+            print(f"FAIL wide a/b {mode} {s}x: queue/stencil change the image:", got)
+            ok = False
     # Render passes: offered on the full-VRAM surface, refused in the window mode.
     if not passes:
         print("passes: skipped (this renderer has no render passes)")
