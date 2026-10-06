@@ -407,13 +407,14 @@ enum {
     RTH_OFFSET, RTH_WIDE_CONFIGURE, RTH_WIDE_VIEW, RTH_WIDE_TARGET,
     RTH_WIDE_DISABLE, RTH_WIDE_CLEAR, RTH_WIDE_CLEAR_MARGINS, RTH_PROJ_TRI,
     RTH_WIDE_RECOVERY, RTH_INTERP_SUSPENDED, RTH_PRESENT_VRAM,
-    RTH_PRESENT_WIDE, RTH_STATE, RTH_PEEK
+    RTH_PRESENT_WIDE, RTH_STATE, RTH_PEEK, RTH_RING_CAPTURE
 };
 static int  rth_record_mode(void);
 static int  rth_rec_ints(uint16_t op, uint16_t flags, int n, const int32_t *v);
 static uint16_t rth_prim_flags(void);
 static int  rth_record_present(uint16_t op, int n, const int32_t *v);
 static int  rth_mirror_wide_present_ok(int base_x);
+static void rth_ring_capture_now(const int32_t *a);
 /* Emulation-side mirror: the recorded wide target is a live surface. */
 static int  s_rthm_cur = 0;
 #define RTH_REC(op, fl, ...) do { const int32_t rth_v_[] = { __VA_ARGS__ }; \
@@ -2599,6 +2600,11 @@ static int cpu_vram_authoritative(void) {
 static void ensure_cpu(void) {
     extern int psx_netplay_active(void);
     if (!s_raster_ok || !s_gpu_dirty) return;
+    /* Guest-visible readbacks run on the emulation thread under a sync point
+     * and land in gpu.c's array. On the render thread s_vram is the private
+     * upload source: reading back there would mark the CPU side current
+     * without the guest's array ever seeing the pixels. */
+    if (rth_replaying()) return;
     /* Dual-raster / netplay and depth24: CPU VRAM is written on every GP0.
      * Packed RGB888 movie uploads are deliberately absent from the FBO;
      * reading it back would overwrite the movie with stale 1555 words. */
@@ -9606,6 +9612,9 @@ static void gl_rth_exec(void *user, const RtCmd *c, const void *payload) {
     case RTH_STATE:
         s_rths_flat_bd = v[0]; s_rths_vp_w = v[1]; s_rths_bg_full = v[2];
         break;
+#ifndef PSX_NO_DEBUG_TOOLS
+    case RTH_RING_CAPTURE: rth_ring_capture_now(v); break;
+#endif
     case RTH_PEEK: {
         uint64_t ptr = (uint64_t)(uint32_t)v[4] | ((uint64_t)(uint32_t)v[5] << 32);
         (void)gl_renderer_fbo_peek(v[0], v[1], v[2], v[3], (uint16_t *)(uintptr_t)ptr);
@@ -9724,5 +9733,55 @@ int gl_renderer_render_thread_json(char *out, size_t cap) {
     if (k > 0 && (size_t)k < cap) k += snprintf(out + k, cap - (size_t)k, "]");
     return k;
 }
+
+#ifndef PSX_NO_DEBUG_TOOLS
+/* Presented-image ring capture for --headless-opengl (main.cpp), at this point
+ * of the command stream: the native-wide surface slice when wide != 0, else
+ * the display rect at internal resolution. With the render thread recording
+ * it is queued (ring readers sync first); a rect the GL surface cannot serve
+ * is skipped there instead of resolving through a CPU readback. */
+static void rth_ring_capture_now(const int32_t *a) {
+    static uint32_t *buf = NULL;
+    static size_t cap = 0;
+    const uint32_t frame = (uint32_t)a[0];
+    const int wide = a[1], base_x = a[2], disp_y = a[3], disp_h = a[4];
+    const int cx = a[5], cy = a[6], cw = a[7], ch = a[8];
+    size_t need = (size_t)1024 * 4 * 512 * 4;
+    if ((size_t)cw * s_out_scale * ch * s_out_scale > need)
+        need = (size_t)cw * s_out_scale * ch * s_out_scale;
+    if (cap < need) {
+        uint32_t *nb = (uint32_t *)realloc(buf, need * 4u);
+        if (!nb) return;
+        buf = nb; cap = need;
+    }
+    if (wide) {
+        int w = 0, h = 0;
+        if (glb_wide_dump_full(buf, (int)cap, &w, &h, base_x) > 0 && h >= 512) {
+            const int sc = h / 512, y0 = disp_y * sc, rows = disp_h * sc;
+            if (y0 + rows <= h) {
+                present_image_ring_push_argb(frame, buf + (size_t)y0 * w, w, rows, w);
+                return;
+            }
+        }
+    }
+    const int w = cw * s_out_scale, h = ch * s_out_scale;
+    int n;
+    if (rth_replaying())
+        n = (s_raster_ok && !s_depth24_skip_up)
+            ? gl_read_display_argb(cx, cy, cw, ch, buf, w * 4, INT_MAX, NULL, NULL) : 0;
+    else
+        n = gl_renderer_capture_display_hires(buf, w * 4, cx, cy, cw, ch);
+    if (n == w * h) present_image_ring_push_argb(frame, buf, w, h, w);
+}
+void gl_renderer_ring_capture(uint32_t frame, int wide, int base_x, int disp_y, int disp_h,
+                              int cx, int cy, int cw, int ch) {
+    const int32_t a[9] = { (int32_t)frame, wide, base_x, disp_y, disp_h, cx, cy, cw, ch };
+    if (rth_record_mode()) { rth_rec_ints(RTH_RING_CAPTURE, 0, 9, a); return; }
+    GL_RT_SYNC("ring_capture");
+    rth_ring_capture_now(a);
+}
+#else
+static void rth_ring_capture_now(const int32_t *a) { (void)a; }
+#endif
 
 const GpuRenderBackend *gl_backend_get(void) { return s_rth_on ? &GL_RT_BACKEND : &GL_BACKEND; }
