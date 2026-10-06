@@ -10023,7 +10023,6 @@ static _Atomic double s_fg_refresh_hz = 0.0, s_fg_guest_hz = 59.94;
 static _Atomic int s_fg_late = 0;             /* emulation thread: a late frame */
 static const char *_Atomic s_fg_hold_reason = NULL;
 static _Atomic uint64_t s_fg_hold_until = 0;  /* rt_now_ns: no generation before */
-static uint64_t  s_fg_emu_last_ns = 0;        /* emulation thread */
 static FgList    s_fg_l[4];                   /* older, newer, capturing, spare */
 static int       s_fg_older = 0, s_fg_newer = 1, s_fg_cur = 2;
 static int       s_fg_pa = -1, s_fg_pb = -1;  /* the pair a schedule draws from */
@@ -10041,7 +10040,15 @@ static FgMatchStats s_fg_mst;
 static FgBreaker s_fg_brk;
 static int       s_fg_brk_init = 0;
 static uint64_t  s_fg_bp_seen = 0;
-static double    s_fg_real_ema = 0.0, s_fg_gen_ema = 0.0;   /* seconds */
+static double    s_fg_real_ema = 0.0;   /* seconds */
+/* A generated frame's cost: cold samples discarded, a blocking estimate
+ * re-probed (frame_gen.h FgCost). s_fg_fit_s: what one may cost to fit. */
+static FgCost    s_fg_cost;
+static int       s_fg_cost_init = 0;
+static double    s_fg_fit_s = 0.0;
+static FgPace    s_fg_pace;                   /* emulation thread */
+static _Atomic uint64_t s_fg_last_gen_ns = 0; /* the last generated frame (rt_now_ns) */
+static uint64_t  s_fg_ignored_late = 0, s_fg_ignored_bp = 0;
 static const char *s_fg_hold_why = NULL;
 static double    s_fg_gen_gpu_ms = 0.0, s_fg_gen_cpu_ms = 0.0;   /* the last one measured */
 /* Schedule after a flip: n generated frames, then the real one. */
@@ -10069,6 +10076,18 @@ static int       s_fg_last_n = 0, s_fg_last_slots = 0;
 static double    s_fg_last_match_ms = 0.0;
 
 static double fg_now_s(void) { return (double)rt_now_ns() * 1e-9; }
+
+static FgCost *fg_cost(void) {
+    if (!s_fg_cost_init) { fg_cost_init(&s_fg_cost, 2.0, 16.0); s_fg_cost_init = 1; }
+    return &s_fg_cost;
+}
+
+/* Breaker trips only count while generation is what could have caused
+ * them: a generated frame in the last half second. */
+static int fg_recently_generated(void) {
+    const uint64_t g = atomic_load(&s_fg_last_gen_ns);
+    return g && rt_now_ns() - g < 500000000ull;
+}
 
 /* Render thread: every swap's wall time. A swap waits for the compositor
  * (and on a busy WindowServer for its round trip); each generated frame adds
@@ -10352,6 +10371,22 @@ static void fg_invalidate(void) {
     fg_list_open();
 }
 
+/* A new surface's first touch (the driver backing its storage) happens here,
+ * when it is allocated, not inside the first generated frame; that frame's
+ * measured cost is discarded as well (cold). */
+static void fg_surface_warm(GLuint fbo) {
+    p_glBindFramebuffer(PSXGL_FRAMEBUFFER, fbo);
+    glDisable(GL_SCISSOR_TEST);
+    glClearColor(0.f, 0.f, 0.f, 0.f);
+    glClearStencil(0);
+    glClearDepth(1.0);
+    glStencilMask(0xFF);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    p_glBindFramebuffer(PSXGL_FRAMEBUFFER, 0);
+    glFlush();
+    fg_cost_cold(fg_cost(), 2);
+}
+
 /* Surfaces for the generated image, at the current level. */
 static int fg_surfaces_ensure(int wide) {
     const int S = s_hr_scale;
@@ -10364,6 +10399,7 @@ static int fg_surfaces_ensure(int wide) {
         s_fg_hr_S = 0;
         if (!hr_alloc_surface(S, &s_fg_hr_tex, &s_fg_hr_rb, &s_fg_hr_fbo)) return 0;
         s_fg_hr_S = S;
+        fg_surface_warm(s_fg_hr_fbo);
     }
     if (wide && (s_fg_w_S != S || s_fg_w_w != g_wide_w)) {
         if (s_fg_w_fbo) {
@@ -10374,6 +10410,7 @@ static int fg_surfaces_ensure(int wide) {
         s_fg_w_S = 0;
         if (!wide_alloc_surface(S, &s_fg_w_tex, &s_fg_w_rb, &s_fg_w_fbo)) return 0;
         s_fg_w_S = S; s_fg_w_w = g_wide_w;
+        fg_surface_warm(s_fg_w_fbo);
     }
     return 1;
 }
@@ -10662,8 +10699,11 @@ static int fg_generate(double t, int swap) {
 /* ---- frame generation: schedule (render thread) ---- */
 static void rth_present_payload(uint16_t op, const uint8_t *p);   /* below */
 
+/* Short first hold, doubling on repeats within 2 s of the last hold's end,
+ * up to 8 s: one hiccup costs a fraction of a second of generation. */
+#define FG_BRK_INIT() do { if (!s_fg_brk_init) { fg_breaker_init(&s_fg_brk, 0.5, 8.0, 2.0); s_fg_brk_init = 1; } } while (0)
 static void fg_trip(const char *why) {
-    if (!s_fg_brk_init) { fg_breaker_init(&s_fg_brk, 3.0, 24.0, 10.0); s_fg_brk_init = 1; }
+    FG_BRK_INIT();
     fg_breaker_trip(&s_fg_brk, fg_now_s(), why);
 }
 
@@ -10675,7 +10715,7 @@ static void fg_gen_cost_poll(void) {
         if (!avail) break;
         p_glGetQueryObjectui64v(s_fg_q[i], GL_QUERY_RESULT, &ns);
         double c = (double)(ns > s_fg_q_cpu[i] ? ns : s_fg_q_cpu[i]) * 1e-9;
-        s_fg_gen_ema = s_fg_gen_ema > 0.0 ? s_fg_gen_ema * 0.8 + c * 0.2 : c;
+        fg_cost_add(fg_cost(), c, s_fg_fit_s);
         s_fg_gen_gpu_ms = (double)ns * 1e-6;
         s_fg_gen_cpu_ms = (double)s_fg_q_cpu[i] * 1e-6;
         s_fg_qt++;
@@ -10724,7 +10764,7 @@ static void fg_generate_timed(double t) {
         s_fg_presenting = 0;
     }
     s_rth_ov.valid = 0;
-    if (ok) s_fg_generated++;
+    if (ok) { s_fg_generated++; atomic_store(&s_fg_last_gen_ns, rt_now_ns()); }
     rthf_resume();
 }
 
@@ -10791,8 +10831,9 @@ static uint64_t fg_tick(void *user, uint64_t now) {
     const uint64_t bp = rt_backpressure_events();
     const int ahead = rt_frames_ahead();
     if (!s_fg_force && (ahead >= 1 || bp != s_fg_bp_seen)) {
-        if (bp != s_fg_bp_seen) fg_trip("queue backed up");
-        else if (ahead >= 2) fg_trip("render thread behind");
+        if (bp != s_fg_bp_seen) {
+            if (fg_recently_generated()) fg_trip("queue backed up"); else s_fg_ignored_bp++;
+        } else if (ahead >= 2) fg_trip("render thread behind");
         s_fg_bp_seen = bp;
         fg_flush();
         return 0;
@@ -10864,26 +10905,40 @@ static int fg_on_present(uint16_t op, const uint8_t *p, uint32_t bytes, int stal
     if (B->valid && (B->disp[0] != disp[0] || B->disp[1] != disp[1])) B = A = NULL;
     if (B) { B->wide = wide; B->linear = wide ? a[3] : a[4]; B->force43 = wide ? 0 : a[5]; }
     const double now = fg_now_s();
-    if (atomic_exchange(&s_fg_late, 0)) fg_trip("guest late");
+    /* Guest lateness and backpressure trip the breaker only while generation
+     * runs: otherwise they are not generation's doing. */
+    const int gen_recent = fg_recently_generated();
+    if (atomic_exchange(&s_fg_late, 0)) {
+        if (gen_recent) fg_trip("guest late"); else s_fg_ignored_late++;
+    }
     const char *why = atomic_exchange(&s_fg_hold_reason, NULL);
     if (why) s_fg_hold_why = why;
     const int held = rt_now_ns() < atomic_load(&s_fg_hold_until);
     const uint64_t bp = rt_backpressure_events();
-    if (bp != s_fg_bp_seen) { s_fg_bp_seen = bp; fg_trip("queue backed up"); }
+    if (bp != s_fg_bp_seen) {
+        s_fg_bp_seen = bp;
+        if (gen_recent) fg_trip("queue backed up"); else s_fg_ignored_bp++;
+    }
     if (stale) fg_trip("render thread behind");
-    if (!s_fg_brk_init) { fg_breaker_init(&s_fg_brk, 3.0, 24.0, 10.0); s_fg_brk_init = 1; }
-    if (s_fg_qok > 0) fg_gen_cost_poll();   /* once per game frame: a poll flushes */
+    FG_BRK_INIT();
     const double ghz = atomic_load(&s_fg_guest_hz), rhz = atomic_load(&s_fg_refresh_hz);
     const double flip_s = (double)s_fg_flip_vb / (ghz > 1.0 ? ghz : 59.94);
     const int slots = (int)floor(flip_s * rhz + 0.5);
     s_fg_last_slots = slots;
+    /* What one generated frame may cost (its swap included) to fit. */
+    const double real_s = s_fg_real_ema * (double)s_fg_flip_vb + s_fg_swap_ema;
+    s_fg_fit_s = 0.85 * flip_s - real_s - s_fg_swap_ema;
+    if (s_fg_qok > 0) fg_gen_cost_poll();   /* once per game frame: a poll flushes */
     int n = 0;
     if (A && B && A->valid && B->valid && A->disp[2] == B->disp[2] &&
         A->disp[3] == B->disp[3] && A->wide_w == B->wide_w && A->scale > 0) {
+        /* The surfaces exist (and are warm) before a frame is planned on them. */
+        if (!s_hiw) (void)fg_surfaces_ensure(B->wide);
         if (s_fg_force) n = slots > 1 ? slots - 1 : 1;
-        else if (fg_breaker_open(&s_fg_brk, now) && !stale && !held)
-            n = fg_plan(flip_s, rhz, s_fg_real_ema * (double)s_fg_flip_vb + s_fg_swap_ema,
-                        s_fg_gen_ema > 0.0 ? s_fg_gen_ema + s_fg_swap_ema : 0.0, 0.85, 7);
+        else if (fg_breaker_open(&s_fg_brk, now) && !stale && !held) {
+            const double est = fg_cost_estimate(fg_cost(), now, s_fg_fit_s);
+            n = fg_plan(flip_s, rhz, real_s, est > 0.0 ? est + s_fg_swap_ema : 0.0, 0.85, 7);
+        }
         if (n == 0) s_fg_skipped_plan++;
     }
     s_fg_last_n = n;
@@ -10944,24 +10999,25 @@ void gl_renderer_frame_gen_configure(double refresh_hz, double guest_hz) {
 }
 
 /* Not a breaker trip: generation pauses while the real frames are under
- * pressure (dynamic resolution over budget or stepping down) and for a second
- * after, without the breaker's escalating holds. */
-void gl_renderer_frame_gen_hold(const char *reason) {
+ * pressure (dynamic resolution over budget or stepping down) for the caller's
+ * short tail, without the breaker's escalating holds. */
+void gl_renderer_frame_gen_hold(const char *reason, double secs) {
     if (!s_fg_on) return;
+    if (secs <= 0.0) secs = 0.1;
     atomic_store(&s_fg_hold_reason, reason ? reason : "hold");
-    atomic_store(&s_fg_hold_until, rt_now_ns() + 1000000000ull);
+    const uint64_t until = rt_now_ns() + (uint64_t)(secs * 1e9);
+    if (until > atomic_load(&s_fg_hold_until)) atomic_store(&s_fg_hold_until, until);
 }
 
-/* Emulation thread, once per frame boundary: a frame that took much longer
- * than the guest's interval trips the breaker. */
+/* Emulation thread, once per frame boundary: the guest is late when it has
+ * slipped two intervals behind its own VBlank schedule. One long frame made
+ * up by short ones (scheduling jitter, a burst after a wait) is not. */
 static void fg_note_guest_frame(void) {
     if (!s_fg_on) return;
-    const uint64_t now = rt_now_ns();
     const double ghz = atomic_load(&s_fg_guest_hz);
-    if (s_fg_emu_last_ns && ghz > 1.0 &&
-        (double)(now - s_fg_emu_last_ns) > 1.5e9 / ghz)
+    if (ghz <= 1.0) return;
+    if (fg_pace_note(&s_fg_pace, (double)rt_now_ns() * 1e-9, 1.0 / ghz, 2.0 / ghz))
         atomic_store(&s_fg_late, 1);
-    s_fg_emu_last_ns = now;
 }
 
 int gl_renderer_frame_gen_json(char *out, int cap) {
@@ -10975,13 +11031,14 @@ int gl_renderer_frame_gen_json(char *out, int cap) {
         "\"match_ms\":%.3f,"
         "\"prims\":%u,\"matched\":%u,\"moved\":%u,\"unmatched\":%u,"
         "\"breaker_s\":%.2f,\"trips\":%u,\"last_trip\":\"%s\",\"held_s\":%.2f,"
-        "\"last_hold\":\"%s\",\"swaps\":%llu",
+        "\"last_hold\":\"%s\",\"swaps\":%llu,\"gen_samples\":%u,\"gen_cold\":%u,"
+        "\"gen_probes\":%u,\"ignored_late\":%llu,\"ignored_bp\":%llu",
         s_fg_on, s_fg_on && s_rth_on && open, s_fg_force,
         (unsigned long long)s_fg_generated, (unsigned long long)s_fg_real_presents,
         (unsigned long long)s_fg_flips, (unsigned long long)s_fg_dups,
         (unsigned long long)s_fg_flushed, (unsigned long long)s_fg_skipped_plan,
         s_fg_last_n, s_fg_last_slots, s_fg_flip_vb, atomic_load(&s_fg_refresh_hz),
-        s_fg_real_ema * 1e3, s_fg_gen_ema * 1e3, s_fg_gen_cpu_ms, s_fg_gen_gpu_ms,
+        s_fg_real_ema * 1e3, fg_cost()->ema * 1e3, s_fg_gen_cpu_ms, s_fg_gen_gpu_ms,
         s_fg_swap_ema * 1e3,
         s_fg_last_match_ms,
         s_fg_mst.prims, s_fg_mst.matched, s_fg_mst.moved, s_fg_mst.unmatched,
@@ -10989,7 +11046,9 @@ int gl_renderer_frame_gen_json(char *out, int cap) {
         s_fg_brk.reason ? s_fg_brk.reason : "",
         (double)(atomic_load(&s_fg_hold_until) > rt_now_ns()
                      ? atomic_load(&s_fg_hold_until) - rt_now_ns() : 0) * 1e-9,
-        s_fg_hold_why ? s_fg_hold_why : "", (unsigned long long)s_swaps_total);
+        s_fg_hold_why ? s_fg_hold_why : "", (unsigned long long)s_swaps_total,
+        fg_cost()->samples, fg_cost()->discarded, fg_cost()->probes,
+        (unsigned long long)s_fg_ignored_late, (unsigned long long)s_fg_ignored_bp);
 }
 
 /* ---- the recording vtable ------------------------------------------------ */

@@ -89,6 +89,41 @@ void fg_breaker_init(FgBreaker *b, double base_hold, double max_hold, double rep
 void fg_breaker_trip(FgBreaker *b, double now, const char *reason);
 int  fg_breaker_open(const FgBreaker *b, double now);   /* 1 = generation allowed */
 
+/* The cost of one generated frame, as the plan sees it.
+ *  - Cold samples are discarded: the first frames after the surfaces were
+ *    (re)allocated or generation was enabled pay first-touch costs (driver
+ *    allocation, page faults) that steady state never sees; fg_cost_cold()
+ *    marks the next `n` samples as such.
+ *  - A stale estimate is re-probed: when the estimate has kept the plan at
+ *    zero for `probe_s`, fg_cost_estimate() reports 0 (unknown) once so one
+ *    frame is generated and measured, and that probe's sample replaces the
+ *    estimate instead of blending into it. A probe that still does not fit
+ *    doubles the wait before the next one (up to max_probe_s); one that fits
+ *    resets it. */
+typedef struct FgCost {
+    double ema;          /* seconds, 0 = unknown */
+    uint32_t samples, discarded, probes;
+    int    cold;         /* samples still to discard */
+    int    probing;      /* the next sample is a probe's */
+    double blocked_since;/* when the estimate started keeping the plan at 0 */
+    double probe_at;     /* when the probe was granted */
+    double probe_s, base_probe_s, max_probe_s;
+} FgCost;
+void   fg_cost_init(FgCost *c, double probe_s, double max_probe_s);
+void   fg_cost_cold(FgCost *c, int n);
+/* One measured frame; `fit_s` is what one generated frame may cost to fit. */
+void   fg_cost_add(FgCost *c, double cost_s, double fit_s);
+/* The estimate to plan with at `now`: 0 when unknown or due for a probe.
+ * `fit_s` as above: an estimate above it is what blocks the plan. */
+double fg_cost_estimate(FgCost *c, double now, double fit_s);
+
+/* The guest's own pacing: frame boundaries against a schedule that advances
+ * one interval per frame. Late only when the guest slipped more than `slack_s`
+ * behind its schedule (jitter, a long frame followed by a short one, does not
+ * count); the schedule then restarts from now. Early boundaries pull it in. */
+typedef struct FgPace { double next; int primed; } FgPace;
+int fg_pace_note(FgPace *p, double now, double period_s, double slack_s);
+
 #ifdef __cplusplus
 }
 #endif

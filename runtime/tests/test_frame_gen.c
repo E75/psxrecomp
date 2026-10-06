@@ -1,7 +1,7 @@
 /* Frame generation's renderer-independent half (src/frame_gen.c,
  * docs/FRAME_GENERATION.md): matching triangles of two frames, the
  * interpolation endpoints, the plan of how many in-between frames fit, and
- * the breaker. */
+ * the breaker, the generated-frame cost estimate and the guest pace. */
 #include "frame_gen.h"
 
 #include <math.h>
@@ -139,7 +139,80 @@ static void test_breaker(void) {
     check(b.hold <= 24.0, "the hold is capped");
 }
 
+static void test_cost(void) {
+    FgCost c;
+    fg_cost_init(&c, 2.0, 16.0);
+    const double fit = 0.020;
+    check(fg_cost_estimate(&c, 0.0, fit) == 0.0, "unknown before any sample");
+    /* Cold: the first frames after allocation are discarded. */
+    fg_cost_cold(&c, 2);
+    fg_cost_add(&c, 0.070, fit);
+    fg_cost_add(&c, 0.040, fit);
+    check(c.ema == 0.0 && c.discarded == 2, "cold samples discarded");
+    fg_cost_add(&c, 0.006, fit);
+    check(fabs(fg_cost_estimate(&c, 0.1, fit) - 0.006) < 1e-12, "first warm sample is the estimate");
+    fg_cost_add(&c, 0.016, fit);
+    check(fabs(c.ema - 0.008) < 1e-12, "warm samples blend");
+    /* A spike that pushes the estimate past the fit blocks the plan... */
+    for (int i = 0; i < 10; i++) fg_cost_add(&c, 0.060, fit);
+    check(fg_cost_estimate(&c, 10.0, fit) > fit, "a high estimate blocks");
+    check(fg_cost_estimate(&c, 11.9, fit) > fit, "... until the probe interval");
+    /* ...for at most probe_s: then one probe, whose sample replaces it. */
+    check(fg_cost_estimate(&c, 12.0, fit) == 0.0 && c.probes == 1, "stale estimate re-probed");
+    check(fg_cost_estimate(&c, 12.03, fit) > fit, "one probe at a time");
+    fg_cost_add(&c, 0.005, fit);
+    check(fabs(fg_cost_estimate(&c, 12.1, fit) - 0.005) < 1e-12, "the probe replaces the estimate");
+    /* A probe that still does not fit backs off. */
+    for (int i = 0; i < 10; i++) fg_cost_add(&c, 0.060, fit);
+    (void)fg_cost_estimate(&c, 20.0, fit);
+    check(fg_cost_estimate(&c, 22.0, fit) == 0.0, "second probe");
+    fg_cost_add(&c, 0.050, fit);
+    check(c.probe_s == 4.0, "a probe that does not fit doubles the wait");
+    check(fg_cost_estimate(&c, 25.9, fit) > fit && fg_cost_estimate(&c, 26.0, fit) == 0.0,
+          "next probe after the doubled wait");
+    fg_cost_add(&c, 0.004, fit);
+    check(c.probe_s == 2.0, "a probe that fits resets the wait");
+    /* A granted probe that was never drawn is given up, then re-granted. */
+    for (int i = 0; i < 10; i++) fg_cost_add(&c, 0.060, fit);
+    (void)fg_cost_estimate(&c, 40.0, fit);
+    check(fg_cost_estimate(&c, 42.0, fit) == 0.0, "probe granted");
+    check(fg_cost_estimate(&c, 44.0, fit) > fit, "an undrawn probe expires");
+    check(fg_cost_estimate(&c, 46.0, fit) == 0.0, "and is granted again");
+    /* Re-allocation makes the next samples cold again. */
+    fg_cost_cold(&c, 2);
+    fg_cost_add(&c, 0.5, fit); fg_cost_add(&c, 0.5, fit);
+    check(c.cold == 0 && c.ema < 0.5, "cold after re-allocation");
+}
+
+static void test_pace(void) {
+    FgPace p;
+    memset(&p, 0, sizeof p);
+    const double T = 1.0 / 59.94, slack = 2.0 * T;
+    double t = 0.0;
+    int late = 0;
+    for (int i = 0; i < 600; i++) {   /* jitter: +-6 ms around the schedule */
+        late += fg_pace_note(&p, t + ((i % 3) - 1) * 0.006, T, slack);
+        t += T;
+    }
+    check(late == 0, "jitter is not late");
+    late = 0;   /* one 40 ms frame made up by a burst */
+    late += fg_pace_note(&p, t + 0.024, T, slack); t += T;
+    late += fg_pace_note(&p, t + 0.004, T, slack); t += T;
+    late += fg_pace_note(&p, t, T, slack); t += T;
+    check(late == 0, "a long frame made up is not late");
+    /* A real slip: 60 ms gap. */
+    check(fg_pace_note(&p, t + 0.045, T, slack) == 1, "a slip beyond two intervals is late");
+    t += 0.045 + T;
+    check(fg_pace_note(&p, t, T, slack) == 0, "the schedule restarts after a slip");
+    /* Slow but steady (a 50 Hz guest told 59.94): one trip, then resync each time it slips. */
+    int trips = 0;
+    for (int i = 0; i < 60; i++) { t += 0.020; trips += fg_pace_note(&p, t, T, slack); }
+    check(trips > 0 && trips < 20, "a steadily slow guest is late now and then");
+}
+
 int main(void) {
+    test_cost();
+    test_pace();
     test_identical_and_moved();
     test_keys_limits_and_duplicates();
     test_each_older_pairs_once();
