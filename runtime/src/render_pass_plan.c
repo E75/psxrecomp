@@ -54,7 +54,9 @@ uint32_t render_pass_plan_phases(const RenderPassPlanInput *in,
         /* Cost unknown (no pass measured at this image size yet): one pass
          * measures it without stalling the guest for a whole plan. */
         double fit = in->pass_cost > 0.0 ? floor(in->budget / in->pass_cost)
-                                         : (in->budget > 0.0 ? 1.0 : 0.0);
+                   : in->probe_min > 0.0
+                         ? (in->budget >= in->probe_min ? 1.0 : 0.0)
+                         : (in->budget > 0.0 ? 1.0 : 0.0);
         if (fit < 0.0) fit = 0.0;
         if (fit < (double)n) n = (uint32_t)fit;
     }
@@ -202,6 +204,120 @@ double render_pass_budget(double idle_ticks, double pass_ticks,
          (pass_ticks > 0.0 ? pass_ticks : 0.0)) * share;
     if (b > frame_length) b = frame_length;
     return b;
+}
+
+double render_pass_leftover(double now, double frame_start, double reserve,
+                            double margin) {
+    if (!isfinite(now) || !isfinite(frame_start) || !(frame_start > 0.0))
+        return -1.0;
+    if (!(reserve >= 0.0) || !isfinite(reserve)) reserve = 0.0;
+    if (!(margin >= 0.0) || !isfinite(margin)) margin = 0.0;
+    return frame_start - reserve - margin - now;
+}
+
+double render_pass_reserve_update(double reserve, double sample) {
+    if (!(sample >= 0.0) || !isfinite(sample)) return reserve;
+    if (!(reserve > 0.0) || sample >= reserve) return sample;
+    return reserve + (sample - reserve) * RENDER_PASS_RESERVE_DECAY;
+}
+
+int render_pass_admission_pct(int internal_scale, int override_pct) {
+    if (override_pct >= 5 && override_pct <= 100) return override_pct;
+    return internal_scale <= 3 ? 65 : 50;
+}
+
+double render_pass_probe_min(double busy, double reserve, double vblank,
+                             int internal_scale) {
+    double normal = (busy > 0.0 ? busy : 0.0) + (reserve > 0.0 ? reserve : 0.0);
+    double minimum = (internal_scale <= 3 ? 1.0 : 2.0) * normal;
+    if (minimum < 0.25 * vblank) minimum = 0.25 * vblank;
+    return minimum;
+}
+
+static unsigned probe_limit(const RenderPassLeftoverCost *cost) {
+    return cost->probe_after ? cost->probe_after : RENDER_PASS_PROBE_MIN;
+}
+
+static void probe_wait_longer(RenderPassLeftoverCost *cost) {
+    unsigned limit = probe_limit(cost);
+    cost->probe_after = limit >= RENDER_PASS_PROBE_MAX / 2u
+                        ? RENDER_PASS_PROBE_MAX : limit * 2u;
+}
+
+void render_pass_leftover_cost_add(RenderPassLeftoverCost *cost, double sample,
+                                   int allocated) {
+    if (!cost || !(sample >= 0.0) || !isfinite(sample)) return;
+    if (allocated && cost->skips < RENDER_PASS_ALLOC_SKIPS) {
+        cost->skips++;
+        return;
+    }
+    cost->skips = 0;
+    cost->waited = 0;
+    if (cost->probing) {
+        /* A probe: the estimate priced every plan out. Far below what it
+         * rests on (the average, or a cut pass's bound), the estimate was
+         * stale (a transient, a busy moment): replace it. */
+        double ref = cost->kept ? cost->ema : 0.0;
+        if (cost->bound > ref) ref = cost->bound;
+        cost->probing = 0;
+        if (ref > 0.0 && sample < ref * RENDER_PASS_PROBE_STALE) {
+            cost->ema = sample;
+            cost->dev = sample * 0.25;
+            cost->kept = 1;
+            cost->bound = 0.0;
+            cost->probe_after = 0;
+            return;
+        }
+        probe_wait_longer(cost);
+    }
+    cost->bound = 0.0;
+    if (cost->kept == 0) {
+        cost->ema = sample;
+        cost->dev = sample * 0.25;
+    } else {
+        double d = fabs(sample - cost->ema);
+        cost->dev = cost->dev * 0.75 + d * 0.25;
+        cost->ema = render_pass_ema(cost->ema, sample);
+    }
+    if (cost->kept < 0xFFFFu) cost->kept++;
+}
+
+void render_pass_leftover_cost_cut(RenderPassLeftoverCost *cost, double elapsed,
+                                   int allocated) {
+    if (!cost || !(elapsed >= 0.0) || !isfinite(elapsed)) return;
+    if (allocated && cost->skips < RENDER_PASS_ALLOC_SKIPS) {
+        /* Its time went to one-time setup: no bound on the next pass. */
+        cost->skips++;
+        if (cost->probing) {
+            cost->probing = 0;
+            cost->waited = 0;
+        }
+        return;
+    }
+    if (elapsed > cost->bound) cost->bound = elapsed;
+    cost->skips = 0;
+    cost->waited = 0;
+    if (cost->probing) {
+        cost->probing = 0;
+        probe_wait_longer(cost);
+    }
+}
+
+double render_pass_leftover_cost_estimate(const RenderPassLeftoverCost *cost) {
+    double e;
+    if (!cost) return 0.0;
+    e = cost->kept ? cost->ema + 2.0 * cost->dev : 0.0;
+    if (cost->bound > e) e = cost->bound;
+    return e;
+}
+
+int render_pass_leftover_cost_probe_due(RenderPassLeftoverCost *cost) {
+    if (!cost || cost->probing || render_pass_leftover_cost_estimate(cost) <= 0.0)
+        return 0;
+    if (++cost->waited < probe_limit(cost)) return 0;
+    cost->waited = 0;
+    cost->probing = 1;
+    return 1;
 }
 
 int render_pass_mmio_class(uint32_t phys, uint32_t val, uint32_t width) {

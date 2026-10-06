@@ -30,6 +30,9 @@ typedef struct RenderPassPlanInput {
                                with a budget, one pass is planned until one
                                has been measured */
     double budget;          /* host ticks the passes may use; < 0 = unlimited */
+    double probe_min;       /* unknown cost under leftover-time planning: one
+                               pass only when the budget is at least this;
+                               0 = any budget (the idle-time planner) */
     uint32_t max;           /* caller's array capacity */
 } RenderPassPlanInput;
 
@@ -38,8 +41,9 @@ typedef struct RenderPassPlanInput {
  * ones within 1/64 of phase 0, which the game's own image already covers).
  * When the budget cannot pay for all of them, an evenly spread subset is
  * returned; while the pass cost is unknown that subset is one phase, since
- * passes run on the emulation thread. *wanted (optional) receives the
- * unshed count. Returns the count (0 when nothing is wanted or affordable). */
+ * passes run on the emulation thread (with `probe_min`, only when the budget
+ * is at least that). *wanted (optional) receives the unshed count. Returns
+ * the count (0 when nothing is wanted or affordable). */
 uint32_t render_pass_plan_phases(const RenderPassPlanInput *in,
                                  uint32_t *alpha_q16, uint32_t *wanted);
 
@@ -131,6 +135,91 @@ int    render_pass_cost_note_plan(RenderPassCost *cost);
  * clamped to [0, frame_length]. No history (both zero) -> share of the frame. */
 double render_pass_budget(double idle_ticks, double pass_ticks,
                           double frame_length, double share);
+
+/* ---- Leftover-time planning (PSX_MOD_RENDER_PASS_LEFTOVER) ---------------
+ * A title that opts in plans passes only into the host time left before the
+ * frame is first presented, after the work the emulation thread still has to
+ * do for it, and holds each pass to that deadline (the renderer stops one
+ * that runs into it). The math below is that planner's; the idle-time
+ * planner above stays the default. */
+
+/* Host ticks passes may still use now: the frame's display deadline
+ * (frame_start, when the game's frame is first presented) less the work the
+ * emulation thread still has to do before it (`reserve`) and a `margin`.
+ * Negative when there is none: the passes would delay the game's frame. */
+double render_pass_leftover(double now, double frame_start, double reserve,
+                            double margin);
+/* Running estimate of that work, from one measured sample per frame (the
+ * busy host time between the end of the passes and the frame's start). It
+ * errs late: a larger sample is taken at once, a smaller one moves it down
+ * by RENDER_PASS_RESERVE_DECAY of the difference. */
+#define RENDER_PASS_RESERVE_DECAY 0.03
+double render_pass_reserve_update(double reserve, double sample);
+
+/* Percent of the leftover time passes are planned into: an explicit
+ * override (5..100, PSX_RENDER_PASS_BUDGET) or, by internal resolution
+ * scale, 65 up to 3x and 50 above (full-resolution VRAM copies can exhaust
+ * the GPU between guest frames even when the CPU has spare time). */
+int    render_pass_admission_pct(int internal_scale, int override_pct);
+/* Least leftover time a pass of unknown cost is tried in: the emulation
+ * thread's own work this interval plus the reserve (twice that above 3x),
+ * and at least a quarter VBlank. Nothing is forced into a frame to learn a
+ * cost. */
+double render_pass_probe_min(double busy, double reserve, double vblank,
+                             int internal_scale);
+
+/* Host cost of one pass at one presented image size under leftover-time
+ * planning (the renderer starts a new one when the size changes). Passes are
+ * only planned into time the game leaves free, so the estimate is learnt
+ * from passes that fit, never from a pass forced into a frame:
+ *
+ * - A pass that ran to the end is a sample (..._add): the first one sets the
+ *   average, later ones move it (render_pass_ema), and the planning cost
+ *   adds twice the smoothed deviation, so a pass that varies is planned with
+ *   headroom.
+ * - `allocated`: as for RenderPassCost, left out at most
+ *   RENDER_PASS_ALLOC_SKIPS times in a row.
+ * - A pass stopped at the deadline (..._cut) costs more than it ran: that
+ *   time becomes a lower bound, and the estimate is never below it until a
+ *   pass completes. One whose time went to one-time setup bounds nothing.
+ * - Probing (..._probe_due): only passes that run are measured, so an
+ *   estimate that prices every plan out (measured in a transient, or a bound
+ *   from a busy moment) would never be corrected. Plans that wanted passes,
+ *   had at least the probe minimum of leftover time and planned none count
+ *   up; after RENDER_PASS_PROBE_MIN of them (about a second of a 30 Hz game)
+ *   one pass is tried in that leftover time -- stopped at the deadline like
+ *   any other, so it never delays the game. A probe that comes in below
+ *   RENDER_PASS_PROBE_STALE of what the estimate rests on (the average, or a
+ *   cut pass's bound) replaces it (and the wait stays at the minimum); one
+ *   that confirms it, or is stopped, doubles the wait, up to
+ *   RENDER_PASS_PROBE_MAX. */
+#define RENDER_PASS_PROBE_MIN    30u
+#define RENDER_PASS_PROBE_MAX    960u
+#define RENDER_PASS_PROBE_STALE  0.75
+typedef struct RenderPassLeftoverCost {
+    double   ema;                   /* completed passes; valid when kept > 0 */
+    double   dev;                   /* smoothed |sample - ema| */
+    double   bound;                 /* > 0: a pass was stopped after this long */
+    unsigned kept;                  /* completed samples (saturating) */
+    unsigned skips;                 /* allocating samples left out in a row */
+    unsigned waited;                /* priced-out plans since the last probe */
+    unsigned probe_after;           /* 0 = RENDER_PASS_PROBE_MIN */
+    int      probing;               /* the next sample or cut is a probe's */
+} RenderPassLeftoverCost;
+void   render_pass_leftover_cost_add(RenderPassLeftoverCost *cost, double sample,
+                                     int allocated);
+/* A pass stopped at its deadline after `elapsed` (or, for a pass stopped
+ * while copying the rect out, the cost extrapolated from the part copied). */
+void   render_pass_leftover_cost_cut(RenderPassLeftoverCost *cost, double elapsed,
+                                     int allocated);
+/* Host ticks to plan per pass: the average plus twice its deviation, never
+ * below a cut pass's bound; 0 while nothing is known (the plan then tries a
+ * single pass, given probe_min of leftover time). */
+double render_pass_leftover_cost_estimate(const RenderPassLeftoverCost *cost);
+/* Call once per plan that wanted passes, had at least the probe minimum of
+ * leftover time and planned none for cost. Returns 1 when one pass should be
+ * tried anyway (planned with an unknown cost, stopped at the deadline). */
+int    render_pass_leftover_cost_probe_due(RenderPassLeftoverCost *cost);
 
 /* Store policy inside a pass (memory.c): -1 = the MMIO store may reach its
  * device (GP0; GP1 DMA mode 0x04 / info 0x10; GPU and OTC DMA channels;

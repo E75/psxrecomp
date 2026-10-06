@@ -88,6 +88,20 @@ static void test_shedding(void) {
     in.budget = 0.0;
     CHECK(render_pass_plan_phases(&in, a, NULL) == 0,
           "no budget: not even the measuring pass");
+    /* Leftover-time planning: the measuring pass only into at least
+     * probe_min of leftover time (the caller stops it at the deadline). */
+    in.probe_min = 4e6;                                 /* a quarter VBlank */
+    in.budget = 26e6;
+    n = render_pass_plan_phases(&in, a, NULL);
+    CHECK(n == 1 && a[0] > 16384u && a[0] < 49152u,
+          "leftover: unknown cost with probe_min left plans one pass");
+    in.budget = 3.9e6;
+    CHECK(render_pass_plan_phases(&in, a, NULL) == 0,
+          "leftover: unknown cost and less than probe_min left: none");
+    in.budget = 0.0;
+    CHECK(render_pass_plan_phases(&in, a, NULL) == 0,
+          "leftover: no leftover, not even a probe");
+    in.probe_min = 0.0;
     in.pass_cost = 2e6;
 
     in.budget = -1.0;
@@ -326,7 +340,173 @@ static void test_stereo_pair_fresh(void) {
     CHECK(!render_pass_stereo_pair_fresh(c, c - 1, vb), "clock behind pair (state load) is stale");
 }
 
+static void test_leftover_and_reserve(void) {
+    /* The frame starts at 100 ms; 10 ms of work is still due before it. */
+    CHECK(fabs(render_pass_leftover(80.0, 100.0, 10.0, 1.0) - 9.0) < 1e-9,
+          "leftover = frame start - reserve - margin - now");
+    CHECK(render_pass_leftover(95.0, 100.0, 10.0, 1.0) < 0.0,
+          "past the point where the game needs the thread: none");
+    CHECK(render_pass_leftover(80.0, 0.0, 10.0, 1.0) < 0.0,
+          "no frame start known: none");
+    CHECK(fabs(render_pass_leftover(80.0, 100.0, -5.0, NAN) - 20.0) < 1e-9,
+          "bad reserve and margin count as zero");
+    /* The reserve errs late: a larger sample at once, a smaller one slowly. */
+    CHECK(render_pass_reserve_update(0.0, 6.0) == 6.0, "first sample sets it");
+    CHECK(render_pass_reserve_update(6.0, 9.0) == 9.0, "a larger sample at once");
+    {
+        double r = 9.0;
+        r = render_pass_reserve_update(r, 3.0);
+        CHECK(fabs(r - (9.0 - 6.0 * RENDER_PASS_RESERVE_DECAY)) < 1e-9,
+              "a smaller sample moves it down by the decay");
+        for (int i = 0; i < 400; i++) r = render_pass_reserve_update(r, 3.0);
+        CHECK(r > 3.0 && r < 3.01, "and it settles on a steady sample");
+    }
+    CHECK(render_pass_reserve_update(5.0, NAN) == 5.0 &&
+          render_pass_reserve_update(5.0, -1.0) == 5.0, "bad samples are ignored");
+}
+
+static void test_resolution_admission(void) {
+    CHECK(render_pass_admission_pct(1, 0) == 65 &&
+          render_pass_admission_pct(3, 0) == 65,
+          "native through 3x uses the wider admission");
+    CHECK(render_pass_admission_pct(4, 0) == 50 &&
+          render_pass_admission_pct(9, 0) == 50,
+          "higher scales keep the conservative admission");
+    CHECK(render_pass_admission_pct(9, 80) == 80,
+          "an explicit profiling budget remains available");
+    CHECK(render_pass_probe_min(4.0, 3.0, 16.0, 1) == 7.0 &&
+          render_pass_probe_min(4.0, 3.0, 16.0, 9) == 14.0,
+          "a high-resolution probe needs twice the normal work");
+    CHECK(render_pass_probe_min(1.0, 1.0, 16.0, 1) == 4.0,
+          "a low-resolution probe keeps the quarter-VBlank floor");
+}
+
+static void test_leftover_cost(void) {
+    {
+        /* First-use allocations are not samples; steady passes are, and the
+         * first one sets the average. */
+        RenderPassLeftoverCost c;
+        memset(&c, 0, sizeof c);
+        render_pass_leftover_cost_add(&c, 70.0, 1);
+        CHECK(render_pass_leftover_cost_estimate(&c) == 0.0 && c.skips == 1 &&
+              c.kept == 0, "an allocating pass is not a sample");
+        render_pass_leftover_cost_add(&c, 10.0, 0);
+        CHECK(c.kept == 1 && c.ema == 10.0 && c.skips == 0,
+              "the first completed pass sets the average");
+        CHECK(fabs(render_pass_leftover_cost_estimate(&c) - 15.0) < 1e-9,
+              "planned with twice the deviation as headroom (2 x 2.5)");
+        for (int i = 0; i < 40; i++) render_pass_leftover_cost_add(&c, 10.0, 0);
+        CHECK(fabs(render_pass_leftover_cost_estimate(&c) - 10.0) < 0.01,
+              "a steady cost loses its headroom");
+        render_pass_leftover_cost_add(&c, 70.0, 1);
+        CHECK(fabs(render_pass_leftover_cost_estimate(&c) - 10.0) < 0.01,
+              "a later allocating pass leaves it alone");
+        for (unsigned i = 1; i < RENDER_PASS_ALLOC_SKIPS; i++)
+            render_pass_leftover_cost_add(&c, 70.0, 1);
+        CHECK(c.skips == RENDER_PASS_ALLOC_SKIPS, "up to RENDER_PASS_ALLOC_SKIPS in a row");
+        render_pass_leftover_cost_add(&c, 70.0, 1);
+        CHECK(fabs(c.ema - 25.0) < 0.01 && c.skips == 0,
+              "then an allocating pass counts, so the average cannot freeze");
+        render_pass_leftover_cost_add(&c, -1.0, 0);
+        render_pass_leftover_cost_add(&c, NAN, 0);
+        CHECK(fabs(c.ema - 25.0) < 0.01, "bad samples are ignored");
+    }
+    {
+        /* A pass stopped at its deadline cost more than it ran: a lower
+         * bound, until a pass completes. */
+        RenderPassLeftoverCost c;
+        memset(&c, 0, sizeof c);
+        render_pass_leftover_cost_cut(&c, 9.0, 0);
+        CHECK(render_pass_leftover_cost_estimate(&c) == 9.0 && c.kept == 0,
+              "a cut with nothing measured: the bound is the estimate");
+        render_pass_leftover_cost_cut(&c, 7.0, 0);
+        CHECK(render_pass_leftover_cost_estimate(&c) == 9.0,
+              "a shorter cut lowers nothing");
+        render_pass_leftover_cost_add(&c, 4.0, 0);
+        CHECK(c.bound == 0.0 && c.ema == 4.0, "a completed pass clears the bound");
+        render_pass_leftover_cost_cut(&c, 12.0, 0);
+        CHECK(render_pass_leftover_cost_estimate(&c) == 12.0,
+              "a cut above the average raises the estimate to it");
+        render_pass_leftover_cost_cut(&c, NAN, 0);
+        CHECK(render_pass_leftover_cost_estimate(&c) == 12.0, "bad cuts are ignored");
+        render_pass_leftover_cost_cut(&c, 50.0, 1);
+        CHECK(render_pass_leftover_cost_estimate(&c) == 12.0 && c.skips == 1,
+              "a cut pass that allocated (one-time setup) bounds nothing");
+        /* A bound from one stopped pass can be a busy moment: it is probed
+         * like any estimate that prices plans out, and a probe far below it
+         * replaces it. */
+        {
+            unsigned due = 0;
+            for (unsigned i = 0; i < RENDER_PASS_PROBE_MIN; i++)
+                due += (unsigned)render_pass_leftover_cost_probe_due(&c);
+            CHECK(due == 1 && c.probing, "a bound is probed after the minimum wait");
+            render_pass_leftover_cost_add(&c, 3.0, 0);
+            CHECK(c.bound == 0.0 && c.ema == 3.0, "a fast probe replaces the bound");
+        }
+    }
+    {
+        /* The first passes of a race can run in a transient (14.8 ms against
+         * a steady 6.9 ms). Priced out, no pass runs to correct it: after
+         * RENDER_PASS_PROBE_MIN plans that had leftover time and planned
+         * none, one probe runs (stopped at the deadline like any pass). */
+        RenderPassLeftoverCost c;
+        unsigned i, due = 0;
+        memset(&c, 0, sizeof c);
+        CHECK(!render_pass_leftover_cost_probe_due(&c),
+              "unknown cost: plans probe anyway");
+        render_pass_leftover_cost_add(&c, 14.8, 0);
+        for (i = 1; i < RENDER_PASS_PROBE_MIN; i++)
+            due += (unsigned)render_pass_leftover_cost_probe_due(&c);
+        CHECK(due == 0, "29 priced-out plans: no probe yet");
+        CHECK(render_pass_leftover_cost_probe_due(&c) && c.probing, "the 30th probes");
+        CHECK(!render_pass_leftover_cost_probe_due(&c),
+              "no second probe while one is open");
+        render_pass_leftover_cost_add(&c, 6.9, 0);
+        CHECK(c.ema == 6.9 && c.kept == 1 && !c.probing && c.probe_after == 0,
+              "the probe found it stale: replaced, the wait stays at the minimum");
+        /* Passes run on it: each measured pass restarts the count. */
+        for (i = 0; i < 10u * RENDER_PASS_PROBE_MIN; i++) {
+            render_pass_leftover_cost_add(&c, 6.9, 0);
+            due += (unsigned)render_pass_leftover_cost_probe_due(&c);
+        }
+        CHECK(due == 0, "an estimate passes run against is never probed");
+    }
+    {
+        /* A size that is truly too expensive, or a machine at its limit:
+         * each probe is stopped at the deadline (or confirms the estimate),
+         * so the waits double to RENDER_PASS_PROBE_MAX and probes become
+         * rare. */
+        for (unsigned k = 0; k < 2; k++) {
+            RenderPassLeftoverCost c;
+            unsigned plans = 0, waits[8] = {0}, w = 0;
+            memset(&c, 0, sizeof c);
+            render_pass_leftover_cost_add(&c, 47.0, 0);
+            while (w < 8u && plans < 20000u) {
+                plans++;
+                if (render_pass_leftover_cost_probe_due(&c)) {
+                    waits[w++] = plans;
+                    plans = 0;
+                    if (k == 0) render_pass_leftover_cost_cut(&c, 9.0, 0);
+                    else render_pass_leftover_cost_add(&c, 46.0, 0);
+                }
+            }
+            CHECK(w == 8u && waits[0] == RENDER_PASS_PROBE_MIN &&
+                  waits[1] == 2u * RENDER_PASS_PROBE_MIN &&
+                  waits[2] == 4u * RENDER_PASS_PROBE_MIN,
+                  k ? "a confirming probe: the waits double"
+                    : "a cut probe: the waits double");
+            for (unsigned i = 5; i < 8; i++)
+                CHECK(waits[i] == RENDER_PASS_PROBE_MAX, "and stop at the maximum");
+            CHECK(render_pass_leftover_cost_estimate(&c) >= 46.0,
+                  "a cut probe never lowers the estimate");
+        }
+    }
+}
+
 int main(void) {
+    test_leftover_and_reserve();
+    test_resolution_admission();
+    test_leftover_cost();
     test_stereo_pair_fresh();
     test_store_policy();
     test_counts_per_rate();
