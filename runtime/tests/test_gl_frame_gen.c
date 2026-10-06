@@ -254,7 +254,11 @@ int main(int argc, char **argv) {
     check(gl_renderer_render_thread_start(2) == 1, "render thread started");
     if (pt_mode) check(gl_renderer_present_thread_active(), "present thread started");
     if (fg) {
+#ifdef _WIN32
+        _putenv("PSX_FRAME_GEN_FORCE=1");
+#else
         setenv("PSX_FRAME_GEN_FORCE", "1", 1);
+#endif
         gl_renderer_set_frame_generation(1);
         check(gl_renderer_frame_generation() == 1, "frame generation on");
     }

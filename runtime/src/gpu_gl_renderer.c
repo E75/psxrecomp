@@ -8301,6 +8301,10 @@ static int pt_cb_ctx(void *user, int current) {
     return 1;
 }
 
+/* The one owned swap call: the composing thread's (direct) or the present
+ * thread's. */
+static void gl_window_swap(void) { SDL_GL_SwapWindow(s_win); }
+
 static void *pt_cb_present(void *user, int slot, void *ready) {
     (void)user;
     if (s_ptp_interval_gen != s_pt_interval_gen) {
@@ -8335,7 +8339,7 @@ static void *pt_cb_present(void *user, int slot, void *ready) {
     GL_PRESENT_THREAD_TEST_HOOK(slot);
 #endif
     void *done = p_glFenceSync(PT_SYNC_GPU_COMMANDS_COMPLETE, 0);
-    SDL_GL_SwapWindow(s_win);
+    gl_window_swap();
     return done;
 }
 
@@ -8412,7 +8416,7 @@ static void pt_end(void) {
 
 /* The swap: direct, or queued to the present thread. */
 static void gl_present_swap(void) {
-    if (!s_pt_on) { SDL_GL_SwapWindow(s_win); return; }
+    if (!s_pt_on) { gl_window_swap(); return; }
     (void)pt_target_fbo();   /* a frame that never bound 0 still has its slot */
     void *ready = p_glFenceSync(PT_SYNC_GPU_COMMANDS_COMPLETE, 0);
     glFlush();
