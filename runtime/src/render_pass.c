@@ -318,6 +318,14 @@ void render_pass_reset_session(void) {
     s_pair_retry = 0;
     gl_renderer_stereo_reset();
     gl_renderer_pass_set_flip_shown(0);
+    gl_renderer_pass_set_leftover(0);
+}
+
+int psx_mod_set_render_pass_budget(uint32_t mode) {
+    if (mode != PSX_MOD_RENDER_PASS_IDLE && mode != PSX_MOD_RENDER_PASS_LEFTOVER)
+        return 0;
+    gl_renderer_pass_set_leftover(mode == PSX_MOD_RENDER_PASS_LEFTOVER);
+    return 1;
 }
 
 int psx_mod_set_render_pass_flip(uint32_t mode) {
@@ -577,6 +585,27 @@ static void watchdog_overrun(void) {
     }
 }
 
+/* Host ticks a pass still needs once its guest code ends (capture, VRAM and
+ * machine restore), smoothed. Under leftover planning a running pass is
+ * stopped while that much is left before its deadline, so even the stop is
+ * done in time. */
+static double s_end_ticks;
+
+static int deadline_near(void) {
+    return gl_renderer_pass_time_left() < s_end_ticks;
+}
+
+/* The pass ran into its deadline (the host time left before the game's
+ * frame is presented): stop it and roll it back like a watchdog abort, but
+ * it is not a fault -- the game's frame comes first. */
+static void deadline_overrun(void) {
+    s_stats.deadline_flag = 1;
+    if (s_abort_armed) {
+        s_abort_armed = 0;
+        longjmp(s_abort_jmp, 1);
+    }
+}
+
 static char s_abort_detail[192];
 
 static void note_fault(const char *what) {
@@ -606,6 +635,7 @@ static int render_transaction(struct CPUState *cpu, const PSXModRenderPass *pass
     uint64_t cycles_before;
     uint32_t leaks;
     int ok = 0, open, reuse;
+    volatile int ran = 0;   /* set between setjmp and a possible longjmp */
     static uint32_t s_leaks_before;
     uint32_t status;
 
@@ -640,6 +670,14 @@ static int render_transaction(struct CPUState *cpu, const PSXModRenderPass *pass
     if (g_overlay_flush_pending_cycles) g_overlay_flush_pending_cycles();
 
     s_attempt.guest_cycle = psx_cycle_count;
+    /* Only into time the game leaves free before its frame is presented
+     * (leftover planning): a pass that would end after the deadline is not
+     * started. Not a refusal -- the game's frame comes first. Stereo eye
+     * pairs have no frame deadline. */
+    if (eye < 0 && !gl_renderer_pass_may_start()) {
+        s_stats.skipped++;
+        return 0;
+    }
     t0 = gl_renderer_perf_ticks();
     open = eye < 0 ? s_open_generation : 0;
     {
@@ -680,14 +718,28 @@ static int render_transaction(struct CPUState *cpu, const PSXModRenderPass *pass
         s_stereo.eye_cycle[eye] = cycles_before;
         s_stereo.eye_hash[eye] = verify_on() ? hash_before : 0;
     }
+    s_stats.deadline_flag = 0;
     (void)psx_cycle_freeze_begin(&s_freeze, watchdog_cycles(),
                                  watchdog_overrun);
-    if (setjmp(s_abort_jmp) == 0) {
+    /* A pass with a deadline is polled against it at every freeze tick. */
+    if (eye < 0)
+        psx_cycle_freeze_set_poll(deadline_near, deadline_overrun);
+    if (eye < 0 && deadline_near()) {
+        /* The backup alone used the time up: no guest code. */
+        s_stats.deadline_flag = 1;
+        ok = 0;
+    } else if (setjmp(s_abort_jmp) == 0) {
         s_pass_cpu = cpu;
         s_abort_armed = 1;
+        ran = 1;
         ok = fn(cpu, user, pass->alpha_q16) ? 1 : 0;
         s_abort_armed = 0;
         if (!ok) s_stats.discarded++;
+        /* Finished, but too late to be worth a capture. */
+        if (ok && eye < 0 && deadline_near()) {
+            s_stats.deadline_flag = 1;
+            ok = 0;
+        }
         if (verify_on() && !nesting_balanced(&s_ck.nest)) {
             s_stats.verify_mismatch++;
             if (eye >= 0) ok = 0;
@@ -701,11 +753,14 @@ static int render_transaction(struct CPUState *cpu, const PSXModRenderPass *pass
          * nesting the longjmp skipped is put back by checkpoint_restore and
          * psx_cycle_freeze_end below. */
         if (g_overlay_flush_pending_cycles) g_overlay_flush_pending_cycles();
-        if (nesting_describe(&s_ck.nest, s_freeze.bb_defer, s_abort_detail,
-                             sizeof s_abort_detail))
-            s_stats.nesting_repairs++;
-        snprintf(s_stats.last_abort_detail, sizeof s_stats.last_abort_detail,
-                 "%s", s_abort_detail);
+        /* A stop at the deadline is not a fault: no abort diagnostics. */
+        if (!s_stats.deadline_flag) {
+            if (nesting_describe(&s_ck.nest, s_freeze.bb_defer, s_abort_detail,
+                                 sizeof s_abort_detail))
+                s_stats.nesting_repairs++;
+            snprintf(s_stats.last_abort_detail, sizeof s_stats.last_abort_detail,
+                     "%s", s_abort_detail);
+        }
         ok = 0;
     }
     s_stats.guest_cycles_last = psx_cycle_count - cycles_before;
@@ -718,8 +773,11 @@ static int render_transaction(struct CPUState *cpu, const PSXModRenderPass *pass
         s_stats.vram_leaks += leaks;
         ok = 0;
     }
-    /* Capture (when kept), then roll the VRAM rect and renderer back. */
-    if (!transaction_end(eye, ok ? pass->alpha_q16 : 0, ok)) {
+    /* Capture (when kept), then roll the VRAM rect and renderer back; a
+     * pass stopped before its guest code ran drew nothing to roll back. */
+    if (!ran) {
+        gl_renderer_pass_abandon();
+    } else if (!transaction_end(eye, ok ? pass->alpha_q16 : 0, ok)) {
         ok = 0;
         if (eye >= 0) s_stereo.last_failure = "eye_capture";
     }
@@ -736,6 +794,10 @@ static int render_transaction(struct CPUState *cpu, const PSXModRenderPass *pass
     s_stats.avg_guest_ms = ema_ms(s_stats.avg_guest_ms, tg - tb);
     s_stats.avg_end_ms = ema_ms(s_stats.avg_end_ms, te - tg);
     s_stats.avg_restore_ms = ema_ms(s_stats.avg_restore_ms, tr - te);
+    if (eye < 0 && ran) {
+        double end = (double)(tr - tg);
+        s_end_ticks = s_end_ticks > 0.0 ? s_end_ticks * 0.75 + end * 0.25 : end;
+    }
 
     if (verify_on()) {
         hash_after = state_hash(cpu);
@@ -759,11 +821,13 @@ static int render_transaction(struct CPUState *cpu, const PSXModRenderPass *pass
         s_stats.avg_pass_ms = s_stats.avg_pass_ms > 0.0
             ? s_stats.avg_pass_ms * 0.9 + ms * 0.1 : ms;
     }
-    if (eye < 0) gl_renderer_pass_note_cost(t1 - t0);
+    if (eye < 0) gl_renderer_pass_note_cost(t1 - t0, s_stats.deadline_flag);
     if (ok) s_stats.passes++;
     else if (leaks) note_fault("VRAM write outside the pass rect");
     else if (s_stats.watchdog_flag) note_fault("guest-cycle watchdog");
+    else if (s_stats.deadline_flag) s_stats.cut++;
     s_stats.watchdog_flag = 0;
+    s_stats.deadline_flag = 0;
     /* Present anything that fell due while the pass ran. */
     if (eye < 0) gl_renderer_pass_service_presents();
     return ok;

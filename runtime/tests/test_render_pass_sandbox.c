@@ -11,7 +11,10 @@
  *    interrupts: the drops are counted per class, no device advances, no
  *    timer IRQ is raised, and RAM, scratchpad, I_STAT/I_MASK, timers and the
  *    clock are exactly as before. Status gates refuse the pass without
- *    running it. The same with 8 MiB RAM live (the opt-in 8 MB RAM map):
+ *    running it. Under leftover planning a pass that would end after its
+ *    deadline (the host time left before the game's frame is presented) is
+ *    not started; one that runs into it is stopped by the freeze's host-time
+ *    poll, rolled back and counted as cut, never as a fault. The same with 8 MiB RAM live (the opt-in 8 MB RAM map):
  *    stores reach unique RAM up to 0x7FFFFF and all 8 MiB are restored; a
  *    retail pass after it folds mirrors again.
  * 3. VRAM journal (render_pass_vram_policy / _journal_add / _rollback, the
@@ -240,7 +243,22 @@ void gl_renderer_pass_end(uint32_t alpha_q16, int keep) {
 }
 uint32_t gl_renderer_pass_leaks(void) { return 0; }
 int gl_renderer_pass_verify_vram(void) { return 1; }
-void gl_renderer_pass_note_cost(uint64_t t) { (void)t; }
+/* Leftover planning: whether a pass may start, and the deadline the running
+ * pass is polled against (here: after s_deadline_polls polls). */
+static int s_may_start = 1, s_deadline_polls = -1, s_polls;
+static int s_cost_notes, s_cost_cuts;
+void gl_renderer_pass_note_cost(uint64_t t, int cut) {
+    (void)t;
+    s_cost_notes++;
+    if (cut) s_cost_cuts++;
+}
+void gl_renderer_pass_abandon(void) { s_open_passes--; }
+int gl_renderer_pass_may_start(void) { return s_may_start; }
+double gl_renderer_pass_time_left(void) {
+    if (s_deadline_polls < 0) return 1e18;
+    return ++s_polls > s_deadline_polls ? -1.0 : 1e18;
+}
+void gl_renderer_pass_set_leftover(int on) { (void)on; }
 void gl_renderer_pass_service_presents(void) {}
 static uint32_t s_stereo_mask;
 static uint64_t s_stereo_published;
@@ -738,9 +756,102 @@ static void test_texture_stream_journal(void) {
     render_pass_journal_free(&j);
 }
 
+/* ---- 2a. the deadline: the game's frame comes first --------------------- */
+static int s_deadline_ran;
+static int long_fn(struct CPUState *cpu, void *user, uint32_t alpha_q16) {
+    (void)user; (void)alpha_q16;
+    s_deadline_ran = 1;
+    cpu->gpr[8] = 0xBADu;
+    guest_store(0x80010000u, 0x0BADF00Du, 4);
+    /* Far more than the deadline allows: the poll stops it on the way. */
+    for (int i = 0; i < 1000; i++) psx_advance_cycles(1000u);
+    failures++;
+    fprintf(stderr, "FAIL: a pass ran past its deadline\n");
+    return 1;
+}
+
+static void test_deadline(void) {
+    CPUState cpu;
+    PSXModRenderPass pass;
+    RenderPassStats st0, st;
+    uint8_t ram0[16];
+    uint64_t cyc0;
+    int opened0 = s_open_passes, kept0 = s_kept;
+
+    memset(&cpu, 0, sizeof cpu);
+    cpu.gpr[8] = 0x77u;
+    memset(&pass, 0, sizeof pass);
+    pass.struct_size = sizeof pass;
+    pass.w = 320; pass.h = 240;
+    pass.alpha_q16 = 32768u;
+    render_pass_get_stats(&st0);
+
+    /* A pass that would end after the deadline is not started at all. */
+    s_may_start = 0;
+    s_cost_notes = 0;
+    CHECK(psx_mod_render_pass(&cpu, &pass, never_fn, NULL) == 0,
+          "a pass that does not fit is not started");
+    render_pass_get_stats(&st);
+    CHECK(st.skipped == st0.skipped + 1 && st.aborted == st0.aborted &&
+          st.last_failure.attempt == st0.last_failure.attempt,
+          "counted as skipped, not as a fault or a refusal");
+    CHECK(s_open_passes == opened0 && s_cost_notes == 0,
+          "nothing opened, nothing measured");
+    s_may_start = 1;
+
+    /* One that runs into the deadline is stopped there and rolled back; it
+     * is a lower bound for the cost, never a fault, however often. */
+    memcpy(ram0, s_ram + 0x10000, sizeof ram0);
+    cyc0 = psx_cycle_count;
+    for (int k = 0; k < 12; k++) {
+        s_polls = 0;
+        s_deadline_polls = 3;
+        s_deadline_ran = 0;
+        s_cost_cuts = 0;
+        CHECK(psx_mod_render_pass(&cpu, &pass, long_fn, NULL) == 0,
+              "a pass past its deadline is not kept");
+        CHECK(s_deadline_ran && s_cost_cuts == 1, "it ran and was noted as cut");
+    }
+    s_deadline_polls = -1;
+    render_pass_get_stats(&st);
+    CHECK(st.cut == st0.cut + 12 && st.aborted == st0.aborted &&
+          st.watchdog == st0.watchdog && st.nesting_repairs == st0.nesting_repairs,
+          "12 cuts, no fault, no abort diagnostics");
+    CHECK(!st.disabled && psx_mod_render_pass_status() == PSX_MOD_RENDER_PASS_READY,
+          "cuts never disable passes");
+    CHECK(s_kept == kept0 && s_open_passes == opened0, "no image kept, pass closed");
+    CHECK(memcmp(ram0, s_ram + 0x10000, sizeof ram0) == 0 && cpu.gpr[8] == 0x77u &&
+          psx_cycle_count == cyc0 && !g_psx_render_pass_active,
+          "RAM, CPU and clock restored after a cut");
+
+    /* Out of time before its guest code starts (the copy out took it): the
+     * callback never runs and there is nothing to restore. */
+    {
+        int opened = s_open_passes;
+        render_pass_get_stats(&st0);
+        s_polls = 0;
+        s_deadline_polls = 0;
+        CHECK(psx_mod_render_pass(&cpu, &pass, never_fn, NULL) == 0,
+              "no time left after the copy: not run");
+        s_deadline_polls = -1;
+        render_pass_get_stats(&st);
+        CHECK(st.cut == st0.cut + 1 && st.aborted == st0.aborted &&
+              s_open_passes == opened && !g_psx_render_pass_active,
+              "abandoned without its guest code, counted as cut, closed");
+    }
+
+    /* A pass inside its deadline is kept. */
+    s_polls = 0;
+    s_deadline_polls = 1000000;
+    CHECK(psx_mod_render_pass(&cpu, &pass, pass_fn, NULL) == 1,
+          "a pass inside its deadline is kept");
+    s_deadline_polls = -1;
+}
+
 int main(void) {
     test_store_policy();
     test_pass();
+    test_deadline();
     test_ram_8mb();
     test_journal();
     test_stereo();

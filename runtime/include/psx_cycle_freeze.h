@@ -40,6 +40,11 @@ typedef struct PsxCycleFreeze {
 } PsxCycleFreeze;
 int  psx_cycle_freeze_begin(PsxCycleFreeze *save, uint64_t watchdog_cycles,
                             void (*overrun)(void));
+/* Optional host-time cut-off for the open freeze: `poll` is called at every
+ * freeze tick (at most 16K guest cycles apart) and, when it returns nonzero,
+ * `stop` is called once (it must not return into the guest either). end()
+ * clears it. */
+void psx_cycle_freeze_set_poll(int (*poll)(void), void (*stop)(void));
 void psx_cycle_freeze_end(const PsxCycleFreeze *save);
 
 #ifdef __cplusplus

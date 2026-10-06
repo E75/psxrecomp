@@ -110,7 +110,7 @@ for name in ("pass_make_color_fbo", "pass_gen_reserve"):
     assert "s_pass_allocs++" in definition(gl, name), (
         "pass allocations must be counted: " + name)
 assert "render_pass_cost_add(" in body(
-    gl, "void gl_renderer_pass_note_cost(uint64_t ticks) {"), (
+    gl, "void gl_renderer_pass_note_cost(uint64_t ticks, int cut) {"), (
     "the pass-cost average must leave allocating passes out")
 assert "s_pass_allocs_begin = s_pass_allocs;" in body(
     gl, "static int transaction_begin("), (
@@ -118,7 +118,7 @@ assert "s_pass_allocs_begin = s_pass_allocs;" in body(
 # The average belongs to one presented image size. A plan at another size
 # passes an unknown cost (0), for which render_pass_plan_phases plans a single
 # measuring pass (render_pass_plan_test): passes run on the emulation thread.
-nc = body(gl, "void gl_renderer_pass_note_cost(uint64_t ticks) {")
+nc = body(gl, "void gl_renderer_pass_note_cost(uint64_t ticks, int cut) {")
 assert "s_pass_cost_w != s_interp_w || s_pass_cost_h != s_interp_h" in nc and \
     "memset(&s_pass_cost, 0, sizeof s_pass_cost);" in nc, (
     "a new image size must start the pass-cost average over")
@@ -139,6 +139,53 @@ assert re.search(r"if \(want && s_pass_cost_w == s_interp_w && "
               gp), (
     "every plan that wants passes must let a stale estimate be re-measured, "
     "and the re-measuring plan must ask for one pass")
+# Leftover-time planning (PSX_MOD_RENDER_PASS_LEFTOVER) is opt-in: the
+# idle-time planner stays the default and holds passes to no deadline.
+gpp = gl[gl.index("uint32_t gl_renderer_pass_plan("):]
+gpp = gpp[:gpp.index("\n}\n")]
+assert "if (s_pass_leftover)\n        return pass_plan_leftover(" in gpp, (
+    "the leftover planner runs only for a title that opted in")
+assert "static int      s_pass_leftover = 0;" in gl, "leftover planning is off by default"
+assert "if (!s_pass_leftover) return 1;" in body(gl, "int gl_renderer_pass_may_start(void) {"), (
+    "the idle-time planner never skips a pass for time")
+assert "if (!s_pass_leftover || !(s_pass_deadline > 0.0)) return 1e18;" in \
+    body(gl, "double gl_renderer_pass_time_left(void) {"), (
+    "the idle-time planner never stops a pass at a deadline")
+assert "gl_renderer_pass_set_leftover(0);" in body(rp, "void render_pass_reset_session(void) {"), (
+    "every session starts with the default planner")
+# Passes never delay the game's frame (docs/RENDER_PASSES.md): the leftover
+# budget is the time left before the frame is first presented, less the work
+# the emulation thread still has to do (measured), and the deadline the
+# passes are held to is that same point.
+lp = gl[gl.index("static uint32_t pass_plan_leftover("):]
+lp = lp[:lp.index("\n}\n")]
+assert "render_pass_leftover(now, in.frame_start, s_pass_reserve, margin)" in lp \
+    and "s_pass_deadline = in.frame_start - s_pass_reserve - margin;" in lp, (
+    "leftover plans must budget only the time before the frame's start")
+assert "in.probe_min = render_pass_probe_min(" in lp, (
+    "an unmeasured pass is tried only with the frame's own cost to spare")
+assert "if (n && !pass_gpu_caught_up()) {" in lp, (
+    "passes wait for the GPU to finish the game's frame")
+assert "if (n && s_since_tight < PASS_TIGHT_HOLDOFF) {" in lp, (
+    "no passes while the game itself has no slack")
+assert "if (n > pace_cap) {" in lp and "pace_cap = pass_pace_cap(sp);" in lp, (
+    "the pace guard limits passes after a frame that slipped")
+assert re.search(r"render_pass_leftover_cost_probe_due\(&s_pass_lcost\)\) \{", lp) and \
+    "in.budget >= in.probe_min" in lp, (
+    "a stale estimate is probed only in leftover time, with one pass")
+# Each pass is held to the deadline: not started when it would end after it,
+# stopped (not a fault) when it runs into it (render_pass_sandbox_test).
+rpt = rp[rp.index("static int render_transaction("):]
+assert rpt.index("gl_renderer_pass_may_start()") < rpt.index("gl_renderer_pass_begin("), (
+    "the start check must come before the pass opens its VRAM transaction")
+assert "psx_cycle_freeze_set_poll(deadline_near, deadline_overrun);" in rpt and \
+    "gl_renderer_pass_time_left() < s_end_ticks" in rp, (
+    "a running pass must be polled against its deadline, less what its "
+    "capture and restore still take")
+assert "note_fault" not in definition(rp, "deadline_overrun"), (
+    "a pass stopped at its deadline is not a fault")
+assert "volatile int ran = 0;" in rpt and "gl_renderer_pass_abandon();" in rpt, (
+    "a pass whose guest code never ran has nothing to restore")
 # A frame on screen longer than planned (a lagging tick) must hold its newest
 # pass image, never fall back to the older capture (render_pass_plan_test).
 pgp = definition(gl, "pass_gen_choose")

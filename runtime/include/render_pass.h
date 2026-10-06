@@ -46,6 +46,10 @@ typedef struct RenderPassStats {
     uint64_t aborted;         /* passes rolled back by a fault */
     uint64_t discarded;       /* passes whose plugin declined the image */
     uint64_t watchdog;        /* of which: guest-cycle watchdog overruns */
+    uint64_t skipped;         /* leftover planning: passes not started, they
+                                 would end after the deadline */
+    uint64_t cut;             /* leftover planning: passes stopped at the
+                                 deadline (not a fault) */
     uint64_t vram_leaks;      /* GPU writes outside the declared rect (dropped) */
     uint64_t nesting_repairs; /* aborts whose skipped exits the restore undid */
     char last_abort_detail[192]; /* skipped host exits; latched until session reset */
@@ -63,6 +67,7 @@ typedef struct RenderPassStats {
     uint64_t guest_cycles_last; /* guest cycles the last pass executed */
     int      disabled;        /* sticky: passes disabled after repeated faults */
     int      watchdog_flag;   /* internal: the current pass overran */
+    int      deadline_flag;   /* internal: the current pass hit its deadline */
 } RenderPassStats;
 
 void render_pass_get_stats(RenderPassStats *out);

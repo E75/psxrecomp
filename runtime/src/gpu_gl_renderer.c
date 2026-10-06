@@ -268,6 +268,19 @@ static PFN_glCheckFramebufferStatus p_glCheckFramebufferStatus;
 static PFN_glBlitFramebuffer   p_glBlitFramebuffer;
 static PFN_glGenQueries          p_glGenQueries;
 static PFN_glDeleteQueries       p_glDeleteQueries;
+/* Fence sync (core GL 3.2): under leftover-time planning render passes start
+ * only once the GPU has finished the work queued before them
+ * (gl_renderer_pass_plan). The handle is an opaque pointer (GLsync). */
+typedef void * (APIENTRY *PFN_psx_glFenceSync)(GLenum, GLbitfield);
+typedef GLenum (APIENTRY *PFN_psx_glClientWaitSync)(void *, GLbitfield, GLuint64);
+typedef void   (APIENTRY *PFN_psx_glDeleteSync)(void *);
+#define PSXGL_SYNC_GPU_COMMANDS_COMPLETE 0x9117
+#define PSXGL_ALREADY_SIGNALED           0x911A
+#define PSXGL_CONDITION_SATISFIED        0x911C
+#define PSXGL_SYNC_FLUSH_COMMANDS_BIT    0x00000001
+static PFN_psx_glFenceSync      p_glFenceSync;
+static PFN_psx_glClientWaitSync p_glClientWaitSync;
+static PFN_psx_glDeleteSync     p_glDeleteSync;
 static PFN_glBeginQuery          p_glBeginQuery;
 static PFN_glEndQuery            p_glEndQuery;
 static PFN_glGetQueryObjectui64v p_glGetQueryObjectui64v;
@@ -336,6 +349,10 @@ static int load_modern_gl(void) {
     /* Optional: only the debug presented-image ring maps pack buffers. */
     p_glMapBuffer           = (void *)SDL_GL_GetProcAddress("glMapBuffer");
     p_glUnmapBuffer         = (void *)SDL_GL_GetProcAddress("glUnmapBuffer");
+    /* Optional: only leftover-time render-pass planning uses fences. */
+    p_glFenceSync           = (void *)SDL_GL_GetProcAddress("glFenceSync");
+    p_glClientWaitSync      = (void *)SDL_GL_GetProcAddress("glClientWaitSync");
+    p_glDeleteSync          = (void *)SDL_GL_GetProcAddress("glDeleteSync");
 #undef LOAD
     return ok;
 }
@@ -525,6 +542,29 @@ static uint64_t s_present_dups = 0;
 static int      s_intervals_unpresented = 0;
 static int pass_gen_choose(uint64_t deadline, PresentChoice *c);
 static void pass_count_present(const PresentChoice *c);
+/* PSX_MOD_RENDER_PASS_LEFTOVER (psx_mod_set_render_pass_budget): plan passes
+ * only into the host time left before the frame is first presented and hold
+ * each to that deadline. Off by default: the idle-time planner. */
+static int      s_pass_leftover = 0;
+/* Leftover planning: fence after each guest VBlank's presents; passes wait
+ * for the GPU to have finished everything queued before them (the game's
+ * frame included). */
+static void    *s_present_fence = NULL;
+static uint64_t s_pass_gpu_busy = 0;   /* plans refused: GPU not caught up */
+/* When the presenter last let the emulation thread go on (host ticks). */
+static uint64_t s_interval_resume = 0;
+/* A guest VBlank that left the emulation thread no idle time although no
+ * pass ran in it: the game is at its limit (or catching up after a stall).
+ * Leftover planning plans no passes for PASS_TIGHT_HOLDOFF VBlanks after
+ * one. */
+#define PASS_TIGHT_HOLDOFF 30u
+static uint64_t s_idle_total = 0;      /* monotonic idle-wait ticks */
+static uint32_t s_since_tight = 0;
+static uint32_t s_passes_this_interval = 0;
+static uint64_t s_pass_behind = 0;     /* plans refused: no slack lately */
+static int pass_gpu_caught_up(void);
+static void pass_note_interval_end(uint64_t resume, double frame_end);
+static void pass_note_vblank_late(double late, double vblank_ticks);
 static int stereo_present(int w, int h);
 static void stereo_resources_release(void);
 static void stereo_invalidate(void);
@@ -6002,7 +6042,18 @@ static void interp_present_source_interval(void) {
     uint64_t now = SDL_GetPerformanceCounter();
     uint64_t deadline;
     float alpha;
+    uint64_t idle_before = s_idle_total;
 
+    /* Leftover planning: how late this guest VBlank is (pass_pace_cap). The
+     * presenter waits out each interval up to its deadline, and the guest's
+     * work for the next VBlank runs in the next interval: that VBlank is
+     * late when it arrives after the end of that interval. */
+    if (s_pass_leftover && s_interp_schedule.source_deadline > 0.0 &&
+        s_interp_source_hz > 0.0) {
+        double sp = (double)frequency / s_interp_source_hz;
+        pass_note_vblank_late((double)now - (s_interp_schedule.source_deadline + sp),
+                              sp);
+    }
     if (!frame_interpolation_schedule_begin_phase(
             &s_interp_schedule, now, frequency,
             s_interp_source_hz, s_interp_target_hz,
@@ -6052,8 +6103,22 @@ static void interp_present_source_interval(void) {
         }
         s_intervals_unpresented = presented ? 0 : s_intervals_unpresented + 1;
     }
+    if (s_pass_leftover && p_glFenceSync && p_glDeleteSync) {
+        if (s_present_fence) p_glDeleteSync(s_present_fence);
+        s_present_fence = p_glFenceSync(PSXGL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    }
     interp_wait_until(frame_interpolation_schedule_end(&s_interp_schedule),
                       frequency);
+    if (s_pass_leftover) {
+        s_interval_resume = SDL_GetPerformanceCounter();
+        pass_note_interval_end(s_interval_resume, s_interp_schedule.frame_end);
+        if (s_idle_total - idle_before < frequency / 2000u &&
+            s_passes_this_interval == 0)
+            s_since_tight = 0;
+        else if (s_since_tight < 0xFFFFu)
+            s_since_tight++;
+    }
+    s_passes_this_interval = 0;
 
     now = SDL_GetPerformanceCounter();
     if (!diag_start) {
@@ -6175,6 +6240,97 @@ static double   s_present_cost_ema = 0.0;     /* host ticks per present */
 static uint32_t s_intervals_since_plan = 0;
 static int      s_pass_budget_pct = -1;
 
+/* Leftover-time planning (docs/RENDER_PASSES.md "Leftover-time budget").
+ * Passes of a plan belong to a frame first presented at s_plan_frame_start;
+ * they may use only the host time before it that the emulation thread does
+ * not need for the rest of its work (s_pass_reserve, measured), so the
+ * game's own frame is never presented later than without them. */
+static RenderPassLeftoverCost s_pass_lcost;
+static double   s_pass_deadline = 0.0;     /* host tick passes must end by */
+static double   s_pass_probe_min = 0.0;    /* least leftover worth a probe */
+static int      s_pass_plan_probe = 0;     /* the open plan is a cost probe */
+static double   s_plan_frame_start = 0.0;  /* the open plan's frame start */
+static double   s_plan_source_period = 0.0;
+static uint64_t s_plan_work_end = 0;       /* host tick its own work ended */
+static uint64_t s_plan_idle_mark = 0;      /* s_idle_total then */
+static int      s_plan_pending = 0;        /* reserve sample due at its start */
+static uint32_t s_plan_passes_run = 0;     /* passes started for it */
+static double   s_pass_reserve = 0.0;      /* ticks of work due after passes */
+/* Diagnostics (render_pass_stats). */
+static uint64_t s_pass_skipped_time = 0;   /* passes not started: too late */
+static uint64_t s_pass_cuts = 0;           /* passes stopped at the deadline */
+static uint64_t s_pass_probes = 0;         /* cost probes planned */
+static double   s_plan_budget_ms_sum = 0.0;
+static uint64_t s_plan_budget_n = 0;
+/* How late the emulation thread resumed after the interval that ends where a
+ * planned frame starts (resume tick minus that frame start), split by
+ * whether passes ran for the frame; and how often passes made it later than
+ * the no-pass baseline (s_resume_late_base) by more than a millisecond. */
+static double   s_late_pass_ms_sum = 0.0, s_late_pass_ms_max = 0.0;
+static double   s_late_nopass_ms_sum = 0.0, s_late_nopass_ms_max = 0.0;
+static uint64_t s_late_pass_n = 0, s_late_nopass_n = 0;
+static double   s_resume_late_base = 0.0;  /* ticks, EMA without passes */
+static uint64_t s_frames_delayed = 0;
+
+/* Guest pace guard (leftover planning). A pass is timed on the emulation
+ * thread, which does not wait for the GPU work it queues. Where the GPU, not
+ * the CPU, is the limit -- high internal resolutions -- that time
+ * understates what passes cost: the GPU falls behind, the emulation thread
+ * waits for it in a later present, and the guest slips behind the
+ * presenter's schedule. Passes must never slow the game, so the schedule
+ * limits them. Each guest VBlank's arrival is checked against the end of its
+ * interval. A frame's passes run in one burst, so the VBlank after them may
+ * be late and the next one catch up; a game frame in which every VBlank was
+ * late by more than 1/PASS_LATE_DIV of a VBlank did not catch up, and the
+ * plan after it halves the passes allowed per frame (s_pace_cap, down to
+ * none). Plans that keep pace let it grow by one every s_pace_wait plans. A
+ * cap cut again soon after it grew doubles that wait, up to
+ * PASS_PACE_WAIT_MAX plans, so a host at its limit is probed rarely; a step
+ * that holds halves it again. A guest that slips for any other reason (a
+ * busy host, a heavy scene) holds passes off too. */
+#define PASS_PACE_WAIT_MIN 8u
+#define PASS_PACE_WAIT_MAX 1024u
+#define PASS_LATE_DIV      8.0
+static uint32_t s_pace_cap = 1, s_pace_ok = 0, s_pace_wait = PASS_PACE_WAIT_MIN;
+static uint32_t s_pace_since_grow = UINT32_MAX;  /* plans since the last step up */
+static uint64_t s_pace_cuts = 0;                 /* plans that found the guest slipping */
+static uint64_t s_pace_vblanks = 0, s_pace_late = 0;   /* VBlanks; late ones */
+static double   s_late_min = 0.0;                /* earliest VBlank since the plan */
+static int      s_late_seen = 0;
+
+/* A guest VBlank arrived `late` host ticks after its interval's end
+ * (negative: early). */
+static void pass_note_vblank_late(double late, double vblank_ticks) {
+    if (!s_late_seen || late < s_late_min) s_late_min = late;
+    s_late_seen = 1;
+    s_pace_vblanks++;
+    if (late > vblank_ticks / PASS_LATE_DIV) s_pace_late++;
+}
+
+static uint32_t pass_pace_cap(double vblank_ticks) {
+    int slipped = s_late_seen && s_late_min > vblank_ticks / PASS_LATE_DIV;
+    s_late_seen = 0;
+    if (s_pace_since_grow < UINT32_MAX) s_pace_since_grow++;
+    if (slipped) {
+        s_pace_cuts++;
+        if (s_pace_since_grow <= 2u * s_pace_wait)      /* the last step up failed */
+            s_pace_wait = s_pace_wait >= PASS_PACE_WAIT_MAX / 2u
+                          ? PASS_PACE_WAIT_MAX : s_pace_wait * 2u;
+        s_pace_cap /= 2u;
+        s_pace_ok = 0;
+        s_pace_since_grow = UINT32_MAX;
+    } else if (++s_pace_ok >= s_pace_wait) {
+        s_pace_ok = 0;
+        if (s_pace_cap < RENDER_PASS_MAX_PHASES) {
+            if (s_pace_since_grow != UINT32_MAX && s_pace_wait > PASS_PACE_WAIT_MIN)
+                s_pace_wait /= 2u;                      /* the last step up held */
+            s_pace_cap++;
+            s_pace_since_grow = 0;
+        }
+    }
+    return s_pace_cap;
+}
+
 static int      s_pass_verify = -1;
 static uint8_t *s_pv_hr = NULL, *s_pv_raw = NULL;
 static size_t   s_pv_hr_cap = 0, s_pv_raw_cap = 0;
@@ -6258,6 +6414,183 @@ static uint32_t pass_slot_cap(int tex_w, int tex_h) {
     return cap;
 }
 
+/* Leftover-time plan (PSX_MOD_RENDER_PASS_LEFTOVER): only into the host time
+ * left before the frame is first presented, after the work the emulation
+ * thread still has to do for it; every pass is held to that deadline
+ * (gl_renderer_pass_may_start, gl_renderer_pass_time_left). */
+static uint32_t pass_plan_leftover(uint32_t period_vblanks,
+                                   uint32_t shown_after_vblanks,
+                                   uint32_t *alpha_q16, uint32_t max,
+                                   uint32_t *wanted) {
+    RenderPassPlanInput in;
+    double freq, sp, now, margin, leftover;
+    uint32_t cap, want = 0, n, pace_cap;
+    int live, same_size;
+
+    if (wanted) *wanted = 0;
+    s_idle_ticks_accum = s_pass_ticks_accum = s_present_ticks_accum = 0;
+    live = s_intervals_since_plan > 0;   /* turbo/headless present nothing */
+    s_intervals_since_plan = 0;
+    s_pass_deadline = 0.0;
+    s_pass_plan_probe = 0;
+    if (!gl_renderer_pass_ready() || !live || !alpha_q16 || max == 0) return 0;
+    if (s_interp_schedule.target_period <= 0.0 ||
+        s_interp_schedule.source_deadline <= 0.0)
+        return 0;
+    if (s_pass_budget_pct < 0) {
+        const char *e = getenv("PSX_RENDER_PASS_BUDGET");
+        int v = e ? atoi(e) : 0;
+        s_pass_budget_pct = (v >= 5 && v <= 100) ? v : 0;
+    }
+    freq = (double)SDL_GetPerformanceFrequency();
+    sp = freq / s_interp_source_hz;
+    pace_cap = pass_pace_cap(sp);
+    cap = pass_slot_cap(s_interp_w, s_interp_h);
+    if (cap < 2) return 0;
+    now = (double)SDL_GetPerformanceCounter();
+    memset(&in, 0, sizeof in);
+    in.next_deadline = s_interp_schedule.next_present_deadline;
+    in.target_period = s_interp_schedule.target_period;
+    in.frame_start = s_interp_schedule.source_deadline +
+                     (double)shown_after_vblanks * sp;
+    in.frame_length = (double)period_vblanks * sp;
+    same_size = s_pass_cost_w == s_interp_w && s_pass_cost_h == s_interp_h;
+    in.pass_cost = same_size ? render_pass_leftover_cost_estimate(&s_pass_lcost)
+                             : 0.0;
+    /* Until the first frame has measured it, assume the work still due
+     * before the frame's start takes half a VBlank. */
+    if (!(s_pass_reserve > 0.0)) s_pass_reserve = 0.5 * sp;
+    margin = freq * 0.001;
+    if (margin < sp / 32.0) margin = sp / 32.0;
+    leftover = render_pass_leftover(now, in.frame_start, s_pass_reserve, margin);
+    /* A share of it (render_pass_admission_pct): full-resolution VRAM copies
+     * can exhaust the GPU between guest frames even when the CPU reports
+     * spare time. Re-evaluated at every plan, so it follows a change of the
+     * internal resolution. */
+    in.budget = leftover > 0.0 ? leftover *
+                (double)render_pass_admission_pct(s_hr_scale,
+                                                   s_pass_budget_pct) / 100.0
+                               : 0.0;
+    {
+        /* A pass whose cost is not known (the first at this image size, or a
+         * probe of an estimate that prices every plan out) is only tried
+         * when the budget pays for the thread's own work already seen this
+         * interval and the work still due after the pass
+         * (render_pass_probe_min). Nothing is forced into a frame to learn
+         * the cost; a pass redraws the same scene the game just did. */
+        double busy = s_interval_resume && now > (double)s_interval_resume
+                      ? now - (double)s_interval_resume : sp;
+        if (busy > sp) busy = sp;
+        in.probe_min = render_pass_probe_min(busy, s_pass_reserve, sp,
+                                             s_hr_scale);
+    }
+    in.max = max < cap - 1u ? max : cap - 1u;
+    n = render_pass_plan_phases(&in, alpha_q16, &want);
+    if (n == 0 && want && in.pass_cost > 0.0 && in.budget >= in.probe_min &&
+        render_pass_leftover_cost_probe_due(&s_pass_lcost)) {
+        /* The estimate prices every plan out: try one pass in this leftover
+         * time. Like any pass it is stopped at the deadline. */
+        in.pass_cost = 0.0;
+        n = render_pass_plan_phases(&in, alpha_q16, NULL);
+        if (n) { s_pass_plan_probe = 1; s_pass_probes++; }
+        else s_pass_lcost.probing = 0;
+    }
+    if (n > pace_cap) {
+        /* The previous game frame could not catch up (pass_pace_cap). Keep
+         * the evenly spaced subset of passes that its measured pace permits. */
+        in.max = pace_cap;
+        n = pace_cap ? render_pass_plan_phases(&in, alpha_q16, NULL) : 0;
+        if (!n && s_pass_plan_probe) {
+            s_pass_plan_probe = 0;
+            s_pass_lcost.probing = 0;
+        }
+    }
+    if (n && s_since_tight < PASS_TIGHT_HOLDOFF) {
+        /* A VBlank without passes left no idle time lately: the game is at
+         * its limit or catching up. Whatever the schedule says, no passes. */
+        s_pass_behind++;
+        if (s_pass_plan_probe) {
+            s_pass_plan_probe = 0;
+            s_pass_lcost.probing = 0;
+        }
+        n = 0;
+    }
+    if (n && !pass_gpu_caught_up()) {
+        /* The GPU is still on work queued before this frame (the game's
+         * own frame, its presents): a pass would first wait for it, in time
+         * the game may need. Not now. */
+        s_pass_gpu_busy++;
+        if (s_pass_plan_probe) {
+            s_pass_plan_probe = 0;
+            s_pass_lcost.probing = 0;
+        }
+        n = 0;
+    }
+    if (wanted) *wanted = want;
+    /* Measure the work due after this plan's passes at its frame's start. */
+    s_plan_frame_start = in.frame_start;
+    s_plan_source_period = sp;
+    s_plan_work_end = (uint64_t)now;
+    s_plan_idle_mark = s_idle_total;
+    s_plan_pending = 1;
+    s_plan_passes_run = 0;
+    s_pass_deadline = in.frame_start - s_pass_reserve - margin;
+    s_pass_probe_min = in.probe_min;
+    if (want) {
+        s_plan_budget_ms_sum += in.budget * 1000.0 / freq;
+        s_plan_budget_n++;
+    }
+    return n;
+}
+
+/* Whether the GPU has finished the work queued before the last guest VBlank
+ * presented (non-blocking). Without fences: assume so. */
+static int pass_gpu_caught_up(void) {
+    GLenum r;
+    if (!s_present_fence || !p_glClientWaitSync) return 1;
+    r = p_glClientWaitSync(s_present_fence, PSXGL_SYNC_FLUSH_COMMANDS_BIT, 0);
+    return r == PSXGL_ALREADY_SIGNALED || r == PSXGL_CONDITION_SATISFIED;
+}
+
+/* Whether the next pass of the open plan may start. Under leftover planning
+ * it must end before the deadline by its estimated cost (a probe: with at
+ * least the probe minimum left); a pass that may not start is skipped, not a
+ * fault. The idle-time planner holds passes to no deadline. */
+int gl_renderer_pass_may_start(void) {
+    double now, need;
+    if (!s_pass_leftover) return 1;
+    now = (double)SDL_GetPerformanceCounter();
+    if (!(s_pass_deadline > 0.0)) return 0;
+    need = s_pass_cost_w == s_interp_w && s_pass_cost_h == s_interp_h
+           ? render_pass_leftover_cost_estimate(&s_pass_lcost) : 0.0;
+    if (s_pass_plan_probe || !(need > 0.0)) need = s_pass_probe_min;
+    if (now + need > s_pass_deadline) {
+        s_pass_skipped_time++;
+        return 0;
+    }
+    s_plan_passes_run++;
+    return 1;
+}
+
+/* Host ticks left before the open plan's deadline (negative past it; a
+ * large value when no plan is open or the idle-time planner is in use).
+ * render_pass.c stops a running pass when this falls below what its capture
+ * and restore still take. */
+double gl_renderer_pass_time_left(void) {
+    if (!s_pass_leftover || !(s_pass_deadline > 0.0)) return 1e18;
+    return s_pass_deadline - (double)SDL_GetPerformanceCounter();
+}
+
+void gl_renderer_pass_set_leftover(int on) {
+    on = on ? 1 : 0;
+    if (on != s_pass_leftover) {
+        s_pass_deadline = 0.0;
+        s_pass_plan_probe = 0;
+        s_plan_pending = 0;
+    }
+    s_pass_leftover = on;
+}
+
 uint32_t gl_renderer_pass_plan(uint32_t period_vblanks,
                                uint32_t shown_after_vblanks,
                                uint32_t *alpha_q16, uint32_t max,
@@ -6267,6 +6600,9 @@ uint32_t gl_renderer_pass_plan(uint32_t period_vblanks,
     uint32_t cap;
     int live;
 
+    if (s_pass_leftover)
+        return pass_plan_leftover(period_vblanks, shown_after_vblanks,
+                                  alpha_q16, max, wanted);
     if (wanted) *wanted = 0;
     /* One plan per game frame: close the previous frame's host-time books. */
     s_idle_ticks_last = s_idle_ticks_accum;
@@ -6322,17 +6658,96 @@ uint32_t gl_renderer_pass_plan(uint32_t period_vblanks,
     }
 }
 
-void gl_renderer_pass_note_cost(uint64_t ticks) {
+void gl_renderer_pass_note_cost(uint64_t ticks, int cut) {
+    int allocated = s_pass_allocs != s_pass_allocs_begin;
     if (s_pass_cost_w != s_interp_w || s_pass_cost_h != s_interp_h) {
         memset(&s_pass_cost, 0, sizeof s_pass_cost);
+        memset(&s_pass_lcost, 0, sizeof s_pass_lcost);
         s_pass_cost_w = s_interp_w;
         s_pass_cost_h = s_interp_h;
     }
-    /* A pass that made pass textures or framebuffers (first use, a size
-     * change) is not a cost sample: see render_pass_cost_add(). */
-    render_pass_cost_add(&s_pass_cost, (double)ticks,
-                         s_pass_allocs != s_pass_allocs_begin);
     s_pass_ticks_accum += ticks;
+    if (!s_pass_leftover) {
+        /* A pass that made pass textures or framebuffers (first use, a size
+         * change) is not a cost sample: see render_pass_cost_add(). */
+        render_pass_cost_add(&s_pass_cost, (double)ticks, allocated);
+        return;
+    }
+    /* Leftover planning: a pass stopped at the deadline cost more than it
+     * ran, a lower bound (render_pass_leftover_cost_cut). */
+    if (cut) {
+        render_pass_leftover_cost_cut(&s_pass_lcost, (double)ticks, allocated);
+        s_pass_cuts++;
+    } else {
+        render_pass_leftover_cost_add(&s_pass_lcost, (double)ticks, allocated);
+    }
+    s_passes_this_interval++;
+    s_plan_work_end = SDL_GetPerformanceCounter();
+    s_plan_idle_mark = s_idle_total;
+}
+
+/* The presenter is about to resume the emulation thread after the interval
+ * ending at frame_end (ticks). When that is where the open plan's frame
+ * starts, the busy time since the plan's passes ended is the work they must
+ * leave room for (the reserve), and the resume time says whether the frame
+ * was delayed. */
+static void pass_note_interval_end(uint64_t resume, double frame_end) {
+    double sp = s_plan_source_period, busy, late, late_ms, freq;
+    int ran;
+    if (!s_plan_pending || !(sp > 0.0)) return;
+    if (frame_end < s_plan_frame_start - 0.25 * sp) return;   /* not yet */
+    s_plan_pending = 0;
+    if (frame_end > s_plan_frame_start + 0.25 * sp) return;   /* re-anchored */
+    busy = (double)(resume - s_plan_work_end) -
+           (double)(s_idle_total - s_plan_idle_mark);
+    if (busy < 0.0) busy = 0.0;
+    s_pass_reserve = render_pass_reserve_update(s_pass_reserve, busy);
+    freq = (double)SDL_GetPerformanceFrequency();
+    late = (double)resume - frame_end;
+    if (late < 0.0) late = 0.0;
+    late_ms = late * 1000.0 / freq;
+    ran = s_plan_passes_run > 0;
+    if (ran) {
+        s_late_pass_ms_sum += late_ms;
+        s_late_pass_n++;
+        if (late_ms > s_late_pass_ms_max) s_late_pass_ms_max = late_ms;
+        if (late > s_resume_late_base + freq * 0.001) {
+            /* The passes delayed the frame: leave that much more room. */
+            s_frames_delayed++;
+            s_pass_reserve += late - s_resume_late_base;
+        }
+    } else {
+        s_late_nopass_ms_sum += late_ms;
+        s_late_nopass_n++;
+        if (late_ms > s_late_nopass_ms_max) s_late_nopass_ms_max = late_ms;
+        s_resume_late_base = s_resume_late_base > 0.0
+            ? s_resume_late_base * 0.9 + late * 0.1 : late;
+    }
+}
+
+void gl_renderer_pass_budget_diag(double out[14]) {
+    double freq = (double)SDL_GetPerformanceFrequency();
+    out[0] = s_plan_budget_n ? s_plan_budget_ms_sum / (double)s_plan_budget_n : 0.0;
+    out[1] = s_pass_reserve * 1000.0 / freq;
+    out[2] = (double)s_pass_skipped_time;
+    out[3] = (double)s_pass_cuts;
+    out[4] = (double)s_pass_probes;
+    out[5] = s_late_pass_n ? s_late_pass_ms_sum / (double)s_late_pass_n : 0.0;
+    out[6] = s_late_pass_ms_max;
+    out[7] = (double)s_late_pass_n;
+    out[8] = s_late_nopass_n ? s_late_nopass_ms_sum / (double)s_late_nopass_n : 0.0;
+    out[9] = s_late_nopass_ms_max;
+    out[10] = (double)s_late_nopass_n;
+    out[11] = (double)s_frames_delayed;
+    out[12] = (double)s_pass_gpu_busy;
+    out[13] = (double)s_pass_behind;
+}
+
+void gl_renderer_pass_pace(uint64_t out[4]) {
+    out[0] = s_pace_cuts;
+    out[1] = s_pace_cap;
+    out[2] = s_pace_vblanks;
+    out[3] = s_pace_late;
 }
 
 uint32_t gl_renderer_pass_leaks(void) { return s_pass_leaks; }
@@ -6521,6 +6936,8 @@ static void pass_resources_release(void) {
     }
     render_pass_journal_free(&s_pj_cpu);
     s_pb_valid = 0;
+    if (s_present_fence && p_glDeleteSync && s_ctx) p_glDeleteSync(s_present_fence);
+    s_present_fence = NULL;
 }
 
 static int pass_journal_protect(int x, int y, int w, int h) {
@@ -6690,6 +7107,17 @@ backed_up:
     s_pj_cpu.n = 0;
     s_pass_active = 1;
     return 1;
+}
+
+/* Close a pass whose guest code never ran (stopped at its deadline before
+ * it started): VRAM was not drawn to, so there is nothing to capture or
+ * restore. A complete backup still equals VRAM and may be reused by the next
+ * pass of this plan. */
+void gl_renderer_pass_abandon(void) {
+    if (!s_pass_active) return;
+    s_pass_active = 0;
+    s_pj_cpu.n = 0;
+    s_pb_valid = 1;
 }
 
 static void transaction_restore(void) {
@@ -7177,7 +7605,9 @@ void gl_renderer_pass_diag(uint64_t out[11]) {
     out[3] = s_pgen_expired;
     out[4] = s_pgen_unmatched;
     out[5] = s_pgen_early;
-    out[6] = (uint64_t)(render_pass_cost_estimate(&s_pass_cost) * 1e6 /
+    out[6] = (uint64_t)((s_pass_leftover
+                             ? render_pass_leftover_cost_estimate(&s_pass_lcost)
+                             : render_pass_cost_estimate(&s_pass_cost)) * 1e6 /
                         (double)SDL_GetPerformanceFrequency()); /* us */
     out[7] = (uint64_t)s_pgen[s_pgen_cur].n;
     out[8] = s_pgen_late;
@@ -7213,6 +7643,7 @@ uint32_t gl_renderer_pass_image_textures(uint64_t *bytes) {
 
 static uint64_t s_idle_ticks_accum_fwd(uint64_t add) {
     s_idle_ticks_accum += add;
+    s_idle_total += add;
     return s_idle_ticks_accum;
 }
 

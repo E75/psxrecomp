@@ -280,6 +280,59 @@ plans, so these one-pass warm-ups stay rare; a re-measure that finds the
 old estimate stale keeps the wait at 30. A plugin can show a crossfade while
 passes are shed (see "When passes are unavailable").
 
+That is the default (`PSX_MOD_RENDER_PASS_IDLE`). It budgets last frame's
+idle time over the whole frame, so nothing stops a pass from delaying the
+game's own next frame.
+
+### Leftover-time budget (opt-in)
+
+`psx_mod_set_render_pass_budget(PSX_MOD_RENDER_PASS_LEFTOVER)` from
+activation (reset at every session start; `#ifdef
+PSX_MOD_RENDER_PASS_LEFTOVER` tells a plugin the runtime has it) makes passes
+use only time the game leaves free, so they never delay its frame:
+
+- **Budget.** A plan's budget is the host time left before the frame is
+  first presented (`frame_start`), less the work the emulation thread still
+  has to do for it (the reserve) and a margin of max(1 ms, 1/32 VBlank),
+  times `render_pass_admission_pct` (65% up to 3x internal scale, 50% above;
+  `PSX_RENDER_PASS_BUDGET` overrides it). The reserve is measured every
+  frame -- the busy time between the end of the frame's passes and its
+  start -- and errs late: a larger sample is taken at once, a smaller one
+  moves it down by 3% of the difference. A frame that resumed more than
+  1 ms later than the no-pass baseline adds the difference to it.
+- **Deadline.** `psx_mod_render_pass()` does not start a pass that would end
+  after `frame_start - reserve - margin` by its estimated cost (`skipped`),
+  and the freeze polls host time at every tick (at most 16K guest cycles
+  apart): a pass that runs into the deadline, less what its capture and
+  restore still take, is stopped and rolled back like a watchdog abort, but
+  it is not a fault (`cut`; never counts towards disabling passes, never
+  sets `last_failure` or `last_abort_detail`). A pass stopped before its
+  guest code ran is closed without a restore. Stereo eye pairs have no
+  deadline.
+- **Cost.** Learnt only from passes that fit: the first completed pass sets
+  the average and later ones move it; plans use the average plus twice its
+  smoothed deviation. A cut pass is a lower bound. A pass of unknown cost is
+  tried only when the budget is at least the thread's own work this
+  interval plus the reserve (twice that above 3x), and at least a quarter
+  VBlank. An estimate that prices every plan out is probed with one pass
+  after 30 such plans that had that much leftover time; a probe that
+  confirms it, or is cut, doubles the wait up to 960 (`probes`).
+- **Holds.** No passes while the GPU is still on work queued before the
+  frame (a fence after each VBlank's presents; `gpu_busy`), for 30 VBlanks
+  after one that left the thread no idle time without passes (`behind`),
+  and per the pace guard: a game frame in which every guest VBlank arrived
+  more than 1/8 VBlank late (the GPU fell behind where the thread's own
+  timing does not show it) halves the passes allowed per frame; plans that
+  keep pace let it grow by one every 8 plans, a growth that fails soon
+  doubles that wait (up to 1024).
+
+`render_pass_stats` reports all of it under `leftover`: `skipped`, `cut`,
+`budget_ms_avg`, `reserve_ms`, `probes`, how late the emulation thread
+resumed at planned frames with and without passes (`resume_late_*`),
+`frames_delayed`, `gpu_busy`, `behind`, `pace_cuts`, `pace_cap`,
+`pace_vblanks`, `pace_late`. With passes on, `resume_late_pass_*` should
+match `resume_late_nopass_*` and `frames_delayed` stay near zero.
+
 Pass images are kept at internal resolution (the size the presenter
 captures). Their textures are made as the slots fill, never more slots than
 two generations fit in 256 MiB, which limits passes per frame at very high

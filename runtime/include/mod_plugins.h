@@ -475,15 +475,36 @@ typedef struct PSXModRenderPass {
  * the frame stays on screen, starting after `shown_after_vblanks` more
  * VBlank presents (R4 at its VSync(0) entry: 1 -- the next VBlank still shows
  * the previous frame). When the host cannot afford them all, an evenly spread
- * subset is returned and the presenter crossfades the gaps. The first
- * psx_mod_render_pass() after a plan captures frame N's own image. Returns 0
- * when passes are unavailable or unaffordable.
+ * subset is returned and the presenter crossfades the gaps (see
+ * PSX_MOD_FRAME_PRESENT_CHANGED for HOLD). The first psx_mod_render_pass()
+ * after a plan captures frame N's own image. Returns 0 when passes are
+ * unavailable or unaffordable.
  */
 uint32_t psx_mod_render_pass_plan(uint32_t period_vblanks,
                                   uint32_t shown_after_vblanks,
                                   uint32_t* alpha_q16, uint32_t max);
-/* Returns 1 when the pass ran and its image was queued, 0 when it was refused
- * or rolled back (state is restored either way).
+/*
+ * How plans budget host time. IDLE (the default, reset at every session
+ * start): a share of the previous game frame's idle time, spread over the
+ * frame. LEFTOVER: passes only get the host time left before frame N is
+ * first presented, after the work the emulation thread still has to do for
+ * it (measured every frame); when that cannot pay for them all an evenly
+ * spread subset is returned, 0 when none fits. psx_mod_render_pass() then
+ * does not start a pass that would end after that point and stops one that
+ * runs into it (state restored, no image, not a fault), and no passes are
+ * planned while the GPU is still on the game's frame, while the game itself
+ * has had no slack lately, or while the guest slips behind the presenter's
+ * schedule -- so passes never delay the game's own frame. Set it from
+ * activation. PSX_MOD_RENDER_PASS_LEFTOVER is defined only by runtimes that
+ * implement it, so a plugin can test for it with #ifdef.
+ */
+enum { PSX_MOD_RENDER_PASS_IDLE = 0 };
+#define PSX_MOD_RENDER_PASS_LEFTOVER 1u
+int psx_mod_set_render_pass_budget(uint32_t mode);
+/* Returns 1 when the pass ran and its image was queued, 0 when it was refused,
+ * not started for time, stopped at its deadline or rolled back (state is
+ * restored either way). A stop at the deadline unwinds like the watchdog
+ * abort below.
  * A watchdog abort rolls the pass back by longjmp, past every frame between
  * the watchdog and psx_mod_render_pass(): plugin callbacks, guest functions
  * and function-entry hooks they called. Runtime nesting state (including the

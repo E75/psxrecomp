@@ -8225,7 +8225,8 @@ static void handle_render_pass_stats(int id, const char *json)
 {
     (void)json;
     RenderPassStats st;
-    uint64_t gd[11], image_bytes = 0;
+    uint64_t gd[11], pace[4], image_bytes = 0;
+    double bd[14];
     uint32_t image_textures;
     char failure_json[2048];
     char abort_detail_json[sizeof st.last_abort_detail * 6 + 1];
@@ -8261,10 +8262,21 @@ static void handle_render_pass_stats(int id, const char *json)
                  b->fbo_status, b->gl_error_before, b->gl_error);
     }
     gl_renderer_pass_diag(gd);
+    gl_renderer_pass_budget_diag(bd);
+    gl_renderer_pass_pace(pace);
     image_textures = gl_renderer_pass_image_textures(&image_bytes);
     send_fmt("{\"id\":%d,\"ok\":true,\"plans\":%llu,\"planned\":%llu,"
              "\"wanted\":%llu,\"refused\":%llu,\"passes\":%llu,"
              "\"aborted\":%llu,\"discarded\":%llu,\"watchdog\":%llu,\"vram_leaks\":%llu,"
+             "\"leftover\":{\"skipped\":%llu,\"cut\":%llu,"
+             "\"budget_ms_avg\":%.3f,\"reserve_ms\":%.3f,\"probes\":%.0f,"
+             "\"resume_late_pass_ms_avg\":%.3f,\"resume_late_pass_ms_max\":%.3f,"
+             "\"resume_late_pass_n\":%.0f,"
+             "\"resume_late_nopass_ms_avg\":%.3f,\"resume_late_nopass_ms_max\":%.3f,"
+             "\"resume_late_nopass_n\":%.0f,\"frames_delayed\":%.0f,"
+             "\"gpu_busy\":%.0f,\"behind\":%.0f,"
+             "\"pace_cuts\":%llu,\"pace_cap\":%llu,\"pace_vblanks\":%llu,"
+             "\"pace_late\":%llu},"
              "\"nesting_repairs\":%llu,"
              "\"verify_checks\":%llu,\"verify_mismatch\":%llu,"
              "\"dropped\":{\"spu\":%llu,\"cd\":%llu,\"timer\":%llu,"
@@ -8292,6 +8304,11 @@ static void handle_render_pass_stats(int id, const char *json)
              (unsigned long long)st.wanted, (unsigned long long)st.refused,
              (unsigned long long)st.passes, (unsigned long long)st.aborted,
              (unsigned long long)st.discarded, (unsigned long long)st.watchdog, (unsigned long long)st.vram_leaks,
+             (unsigned long long)st.skipped, (unsigned long long)st.cut,
+             bd[0], bd[1], bd[4], bd[5], bd[6], bd[7], bd[8], bd[9], bd[10],
+             bd[11], bd[12], bd[13],
+             (unsigned long long)pace[0], (unsigned long long)pace[1],
+             (unsigned long long)pace[2], (unsigned long long)pace[3],
              (unsigned long long)st.nesting_repairs,
              (unsigned long long)st.verify_checks,
              (unsigned long long)st.verify_mismatch,

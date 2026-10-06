@@ -90,7 +90,35 @@ void     gl_renderer_pass_set_flip_shown(int shown);
 void     gl_renderer_pass_end(uint32_t alpha_q16, int keep);
 uint32_t gl_renderer_pass_leaks(void);
 int      gl_renderer_pass_verify_vram(void);
-void     gl_renderer_pass_note_cost(uint64_t ticks);
+/* Host ticks one pass took; cut = it was stopped at its deadline (leftover
+ * planning: its cost is higher, a lower bound). */
+void     gl_renderer_pass_note_cost(uint64_t ticks, int cut);
+/* 1 = plan passes only into the host time left before the frame is first
+ * presented and hold them to that deadline (PSX_MOD_RENDER_PASS_LEFTOVER);
+ * 0 = the idle-time planner (default). */
+void     gl_renderer_pass_set_leftover(int on);
+/* Under leftover planning, whether the next pass of the open plan still ends
+ * before its deadline (by its estimated cost); 0: do not start it. Always 1
+ * for the idle-time planner. */
+int      gl_renderer_pass_may_start(void);
+/* Host ticks left before the open plan's deadline (negative past it; 1e18
+ * when there is none). */
+double   gl_renderer_pass_time_left(void);
+/* Close a pass whose guest code never ran (nothing to capture or restore). */
+void     gl_renderer_pass_abandon(void);
+/* Leftover planning: mean budget of plans that wanted passes (ms), the
+ * reserve (ms), passes skipped for time, passes cut at the deadline, probes;
+ * how late the emulation thread resumed at a planned frame's start with
+ * passes (mean ms, max ms, count) and without (mean, max, count); frames the
+ * passes delayed past the no-pass baseline by more than 1 ms; plans refused
+ * because the GPU had not caught up; plans refused because the game had no
+ * slack lately. */
+void     gl_renderer_pass_budget_diag(double out[14]);
+/* Leftover planning's pace guard: [0] plans after a game frame that slipped
+ * behind the presenter's schedule (each cut the passes allowed), [1] passes
+ * per frame allowed now, [2] guest VBlanks checked, [3] of them late by more
+ * than an eighth of a VBlank (lifetime counts). */
+void     gl_renderer_pass_pace(uint64_t out[4]);
 /* Present output deadlines that fell due while guest code ran. */
 void     gl_renderer_pass_service_presents(void);
 /* promotions, presents, blended presents, expired, unmatched flips, presents

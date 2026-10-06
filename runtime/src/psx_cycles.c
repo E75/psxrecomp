@@ -34,6 +34,8 @@ int g_psx_render_pass_active = 0;
 static uint64_t s_freeze_start = 0;
 static uint64_t s_freeze_limit = 0;
 static void   (*s_freeze_overrun)(void) = 0;
+static int    (*s_freeze_poll)(void) = 0;
+static void   (*s_freeze_stop)(void) = 0;
 
 static void psx_cycle_freeze_tick(void) {
     extern uint64_t g_psx_cycle_fast_limit;
@@ -47,6 +49,17 @@ static void psx_cycle_freeze_tick(void) {
         s_freeze_overrun = 0;
         overrun();
     }
+    if (s_freeze_poll && s_freeze_stop && s_freeze_poll()) {
+        void (*stop)(void) = s_freeze_stop;
+        s_freeze_stop = 0;
+        stop();
+    }
+}
+
+void psx_cycle_freeze_set_poll(int (*poll)(void), void (*stop)(void)) {
+    if (!g_psx_render_pass_active) return;
+    s_freeze_poll = poll;
+    s_freeze_stop = stop;
 }
 
 int psx_cycle_replay_begin(uint64_t start_cycle) {
@@ -853,6 +866,8 @@ void psx_cycle_freeze_end(const PsxCycleFreeze *save) {
     g_psx_render_pass_active = 0;
     s_freeze_overrun = 0;
     s_freeze_limit = 0;
+    s_freeze_poll = 0;
+    s_freeze_stop = 0;
     if (!save) return;
     psx_cycle_count = save->cycle_count;
     psx_next_service_cycle = save->next_service;
