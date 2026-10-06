@@ -2,6 +2,7 @@
 
 #include "config_loader.h"
 
+#include <unordered_set>
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -109,6 +110,8 @@ uint32_t overlay_codegen_config_hash(const GameConfig& c) {
         h.words("cull_clip_edge_x_load", c.ws_cull_clip_edge_x_load_sites);
         h.u32(ws_cull_clip_edge_width(c));
     }
+    if (!c.netplay_local_viewport_width_sites.empty())
+        h.words("local_viewport_width", c.netplay_local_viewport_width_sites);
 
     h.tag("flags");
     h.u32(c.ws_auto_screen_x_cull ? 1u : 0u);
@@ -1441,6 +1444,7 @@ GameConfig load_game_config(const fs::path& config_path_in) {
     std::string netplay_local_viewport;
     std::string netplay_local_viewport_aspect;
     std::string netplay_local_viewport_renderer;
+    std::vector<uint32_t> netplay_local_viewport_width_sites;
     uint32_t netplay_local_viewport_state_addr = 0;
     std::vector<uint32_t> netplay_local_viewport_state_values;
     if (cfg.contains("netplay")) {
@@ -1486,10 +1490,11 @@ GameConfig load_game_config(const fs::path& config_path_in) {
             if (!netplay_local_viewport_aspect.empty() &&
                 netplay_local_viewport_aspect != "16:9" &&
                 netplay_local_viewport_aspect != "21:9" &&
+                netplay_local_viewport_aspect != "fixed" &&
                 netplay_local_viewport_aspect != "adaptive") {
                 throw std::runtime_error(fmt::format(
                     "[netplay] local_viewport_aspect must be \"16:9\", "
-                    "\"21:9\", or \"adaptive\", got '{}'",
+                    "\"21:9\", \"fixed\", or \"adaptive\", got '{}'",
                     netplay_local_viewport_aspect));
             }
             if (!netplay_local_viewport_aspect.empty() &&
@@ -1497,6 +1502,10 @@ GameConfig load_game_config(const fs::path& config_path_in) {
                 throw std::runtime_error(
                     "[netplay] local_viewport_aspect requires local_viewport");
             }
+        }
+        if (np.contains("local_viewport_width_sites")) {
+            for (const auto& value : toml::find<std::vector<std::string>>(np, "local_viewport_width_sites"))
+                netplay_local_viewport_width_sites.push_back(parse_hex(value, "netplay.local_viewport_width_sites"));
         }
         if (np.contains("local_viewport_renderer")) {
             netplay_local_viewport_renderer =
@@ -1513,6 +1522,19 @@ GameConfig load_game_config(const fs::path& config_path_in) {
             if (netplay_local_viewport.empty()) {
                 throw std::runtime_error(
                     "[netplay] local_viewport_renderer requires local_viewport");
+            }
+        }
+        if (!netplay_local_viewport_width_sites.empty()) {
+            if (netplay_local_viewport_renderer != "projection")
+                throw std::runtime_error("[netplay] local_viewport_width_sites requires projection renderer");
+            if (netplay_local_viewport_width_sites.size() > 16)
+                throw std::runtime_error("[netplay] local_viewport_width_sites supports at most 16 sites");
+            std::unordered_set<uint32_t> unique;
+            for (uint32_t pc : netplay_local_viewport_width_sites) {
+                if ((pc & 3) || (pc & 0x1fffffff) >= 0x800000)
+                    throw std::runtime_error("[netplay] local_viewport_width_sites requires aligned main RAM addresses");
+                if (!unique.insert(pc & 0x1fffffff).second)
+                    throw std::runtime_error("[netplay] duplicate local_viewport_width_sites address");
             }
         }
         {
@@ -2437,6 +2459,7 @@ GameConfig load_game_config(const fs::path& config_path_in) {
         /*netplay_local_viewport*/ netplay_local_viewport,
         /*netplay_local_viewport_aspect*/ netplay_local_viewport_aspect,
         /*netplay_local_viewport_renderer*/ netplay_local_viewport_renderer,
+        /*netplay_local_viewport_width_sites*/ netplay_local_viewport_width_sites,
         /*netplay_local_viewport_state_addr*/ netplay_local_viewport_state_addr,
         /*netplay_local_viewport_state_values*/ netplay_local_viewport_state_values,
         /*seeds_path*/       seeds_path,

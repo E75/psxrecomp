@@ -1251,6 +1251,32 @@ void mod_instruction_codegen_test(const fs::path& root) {
           "unconfigured code emits no instruction callbacks");
 }
 
+void local_viewport_tests(const fs::path& root) {
+    const std::string prefix = "\n[netplay]\nlocal_viewport=\"vertical_split\"\nlocal_viewport_renderer=\"projection\"\n";
+    const auto cfg = PSXRecompV4::load_game_config(write_config(root,"unsplit",prefix +
+        "local_viewport_width_sites=[\"0x80010000\"]\nlocal_viewport_state_addr=\"0x80018000\"\nlocal_viewport_state_values=[\"0x0\"]\n"));
+    check(cfg.netplay_local_viewport_width_sites == std::vector<uint32_t>{0x80010000}, "unsplit width sites parse");
+    check(cfg.netplay_local_viewport_renderer == "projection" && cfg.netplay_local_viewport_state_addr == 0x80018000 &&
+        cfg.netplay_local_viewport_state_values == std::vector<uint32_t>{0}, "unsplit renderer and pause gate parse");
+    auto changed = cfg; changed.netplay_local_viewport_width_sites.clear();
+    check(PSXRecompV4::overlay_codegen_config_hash(cfg) != PSXRecompV4::overlay_codegen_config_hash(changed), "unsplit sites invalidate cached code");
+    for (auto bad : {"0x80010001", "0x1F800000", "0x80800000"}) {
+        auto path = write_config(root,"unsplit-bad",prefix+"local_viewport_width_sites=[\""+bad+"\"]\n");
+        check_throws([&]{PSXRecompV4::load_game_config(path);}, "aligned main RAM", "unsplit rejects invalid site");
+    }
+    auto dup = write_config(root,"unsplit-duplicate",prefix+"local_viewport_width_sites=[\"0x80010000\",\"0xA0010000\"]\n");
+    check_throws([&]{PSXRecompV4::load_game_config(dup);},"duplicate", "unsplit rejects aliased duplicates");
+    auto no_projection = write_config(root,"unsplit-renderer","\n[netplay]\nlocal_viewport_width_sites=[\"0x80010000\"]\n");
+    check_throws([&]{PSXRecompV4::load_game_config(no_projection);},"requires projection", "unsplit width requires projection");
+    PSXRecomp::CodeGenConfig codegen{};
+    codegen.netplay_local_viewport_width_sites.insert(0x80010000);
+    for (bool overlay : {false,true}) {
+        auto code=generate_first_instruction(0x8F820EDCu,{},overlay,codegen);
+        check(code.find("psx_ws_local_viewport_width((int32_t)psx_cyc_load_word") != std::string::npos, "unsplit keeps LW cycle accounting");
+    }
+    check(generate_first_instruction(0x8F820EDCu,{},false).find("= (uint32_t)psx_ws_local_viewport_width") == std::string::npos, "ordinary loads remain native");
+}
+
 void cfg_fallthrough_reachability_test() {
     constexpr uint32_t base = 0x80010000u;
     PSXRecomp::PS1Executable exe{};
@@ -1302,6 +1328,7 @@ int main() {
         cfg_codegen_load_delay_test();
         mod_function_completion_codegen_test();
         mod_instruction_codegen_test(root);
+        local_viewport_tests(root);
         cfg_fallthrough_reachability_test();
     } catch (const std::exception& e) {
         fmt::print(stderr, "FAIL  unexpected exception: {}\n", e.what());

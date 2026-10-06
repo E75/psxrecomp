@@ -1479,10 +1479,15 @@ static bool ensure_sdl_pixel_buf_capacity(size_t pixels) {
 static int g_netplay_local_viewport = 0; /* 0 off, 1 vertical split */
 /* Optional aspect for netplay local-view extraction. Mirrors trusted mod aspect
  * activation, but remains game.toml opt-in so normal netplay stays vanilla. */
-static int g_netplay_local_viewport_aspect = 0; /* 0 off, 1 16:9, 2 21:9, 3 adaptive */
+static int g_netplay_local_viewport_aspect = 0; /* 0 off, 1 16:9, 2 21:9, 3 adaptive, 4 fixed mod choice */
 /* [netplay] local_viewport_renderer = "projection": widen the projection into
  * the local half instead of rendering native-wide columns beside it. */
 static int g_netplay_local_viewport_projection = 0;
+/* Native-wide per-camera views ([netplay] local_viewport_renderer =
+ * "native_wide"). Projection views keep the shared presentation path. */
+static bool netplay_local_viewport_native_wide(void) {
+    return g_netplay_local_viewport == 1 && !g_netplay_local_viewport_projection;
+}
 
 extern "C" int psx_mod_set_fixed_display_aspect(
     uint32_t numerator, uint32_t denominator) {
@@ -1948,7 +1953,10 @@ static void refresh_widescreen_projection() {
     const bool local_native_wide =
         g_netplay_local_viewport == 1 && !g_netplay_local_viewport_projection &&
         psx_netplay_active() && gpu_last_frame_vertical_split_screen();
-    const bool native_wide = (g_netplay_local_viewport == 1)
+    /* Native-wide local views follow the title's own renderer offline;
+     * projection local views keep their per-camera projection throughout. */
+    const bool native_wide = (g_netplay_local_viewport == 1 &&
+                              (g_netplay_local_viewport_projection || psx_netplay_active()))
         ? local_native_wide
         : (g_ws_native_wide != 0);
     const int mode = wide ? (native_wide ? 2 : 1) : 0;
@@ -3270,6 +3278,12 @@ static void apply_netplay_local_viewport_aspect(bool netplay_enabled) {
         case 3:
             (void)psx_mod_set_fixed_display_aspect(16u, 9u);
             (void)psx_mod_set_adaptive_display_aspect(21u, 9u);
+            break;
+        case 4:
+            // The admitted mod plan selects a fixed ratio before play. Window
+            // resizing cannot change it; other offline choices default to 16:9.
+            (void)psx_mod_set_fixed_display_aspect(
+                g_video_aspect_num * 9 == g_video_aspect_den * 21 ? 21u : 16u, 9u);
             break;
         default:
             break;
@@ -8138,7 +8152,9 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
          * wide (compositor unsupported, or the surface fallback below)
          * pillarboxes 4:3 like FMV/menus instead. Only squash mode (1) may
          * stretch: its canonical content is pre-squashed FOR the stretch. */
-        const bool nw_pin = g_ws_engaged && g_ws_native_wide;
+        const bool nw_pin = g_ws_engaged &&
+            (netplay_local_viewport_native_wide() ? g_ws_projection_mode == 2
+                                                  : g_ws_native_wide != 0);
 
         /* Ring the classification now that it's final (only the software/CPU
          * wide path below can still fall back — it amends this entry). A
@@ -8171,7 +8187,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
             return ep;
         }
         if (g_gl_active && g_gl_fbo_present && !di.depth24 &&
-            !local_viewport_crop) {
+            (!local_viewport_crop || local_viewport_wide)) {
             if (wide_present) {
                 /* GPU-direct native-wide present: blit the displayed buffer's
                  * wide FBO straight to the window (GPU-side, like the canonical
@@ -8180,7 +8196,9 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                  * GL-only slowdown (SW's wide path is pure CPU, no GPU sync, so
                  * SW stayed smooth). Falls through to the CPU readout path only if
                  * the wide surface for this buffer doesn't exist yet. */
-                if (gl_renderer_present_wide_fbo((int)di.display_x, (int)di.display_y,
+                const int wide_base = local_viewport_wide
+                    ? gpu_ws_netplay_local_viewport_base_x() : (int)di.display_x;
+                if (gl_renderer_present_wide_fbo(wide_base, (int)di.display_y,
                                                  (int)h, g_video_aa ? 1 : 0)) {
                     netplay_note_present();
                     return ep;
@@ -14048,9 +14066,13 @@ int main(int argc, char** argv) {
             g_netplay_local_viewport_aspect =
                 (gc.netplay_local_viewport_aspect == "16:9") ? 1 :
                 (gc.netplay_local_viewport_aspect == "21:9") ? 2 :
+                (gc.netplay_local_viewport_aspect == "fixed") ? 4 :
                 (gc.netplay_local_viewport_aspect == "adaptive") ? 3 : 0;
+            gpu_ws_set_local_viewport_width_sites(gc.netplay_local_viewport_width_sites.data(), (int)gc.netplay_local_viewport_width_sites.size());
             g_netplay_local_viewport_projection =
                 (gc.netplay_local_viewport_renderer == "projection") ? 1 : 0;
+            gpu_ws_set_local_viewport_native_wide(
+                g_netplay_local_viewport == 1 && !g_netplay_local_viewport_projection);
             gpu_ws_set_local_viewport_state_gate(
                 gc.netplay_local_viewport_state_addr,
                 gc.netplay_local_viewport_state_values.data(),

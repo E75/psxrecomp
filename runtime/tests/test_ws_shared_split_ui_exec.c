@@ -86,7 +86,62 @@ static void expect_shared(int shared) {
     }
 }
 
+static void width_sites(void) {
+    counter(1,0);
+    hres1=0; hres2=1; // 368 would not represent V82; use its 320 mode below.
+    hres1=1; hres2=0;
+    GpuDisplayInfo di; gpu_get_display_info(&di); assert(di.width==320);
+    uint32_t sites[]={0x8001C248,0x8002E01C};
+    gpu_ws_set_local_viewport_width_sites(sites,2);
+    assert(psx_ws_is_local_viewport_width_site(0xA001C248));
+    assert(!psx_ws_is_local_viewport_width_site(0x8001C24C));
+    for(int slot=0;slot<2;slot++) {
+        gpu_ws_set_netplay_local_viewport(1,slot);
+        assert(psx_ws_local_viewport_width(160)==427);
+        assert(psx_ws_local_viewport_width(320)==320);
+        assert(psx_ws_local_viewport_width(INT32_MAX)==INT32_MAX);
+        assert(psx_ws_local_viewport_width(-1)==-1);
+    }
+    test_ram[GATE/4]=1; assert(psx_ws_local_viewport_width(160)==160);
+    test_ram[GATE/4]=0; ws_mode=2; assert(psx_ws_local_viewport_width(160)==160);
+    ws_mode=1; gpu_ws_set_netplay_local_viewport(0,0); assert(psx_ws_local_viewport_width(160)==160);
+}
+
+static void native_wide_buffers(void) {
+    counter(1, 0);
+    hres1 = 1; hres2 = 0;
+    ws_mode = 2; ws_cfg_num = 16; ws_cfg_den = 9;
+    for (int slot = 0; slot < 2; ++slot) {
+        ws_local_viewport_slot = slot;
+        assert(gpu_ws_netplay_local_viewport_width() == 426);
+        for (int band = 0; band < 2; ++band) {
+            display_area_y = 240 * (1 - band);
+            draw_area_top = draw_offset_y = 240 * band;
+            draw_area_bottom = draw_area_top + 239;
+            draw_area_left = slot ? 161 : 0;
+            draw_area_right = slot ? 319 : 159;
+            int base = -1;
+            assert(ws_local_viewport_draw_target(&base));
+            assert(base == 160 * slot);
+            draw_area_left = slot ? 0 : 161;
+            draw_area_right = slot ? 159 : 319;
+            assert(!ws_local_viewport_draw_target(&base));
+            assert(ws_local_viewport_divider(160, 0, 161, 240, 0, 0));
+            assert(!ws_local_viewport_divider(160, 0, 161, 20, 0, 0));
+            assert(!ws_local_viewport_divider(160, 0, 161, 240, 1, 0));
+            assert(!ws_local_viewport_divider(160, 0, 161, 240, 0, 1));
+            assert(!ws_local_viewport_divider(159, 0, 163, 240, 0, 0));
+        }
+    }
+    ws_cfg_num = 21;
+    assert(gpu_ws_netplay_local_viewport_width() == 560);
+    ws_local_viewport_cfg = 0;
+    assert(!ws_local_viewport_divider(160, 0, 161, 240, 0, 0));
+}
+
 int main(void) {
+    native_wide_buffers();
+    width_sites();
     counter(1, 0);
     expect_shared(1);
     for (unsigned slot = 0; slot < 2; slot++) {

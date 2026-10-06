@@ -903,6 +903,9 @@ struct GameConfig {
     // rejects everything outside the half (THPS2), as their single-player
     // [widescreen] native_wide = false path does.
     std::string           netplay_local_viewport_renderer;
+    // Exact LW sites loading the native per-camera width for world frusta.
+    // Projection unsplit widens that cone while retaining the half-size raster.
+    std::vector<uint32_t> netplay_local_viewport_width_sites;
     // local_viewport_state_addr / _values: optional guest word gating the
     // local viewport. Split frames crop to this peer's half only while the
     // word holds one of the values (e.g. a level running); otherwise, as on a

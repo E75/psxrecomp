@@ -111,6 +111,15 @@ static int      ws_auto_ui_squash;
 static int      ws_auto_ui_in_place;
 static int      ws_auto_ui_dense;
 static int      ws_active(void);
+static int ws_local_viewport_cfg = 0;
+/* [netplay] local_viewport_renderer = "native_wide": split frames are always
+ * world frames for the per-camera wide surfaces. Projection views keep the
+ * title's own scene classification. */
+static int ws_local_viewport_native = 0;
+static int ws_vertical_split_active(void);
+static int ws_local_native_split(void) {
+    return ws_local_viewport_cfg && ws_local_viewport_native && ws_vertical_split_active();
+}
 static int      gp0_command_word_count(uint8_t opcode);
 static uint64_t ws_auto_ui_candidate_count;
 static uint64_t ws_auto_ui_transform_count;
@@ -384,6 +393,7 @@ static int ws_mod_world_scene(void) {
 }
 static int ws_game_mode(void) {
     if (ws_mod_world_scene()) return 1;
+    if (ws_local_native_split()) return 1;
     int state_match = ws_gameplay_state_matches();
     if (state_match >= 0) return state_match;
     if (ws_full_2d_mode()) return 1;
@@ -421,6 +431,7 @@ static int ws_game_mode(void) {
 static WsSceneLatch ws_scene_latch;
 static int ws_2d_only_scene(void) {
     if (ws_mod_world_scene()) return 0;
+    if (ws_local_native_split()) return 0;
     if (ws_full_2d_mode() || ws_gte_game_mode_cfg) return 0;
     uint32_t f = (uint32_t)s_frame_count;
     return ws_scene_is_2d(&ws_scene_latch, f,
@@ -504,10 +515,31 @@ static int ws_native_wide_configured(void) {
     return ws_mode == 2 && ws_cfg_num * 3 > ws_cfg_den * 4;
 }
 
-static int ws_local_viewport_cfg = 0;
+
 static int ws_local_viewport_slot = 0;
 static int ws_local_viewport_draw_target(int *base_x);
 static int ws_vertical_split_active(void);
+#define WS_LOCAL_WIDTH_SITES_MAX 16
+static uint32_t ws_local_width_sites[WS_LOCAL_WIDTH_SITES_MAX];
+static int ws_local_width_count;
+void gpu_ws_set_local_viewport_width_sites(const uint32_t *sites, int count) {
+    ws_local_width_count = count < 0 ? 0 : count > WS_LOCAL_WIDTH_SITES_MAX ? WS_LOCAL_WIDTH_SITES_MAX : count;
+    for (int i = 0; i < ws_local_width_count; ++i) ws_local_width_sites[i] = sites[i] & 0x1FFFFFFFu;
+}
+int psx_ws_is_local_viewport_width_site(uint32_t pc) {
+    for (int i = 0; i < ws_local_width_count; ++i)
+        if (ws_local_width_sites[i] == (pc & 0x1FFFFFFFu)) return 1;
+    return 0;
+}
+int32_t psx_ws_local_viewport_width(int32_t vanilla) {
+    GpuDisplayInfo di; gpu_get_display_info(&di);
+    if (!ws_local_viewport_cfg || ws_mode != 1 || !ws_vertical_split_active() ||
+        vanilla <= 0 || (int64_t)vanilla * 2 != (int)di.width) return vanilla;
+    return (int32_t)(((int64_t)vanilla * ws_xden + ws_xnum - 1) / ws_xnum);
+}
+void gpu_ws_set_local_viewport_native_wide(int enabled) {
+    ws_local_viewport_native = enabled ? 1 : 0;
+}
 void gpu_ws_set_netplay_local_viewport(int enabled, int slot) {
     ws_local_viewport_cfg = enabled ? 1 : 0;
     ws_local_viewport_slot = slot == 1 ? 1 : 0;
@@ -3172,7 +3204,9 @@ static int ws_local_viewport_draw_target(int *base_x) {
         return 0;
     GpuDisplayInfo di;
     gpu_get_display_info(&di);
-    if (draw_area_intersects_rect(base, (int)di.display_y,
+    /* Native double buffering draws the next frame in the other Y band.
+     * The per-camera wide surface spans every band, just like the 1P surface. */
+    if (draw_area_intersects_rect(base, (int)draw_area_top,
                                   src_w, (int)di.height)) {
         if (base_x) *base_x = base;
         return 1;
@@ -4638,12 +4672,34 @@ static void gp0_exec_mono_tri(void) {
 }
 
 /* Execute mono quad (GP0 0x28-0x2B) — two triangles: (0,1,2) and (2,1,3) */
+/* A native split divider belongs to the combined framebuffer. Preserve it in
+ * canonical VRAM, but never mirror it into an expanded individual camera. */
+static int ws_local_viewport_divider(int x0, int y0, int x1, int y1,
+                                     uint16_t color, int semi_trans) {
+    int base, src_w;
+    if (color || semi_trans || !ws_native_wide_active() ||
+        !ws_local_viewport_layout(&base, &src_w, NULL, NULL)) return 0;
+    GpuDisplayInfo di; gpu_get_display_info(&di);
+    const int seam = (int)di.display_x + (int)di.width / 2;
+    return x0 + draw_offset_x >= seam - 1 && x1 + draw_offset_x <= seam + 1 &&
+        x1 > x0 && y0 <= 0 && y1 >= (int)di.height;
+}
+
 static void gp0_exec_mono_quad(void) {
     int semi_trans = (gp0_cmd_buf[0] >> 25) & 1;
     uint16_t color = rgb888_to_rgb555(gp0_cmd_buf[0] & 0xFFFFFFu);
     int32_t vx[4], vy[4];
     for (int i = 0; i < 4; i++)
         parse_vertex(gp0_cmd_buf[1 + i], &vx[i], &vy[i]);
+    if (vx[0] == vx[2] && vx[1] == vx[3] && vy[0] == vy[1] && vy[2] == vy[3] &&
+        ws_local_viewport_divider(vx[0], vy[0], vx[1], vy[2], color, semi_trans)) {
+        gr_wide_disable_target();
+        gr_set_semi_transparency(0, (int)semi_transparency);
+        gr_draw_flat_rect(vx[0] + draw_offset_x, vy[0] + draw_offset_y,
+                          vx[1] - vx[0], vy[2] - vy[0], color);
+        ws_nw_sync_target();
+        return;
+    }
     int rej_a = gpu_triangle_rejected(vx, vy, 0, 1, 2);
     int rej_b = gpu_triangle_rejected(vx, vy, 2, 1, 3);
     if (rej_a && rej_b) return;
@@ -5169,6 +5225,15 @@ static void gp0_exec_mono_line(void) {
     parse_vertex(gp0_cmd_buf[1], &x0, &y0);
     parse_vertex(gp0_cmd_buf[2], &x1, &y1);
     if (psx_gpu_line_oversize(x0, y0, x1, y1)) return;
+    if (x0 == x1 && ws_local_viewport_divider(x0, y0 < y1 ? y0 : y1,
+            x0 + 1, (y0 > y1 ? y0 : y1) + 1, color, semi_trans)) {
+        gr_wide_disable_target();
+        gr_set_semi_transparency(0, (int)semi_transparency);
+        gr_draw_line(x0 + draw_offset_x, y0 + draw_offset_y,
+                      x1 + draw_offset_x, y1 + draw_offset_y, color);
+        ws_nw_sync_target();
+        return;
+    }
     int32_t vx[2] = { x0, x1 };
     ws_nw_hud_shift_vertices(vx, 2);
     x0 = vx[0]; x1 = vx[1];
@@ -5214,6 +5279,13 @@ static void gp0_exec_mono_rect(void) {
     int h = (gp0_cmd_buf[2] >> 16) & 0xFFFFu;
     if (w > 1023) w = 1023;
     if (h > 511)  h = 511;
+    if (ws_local_viewport_divider(x0, y0, x0 + w, y0 + h, color, semi_trans)) {
+        gr_wide_disable_target();
+        gr_set_semi_transparency(0, (int)semi_transparency);
+        gr_draw_flat_rect(x0 + draw_offset_x, y0 + draw_offset_y, w, h, color);
+        ws_nw_sync_target();
+        return;
+    }
     ws_expand_fullscreen_rect(&x0, y0, &w, h);
     /* Same auto_ui squash the textured rect path gets. Without it a flat
      * -coloured HUD mark keeps its 4:3 X while the textured primitives of the
@@ -6178,7 +6250,8 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
      * threshold, which pinned every HUD group to the 4:3 centre. Keep edge
      * groups edge-anchored in those frames so the HUD adapts to the wide view.
      */
-    ws_auto_ui_dense = ws_ui_prepass_count >= 32u && !ws_gte_game_mode_cfg;
+    ws_auto_ui_dense = ws_ui_prepass_count >= 32u && !ws_gte_game_mode_cfg &&
+        !ws_local_native_split();
     if (ws_ui_prepass_count == 0) return;
 
     const int32_t group_origin = ws_disp_x();
