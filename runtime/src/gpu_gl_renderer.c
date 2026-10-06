@@ -5115,7 +5115,8 @@ static int init_gpu_raster(void) {
 int gl_renderer_texture_banks_supported(void) { return s_raster_ok && !s_cpu_auth_dual && !s_hd_native_authority; }
 
 int gl_renderer_fit_wide_aspect(int disp_w, int *num, int *den) {
-    GL_RT_SYNC("fit_wide_aspect");
+    /* No sync point: pure arithmetic on limits that change only while the
+     * emulation thread holds the context (main.cpp asks every frame). */
     if (!s_raster_ok || s_gl_max_dim <= 0) return 0;
     /* Against the allocation (the dynamic-resolution ceiling): the aspect
      * must not change when the level steps. */
