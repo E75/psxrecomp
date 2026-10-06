@@ -214,7 +214,9 @@ if(BUILD_TESTING)
         # Render thread ([video] render_thread) on vs off: the values the
         # guest reads back, native VRAM, the frame at S and the native-wide
         # surface are identical for a scripted stream with readbacks, mask
-        # bits, uploads, ring wraps and per-primitive widescreen tags.
+        # bits, uploads, ring wraps and per-primitive widescreen tags. A host
+        # with no window/GL 3.3 context (headless, Windows over SSH) exits 77:
+        # reported as skipped.
         add_test(NAME gl_render_thread_test
             COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_gl_render_thread.py"
@@ -223,7 +225,8 @@ if(BUILD_TESTING)
                 --sdl-include "${_gl_scale_sdl_inc}"
                 --sdl-library "$<TARGET_FILE:SDL3::SDL3>"
                 --output "${CMAKE_CURRENT_BINARY_DIR}/gl-render-thread-results")
-        set_tests_properties(gl_render_thread_test PROPERTIES LABELS "gpu;opengl;hardware" TIMEOUT 300)
+        set_tests_properties(gl_render_thread_test PROPERTIES
+            LABELS "gpu;opengl;hardware" TIMEOUT 300 SKIP_RETURN_CODE 77)
         unset(_gl_scale_sdl_inc)
     else()
         message(STATUS "gl_scale_invariance_test: not registered (needs macOS, Linux or MinGW, Python 3 and SDL3)")
@@ -1134,8 +1137,9 @@ if(BUILD_TESTING)
     # Render thread core ([video] render_thread, docs/RENDER_THREAD.md):
     # ordering across ring wraps, the frame bound, stale-frame detection and
     # the drain + context hand-off sync point, against a fake executor.
-    # The fixture itself uses POSIX threads and nanosleep.
-    if(NOT WIN32)
+    # The fixture itself uses POSIX threads and nanosleep (MinGW has both;
+    # the core takes its Win32 path there).
+    if(NOT MSVC)
         add_executable(render_thread_test tests/test_render_thread.c src/render_thread.c)
         target_include_directories(render_thread_test PRIVATE include)
         find_package(Threads REQUIRED)

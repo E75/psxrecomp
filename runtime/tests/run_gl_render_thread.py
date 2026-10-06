@@ -8,12 +8,16 @@ the stream (its own checks). A third run per scale with one frame in flight
 (PSX_TEST_RT_FRAMES is not needed: the fixture takes the bound as argv) is not
 required; the in-flight bound itself is covered by render_thread_test.
 
-macOS/Linux: pass the SDL3 include directory and static library and a C
-compiler, as for run_gl_scale_invariance.py. Evidence (commands, output) is
-written to receipt.json under --output.
+macOS/Linux/Windows (MinGW): pass the SDL3 include directory and static
+library and a C compiler, as for run_gl_scale_invariance.py. Evidence
+(commands, output) is written to receipt.json under --output. When the host
+cannot create a hidden window with a GL 3.3 core context (headless, or Windows
+over SSH) the fixture exits SKIP_EXIT and so does this script: CTest reports a
+skip, not a pass.
 """
 import argparse
 import json
+import os
 import pathlib
 import platform
 import re
@@ -25,6 +29,11 @@ MAC_FRAMEWORKS = ["Cocoa", "OpenGL", "IOKit", "CoreVideo", "CoreAudio", "AudioTo
                   "Carbon", "ForceFeedback", "GameController", "Metal", "QuartzCore",
                   "CoreMedia", "AVFoundation", "Foundation", "CoreHaptics",
                   "UniformTypeIdentifiers"]
+# The static SDL3's Win32 dependencies (as run_gl_texture_filter.py links them).
+WIN_LIBS = ["opengl32", "kernel32", "user32", "gdi32", "winmm", "imm32", "ole32",
+            "oleaut32", "version", "uuid", "advapi32", "setupapi", "shell32", "dinput8"]
+SKIP_EXIT = 77
+WINDOWS = os.name == "nt" or platform.system().startswith(("MINGW", "MSYS", "CYGWIN"))
 KEYS = ("rb", "digest", "hires", "wide")
 
 
@@ -78,6 +87,10 @@ def main():
                ("xr", src / "psx_openxr.c"), ("rth", src / "render_thread.c"),
                ("facade", src / "gpu_render.c")]
     sections = [] if platform.system() == "Darwin" else ["-ffunction-sections", "-fdata-sections"]
+    # MinGW's PE linker reports undefined references from sections it later
+    # collects, so there LTO drops them first (as run_gl_scale_invariance.py).
+    if WINDOWS:
+        sections.append("-flto")
     objs = []
     for name, path in sources:
         o = dest / (name + ".o")
@@ -87,11 +100,15 @@ def main():
             print(r.stderr[-3000:])
             return 2
         objs.append(o)
-    link = [args.cc, *objs, args.sdl_library, "-o", dest / "probe"]
+    probe = dest / ("probe.exe" if WINDOWS else "probe")
+    link = [args.cc, *objs, args.sdl_library, "-o", probe]
     if platform.system() == "Darwin":
         for f in MAC_FRAMEWORKS:
             link += ["-framework", f]
         link += ["-liconv", "-lm", "-lpthread", "-Wl,-dead_strip"]
+    elif WINDOWS:
+        # -static: no libwinpthread/libgcc DLLs needed next to probe.exe.
+        link += ["-flto", "-static", *["-l" + x for x in WIN_LIBS], "-lm", "-Wl,--gc-sections"]
     else:
         link += ["-lGL", "-lm", "-ldl", "-lpthread", "-Wl,--gc-sections"]
     r = run(link)
@@ -100,10 +117,17 @@ def main():
         return 2
 
     ok = True
+    first = True
     for s in [int(v) for v in args.scales.split(",") if v]:
         runs = {}
         for threaded in (0, 1):
-            r = run([dest / "probe", s, threaded, args.frames])
+            r = run([probe, s, threaded, args.frames])
+            if first and r.returncode == SKIP_EXIT:
+                # No window/GL context on this host: skip. Only the first
+                # run may skip; after it, 77 is a failure like any other.
+                print("SKIP:", r.stderr.strip()[-600:])
+                return SKIP_EXIT
+            first = False
             p = parse(r.stdout)
             tail = r.stdout.strip().splitlines()[-6:]
             print(f"scale {s} render_thread={threaded}: exit={r.returncode}", tail,
