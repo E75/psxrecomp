@@ -150,31 +150,47 @@ double render_pass_budget(double idle_ticks, double pass_ticks,
 double render_pass_leftover(double now, double frame_start, double reserve,
                             double margin);
 /* Running estimate of that work, from one measured sample per frame (the
- * busy host time between the end of the passes and the frame's start). It
- * errs late: a larger sample is taken at once, a smaller one moves it down
- * by RENDER_PASS_RESERVE_DECAY of the difference. */
+ * busy host time between the end of the passes and the frame's start): the
+ * 90th percentile of the last RENDER_PASS_RESERVE_WINDOW samples, at least
+ * the smaller of the last two (two high samples in a row are a heavier
+ * scene, not a stall of a busy host), plus what frames the passes delayed
+ * added (render_pass_reserve_delayed), which fades by
+ * RENDER_PASS_RESERVE_DECAY per sample. A lone stall (another process on
+ * the core) leaves it within a frame instead of pricing passes out for
+ * seconds; a heavier scene raises it at its second frame. */
+#define RENDER_PASS_RESERVE_WINDOW 32u
 #define RENDER_PASS_RESERVE_DECAY 0.03
-double render_pass_reserve_update(double reserve, double sample);
+typedef struct RenderPassReserve {
+    double   s[RENDER_PASS_RESERVE_WINDOW];
+    unsigned n, at;     /* samples held; next slot */
+    double   bump;      /* added by delayed frames, fading */
+} RenderPassReserve;
+/* Add a sample (ignored unless finite and >= 0); returns the estimate. */
+double render_pass_reserve_note(RenderPassReserve *r, double sample);
+/* The estimate now (0 before the first sample). */
+double render_pass_reserve_value(const RenderPassReserve *r);
+/* A frame the passes delayed by `late` beyond the no-pass baseline. */
+void   render_pass_reserve_delayed(RenderPassReserve *r, double late);
 
-/* Percent of the leftover time passes are planned into: an explicit
- * override (5..100, PSX_RENDER_PASS_BUDGET) or, by internal resolution
- * scale, 65 up to 3x and 50 above (full-resolution VRAM copies can exhaust
- * the GPU between guest frames even when the CPU has spare time). */
+/* Percent of the leftover time a plan's second and later passes are
+ * planned into: an explicit override (5..100, PSX_RENDER_PASS_BUDGET) or, by
+ * internal resolution scale, 65 up to 3x and 50 above (full-resolution VRAM
+ * copies can exhaust the GPU between guest frames even when the CPU has
+ * spare time). One pass may use all of it: it is held to the deadline. */
 int    render_pass_admission_pct(int internal_scale, int override_pct);
-/* Least leftover time a pass of unknown cost is tried in: the emulation
- * thread's own work this interval plus the reserve (twice that above 3x),
- * and at least a quarter VBlank. Nothing is forced into a frame to learn a
- * cost. */
-double render_pass_probe_min(double busy, double reserve, double vblank,
-                             int internal_scale);
+/* Least leftover time (already net of the reserve) a pass of unknown cost
+ * is tried in: the emulation thread's own work this interval, and at least
+ * a quarter VBlank (twice that above 3x). The probe is held to the deadline
+ * like any pass, so it cannot delay the frame; a probe stopped there leaves
+ * a lower bound on the cost. */
+double render_pass_probe_min(double busy, double vblank, int internal_scale);
 /* The same two policies keyed on whether the GPU is the limit (`gpu_heavy`)
  * instead of on the scale: the functions above are these with gpu_heavy =
  * internal_scale > 3. Dynamic resolution moves the scale at run time, and a
  * threshold on a moving scale would be a second resolution controller, so
  * there the renderer passes what it measured (RenderPassGpuPressure). */
 int    render_pass_admission_pct_for(int gpu_heavy, int override_pct);
-double render_pass_probe_min_for(double busy, double reserve, double vblank,
-                                 int gpu_heavy);
+double render_pass_probe_min_for(double busy, double vblank, int gpu_heavy);
 
 /* Measured GPU pressure for the two policies above: a plan the GPU fence
  * refused (the GPU still on the game's frame) or that found the guest

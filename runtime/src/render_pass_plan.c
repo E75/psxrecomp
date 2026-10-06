@@ -215,10 +215,43 @@ double render_pass_leftover(double now, double frame_start, double reserve,
     return frame_start - reserve - margin - now;
 }
 
-double render_pass_reserve_update(double reserve, double sample) {
-    if (!(sample >= 0.0) || !isfinite(sample)) return reserve;
-    if (!(reserve > 0.0) || sample >= reserve) return sample;
-    return reserve + (sample - reserve) * RENDER_PASS_RESERVE_DECAY;
+static int cmp_double(const void *a, const void *b) {
+    double x = *(const double *)a, y = *(const double *)b;
+    return x < y ? -1 : x > y ? 1 : 0;
+}
+
+double render_pass_reserve_value(const RenderPassReserve *r) {
+    double sorted[RENDER_PASS_RESERVE_WINDOW], v, a, b;
+    unsigned idx;
+    if (!r || r->n == 0) return 0.0;
+    memcpy(sorted, r->s, r->n * sizeof sorted[0]);
+    qsort(sorted, r->n, sizeof sorted[0], cmp_double);
+    idx = (unsigned)floor(0.9 * (double)r->n);
+    if (idx >= r->n) idx = r->n - 1;
+    v = sorted[idx];
+    if (r->n >= 2) {
+        unsigned last = (r->at + RENDER_PASS_RESERVE_WINDOW - 1u) % RENDER_PASS_RESERVE_WINDOW;
+        unsigned prev = (r->at + RENDER_PASS_RESERVE_WINDOW - 2u) % RENDER_PASS_RESERVE_WINDOW;
+        a = r->s[last];
+        b = r->s[prev];
+        if ((a < b ? a : b) > v) v = a < b ? a : b;
+    }
+    return v + (r->bump > 0.0 ? r->bump : 0.0);
+}
+
+double render_pass_reserve_note(RenderPassReserve *r, double sample) {
+    if (!r) return 0.0;
+    if (sample >= 0.0 && isfinite(sample)) {
+        r->s[r->at] = sample;
+        r->at = (r->at + 1u) % RENDER_PASS_RESERVE_WINDOW;
+        if (r->n < RENDER_PASS_RESERVE_WINDOW) r->n++;
+        r->bump -= r->bump * RENDER_PASS_RESERVE_DECAY;
+    }
+    return render_pass_reserve_value(r);
+}
+
+void render_pass_reserve_delayed(RenderPassReserve *r, double late) {
+    if (r && late > 0.0 && isfinite(late)) r->bump += late;
 }
 
 int render_pass_admission_pct_for(int gpu_heavy, int override_pct) {
@@ -230,17 +263,14 @@ int render_pass_admission_pct(int internal_scale, int override_pct) {
     return render_pass_admission_pct_for(internal_scale > 3, override_pct);
 }
 
-double render_pass_probe_min_for(double busy, double reserve, double vblank,
-                                 int gpu_heavy) {
-    double normal = (busy > 0.0 ? busy : 0.0) + (reserve > 0.0 ? reserve : 0.0);
-    double minimum = (gpu_heavy ? 2.0 : 1.0) * normal;
+double render_pass_probe_min_for(double busy, double vblank, int gpu_heavy) {
+    double minimum = busy > 0.0 ? busy : 0.0;
     if (minimum < 0.25 * vblank) minimum = 0.25 * vblank;
-    return minimum;
+    return (gpu_heavy ? 2.0 : 1.0) * minimum;
 }
 
-double render_pass_probe_min(double busy, double reserve, double vblank,
-                             int internal_scale) {
-    return render_pass_probe_min_for(busy, reserve, vblank, internal_scale > 3);
+double render_pass_probe_min(double busy, double vblank, int internal_scale) {
+    return render_pass_probe_min_for(busy, vblank, internal_scale > 3);
 }
 
 void render_pass_gpu_pressure_note(RenderPassGpuPressure *p, int event) {

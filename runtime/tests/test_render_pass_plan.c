@@ -350,19 +350,39 @@ static void test_leftover_and_reserve(void) {
           "no frame start known: none");
     CHECK(fabs(render_pass_leftover(80.0, 100.0, -5.0, NAN) - 20.0) < 1e-9,
           "bad reserve and margin count as zero");
-    /* The reserve errs late: a larger sample at once, a smaller one slowly. */
-    CHECK(render_pass_reserve_update(0.0, 6.0) == 6.0, "first sample sets it");
-    CHECK(render_pass_reserve_update(6.0, 9.0) == 9.0, "a larger sample at once");
+    /* The reserve: the 90th percentile of the recent samples, at least the
+     * smaller of the last two, plus a fading bump per delayed frame. */
     {
-        double r = 9.0;
-        r = render_pass_reserve_update(r, 3.0);
-        CHECK(fabs(r - (9.0 - 6.0 * RENDER_PASS_RESERVE_DECAY)) < 1e-9,
-              "a smaller sample moves it down by the decay");
-        for (int i = 0; i < 400; i++) r = render_pass_reserve_update(r, 3.0);
-        CHECK(r > 3.0 && r < 3.01, "and it settles on a steady sample");
+        RenderPassReserve r;
+        memset(&r, 0, sizeof r);
+        CHECK(render_pass_reserve_value(&r) == 0.0, "no sample: none");
+        CHECK(render_pass_reserve_note(&r, 6.0) == 6.0, "first sample sets it");
+        for (int i = 0; i < 31; i++) render_pass_reserve_note(&r, 4.0);
+        CHECK(render_pass_reserve_value(&r) == 4.0,
+              "an old high sample out of the top tenth no longer counts");
+        render_pass_reserve_note(&r, 20.0);
+        CHECK(render_pass_reserve_value(&r) == 4.0,
+              "a lone stall does not price passes out");
+        render_pass_reserve_note(&r, 9.0);
+        CHECK(render_pass_reserve_value(&r) == 9.0,
+              "two high samples in a row are taken at once");
+        for (int i = 0; i < 4; i++) render_pass_reserve_note(&r, 8.0);
+        CHECK(render_pass_reserve_value(&r) == 8.0,
+              "a few high samples are the 90th percentile of the window");
+        for (int i = 0; i < 32; i++) render_pass_reserve_note(&r, 3.0);
+        CHECK(render_pass_reserve_value(&r) == 3.0, "and it settles on a steady sample");
+        render_pass_reserve_delayed(&r, 2.0);
+        CHECK(render_pass_reserve_value(&r) == 5.0, "a delayed frame adds its delay");
+        render_pass_reserve_note(&r, 3.0);
+        CHECK(fabs(render_pass_reserve_value(&r) -
+                   (3.0 + 2.0 * (1.0 - RENDER_PASS_RESERVE_DECAY))) < 1e-9,
+              "which fades with every sample");
+        CHECK(render_pass_reserve_note(&r, NAN) == render_pass_reserve_value(&r) &&
+              r.n == RENDER_PASS_RESERVE_WINDOW, "bad samples are ignored");
+        render_pass_reserve_note(&r, -1.0);
+        CHECK(r.s[(r.at + RENDER_PASS_RESERVE_WINDOW - 1u) % RENDER_PASS_RESERVE_WINDOW] == 3.0,
+              "a negative sample is ignored");
     }
-    CHECK(render_pass_reserve_update(5.0, NAN) == 5.0 &&
-          render_pass_reserve_update(5.0, -1.0) == 5.0, "bad samples are ignored");
 }
 
 static void test_resolution_admission(void) {
@@ -374,11 +394,12 @@ static void test_resolution_admission(void) {
           "higher scales keep the conservative admission");
     CHECK(render_pass_admission_pct(9, 80) == 80,
           "an explicit profiling budget remains available");
-    CHECK(render_pass_probe_min(4.0, 3.0, 16.0, 1) == 7.0 &&
-          render_pass_probe_min(4.0, 3.0, 16.0, 9) == 14.0,
-          "a high-resolution probe needs twice the normal work");
-    CHECK(render_pass_probe_min(1.0, 1.0, 16.0, 1) == 4.0,
-          "a low-resolution probe keeps the quarter-VBlank floor");
+    CHECK(render_pass_probe_min(7.0, 16.0, 1) == 7.0 &&
+          render_pass_probe_min(7.0, 16.0, 9) == 14.0,
+          "a high-resolution probe needs twice the thread's own work");
+    CHECK(render_pass_probe_min(1.0, 16.0, 1) == 4.0 &&
+          render_pass_probe_min(1.0, 16.0, 9) == 8.0,
+          "the probe minimum keeps the quarter-VBlank floor");
 }
 
 static void test_leftover_cost(void) {
@@ -514,8 +535,8 @@ static void test_measured_admission(void) {
         CHECK(render_pass_admission_pct(sc, 0) ==
               render_pass_admission_pct_for(sc > 3, 0),
               "admission by scale is admission by pressure (scale > 3)");
-        CHECK(render_pass_probe_min(4.0, 3.0, 16.0, sc) ==
-              render_pass_probe_min_for(4.0, 3.0, 16.0, sc > 3),
+        CHECK(render_pass_probe_min(4.0, 16.0, sc) ==
+              render_pass_probe_min_for(4.0, 16.0, sc > 3),
               "probe minimum by scale is by pressure (scale > 3)");
     }
     CHECK(render_pass_admission_pct_for(1, 0) == 50 &&

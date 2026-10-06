@@ -291,16 +291,27 @@ activation (reset at every session start; `#ifdef
 PSX_MOD_RENDER_PASS_LEFTOVER` tells a plugin the runtime has it) makes passes
 use only time the game leaves free, so they never delay its frame:
 
-- **Budget.** A plan's budget is the host time left before the frame is
+- **Budget.** The leftover time is the host time left before the frame is
   first presented (`frame_start`), less the work the emulation thread still
-  has to do for it (the reserve) and a margin of max(1 ms, 1/32 VBlank),
-  times `render_pass_admission_pct` (65% up to 3x internal scale, 50% above;
+  has to do for it (the reserve) and a margin of max(1 ms, 1/32 VBlank).
+  One pass may use all of it; a plan of several passes gets
+  `render_pass_admission_pct` of it (65% up to 3x internal scale, 50% above;
   `PSX_RENDER_PASS_BUDGET` overrides it; with dynamic resolution, see
-  below). The reserve is measured every
-  frame -- the busy time between the end of the frame's passes and its
-  start -- and errs late: a larger sample is taken at once, a smaller one
-  moves it down by 3% of the difference. A frame that resumed more than
-  1 ms later than the no-pass baseline adds the difference to it.
+  below). The reserve has two parts. The thread's own work after the plan
+  point is sampled every frame whose VBlank presented no pass image -- the
+  busy time between the end of the frame's passes and its start -- as the
+  90th percentile of the last 32 samples, at least the smaller of the last
+  two (a lone stall of a busy host fades within a frame, a heavier scene
+  counts from its second frame). To that comes one present for each pass
+  image of the previous plan whose output deadline falls in the VBlank
+  ending at `frame_start`: the presenter shows it there, on the emulation
+  thread, before the game may go on. Present times are sampled at every
+  present (90th percentile of the last 32). On macOS GL a present took 3 ms
+  at the median and 5 ms at the 90th percentile (R4 native, M4 under load),
+  so a frame after a frame with passes often has no room for one: one pass
+  every other frame is the common case there. A frame that resumed more
+  than 1 ms later than the no-pass baseline adds the difference to the
+  reserve, fading by 3% a frame.
 - **Deadline.** `psx_mod_render_pass()` does not start a pass that would end
   after `frame_start - reserve - margin` by its estimated cost (`skipped`),
   and the freeze polls host time at every tick (at most 16K guest cycles
@@ -326,21 +337,24 @@ use only time the game leaves free, so they never delay its frame:
 - **Cost.** Learnt only from passes that fit: the first completed pass sets
   the average and later ones move it; plans use the average plus twice its
   smoothed deviation. A cut pass is a lower bound. A pass of unknown cost is
-  tried only when the budget is at least the thread's own work this
-  interval plus the reserve (twice that above 3x), and at least a quarter
-  VBlank. Costs are kept per presented image size (up to 8 sizes, least
+  tried only when the leftover time (already net of the reserve) is at
+  least the thread's own work this interval and at least a quarter VBlank
+  (twice that above 3x); it is held to the deadline like any pass. Costs are kept per presented image size (up to 8 sizes, least
   recently used replaced): returning to a size restores its estimate instead
   of measuring from nothing. An estimate that prices every plan out is probed with one pass
   after 30 such plans that had that much leftover time; a probe that
   confirms it, or is cut, doubles the wait up to 960 (`probes`).
 - **Holds.** No passes while the GPU is still on work queued before the
-  frame (a fence after each VBlank's presents; `gpu_busy`), for 30 VBlanks
-  after one that left the thread no idle time without passes (`behind`),
-  and per the pace guard: a game frame in which every guest VBlank arrived
-  more than 1/8 VBlank late (the GPU fell behind where the thread's own
-  timing does not show it) halves the passes allowed per frame; plans that
-  keep pace let it grow by one every 8 plans, a growth that fails soon
-  doubles that wait (up to 1024).
+  frame (a fence after each VBlank's presents; `gpu_busy`), for 8 VBlanks
+  after one that left the thread no idle time without passes (`behind`: a
+  game that stays behind has one at every catch-up; a lone stall of a busy
+  host must not cost the next half second), and per the pace guard: a game
+  frame after passes (in it or the frame before) in which every guest
+  VBlank arrived more than 1/8 VBlank late (the GPU fell behind where the
+  thread's own timing does not show it) halves the passes allowed per
+  frame; plans that keep pace let it grow by one every 8 plans, a growth
+  that fails soon doubles that wait (up to 1024). A slip without passes is
+  not judged: it says nothing about what passes cost.
 - **Dynamic resolution (one budget).** With `[video] dynamic_resolution`
   on, the dynamic-resolution controller is the only thing that changes the
   internal scale; passes are a per-frame consumer of the time it leaves.

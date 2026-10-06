@@ -162,16 +162,20 @@ lp = lp[:lp.index("\n}\n")]
 assert "render_pass_leftover(now, in.frame_start, s_pass_reserve, margin)" in lp \
     and ": in.frame_start - s_pass_reserve - margin;" in lp, (
     "leftover plans must budget only the time before the frame's start")
-assert "in.probe_min = render_pass_probe_min(" in lp, (
-    "an unmeasured pass is tried only with the frame's own cost to spare")
+assert "in.probe_min = render_pass_probe_min_for(busy, sp, heavy);" in lp, (
+    "an unmeasured pass is tried only with the frame's own work to spare")
+assert "one.budget = leftover > 0.0 ? leftover : 0.0;" in lp and \
+    "one.max = 1;" in lp, "one pass may use all of the leftover time"
+assert "(double)s_plan_presents * render_pass_reserve_value(&s_present_cost_est)" in lp, (
+    "a frame after passes must leave room for presenting their images")
 assert "if (!force && n && !pass_gpu_caught_up()) {" in lp, (
     "passes wait for the GPU to finish the game's frame")
 assert "if (!force && n && s_since_tight < PASS_TIGHT_HOLDOFF) {" in lp, (
     "no passes while the game itself has no slack")
-assert "if (!force && n > pace_cap) {" in lp and "pace_cap = pass_pace_cap(sp);" in lp, (
+assert "if (!force && n > pace_cap) {" in lp and "pace_cap = pass_pace_cap(sp, s_plan_prev_ran);" in lp, (
     "the pace guard limits passes after a frame that slipped")
 assert re.search(r"render_pass_leftover_cost_probe_due\(&s_pass_lcost\)\) \{", lp) and \
-    "in.budget >= in.probe_min" in lp, (
+    "one.budget >= in.probe_min" in lp, (
     "a stale estimate is probed only in leftover time, with one pass")
 # PSX_RENDER_PASS_VERIFY compares the hr colour, raw mirror, both mask
 # stencils and the native-wide band, before and after every pass.
