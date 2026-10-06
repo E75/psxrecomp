@@ -155,8 +155,8 @@ row, so a saturated render thread still shows at least every other frame.
 
 Consequence: the render thread takes the GL cost off the guest's frame, but
 if GL alone exceeds the frame budget the guest is still held back by the
-bound. Choosing an internal resolution that fits is the job of the
-resolution controller (roadmap Phase 1.2), not of this layer.
+bound. Choosing an internal resolution that fits is the job of dynamic
+resolution (below), not of this layer.
 
 ## Interoperation
 
@@ -168,10 +168,75 @@ resolution controller (roadmap Phase 1.2), not of this layer.
 | frame interpolation | ineligible (held) while enabled; not started when it is on at boot |
 | OpenXR | ineligible while a session is active |
 | native-wide / widescreen | recorded; tags, latch and wide-surface mirror as above |
-| internal resolution changes | `gr_set_scale` and every resolution entry point are sync points |
+| internal resolution changes | `gr_set_scale` and every resolution entry point are sync points; dynamic-resolution level steps are recorded (below) |
 | screenshots / debug captures | `screenshot*` sync; `present_shot` is fulfilled on the render thread |
 | headless | `--headless` (software) never starts it; `--headless-opengl` runs it on the hidden context (no present; the frame boundary still closes every frame), which is what `fp_identity` exercises |
 | Vulkan / software | never started (log line says why) |
+
+## Dynamic resolution (`[video] dynamic_resolution`)
+
+Opt-in as before (`dynamic_resolution = true`, `dynamic_resolution_min`;
+`PSX_DYNRES=0/1`, `PSX_DYNRES_MIN` for one run); no new keys. The surfaces
+are allocated at the configured internal resolution (the ceiling, e.g. Match
+display) and the level steps between that and the minimum. With the render
+thread off nothing changes: the emulation thread's wall-time controller
+(`dynres_*` in `dynamic_resolution.c`) decides. With it on, the guest's
+frame no longer pays for GL, so its wall time says nothing about whether the
+resolution fits; a second controller (`dynrt_*`, same file) takes over when
+the render thread starts and is fed what the render thread measured. The one
+target is every guest frame at the guest's rate (60 on NTSC); resolution is
+the only lever.
+
+**Cost.** Per replayed guest frame, between its first record and an
+`RTH_FRAME` marker the frame boundary records: the render thread's CPU time
+(wall time minus its idle waits for records and its time in the swap, the
+display's vsync) and the GPU time of the same span (a `GL_TIME_ELAPSED`
+query, read back when available, never waited on; `GL_TIMESTAMP` counters
+read 0 on macOS). cost = max(CPU, GPU), published as running totals
+(`gl_renderer_render_thread_costs`). A frame during which the context went
+to the emulation thread is dropped (its span holds the emulation thread's
+drawing). While this measures, `frame_perf`'s own TIME_ELAPSED brackets
+stand aside (queries of one target cannot nest). `PSX_DYNRES_GPU_TIMER=0`
+leaves CPU time only.
+
+**Decisions** (0.25 s windows of guest time; `dynamic_resolution.h` has the
+full rules and `dynrt_default_params` the numbers):
+
+- load = mean cost / the guest's nominal interval (one display refresh at
+  60 Hz). Budget 0.85 (15 % margin).
+- Down, one level, after two consecutive windows over budget, or one window
+  in which the emulation thread spent 5 % or more of the time blocked on the
+  queue bound (backpressure: the render thread is behind) or the cost was
+  over the whole interval. Never below the minimum.
+- Guest-bound: when the guest ran below its rate, never waited on the queue
+  and the render thread had slack in the interval it was given, the guest is
+  the limit and no down step is taken.
+- Judged: the window after a step settles (the cost lags the queue and the
+  query readback), the next one judges it. A down step that removed less than
+  30 % of the predicted cost (and did not end the backpressure) is a strike;
+  a second in a row means the cost is not the pixels: both steps are undone
+  and down steps are blocked for 20 s, doubling to 320 s.
+- Up, one level, after 3 s of windows with no backpressure and the next level
+  predicted at 0.70 or less, 2 s after the last step, never above the
+  ceiling. The prediction (load × ((1−f) + f·(S′/S)²)) learns f from each
+  judged step. A level reached by an up step and left within 10 s is blocked
+  for up steps, 10 s doubling to 160 s.
+- Holds as before (FMV, fast-forward, overlay compiles, resim, resizes,
+  boot); the savestate-load and game-entry tails, which only covered the
+  wall-time model's settling, are cut to 0.5 s.
+
+**Steps** are recorded (`RTH_DYN_STEP`) after the frame just closed, with the
+displayed rect captured at record time, and applied by the render thread in
+stream order (`dyn_apply`, the same reseed as without the thread). The
+emulation side's level (`gr_scale`, the wide-surface mirror,
+`gl_renderer_dynres_stats`) moves at record time. A frame the emulation
+thread holds steps directly, as without the thread.
+
+**Telemetry.** `{"cmd":"dynres"}` reports `"mode":"render_thread"`, level,
+load, budget, `bp_share`, `guest_hz`, `cpu_ms`/`gpu_ms` (last window's
+means), `guest_bound`, the step counters and `up_blocked`.
+`PSX_DYNRES_TRACE=<csv>` writes one line per window
+(`t_s,level,load,bp_share,guest_hz,cpu_ms,gpu_ms,guest_bound,decision`).
 
 ## Out of scope
 
@@ -204,6 +269,18 @@ resolution controller (roadmap Phase 1.2), not of this layer.
   mistakes: replay reading the tags live, staging uploads from the guest
   array, dropping the stream state.
 - `video_enhancement_settings_test`: the key defaults off and parses.
+- `dynamic_resolution_rt_test` (`test_dynamic_resolution_rt.c`): the
+  render-thread controller against a synthetic two-stage pipeline (guest E,
+  render a + b·S², two frames in flight, costs four frames late): overrun ->
+  one level at a time to the highest level that fits, then no oscillation;
+  headroom -> up only after the window; the hysteresis band; guest-bound ->
+  no step; a cost that does not scale -> two strikes, undo, back-off; queue
+  full with an under-reading meter -> down; floor and ceiling; a heavy
+  stretch whose first window is mixed -> one strike, not an undo; holds;
+  thin windows; pins.
+- `gl_render_thread_test` dynres mode: the same level steps between frames
+  with the thread off (applied at once) and on (recorded, and directly in
+  held frames) give identical readbacks, VRAM, frame and wide surface.
 - Windows (MinGW): the runtime builds with the Win32 path of
   `render_thread.c` (SRW lock, condition variable, `CreateThread`), and
   `render_thread_test` and `gl_render_thread_test` run there (the GL test
