@@ -23,7 +23,8 @@
  *     thread at all.
  *   - No lock is held while exec() runs. Locks only guard sleeping/waking.
  *
- * Every function except the rt_on_render_thread() / rt_frames_ahead()
+ * Every function except the rt_on_render_thread() / rt_frames_ahead() /
+ * rt_render_idle_ns()
  * queries is emulation-thread only. */
 #ifndef PSX_RENDER_THREAD_H
 #define PSX_RENDER_THREAD_H
@@ -85,6 +86,9 @@ void rt_frame_end(void);
 /* Render-thread query while executing: how many complete frames are queued
  * after the frame whose record is being executed (0 = it is the newest). */
 int  rt_frames_ahead(void);
+/* Render-thread query: the consumer's running idle total (waiting for
+ * records, or parked while the emulation thread holds the context). */
+uint64_t rt_render_idle_ns(void);
 
 /* Sync point. Drain, then move the context to the calling thread (held).
  * reason is a static string kept in the acquire ring. No-op when already held

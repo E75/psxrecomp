@@ -299,3 +299,294 @@ int dynres_sample(DynresController *c, double now_s, const DynresSample *s) {
     if (c->win_period >= c->p.window_s - 1e-9) return close_window(c, now_s);
     return c->level;
 }
+
+/* ---- Render-thread mode (see dynamic_resolution.h) ----------------------- */
+
+void dynrt_default_params(DynrtParams *p) {
+    memset(p, 0, sizeof *p);
+    p->window_s = 0.25;
+    p->margin = 0.15;
+    p->down_windows = 2;
+    p->strong_load = 1.0;
+    p->bp_strong = 0.05;
+    p->bp_weak = 0.01;
+    p->guest_slow = 1.03;
+    p->guest_slack = 0.90;
+    p->up_load = 0.70;
+    p->up_after_s = 3.0;
+    p->up_cooldown_s = 2.0;
+    p->verify_fraction = 0.30;
+    p->verify_block_s = 20.0;
+    p->verify_block_max_s = 320.0;
+    p->verify_forget_s = 300.0;
+    p->strike_s = 2.0;
+    p->relapse_s = 10.0;
+    p->relapse_block_s = 10.0;
+    p->relapse_block_max_s = 160.0;
+    p->relapse_forget_s = 60.0;
+    p->prior_scaled = 0.8;
+    p->learn_rate = 0.3;
+    p->gap_factor = 4.0;
+    p->gap_hold_s = 1.0;
+    p->min_coverage = 0.5;
+}
+
+static int rt_clamp(const DynrtController *c, int l) {
+    if (l < c->floor) l = c->floor;
+    if (l > c->ceiling) l = c->ceiling;
+    return l;
+}
+
+void dynrt_init(DynrtController *c, const DynrtParams *p, int floor_level,
+                int ceiling, int level) {
+    memset(c, 0, sizeof *c);
+    if (p) c->p = *p; else dynrt_default_params(&c->p);
+    if (ceiling < 1) ceiling = 1;
+    if (ceiling > DYNRES_MAX_LEVEL) ceiling = DYNRES_MAX_LEVEL;
+    if (floor_level < 1) floor_level = 1;
+    if (floor_level > ceiling) floor_level = ceiling;
+    c->floor = floor_level;
+    c->ceiling = ceiling;
+    c->level = rt_clamp(c, level);
+    c->f = c->p.prior_scaled;
+    c->last_step_t = c->last_down_t = -1e9;
+    c->verify_last_fail = -1e9;
+    c->verify_dur = c->p.verify_block_s;
+    for (int i = 0; i <= DYNRES_MAX_LEVEL; i++) {
+        c->up_reached_t[i] = -1e9;
+        c->relapse_dur[i] = c->p.relapse_block_s;
+    }
+    c->last_reason = "start";
+}
+
+double dynrt_predict(const DynrtController *c, double load, int from, int to) {
+    if (from < 1 || to < 1) return load;
+    double q = ((double)to * (double)to) / ((double)from * (double)from);
+    return load * ((1.0 - c->f) + c->f * q);
+}
+
+double dynrt_up_blocked_s(const DynrtController *c, int level, double now_s) {
+    if (level < 0 || level > DYNRES_MAX_LEVEL) return 0.0;
+    double r = c->up_block_until[level] - now_s;
+    return r > 0.0 ? r : 0.0;
+}
+
+static void rt_window_reset(DynrtController *c) {
+    c->win_period = c->win_wall = c->win_cost = c->win_bp = 0.0;
+    c->win_n = c->win_frames = 0;
+}
+
+static void rt_discard(DynrtController *c) {
+    if (c->win_n) c->held_windows++;
+    rt_window_reset(c);
+    c->over_streak = 0;
+    c->up_streak_s = 0.0;
+    c->post_active = 0;
+}
+
+void dynrt_hold(DynrtController *c, double now_s, double tail_s) {
+    double until = now_s + (tail_s > 0.0 ? tail_s : 0.0);
+    if (until > c->hold_until) c->hold_until = until;
+    rt_discard(c);
+}
+
+int dynrt_force(DynrtController *c, int level) {
+    if (level <= 0) {
+        c->forced = 0;
+        c->last_reason = "force released";
+        rt_discard(c);
+        return c->level;
+    }
+    c->forced = rt_clamp(c, level);
+    c->level = c->forced;
+    c->last_reason = "forced";
+    rt_discard(c);
+    return c->level;
+}
+
+static void rt_step(DynrtController *c, double now, int to, int down, double load,
+                    double bp_share, const char *why) {
+    const int from = c->level;
+    c->post_active = 1;
+    c->post_from = from;
+    c->post_to = to;
+    c->post_windows = 0;
+    c->post_down = down;
+    c->post_load_before = load;
+    c->post_bp_before = bp_share;
+    c->post_pred = dynrt_predict(c, load, from, to);
+    if (down) {
+        if (now - c->up_reached_t[from] < c->p.relapse_s) {
+            c->up_block_until[from] = now + c->relapse_dur[from];
+            c->relapse_dur[from] *= 2.0;
+            if (c->relapse_dur[from] > c->p.relapse_block_max_s)
+                c->relapse_dur[from] = c->p.relapse_block_max_s;
+            c->relapses++;
+        }
+        c->up_reached_t[from] = -1e9;
+        c->last_down_t = now;
+        c->downs++;
+    } else {
+        c->up_reached_t[to] = now;
+        c->ups++;
+    }
+    c->level = to;
+    c->last_step_t = now;
+    c->over_streak = 0;
+    c->up_streak_s = 0.0;
+    c->last_reason = why;
+    c->last_decision_t = now;
+}
+
+static void rt_learn(DynrtController *c, double before, double after, int from, int to) {
+    if (before <= 0.05 || from == to) return;
+    double q = ((double)to * (double)to) / ((double)from * (double)from);
+    double fo = (after / before - 1.0) / (q - 1.0);
+    if (fo < 0.1) fo = 0.1;
+    if (fo > 0.95) fo = 0.95;
+    c->f += c->p.learn_rate * (fo - c->f);
+}
+
+static int rt_close_window(DynrtController *c, double now) {
+    const double dur = c->win_period;
+    const int n = c->win_n, frames = c->win_frames;
+    const double wall = c->win_wall, cost = c->win_cost, bp = c->win_bp;
+    rt_window_reset(c);
+    c->windows++;
+    if (frames < 1 || (double)frames < c->p.min_coverage * (double)n) {
+        /* Mostly frames the emulation thread drew at a sync point, or the
+         * costs have not arrived yet: nothing to judge on. */
+        c->thin_windows++;
+        c->over_streak = 0;
+        c->up_streak_s = 0.0;
+        c->post_active = 0;
+        return c->level;
+    }
+    const double period = dur / (double)n;
+    const double load = (cost / (double)frames) / period;
+    const double bp_share = wall > 0.0 ? bp / wall : 0.0;
+    const double interval = wall / (double)n;
+    const double budget = 1.0 - c->p.margin;
+    c->last_load = load;
+    c->last_bp_share = bp_share;
+    c->last_hz = wall > 0.0 ? (double)n / wall : 0.0;
+    c->last_valid = 1;
+    const int strong_bp = bp_share >= c->p.bp_strong;
+    const int no_bp = bp_share < c->p.bp_weak;
+    /* The guest is the limit: slow, never held by the queue, and the render
+     * thread had room in the interval it was actually given. */
+    const int guest_bound = no_bp && interval > period * c->p.guest_slow &&
+                            (cost / (double)frames) < interval * c->p.guest_slack;
+    c->last_guest_bound = guest_bound;
+    if (guest_bound) c->guest_bound_windows++;
+
+    /* Judge a recent step: the first window settles, the second judges. */
+    if (c->post_active && ++c->post_windows >= 2) {
+        c->post_active = 0;
+        const double want = c->post_load_before - c->post_pred;
+        const double fell = c->post_load_before - load;
+        const int bp_cleared = c->post_bp_before >= c->p.bp_strong && no_bp;
+        const int failed = c->post_down && want > 0.0 &&
+                           fell < c->p.verify_fraction * want && !bp_cleared;
+        if (failed && !c->verify_strikes) {
+            /* One strike: the window before the step may have mixed lighter
+             * frames in (a scene getting heavier, the cost's lag), so it
+             * says little. Keep going; a second step that also removes
+             * nothing is the evidence. */
+            c->verify_strikes = 1;
+            c->strike_from = c->post_from;
+            c->strike_t = now;
+            c->last_reason = "down step removed less than predicted (one strike)";
+            c->last_decision_t = now;
+        } else if (failed) {
+            c->verify_strikes = 0;
+            if (now - c->verify_last_fail > c->p.verify_forget_s)
+                c->verify_dur = c->p.verify_block_s;
+            c->down_block_until = now + c->verify_dur;
+            c->verify_dur *= 2.0;
+            if (c->verify_dur > c->p.verify_block_max_s)
+                c->verify_dur = c->p.verify_block_max_s;
+            c->verify_last_fail = now;
+            const int to = rt_clamp(c, c->strike_from > c->post_from ? c->strike_from
+                                                                         : c->post_from);
+            if (to != c->level) {
+                c->undos++;
+                c->level = to;
+                c->last_step_t = now;
+            }
+            c->over_streak = 0;
+            c->up_streak_s = 0.0;
+            c->last_reason = "two down steps did not lower the cost: undone, down steps blocked";
+            c->last_decision_t = now;
+            return c->level;
+        } else {
+            if (c->post_down) c->verify_strikes = 0;
+            rt_learn(c, c->post_load_before, load, c->post_from, c->post_to);
+        }
+    }
+    /* A strike is about the steps right after it. */
+    if (c->verify_strikes && !c->post_active && now - c->strike_t > c->p.strike_s)
+        c->verify_strikes = 0;
+    if (now - c->up_reached_t[c->level] >= c->p.relapse_forget_s) {
+        c->relapse_dur[c->level] = c->p.relapse_block_s;
+        c->up_reached_t[c->level] = -1e9;
+    }
+    if (c->post_active) return c->level;
+
+    const int over = !guest_bound && (load >= budget || strong_bp);
+    c->last_over = over;
+    if (over) {
+        c->up_streak_s = 0.0;
+        c->over_streak++;
+        const int strong = strong_bp || load >= c->p.strong_load;
+        if (c->level > c->floor && now >= c->down_block_until &&
+            (strong || c->over_streak >= c->p.down_windows))
+            rt_step(c, now, c->level - 1, 1, load, bp_share,
+                    strong_bp ? "queue full (render thread behind)"
+                              : strong ? "render cost over the interval"
+                                       : "render cost over budget");
+        else if (c->level <= c->floor)
+            c->last_reason = "over budget at the floor";
+        return c->level;
+    }
+    c->over_streak = 0;
+    if (guest_bound) c->last_reason = "guest-bound (no step)";
+    if (c->level >= c->ceiling) { c->up_streak_s = 0.0; return c->level; }
+    const int next = c->level + 1;
+    if (no_bp && dynrt_predict(c, load, c->level, next) <= c->p.up_load)
+        c->up_streak_s += dur;
+    else
+        c->up_streak_s = 0.0;
+    if (c->up_streak_s >= c->p.up_after_s - 1e-9 &&
+        now - c->last_step_t >= c->p.up_cooldown_s &&
+        now >= c->up_block_until[next])
+        rt_step(c, now, next, 0, load, bp_share, "headroom");
+    return c->level;
+}
+
+int dynrt_sample(DynrtController *c, double now_s, const DynrtSample *s) {
+    if (c->forced) return c->level;
+    if (!s || s->period_s <= 0.0) return c->level;
+    if (s->held || now_s < c->hold_until) {
+        if (s->held || c->win_n) rt_discard(c);
+        return c->level;
+    }
+    /* A long interval the queue explains is the render thread being slow,
+     * not a gap. */
+    const double unexplained = s->wall_s - (s->bp_s > 0.0 ? s->bp_s : 0.0);
+    if (unexplained > s->period_s * c->p.gap_factor) {
+        dynrt_hold(c, now_s, c->p.gap_hold_s);
+        c->last_reason = "gap";
+        return c->level;
+    }
+    c->win_period += s->period_s;
+    c->win_wall += s->wall_s;
+    c->win_n++;
+    if (s->frames > 0 && s->cost_s >= 0.0) {
+        c->win_frames += s->frames;
+        c->win_cost += s->cost_s;
+    }
+    if (s->bp_s > 0.0) c->win_bp += s->bp_s;
+    if (c->win_period >= c->p.window_s - 1e-9) return rt_close_window(c, now_s);
+    return c->level;
+}

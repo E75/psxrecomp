@@ -335,6 +335,15 @@ typedef struct GlHostLedger {
     uint64_t interp_presents, swaps;
 } GlHostLedger;
 void gl_renderer_host_ledger(GlHostLedger *out);
+/* Render thread ([video] render_thread): the cost of each guest frame it
+ * replayed, max(GPU time, its CPU time without idle waits and the swap), as
+ * running totals the emulation thread differences. Measured only while
+ * gl_renderer_render_thread_measure(1) (dynamic resolution on). */
+typedef struct GlRthCosts {
+    uint64_t frames, cost_ns, cpu_ns, gpu_ns, gpu_frames, dropped;
+} GlRthCosts;
+void gl_renderer_render_thread_measure(int on);
+void gl_renderer_render_thread_costs(GlRthCosts *out);
 
 /* Narrow a native-wide display aspect num:den to the widest whose surface
  * this context can allocate at its internal scale (psx_gl_fit_wide_aspect;
