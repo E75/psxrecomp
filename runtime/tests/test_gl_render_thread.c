@@ -210,7 +210,12 @@ int main(int argc, char **argv) {
     int scale = argc > 1 ? atoi(argv[1]) : 1;
     int threaded = argc > 2 && argv[2][0] == '1';
     int frames = argc > 3 ? atoi(argv[3]) : 80;
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) return 2;
+    /* No video device, window or GL context (headless, Windows over SSH):
+     * exit 77, which the harness reports as a CTest skip. */
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        fprintf(stderr, "SKIP no video (%s)\n", SDL_GetError());
+        return 77;
+    }
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
@@ -219,7 +224,19 @@ int main(int argc, char **argv) {
 #endif
     SDL_Window *win = SDL_CreateWindow("Render thread hidden test", 0, 0, 320, 240,
                                        SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
-    if (!win) return 2;
+    if (!win) { fprintf(stderr, "SKIP no window (%s)\n", SDL_GetError()); return 77; }
+    {   /* Probe with the renderer's attributes: only a probe tells "no
+         * context on this host" from "the renderer's init broke". */
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+        SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+        SDL_GLContext probe = SDL_GL_CreateContext(win);
+        if (!probe) {
+            fprintf(stderr, "SKIP no GL 3.3 core context (%s)\n", SDL_GetError());
+            return 77;
+        }
+        SDL_GL_MakeCurrent(win, NULL);
+        SDL_GL_DeleteContext(probe);
+    }
     gr_set_backend(GR_BACKEND_OPENGL);
     gr_init(vram);
     gr_set_scale(scale);
