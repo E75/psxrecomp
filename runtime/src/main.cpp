@@ -67,6 +67,8 @@ extern "C" void psx_event_step_conservative_env_init(void);
 #endif
 #include "psx_netplay.h"
 #include "psx_stick.h"       /* radial SDL-stick -> DualShock response transform */
+#include "psx_trigger.h"     /* continuous SDL trigger -> 0..255 magnitude */
+#include "mod_pad_transform.h"
 #include "psx_controller_type.h" /* mapped wheel-name classification */
 #include "psx_netplay_rb.h"
 #include "psx_selfcheck.h"
@@ -5059,6 +5061,13 @@ static int pad_type_boot(const PlayerInput& p, int mode) {
          : (pad_mode_boot_analog(mode) ? SIO_PAD_DUALSHOCK : SIO_PAD_DIGITAL);
 }
 
+/* Boot/hotplug type for slot s: a registered title pad transform names the
+ * type it presents before its first frame; otherwise the device/mode type. */
+static int pad_type_boot_for_slot(int s, const PlayerInput& p, int mode) {
+    const int initial = mod_pad_transform_initial_type((uint32_t)s);
+    return initial >= 0 ? initial : pad_type_boot(p, mode);
+}
+
 /* Keyboard mappings can drive both DualShock sticks. Honor the configured
  * mode, including analog-only title locks; multitap policy belongs to the
  * SIO seat below and applies equally to keyboards and physical controllers. */
@@ -5124,7 +5133,10 @@ static void refresh_player_devices(void) {
         if (p.kind == 2) open_player(p, s);
         if (netplay) continue;
         const int boot_mode = assert_sio_pad_profile(s, false);
-        sio_set_pad_type(s, pad_type_boot(p, boot_mode), 0x80, 0x80, 0x80, 0x80);
+        const int boot_type = pad_type_boot_for_slot(s, p, boot_mode);
+        if (boot_type == SIO_PAD_DUALSHOCK || boot_type == SIO_PAD_JOGCON)
+            sio_set_pad_config_capable(s, 1);
+        sio_set_pad_type(s, boot_type, 0x80, 0x80, 0x80, 0x80);
     }
 }
 
@@ -6421,6 +6433,30 @@ static void pad_ext_source_resolve(void*, int s, const PSXModControllerState* so
                            : mode != PSXRecompV4::PAD_MODE_DIGITAL);
 }
 static void pad_ext_mouse_reset(void*) { psx_local_mouse_reset(); }
+/* Host extras of port s for the title transform: the assigned gamepad and its
+ * analog triggers (SDL 0..32767 -> 0..255, unthresholded). */
+static void pad_ext_host_extras(void*, int s, uint32_t* flags, uint32_t* lt,
+                                uint32_t* rt) {
+    *flags = *lt = *rt = 0;
+    if (s < 0 || s >= PSX_MAX_PLAYERS) return;
+    SDL_GameController* handle = g_players[s].handle;
+    if (g_players[s].kind != 2 || !handle) return;
+    *flags = PSX_MOD_PAD_HOST_GAMEPAD;
+    if (SDL_GameControllerHasAxis(handle, SDL_CONTROLLER_AXIS_TRIGGERLEFT)) {
+        *flags |= PSX_MOD_PAD_HOST_LT;
+        *lt = psx_trigger_axis_to_u8(
+            SDL_GameControllerGetAxis(handle, SDL_CONTROLLER_AXIS_TRIGGERLEFT));
+    }
+    if (SDL_GameControllerHasAxis(handle, SDL_CONTROLLER_AXIS_TRIGGERRIGHT)) {
+        *flags |= PSX_MOD_PAD_HOST_RT;
+        *rt = psx_trigger_axis_to_u8(
+            SDL_GameControllerGetAxis(handle, SDL_CONTROLLER_AXIS_TRIGGERRIGHT));
+    }
+}
+static int pad_ext_pad_transform(void*, int s, const PSXModPadFrame* frame,
+                                 PSXModPadOutput* out) {
+    return mod_pad_transform_run((uint32_t)s, frame, out);
+}
 static void pad_ext_mouse_fold(void*, int connected, int analog, uint16_t buttons,
                                uint8_t* rx, uint8_t* ry) {
     psx_local_mouse_pad(connected != 0, analog != 0, buttons, *rx, *ry);
@@ -6434,6 +6470,8 @@ static PadExtHooks pad_ext_main_hooks(void) {
     h.source_resolve = pad_ext_source_resolve;
     h.mouse_reset = pad_ext_mouse_reset;
     h.mouse_fold = pad_ext_mouse_fold;
+    h.host_extras = pad_ext_host_extras;
+    h.pad_transform = pad_ext_pad_transform;
     return h;
 }
 
@@ -16173,6 +16211,7 @@ int main(int argc, char** argv) {
          * latched across a soft return. */
         g_mod_controller_mode_override.fill(-1);
         mod_controller_source_reset();
+        mod_pad_transform_reset();
         for (auto& policy : g_mod_controller_policy)
             policy = ModControllerPresentationPolicy{};
         g_mod_load_wall_multiplier = -1;

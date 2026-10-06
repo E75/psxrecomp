@@ -16,6 +16,8 @@ static struct {
     int fold_connected, fold_analog; uint16_t fold_buttons; uint8_t fold_rx, fold_ry;
     int fold_slot_calls[2];
     int src_analog_out;
+    int xf_ret; PSXModPadOutput xf_out; PSXModPadFrame xf_seen; int xf_calls;
+    uint32_t ex_flags, ex_lt, ex_rt;
 } T;
 
 static void L(char c) { T.log[T.n++] = c; T.log[T.n] = 0; }
@@ -49,6 +51,15 @@ static void h_mfold(void *c, int con, int an, uint16_t b, uint8_t *rx, uint8_t *
     T.fold_connected = con; T.fold_analog = an; T.fold_buttons = b;
     T.fold_rx = *rx; T.fold_ry = *ry;
     if (T.mouse_override) { *rx = T.mouse_rx; *ry = T.mouse_ry; }
+}
+
+static void h_extras(void *c, int s, uint32_t *f, uint32_t *lt, uint32_t *rt) {
+    (void)c; (void)s; L('e'); *f = T.ex_flags; *lt = T.ex_lt; *rt = T.ex_rt;
+}
+static int h_xf(void *c, int s, const PSXModPadFrame *f, PSXModPadOutput *o) {
+    (void)c; (void)s; L('t'); T.xf_calls++; T.xf_seen = *f;
+    if (!T.xf_ret) return 0;
+    *o = T.xf_out; return 1;
 }
 
 static PadExtHooks hooks(void) {
@@ -140,6 +151,68 @@ int main(void) {
     reset(); T.guard = 1; T.have_source = 1;
     CHECK(pad_ext_resolve(&h, 0, &o) == 1 && T.last_guarded_res == 1);
     CHECK(o.buttons == 0xffff && o.lx == 128 && T.mouse_resets == 1 && T.mouse_folds == 0);
+
+    /* Stage 2b, title transform. Not registered (hook returns 0): the pad of
+     * stages 1-2 passes through bit-identical. */
+    {
+        PadExtHooks hx = hooks();
+        hx.host_extras = h_extras; hx.pad_transform = h_xf;
+        reset();
+        CHECK(pad_ext_resolve(&hx, 0, &o) == 1);
+        CHECK(o.buttons == 0xfffe && o.lx == 10 && o.ly == 20 && o.rx == 30 &&
+              o.ry == 40 && o.analog == 1);
+        CHECK(strcmp(T.log, "gscetm") == 0);
+
+        /* It sees the resolved pad (after the source) plus host extras, and a
+         * NeGcon output is packed lx twist, rx I, ry II, ly L; the mouse is
+         * reset rather than folded into the pressures. */
+        reset();
+        T.have_source = 1;
+        T.ex_flags = 7; T.ex_lt = 60; T.ex_rt = 250;
+        T.xf_ret = 1;
+        T.xf_out.struct_size = sizeof T.xf_out; T.xf_out.buttons = 0xbfff;
+        T.xf_out.type = PSX_MOD_PAD_NEGCON; T.xf_out.lx = 0x30;
+        T.xf_out.ly = 0x99; T.xf_out.rx = 0x98; T.xf_out.ry = 0x97;
+        T.xf_out.negcon_i = 250; T.xf_out.negcon_ii = 60; T.xf_out.negcon_l = 5;
+        T.mouse_override = 1; T.mouse_rx = 1; T.mouse_ry = 2;
+        CHECK(pad_ext_resolve(&hx, 0, &o) == 1);
+        CHECK(T.xf_seen.struct_size == sizeof T.xf_seen && T.xf_seen.player == 0);
+        CHECK(T.xf_seen.buttons == (0xfeff & 0xfffe) && T.xf_seen.lx == 200 &&
+              T.xf_seen.type == 1 && T.xf_seen.host_flags == 7 &&
+              T.xf_seen.host_lt == 60 && T.xf_seen.host_rt == 250);
+        CHECK(o.analog == PSX_MOD_PAD_NEGCON && o.buttons == 0xbfff &&
+              o.lx == 0x30 && o.rx == 250 && o.ry == 60 && o.ly == 5);
+        CHECK(T.mouse_folds == 0 && T.mouse_resets == 1);
+        CHECK(strcmp(T.log, "gscretx") == 0);
+
+        /* DualShock output: sticks from the output, mouse folds as usual. */
+        reset();
+        T.xf_ret = 1; T.xf_out.struct_size = sizeof T.xf_out;
+        T.xf_out.buttons = 0xfff0; T.xf_out.type = PSX_MOD_PAD_DUALSHOCK;
+        T.xf_out.lx = 1; T.xf_out.ly = 2; T.xf_out.rx = 3; T.xf_out.ry = 4;
+        CHECK(pad_ext_resolve(&hx, 0, &o) == 1);
+        CHECK(o.analog == 1 && o.lx == 1 && o.ly == 2 && o.rx == 3 && o.ry == 4 &&
+              T.mouse_folds == 1 && T.fold_rx == 3 && T.fold_buttons == 0xfff0);
+
+        /* Digital output centres the sticks. */
+        T.xf_out.type = PSX_MOD_PAD_DIGITAL;
+        CHECK(pad_ext_resolve(&hx, 1, &o) == 1 && o.analog == 0 && o.lx == 0x80);
+
+        /* Input guard: the transform still runs, sees no trigger values, and
+         * its output is neutralized while keeping the presented type. */
+        reset(); T.guard = 1; T.ex_flags = 7; T.ex_lt = 99; T.ex_rt = 99;
+        T.xf_ret = 1; T.xf_out.struct_size = sizeof T.xf_out;
+        T.xf_out.buttons = 0x0000; T.xf_out.type = PSX_MOD_PAD_NEGCON;
+        T.xf_out.negcon_i = 200;
+        CHECK(pad_ext_resolve(&hx, 0, &o) == 1);
+        CHECK(T.xf_seen.host_flags == 7 && T.xf_seen.host_lt == 0 && T.xf_seen.host_rt == 0);
+        CHECK(o.analog == PSX_MOD_PAD_NEGCON && o.buttons == 0xffff &&
+              o.lx == 0x80 && o.rx == 0 && o.ry == 0 && o.ly == 0);
+
+        /* No device and no source: the transform is not consulted. */
+        reset(); T.have_device = 0; T.xf_ret = 1;
+        CHECK(pad_ext_resolve(&hx, 0, &o) == 0 && T.xf_calls == 0);
+    }
 
     /* Gating predicate: live only when every blocking condition is clear. */
     {

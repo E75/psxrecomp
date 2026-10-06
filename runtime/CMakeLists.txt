@@ -460,6 +460,13 @@ if(BUILD_TESTING)
     target_include_directories(mod_controller_source_test PRIVATE include)
     add_test(NAME mod_controller_source_test COMMAND mod_controller_source_test)
 
+    add_executable(mod_pad_transform_test
+        tests/test_mod_pad_transform.c src/mod_pad_transform.c)
+    target_include_directories(mod_pad_transform_test PRIVATE include)
+    add_test(NAME mod_pad_transform_test COMMAND mod_pad_transform_test)
+    add_executable(psx_trigger_values_test tests/test_psx_trigger_values.c)
+    target_include_directories(psx_trigger_values_test PRIVATE include)
+    add_test(NAME psx_trigger_values_test COMMAND psx_trigger_values_test)
     add_executable(pad_external_input_test
         tests/test_pad_external_input.c src/pad_external_input.c)
     target_include_directories(pad_external_input_test PRIVATE include src)

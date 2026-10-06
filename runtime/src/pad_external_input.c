@@ -1,3 +1,4 @@
+#include <string.h>
 #include "pad_external_input.h"
 
 int pad_ext_live(const PadExtGate *g) {
@@ -5,6 +6,42 @@ int pad_ext_live(const PadExtGate *g) {
            !g->netplay_resim && !g->selfcheck_locked && !g->selfcheck_resim &&
            !g->render_pass && !g->savestate_menu_open && !g->rewind_open &&
            !g->input_guard;
+}
+
+/* Stage 2b: run the title transform over the resolved pad and pack its
+ * output back into the PsxNetPad (NeGcon: lx twist, rx I, ry II, ly L). */
+static void pad_ext_transform(const PadExtHooks *h, int s, int guarded,
+                              PsxNetPad *out) {
+    PSXModPadFrame f;
+    PSXModPadOutput o;
+    if (!h->pad_transform) return;
+    memset(&f, 0, sizeof f);
+    f.struct_size = sizeof f;
+    f.player = (uint32_t)s;
+    f.buttons = out->buttons;
+    f.lx = out->lx; f.ly = out->ly; f.rx = out->rx; f.ry = out->ry;
+    f.type = out->analog;
+    if (h->host_extras) h->host_extras(h->ctx, s, &f.host_flags, &f.host_lt, &f.host_rt);
+    if (guarded) f.host_lt = f.host_rt = 0;
+    if (!h->pad_transform(h->ctx, s, &f, &o)) return;
+    if (guarded) {
+        o.buttons = 0xffff;
+        o.lx = o.ly = o.rx = o.ry = 0x80;
+        o.negcon_i = o.negcon_ii = o.negcon_l = 0;
+    }
+    out->buttons = (uint16_t)o.buttons;
+    out->analog = (uint8_t)o.type;
+    if (o.type == PSX_MOD_PAD_NEGCON) {
+        out->lx = (uint8_t)o.lx;
+        out->ly = (uint8_t)o.negcon_l;
+        out->rx = (uint8_t)o.negcon_i;
+        out->ry = (uint8_t)o.negcon_ii;
+    } else if (o.type == PSX_MOD_PAD_DIGITAL) {
+        out->lx = out->ly = out->rx = out->ry = 0x80;
+    } else {
+        out->lx = (uint8_t)o.lx; out->ly = (uint8_t)o.ly;
+        out->rx = (uint8_t)o.rx; out->ry = (uint8_t)o.ry;
+    }
 }
 
 int pad_ext_resolve(const PadExtHooks *h, int s, PsxNetPad *out) {
@@ -29,8 +66,9 @@ int pad_ext_resolve(const PadExtHooks *h, int s, PsxNetPad *out) {
         if (s == 0) h->mouse_reset(h->ctx);
         return 0;
     }
+    pad_ext_transform(h, s, guarded, out);
     if (s == 0) {
-        if (guarded) h->mouse_reset(h->ctx);
+        if (guarded || out->analog == PSX_MOD_PAD_NEGCON) h->mouse_reset(h->ctx);
         else h->mouse_fold(h->ctx, out->connected, out->analog, out->buttons,
                            &out->rx, &out->ry);
     }
