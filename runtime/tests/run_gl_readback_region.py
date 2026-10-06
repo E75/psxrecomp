@@ -73,6 +73,8 @@ def main():
                ("xr", framework / "runtime/src/psx_openxr.c")]
     if (framework / "runtime/src/render_thread.c").exists():
         sources.append(("rth", framework / "runtime/src/render_thread.c"))
+    if (framework / "runtime/src/present_thread.c").exists():
+        sources.append(("pth", framework / "runtime/src/present_thread.c"))
     if (framework / "runtime/src/frame_gen.c").exists():
         sources.append(("fg", framework / "runtime/src/frame_gen.c"))
     for name, source in sources:

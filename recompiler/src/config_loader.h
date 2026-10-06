@@ -583,6 +583,14 @@ struct RuntimeConfig {
     // PSX_FRAME_GEN=0/1 overrides.
     bool                  video_frame_generation = false;
 
+    // present_thread: with render_thread, composed frames go to offscreen
+    // slots and a present thread (second, shared GL context on the window)
+    // does the copy and the swap, so the window compositor's wait does not
+    // block rendering (docs/RENDER_THREAD.md "Present thread"). Same pixels.
+    // Off by default; PSX_PRESENT_THREAD=0/1 overrides,
+    // PSX_PRESENT_THREAD_SLOTS=2..4 (default 3).
+    bool                  video_present_thread = false;
+
     // low_latency_input: re-sample the pad after the wall-clock pacer (just
     // before present) so the next CPU frame reads near-fresh input instead of
     // input ~one frame stale. Default on. vsync: present/swap mode —

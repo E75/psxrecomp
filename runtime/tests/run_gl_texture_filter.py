@@ -41,6 +41,8 @@ def main():
         sources.append(('xr',fw/'runtime/src/psx_openxr.c'))
     if (fw/'runtime/src/render_thread.c').exists():
         sources.append(('rth',fw/'runtime/src/render_thread.c'))
+    if (fw/'runtime/src/present_thread.c').exists():
+        sources.append(('pth',fw/'runtime/src/present_thread.c'))
     if (fw/'runtime/src/frame_gen.c').exists():
         sources.append(('fg',fw/'runtime/src/frame_gen.c'))
     objects=[]

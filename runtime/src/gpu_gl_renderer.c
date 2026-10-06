@@ -95,6 +95,7 @@
 #include "psx_rewind.h"
 #include "psx_openxr.h"
 #include "openxr_color.h"
+#include "present_thread.h"
 
 #include "psx_sdl.h"
 #if defined(PSX_SDL3)
@@ -293,6 +294,25 @@ static PFN_glBindRenderbuffer  p_glBindRenderbuffer;
 static PFN_glRenderbufferStorage p_glRenderbufferStorage;
 static PFN_glFramebufferRenderbuffer p_glFramebufferRenderbuffer;
 
+/* Present thread (docs/RENDER_THREAD.md "Present thread"): while it runs,
+ * the default framebuffer of the composing context is an offscreen slot.
+ * Every bind of framebuffer 0 on that context lands on the current slot; the
+ * present thread's own context binds the real one (p_glBindFramebuffer_raw). */
+typedef void *(APIENTRY *PFN_glFenceSync)(GLenum, GLbitfield);
+typedef void   (APIENTRY *PFN_glWaitSync)(void *, GLbitfield, uint64_t);
+typedef void   (APIENTRY *PFN_glDeleteSync)(void *);
+static PFN_glFenceSync  p_glFenceSync;
+static PFN_glWaitSync   p_glWaitSync;
+static PFN_glDeleteSync p_glDeleteSync;
+static PFN_glBindFramebuffer p_glBindFramebuffer_raw;
+static int    s_pt_on = 0;               /* redirect active (present thread running) */
+static volatile int s_pt_interval_gen = 0; /* bumped per swap-interval change */
+static GLuint pt_target_fbo(void);
+static void APIENTRY gl_bind_fb_redirect(GLenum target, GLuint fb) {
+    if (fb == 0 && s_pt_on) fb = pt_target_fbo();
+    p_glBindFramebuffer_raw(target, fb);
+}
+
 static int load_modern_gl(void) {
     int ok = 1;
 #define LOAD(p, n) do { p = (void *)SDL_GL_GetProcAddress(n); if (!p) ok = 0; } while (0)
@@ -340,6 +360,14 @@ static int load_modern_gl(void) {
     /* Optional: only the debug presented-image ring maps pack buffers. */
     p_glMapBuffer           = (void *)SDL_GL_GetProcAddress("glMapBuffer");
     p_glUnmapBuffer         = (void *)SDL_GL_GetProcAddress("glUnmapBuffer");
+    /* Optional: the present thread needs sync objects (GL 3.2). */
+    p_glFenceSync           = (void *)SDL_GL_GetProcAddress("glFenceSync");
+    p_glWaitSync            = (void *)SDL_GL_GetProcAddress("glWaitSync");
+    p_glDeleteSync          = (void *)SDL_GL_GetProcAddress("glDeleteSync");
+    if (p_glBindFramebuffer && p_glBindFramebuffer != gl_bind_fb_redirect) {
+        p_glBindFramebuffer_raw = p_glBindFramebuffer;
+        p_glBindFramebuffer = gl_bind_fb_redirect;
+    }
 #undef LOAD
     return ok;
 }
@@ -1296,7 +1324,7 @@ static void pres_record(int path, int dx, int dy, int w, int h,
      * we pass in are already bottom-origin GL window coords). */
     uint8_t px[3] = { 0, 0, 0 };
     if (probe_pixels && lw > 0 && lh > 0) {
-        glReadBuffer(GL_BACK);
+        glReadBuffer(s_pt_on ? PSXGL_COLOR_ATTACHMENT0 : GL_BACK);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
         glReadPixels(lx + lw / 2, ly + lh / 2, 1, 1, GL_RGB, GL_UNSIGNED_BYTE, px);
         glPixelStorei(GL_PACK_ALIGNMENT, 4);
@@ -5432,6 +5460,7 @@ int gl_renderer_init_context(SDL_Window *win) {
 void gl_renderer_set_swap_interval(int interval) {
     GL_RT_SYNC("set_swap_interval");
     s_swap_interval = interval;
+    s_pt_interval_gen++;   /* the present thread's context applies it */
     if (s_ctx) {
         if (SDL_GL_SetSwapInterval(interval) != 0 && interval < 0) {
             SDL_GL_SetSwapInterval(1);
@@ -5442,6 +5471,7 @@ void gl_renderer_set_swap_interval(int interval) {
 int gl_renderer_get_swap_interval(void) {
     GL_RT_SYNC("get_swap_interval");
     if(!s_ctx)return -2;
+    if(s_pt_on)return s_swap_interval;
 #if defined(PSX_SDL3)
     int interval=0;
     return SDL_GL_GetSwapInterval(&interval)?interval:-2;
@@ -7756,7 +7786,7 @@ static int openxr_copy_native(uint32_t eye,uint32_t texture,int w,int h) {
     int ok=p_glCheckFramebufferStatus(PSXGL_DRAW_FRAMEBUFFER)==PSXGL_FRAMEBUFFER_COMPLETE;
     if(ok) {
         int *r=s_native_surface_rect;
-        glDisable(GL_SCISSOR_TEST);p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER,0);glReadBuffer(GL_BACK);
+        glDisable(GL_SCISSOR_TEST);p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER,0);glReadBuffer(s_pt_on?PSXGL_COLOR_ATTACHMENT0:GL_BACK);
         glDisable(0x8DB9);
         /* Default framebuffer is already upright: unlike native VRAM/eye
          * textures, its bottom GL row is the displayed bottom row. */
@@ -8190,6 +8220,227 @@ static int ov_needs_present(void) {
 }
 
 static uint64_t s_swaps_total = 0;   /* every swap, real or generated (diagnostic) */
+
+/* ---- Present thread ([video] present_thread) -------------------------------
+ * Opt-in under the render thread. Each composed frame (everything that used
+ * to land in the window's back buffer: the display quad, OSD, captures) goes
+ * to an offscreen slot of the window's size; the swap becomes "fence, queue
+ * the slot, take the next free one". The present thread owns a second context
+ * on the same window, sharing objects with s_ctx, and does the 1:1 copy and
+ * the real swap, so the compositor's wait no longer blocks rendering. The
+ * composing side waits only while every slot is queued or on screen. */
+#define PT_SYNC_GPU_COMMANDS_COMPLETE 0x9117
+#define PT_TIMEOUT_IGNORED 0xFFFFFFFFFFFFFFFFull
+static int           s_pt_want = 0, s_pt_slots = 3;
+static GLenum        s_pt_format = GL_RGBA8;   /* the window's: no alpha -> GL_RGB8 */
+static SDL_GLContext s_pt_ctx = NULL;
+static GLuint        s_pts_tex[PT_MAX_SLOTS], s_pts_rb[PT_MAX_SLOTS], s_pts_fbo[PT_MAX_SLOTS];
+static int           s_pts_w[PT_MAX_SLOTS], s_pts_h[PT_MAX_SLOTS];
+static unsigned      s_pts_gen[PT_MAX_SLOTS];
+/* present thread's own objects (FBOs are per-context) */
+static GLuint        s_ptp_fbo[PT_MAX_SLOTS];
+static unsigned      s_ptp_gen[PT_MAX_SLOTS];
+static int           s_ptp_interval_gen = -1;
+
+void gl_renderer_set_present_thread(int on, int slots) {
+    s_pt_want = on ? 1 : 0;
+    s_pt_slots = slots < 2 ? 2 : slots > PT_MAX_SLOTS ? PT_MAX_SLOTS : slots;
+}
+int gl_renderer_present_thread_active(void) { return s_pt_on; }
+
+/* Composing context: the current slot, (re)allocated at the window's size. */
+static GLuint pt_target_fbo(void) {
+    const int i = pt_current();
+    if (i < 0) return 0;
+    int ww = 0, wh = 0;
+    SDL_GL_GetDrawableSize(s_win, &ww, &wh);
+    if (ww < 1) ww = 1;
+    if (wh < 1) wh = 1;
+    if (s_pts_fbo[i] && s_pts_w[i] == ww && s_pts_h[i] == wh) return s_pts_fbo[i];
+    GLint tex_prev = 0, rb_prev = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &tex_prev);
+    glGetIntegerv(0x8CA7 /* GL_RENDERBUFFER_BINDING */, &rb_prev);
+    if (s_pts_fbo[i]) {
+        p_glDeleteFramebuffers(1, &s_pts_fbo[i]);
+        p_glDeleteRenderbuffers(1, &s_pts_rb[i]);
+        glDeleteTextures(1, &s_pts_tex[i]);
+        s_pts_fbo[i] = s_pts_rb[i] = s_pts_tex[i] = 0;
+    }
+    s_pts_tex[i] = make_tex(s_pt_format, ww, wh, GL_RGBA, GL_UNSIGNED_BYTE);
+    p_glGenRenderbuffers(1, &s_pts_rb[i]);
+    p_glBindRenderbuffer(PSXGL_RENDERBUFFER, s_pts_rb[i]);
+    p_glRenderbufferStorage(PSXGL_RENDERBUFFER, PSXGL_DEPTH24_STENCIL8, ww, wh);
+    p_glGenFramebuffers(1, &s_pts_fbo[i]);
+    p_glBindFramebuffer_raw(PSXGL_FRAMEBUFFER, s_pts_fbo[i]);
+    p_glFramebufferTexture2D(PSXGL_FRAMEBUFFER, PSXGL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_pts_tex[i], 0);
+    p_glFramebufferRenderbuffer(PSXGL_FRAMEBUFFER, PSXGL_DEPTH_STENCIL_ATTACHMENT,
+                                PSXGL_RENDERBUFFER, s_pts_rb[i]);
+    if (p_glCheckFramebufferStatus(PSXGL_FRAMEBUFFER) != PSXGL_FRAMEBUFFER_COMPLETE)
+        fprintf(stdout, "psxrecomp: present thread: slot FBO incomplete\n");
+    glBindTexture(GL_TEXTURE_2D, (GLuint)tex_prev);
+    p_glBindRenderbuffer(PSXGL_RENDERBUFFER, (GLuint)rb_prev);
+    s_pts_w[i] = ww; s_pts_h[i] = wh;
+    s_pts_gen[i]++;
+    return s_pts_fbo[i];
+}
+
+static int pt_cb_ctx(void *user, int current) {
+    (void)user;
+    if (current) {
+        if (SDL_GL_MakeCurrent(s_win, s_pt_ctx) != 0) return 0;
+        s_ptp_interval_gen = -1;
+        return 1;
+    }
+    for (int i = 0; i < PT_MAX_SLOTS; i++) {
+        if (s_ptp_fbo[i]) p_glDeleteFramebuffers(1, &s_ptp_fbo[i]);
+        s_ptp_fbo[i] = 0;
+        s_ptp_gen[i] = 0;
+    }
+    glFinish();
+    SDL_GL_MakeCurrent(s_win, NULL);
+    return 1;
+}
+
+static void *pt_cb_present(void *user, int slot, void *ready) {
+    (void)user;
+    if (s_ptp_interval_gen != s_pt_interval_gen) {
+        s_ptp_interval_gen = s_pt_interval_gen;
+        if (SDL_GL_SetSwapInterval(s_swap_interval) != 0 && s_swap_interval < 0)
+            SDL_GL_SetSwapInterval(1);
+    }
+    if (ready) { p_glWaitSync(ready, 0, PT_TIMEOUT_IGNORED); p_glDeleteSync(ready); }
+    if (!s_ptp_fbo[slot] || s_ptp_gen[slot] != s_pts_gen[slot]) {
+        if (!s_ptp_fbo[slot]) p_glGenFramebuffers(1, &s_ptp_fbo[slot]);
+        p_glBindFramebuffer_raw(PSXGL_READ_FRAMEBUFFER, s_ptp_fbo[slot]);
+        p_glFramebufferTexture2D(PSXGL_READ_FRAMEBUFFER, PSXGL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                                 s_pts_tex[slot], 0);
+        s_ptp_gen[slot] = s_pts_gen[slot];
+    }
+    const int sw = s_pts_w[slot], sh = s_pts_h[slot];
+    int ww = 0, wh = 0;
+    SDL_GL_GetDrawableSize(s_win, &ww, &wh);
+    p_glBindFramebuffer_raw(PSXGL_READ_FRAMEBUFFER, s_ptp_fbo[slot]);
+    p_glBindFramebuffer_raw(PSXGL_DRAW_FRAMEBUFFER, 0);
+    glDisable(GL_SCISSOR_TEST);
+    if (ww == sw && wh == sh) {
+        p_glBlitFramebuffer(0, 0, sw, sh, 0, 0, sw, sh, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    } else {
+        /* The window changed after this frame was composed: fit it. */
+        glViewport(0, 0, ww, wh);
+        glClearColor(0.f, 0.f, 0.f, 1.f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        p_glBlitFramebuffer(0, 0, sw, sh, 0, 0, ww, wh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    }
+#ifdef GL_PRESENT_THREAD_TEST_HOOK
+    GL_PRESENT_THREAD_TEST_HOOK(slot);
+#endif
+    void *done = p_glFenceSync(PT_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    SDL_GL_SwapWindow(s_win);
+    return done;
+}
+
+static void pt_cb_dispose(void *user, void *token) {
+    (void)user;
+    if (token) p_glDeleteSync(token);
+}
+
+/* Composing context current; 1 when the present thread runs. */
+static int pt_begin(void) {
+    if (!s_pt_want || s_pt_on || !s_win || !s_ctx) return 0;
+    if (!p_glFenceSync || !p_glWaitSync || !p_glDeleteSync) {
+        fprintf(stdout, "psxrecomp: present thread: no sync objects; swaps stay on the render thread\n");
+        return 0;
+    }
+    /* The slots stand in for the window's back buffer: same channels, so
+     * destination alpha and readbacks behave as they did there. */
+    {
+        GLint a = 8;
+        typedef void (APIENTRY *PFN_gfap)(GLenum, GLenum, GLenum, GLint *);
+        PFN_gfap gfap = (PFN_gfap)SDL_GL_GetProcAddress("glGetFramebufferAttachmentParameteriv");
+        p_glBindFramebuffer_raw(PSXGL_FRAMEBUFFER, 0);
+        while (glGetError() != GL_NO_ERROR) {}
+        if (gfap) gfap(PSXGL_FRAMEBUFFER, GL_BACK_LEFT, 0x8215 /* ALPHA_SIZE */, &a);
+        if (glGetError() != GL_NO_ERROR) a = 8;
+        s_pt_format = a > 0 ? GL_RGBA8 : GL_RGB8;
+    }
+    SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 1);
+    s_pt_ctx = SDL_GL_CreateContext(s_win);
+    SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 0);
+    if (!s_pt_ctx) {
+        fprintf(stdout, "psxrecomp: present thread: shared context failed (%s); swaps stay on "
+                "the render thread\n", SDL_GetError());
+        SDL_GL_MakeCurrent(s_win, s_ctx);
+        return 0;
+    }
+    SDL_GL_MakeCurrent(s_win, NULL);   /* creation made it current here */
+    SDL_GL_MakeCurrent(s_win, s_ctx);
+    memset(s_pts_fbo, 0, sizeof s_pts_fbo);
+    memset(s_ptp_fbo, 0, sizeof s_ptp_fbo);
+    PtConfig c = { s_pt_slots, pt_cb_ctx, pt_cb_present, pt_cb_dispose, NULL };
+    if (!pt_start(&c)) {
+        fprintf(stdout, "psxrecomp: present thread: start failed; swaps stay on the render thread\n");
+        SDL_GL_DeleteContext(s_pt_ctx);
+        s_pt_ctx = NULL;
+        SDL_GL_MakeCurrent(s_win, s_ctx);
+        return 0;
+    }
+    s_pt_on = 1;
+    fprintf(stdout, "psxrecomp: present thread on (%d slots)\n", s_pt_slots);
+    return 1;
+}
+
+/* Composing context current, render thread stopped. */
+static void pt_end(void) {
+    if (!s_pt_on) return;
+    glFlush();
+    pt_stop();
+    s_pt_on = 0;
+    for (int i = 0; i < PT_MAX_SLOTS; i++) {
+        if (s_pts_fbo[i]) {
+            p_glDeleteFramebuffers(1, &s_pts_fbo[i]);
+            p_glDeleteRenderbuffers(1, &s_pts_rb[i]);
+            glDeleteTextures(1, &s_pts_tex[i]);
+        }
+        s_pts_fbo[i] = s_pts_rb[i] = s_pts_tex[i] = 0;
+        s_pts_w[i] = s_pts_h[i] = 0;
+    }
+    SDL_GL_DeleteContext(s_pt_ctx);
+    s_pt_ctx = NULL;
+    SDL_GL_MakeCurrent(s_win, s_ctx);
+    p_glBindFramebuffer(PSXGL_FRAMEBUFFER, 0);
+}
+
+/* The swap: direct, or queued to the present thread. */
+static void gl_present_swap(void) {
+    if (!s_pt_on) { SDL_GL_SwapWindow(s_win); return; }
+    (void)pt_target_fbo();   /* a frame that never bound 0 still has its slot */
+    void *ready = p_glFenceSync(PT_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    glFlush();
+    void *done = NULL;
+    (void)pt_submit(ready, &done, NULL);
+    if (done) { p_glWaitSync(done, 0, PT_TIMEOUT_IGNORED); p_glDeleteSync(done); }
+    /* Whatever is bound as the window now means the new slot. */
+    GLint d = 0, r = 0;
+    glGetIntegerv(0x8CA6 /* DRAW_FRAMEBUFFER_BINDING */, &d);
+    glGetIntegerv(0x8CAA /* READ_FRAMEBUFFER_BINDING */, &r);
+    for (int i = 0; i < PT_MAX_SLOTS; i++) {
+        if (s_pts_fbo[i] && (GLuint)d == s_pts_fbo[i]) p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, 0);
+        if (s_pts_fbo[i] && (GLuint)r == s_pts_fbo[i]) p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, 0);
+    }
+}
+
+int gl_renderer_present_thread_json(char *out, size_t cap) {
+    PtStats st;
+    pt_get_stats(&st);
+    return snprintf(out, cap,
+        "\"present_thread\":{\"active\":%d,\"slots\":%d,\"submits\":%llu,\"presents\":%llu,"
+        "\"waits\":%llu,\"wait_ms\":%.3f,\"swap_ms_avg\":%.3f,\"swap_ms_max\":%.3f,"
+        "\"queued_high\":%d}",
+        s_pt_on, st.slots, (unsigned long long)st.submits, (unsigned long long)st.presents,
+        (unsigned long long)st.waits, st.wait_ns / 1e6,
+        st.presents ? (double)st.present_ns / (double)st.presents / 1e6 : 0.0,
+        st.present_max_ns / 1e6, st.queued_high);
+}
 static void gl_swap_now(int generated);
 static int  fg_keep_real(void);      /* frame generation */
 static void fg_note_swap(uint64_t ns);
@@ -8288,7 +8539,7 @@ static void gl_swap_now(int generated) {
     s_swaps_total++;
     uint64_t t0 = s_dyn_on ? SDL_GetPerformanceCounter() : 0;
     const uint64_t rthf_t0 = rth_replaying() ? host_now_ns_rthf() : 0;
-    SDL_GL_SwapWindow(s_win);
+    gl_present_swap();
     if (rthf_t0) {
         const uint64_t sw = host_now_ns_rthf() - rthf_t0;
         s_rthf_swap_ns += sw;
@@ -11091,7 +11342,9 @@ int gl_renderer_render_thread_start(int max_frames) {
     cfg.user = NULL;
     cfg.tick = fg_tick;
     fg_invalidate();
+    (void)pt_begin();   /* [video] present_thread; falls back to direct swaps */
     if (!rt_start(&cfg)) {
+        pt_end();
         s_rth_on = 0;
         s_vram = s_rth_vram_pub;
         sw_renderer_rebind_vram(s_rth_vram_pub);
@@ -11106,6 +11359,7 @@ int gl_renderer_render_thread_start(int max_frames) {
 void gl_renderer_render_thread_stop(void) {
     if (!s_rth_on) return;
     rt_stop();                       /* drains; the context is current here again */
+    pt_end();
     s_rth_on = 0;
     s_vram = s_rth_vram_pub;
     sw_renderer_rebind_vram(s_rth_vram_pub);
@@ -11162,7 +11416,8 @@ int gl_renderer_render_thread_json(char *out, size_t cap) {
         k += snprintf(out + k, cap - (size_t)k, "%s{\"frame\":%llu,\"wait_us\":%.1f,\"reason\":\"%s\"}",
                       i ? "," : "", (unsigned long long)ev[i].frame, ev[i].wait_ns / 1e3,
                       ev[i].reason);
-    if (k > 0 && (size_t)k < cap) k += snprintf(out + k, cap - (size_t)k, "]");
+    if (k > 0 && (size_t)k < cap) k += snprintf(out + k, cap - (size_t)k, "],");
+    if (k > 0 && (size_t)k < cap) k += gl_renderer_present_thread_json(out + k, cap - (size_t)k);
     return k;
 }
 

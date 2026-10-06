@@ -802,6 +802,9 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
         if (video.contains("render_thread")) {
             rt.video_render_thread = toml::find<bool>(video, "render_thread");
         }
+        if (video.contains("present_thread")) {
+            rt.video_present_thread = toml::find<bool>(video, "present_thread");
+        }
         if (video.contains("frame_generation")) {
             rt.video_frame_generation = toml::find<bool>(video, "frame_generation");
         }
