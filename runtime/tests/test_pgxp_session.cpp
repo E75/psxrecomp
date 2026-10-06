@@ -25,6 +25,7 @@
 #include "mod_plugins.h"
 #include "pgxp.h"
 #include "pgxp_session.h"
+#include "psx_lobby_client.h"
 
 #include "cpu_state.h"
 #include "gpu.h"
@@ -128,6 +129,11 @@ extern "C" int gpu_ws_configured_x_reveal(void) { return 0; }
 extern "C" void gpu_ws_tag_hud_prim(uint32_t, int) {}
 extern "C" void gpu_ws_tag_screen_mask_quad(uint32_t) {}
 extern "C" void gpu_ws_tag_radial_screen_mask_quad(uint32_t, float) {}
+/* mod_runtime.cpp's lobby netplay commit reads the negotiated match caps.
+ * This test drives netplay through mod_runtime_clear_for_netplay, so no
+ * lobby match is ever negotiated. */
+static PsxLobbyMatchCaps no_match_caps;
+extern "C" const PsxLobbyMatchCaps* psx_lobby_match_caps(void) { return &no_match_caps; }
 
 /* ---- staging ------------------------------------------------------------- */
 
@@ -260,6 +266,19 @@ int main(void) {
 
     /* Offline rematch after netplay: on again. */
     CHECK(commit(title_root));
+    CHECK(armed(session(), 1, 1, 0, 1));
+
+    /* A netplay session whose published plan carries the mod (content
+     * negotiation, mod_runtime_commit_for_netplay): geometry and texture as
+     * planned, precise culling never -- not even from the env override --
+     * because its guest-visible NCLIP reads host-only shadows that a rollback
+     * load drops on one peer only. */
+    g_cfg.netplay = 1;
+    CHECK(armed(session(), 1, 1, 0, 0));
+    test_setenv("PSX_PGXP_CULLING", "1");
+    CHECK(armed(session(), 1, 1, 0, 0));
+    test_unsetenv("PSX_PGXP_CULLING");
+    g_cfg.netplay = 0;
     CHECK(armed(session(), 1, 1, 0, 1));
 
     /* The player's off switch on the Mods page. */

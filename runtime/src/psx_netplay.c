@@ -34,6 +34,7 @@
 #include "recomp_net/input_contract.h"
 #include "crc32.h"
 #include "netplay_hash_confirm.h"
+#include "netplay_content_gate.h"
 #include "netplay_input_hist.h"
 #include "netplay_state_digest.h"
 #include "psx_netplay_rb.h"
@@ -448,13 +449,13 @@ void psx_netplay_diag_tick(void) {}
 int  psx_netplay_is_spectator(void) { return 0; }
 int  psx_netplay_host_spectates(void) { return 0; }
 int  psx_netplay_local_slot(void) { return -1; }
+int  psx_netplay_local_port(void) { return -1; }
 int  psx_netplay_input_player(void) { return 0; }
 uint32_t psx_netplay_sim_tick(void) { return 0; }
-int  psx_netplay_start(const PsxNetplayConfig *cfg)
-{
-    (void)cfg;
-    return -1;
-}
+int psx_netplay_content_note(uint32_t e, uint32_t a, uint32_t b, uint32_t seen,
+                             uint8_t slot, uint8_t op, uint8_t flags)
+{ (void)e;(void)a;(void)b;(void)seen;(void)slot;(void)op;(void)flags;return 0; }
+int  psx_netplay_start(const PsxNetplayConfig *cfg) { (void)cfg; return -1; }
 void psx_netplay_shutdown(void) {}
 void psx_netplay_cold_reset(void) {}
 void psx_netplay_stage_local(const PsxNetPad *pad) { (void)pad; }
@@ -1120,6 +1121,19 @@ static void np_sleep_ms(unsigned ms)
     psx_host_sleep_ms(ms);
 }
 
+static NpContentGate s_content;
+static uint32_t s_content_send_ms;
+int psx_netplay_content_note(uint32_t epoch, uint32_t a, uint32_t b, uint32_t seen,
+                             uint8_t slot, uint8_t op, uint8_t flags) {
+    int was_mismatch=s_content.mismatch;
+    /* Only a session with a content fingerprint consumes identity packets;
+     * otherwise every RB_SYNC message keeps its existing meaning. */
+    if(!s_content.enabled || op!=RNET_RB_SYNC_OP_IDENT || epoch!=NP_CONTENT_MAGIC) return 0;
+    np_content_note(&s_content,slot,flags,a,b,seen);
+    if(!was_mismatch && s_content.mismatch)
+        fprintf(stderr,"psxrecomp: LAN content differs between peers; choose matching mods, options and media before restarting.\n");
+    return 1;
+}
 static uint32_t np_mono_ms(void)
 {
     return (uint32_t)psx_host_mono_ms();
@@ -3315,6 +3329,11 @@ int psx_netplay_local_slot(void)
     return psx_netplay_active() ? g_np.local_slot : -1;
 }
 
+int psx_netplay_local_port(void)
+{
+    return psx_netplay_active() && !psx_netplay_is_spectator() ? np_slot_to_port(g_np.local_slot) : -1;
+}
+
 int psx_netplay_input_player(void)
 {
     return psx_netplay_active() ? g_np.input_player : 0;
@@ -3729,6 +3748,9 @@ int psx_netplay_start(const PsxNetplayConfig *cfg)
         }
     }
 
+    if (!np_content_init(&s_content, cfg->content_fingerprint, rcfg.occupied_mask, local))
+        return -5;
+    s_content_send_ms = 0;
     /* Host resolves auto (-1) before start; accept 0..PSX_MAX_PLAYERS-1. */
     in_player = cfg->input_player;
     if (in_player < 0 || in_player >= PSX_MAX_PLAYERS) in_player = 0;
@@ -4644,6 +4666,33 @@ static void np_note_save_complete(void)
     psx_netplay_rb_clear_fmv_desync_hold("netplay save complete");
 }
 
+static void np_content_pump(void) {
+    uint32_t now=np_mono_ms(); unsigned i;
+    if(!s_content.enabled || !rnet_session_is_running(g_np.session)) return;
+    if(!g_np.rollback) {
+        rnet_u32 e,a,b,seen; rnet_u8 slot,op,flags;
+        while(rnet_session_take_rb_sync(g_np.session,&e,&a,&b,&seen,&slot,&op,&flags))
+            (void)psx_netplay_content_note(e,a,b,seen,slot,op,flags);
+    }
+    // Keep answering during early gameplay so a dropped final ACK cannot
+    // strand the peer. No guest-derived or local presentation data is sent.
+    if(np_content_ready(&s_content) && rnet_session_sim_tick(g_np.session)>90) {
+        int all_advanced=1;
+        for(i=0;i<9;++i) {
+            rnet_u32 tip=0;
+            if(i==s_content.local || !(s_content.occupied&(1u<<i))) continue;
+            if(!rnet_session_remote_tip(g_np.session,(int)i,&tip) || tip<=90) all_advanced=0;
+        }
+        if(all_advanced) return;
+    }
+    if(s_content_send_ms && now-s_content_send_ms<100) return;
+    s_content_send_ms=now;
+    for(i=0;i<4;++i)
+        rnet_session_send_rb_sync(g_np.session,NP_CONTENT_MAGIC,s_content.words[i*2],
+            s_content.words[i*2+1],s_content.matched,(rnet_u8)s_content.local,
+            RNET_RB_SYNC_OP_IDENT,(rnet_u8)(i|(s_content.mismatch?0x80:0)));
+}
+
 static void np_pump_session(void)
 {
 #if defined(PSX_HAS_LOBBY_CLIENT)
@@ -4664,6 +4713,8 @@ static void np_pump_session(void)
         np_rollback_reconcile_wire();
         psx_netplay_rb_pump();
     }
+    np_content_pump();
+    if(!np_content_ready(&s_content)) return;
     np_guest_handle_probe();
     np_maybe_stage_target_save();
     np_apply_ready_state();
@@ -4788,6 +4839,10 @@ int psx_netplay_poll_admit(void)
         return 0;
     }
 
+    if (!np_content_ready(&s_content)) {
+        np_sched_set_admit_stall(s_content.mismatch ? "content_mismatch" : "content_agreement");
+        return 0;
+    }
     /* Both peers stall until initial memcard hash-agree / transfer finishes. */
     if (!g_np.mc_sync_done)
         return 0;
@@ -5227,6 +5282,8 @@ void psx_netplay_admit_wait_info(char *stall_out, size_t stall_cap,
             }
             break;
         }
+        if (!np_content_ready(&s_content))
+            snprintf(phase,sizeof(phase),"%s",s_content.mismatch ? "content_mismatch" : "content_agreement");
         /* Rollback episode: try_admit is skipped so last_stall stays "ok" —
          * surface the RB FSM phase instead. */
         if (!phase[0] && g_np.rollback && psx_netplay_rb_active()) {

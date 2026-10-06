@@ -756,6 +756,66 @@ on a fixed region -> next.
   Ledger `recompiler/tests/test_segment_aware_codegen.py` (synthetic KUSEG EXE,
   Beetle fetch transcription vs psx_icache.c): 10 known gaps, model checks exact.
   Not a live Beetle run (no oracle binary on the Mac); §7.2 lists the oracle runs.
+- **2026-10-02 (Phase 5 V8:2 enhanced netplay/HFR):** Owner requested the
+  single-player enhanced renderer in multiplayer, fixed 16:9/21:9, and the
+  high-frame-rate branch in the combined mods build, including true netplay
+  render passes (`beads-eio.12.14`, `beads-eio.3.232`). Isolated integration
+  worktree `_wt-v82-enhanced-net-fw` preserves the modern core and prior LAN
+  content changes. Forward-netplay passes require explicit title opt-in and
+  skip resimulation; dual-raster pass draws bypass software authoritative VRAM.
+  Native local wide views now use the direct GL presenter and both Y buffers.
+  Split dividers remain canonical-only; full local surfaces avoid copying
+  canonical seam columns back into the expanded view. Nine focused framework
+  tests pass, including both buffer bands/ratios and netplay pass gates.
+  Paired Meteor captures show the same local car in native and intermediate
+  frames; 2,023 passes verified with zero machine-state mismatches or failures.
+  Fresh 21:9 Meteor Versus: 743 additional passes, zero verify mismatches,
+  confirmed ticks through 24,904; all 682 compared core checkpoints matched
+  through tick 24,896. Owner accepted the playtest and deferred the observed
+  intermediate-frame HUD identity/position jitter until after v0.1.0.
+  The visible pair uses 144 Hz target with costly verification disabled.
+  No simulation cadence or generated instruction semantics changed; the title
+  regenerated one shard to add guarded draw-boundary callbacks.
+
+- **2026-10-02 (V8:2 private release, beads-eio.12.15):** Production builds
+  disable debug tooling. Added the missing no-op GP0 capture-freeze accessor
+  for that build and resolved imported SDL target aliases in header probes
+  for Ubuntu CMake 3.28. Regenerated both BIOS profiles with the current
+  emitter: generated C is unchanged; fingerprints now match. Windows and
+  Linux title builds pass all 21 checks; each overlay cache compiled 59
+  native shards without failures. Game media, captures and personal state
+  remain outside source and player packages. No guest timing changes.
+
+- **2026-10-02 (Phase 5 V8:2 LAN content):** Resumed interrupted mod sync
+  work under `beads-eio.3.218`. LAN carries the host's verified portable plan
+  in settings and start messages. Media preparation precedes guest fingerprint
+  verification; direct peers compare all SHA-256 words before execution.
+  Offline choices remain intact. Five focused framework checks pass. Owner
+  validation isolated a separate missing simultaneous two-player carousel in
+  the title; its new hooks expose original cars to both players. Owner verified
+  both original cars load into a match, correct selection voices and imported
+  music work, and the latest offline Meteor Crater view looks fine. All 21
+  title checks pass with the owner package fixture.
+  No faithful timing-core changes or generated-code edits.
+
+- **2026-10-01 (Phase 5 V8:2 music and widescreen):** Owner resumed original
+  soundtrack selection/rotation and adaptive native-wide rendering through
+  32:9 (`beads-eio.12.8`, `beads-eio.12.7`). Preserve the uncommitted netplay
+  implementation; keep native 1x as the performance default. Adapt title
+  render/culling hooks from the original V8 mod with sequel instruction guards.
+  Donor audio and all converted media remain external. No timing-core change.
+
+- **2026-10-01 (Phase 5 combined V8 netplay):** Owner resumed two-player
+  netplay only (`beads-eio.12.6`); widescreen and original music remain parked.
+  `beads-eio.3.218` ports Toshinden's generic online mod-plan negotiation and
+  admits only immutable, size/SHA-256-verified external resources. Host plan
+  mismatches fail before replacement; offline selections survive session exit.
+  Read-only `netplay_status` exposes the existing hash-confirm watermark.
+  Headless netplay now accepts injected local input and honors controller mode.
+  Two isolated peers reached native V8:2 Versus gameplay, independently drove
+  both cars and matched state hashes through tick 43944. Online combined-content
+  play and WAN conditions remain for human validation. No timing/codegen change.
+
 - **2026-09-30 (Phase 5 owner-requested source checkpoint):** Preserve the
   existing V8:2 combined-content title and generic callback/disc-extent support
   on local `checkpoint/v82-combined-20260930` branches. Source, tests and
@@ -1881,3 +1941,36 @@ on a fixed region -> next.
   `PSX_PRECISE_SLICE` left in tree (inert). −8 mechanism located in
   code_generator.cpp (delay-slot-is-leader undercount). Tree builds + boots clean.
   NEXT: P1 (cycle-audit) → P2 (delay-slot ownership fix).
+
+
+### 2026-10-01 ? Shared owner-media setup (beads-eio.3.220)
+
+Format 9 adds shared launcher source bindings, hidden derived resources, and
+linked trusted preparers at offline/online commit. Preparation inherits the
+main disc and user cache; output binding is transactional and the existing
+size/SHA snapshot checks remain authoritative. Shared-picker/reload, disabled
+preparation, inherited disc, failure preservation and corrupt-output checks
+pass with mod_packages_test and mod_runtime_test. V8:2 supplies its own bundled
+conversion worker; no title asset rules enter the framework. V8:2 terrain-ray
+arithmetic is an enhancement in the title plugin. Owner live game untouched.
+
+### 2026-10-02: V82 extra-frame HUD replay investigation
+
+V82 split rendering interleaves world(0)/HUD(1), then world(1)/HUD(0).
+Replaying a complete split section pairs the local world with the remote HUD.
+The title now captures both HUD CPU contexts and replays the matching HUD after
+its local world. This exposed a framework contract defect: forced replay could
+hand straight-line flow into a compiled continuation before checking its stop
+PC. Forced spans now retain interpreter ownership through the boundary instead
+of entering that continuation. Normal native execution and callee dispatch
+remain unchanged. Actual LAN replay verification has passed thousands of spans
+with no state mismatch, watchdog or VRAM leak. Consecutive presentation captures
+confirmed stable local HUDs at fixed 16:9 and 21:9, while a comparison build
+reproduced both swapping icons and shifting bounds. Single-player Meteor Crater
+was also entered through the menus and produced verified extra frames.
+
+The presented-image ring now assigns each swap a unique sequence ID.
+Guest-frame lookup merged multiple extra presentations and could not verify
+HUD stability. Added duplicate-frame/freeze/eviction regression coverage and
+retained legacy frame lookup. Six focused framework checks and all 21 title
+checks pass on Windows and Linux, and both runtime builds link successfully.

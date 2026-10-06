@@ -32,7 +32,11 @@
  * The mod arms both geometry and texture correction; its CPU-mode option adds
  * tier-2 propagation and its culling option precise culling. Precise culling
  * changes guest-visible NCLIP results, so it has no [video] key (netplay does
- * not clear [video]); it needs geometry correction.
+ * not clear [video]); it needs geometry correction. A netplay session never
+ * arms it, whatever the mod, the env override or the plan say: a published
+ * netplay plan can carry the mod (content negotiation, MOD_PACKAGES.md), and
+ * the shadows it reads are host-only state that a rollback load drops on one
+ * peer and not the other, so the guest's NCLIP results would fork.
  */
 
 #ifdef __cplusplus
@@ -51,6 +55,7 @@ typedef struct PSXPgxpSessionInputs {
     int mod_cpu_mode;
     int mod_culling;
     int mod_only;
+    int netplay;
 } PSXPgxpSessionInputs;
 
 typedef struct PSXPgxpSessionArm {
@@ -78,7 +83,7 @@ static inline PSXPgxpSessionArm psx_pgxp_session_resolve(
     arm.cpu_mode = psx_pgxp_session_pick(in->env_cpu_mode,
                                          use_video && in->video_cpu_mode,
                                          in->mod_enabled && in->mod_cpu_mode);
-    arm.culling = arm.geometry &&
+    arm.culling = !in->netplay && arm.geometry &&
                   psx_pgxp_session_pick(in->env_culling, 0,
                                         in->mod_enabled && in->mod_culling);
     return arm;
@@ -102,6 +107,7 @@ typedef struct PSXPgxpSessionConfig {
     int position_fallback;
     int preserve_projection;
     int mod_only;
+    int netplay;   /* this session is a netplay match: precise culling off */
 } PSXPgxpSessionConfig;
 
 /* Session start, before plugin activation: forget any mod request. */

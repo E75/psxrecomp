@@ -10,6 +10,7 @@
 #include "render_pass_projection.h"
 #include "psx_sha256.h"
 #include "cpu_state.h"
+#include "psx_lobby_client.h"
 
 #if defined(RECOMP_LAUNCHER)
 #include "recomp_launcher.h"
@@ -21,6 +22,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <optional>
 #include <fstream>
 #include <iomanip>
 #include <map>
@@ -1173,9 +1175,12 @@ int provider_commit(void*, const char* image_path) {
 }
 
 int provider_commit_netplay(void*, const char* image_path) {
-    (void)image_path;
     std::string error;
-    if (!mod_runtime_clear_for_netplay(&error)) {
+    /* Without [netplay] content_negotiation every netplay session is vanilla. */
+    if (!(mod_runtime_netplay_content_negotiation()
+            ? mod_runtime_commit_for_netplay(image_path ? std::filesystem::path(image_path) :
+                                             std::filesystem::path(), &error)
+            : mod_runtime_clear_for_netplay(&error))) {
         set_error(error);
         return 0;
     }
@@ -1221,12 +1226,25 @@ RecompLauncherCModProvider provider = {
 
 } // namespace
 
+static std::optional<ModPackageManager> offline_manager_before_netplay;
+static bool netplay_content_negotiation_enabled = false;
+
+void mod_runtime_set_netplay_content_negotiation(bool enabled) {
+    netplay_content_negotiation_enabled = enabled;
+}
+
+bool mod_runtime_netplay_content_negotiation() {
+    return netplay_content_negotiation_enabled;
+}
+
 bool mod_runtime_initialize(const std::filesystem::path& root,
                             const std::string& game_id,
                             uint32_t game_entry_pc,
                             const std::filesystem::path& exe_path,
                             std::string* error) {
     RuntimeMods& s = state();
+    offline_manager_before_netplay.reset();
+    mod_runtime_set_session_plan_fp({});
     s.manager.set_root({});
     clear_function_entry_hooks();
     s.disc_extents.clear();
@@ -1306,6 +1324,212 @@ bool mod_runtime_clear_for_netplay(std::string* error) {
 }
 
 
+/* One CSV element is "<feature>" or "<feature>=<opt>~<val>[+<opt>~<val>]". */
+static void feat_token_split(const std::string& token, std::string& name,
+                             std::string& opts) {
+    const size_t eq = token.find('=');
+    if (eq == std::string::npos) {
+        name = token;
+        opts.clear();
+    } else {
+        name = token.substr(0, eq);
+        opts = token.substr(eq + 1);
+    }
+}
+
+static bool feat_csv_wants(const char* csv, const std::string& id) {
+    if (!csv || !csv[0]) return true;
+    const char* q = csv;
+    while (*q) {
+        const char* start = q;
+        while (*q && *q != ',') ++q;
+        std::string name, opts;
+        feat_token_split(std::string(start, q), name, opts);
+        if (name == id) return true;
+        if (*q == ',') ++q;
+    }
+    return false;
+}
+
+static bool feat_csv_apply_options(ModPackageManager& mgr,
+                                   const std::string& package_id,
+                                   const std::string& feature_id,
+                                   const char* csv,
+                                   std::string* error) {
+    if (!csv || !csv[0]) return true;
+    const char* q = csv;
+    while (*q) {
+        const char* start = q;
+        while (*q && *q != ',') ++q;
+        std::string name, opts;
+        feat_token_split(std::string(start, q), name, opts);
+        if (*q == ',') ++q;
+        if (name != feature_id || opts.empty()) continue;
+        size_t pos = 0;
+        while (pos < opts.size()) {
+            size_t end = opts.find('+', pos);
+            if (end == std::string::npos) end = opts.size();
+            const std::string kv = opts.substr(pos, end - pos);
+            pos = end + 1;
+            const size_t tilde = kv.find('~');
+            if (tilde == std::string::npos || tilde == 0) {
+                if (error) *error = package_id + "/" + feature_id +
+                    ": malformed option in netplay mod plan";
+                return false;
+            }
+            const std::string key = kv.substr(0, tilde);
+            const std::string val = kv.substr(tilde + 1);
+            std::string err;
+            if (!mgr.set_feature_option(package_id, feature_id, key, val, &err)) {
+                if (error) *error = err.empty()
+                    ? (package_id + "/" + feature_id +
+                       ": unsupported netplay option " + key)
+                    : err;
+                return false;
+            }
+        }
+        return true;
+    }
+    return true;
+}
+
+static bool feat_csv_all_known(const ModPackage& package, const char* csv,
+                               std::string* error) {
+    if (!csv || !csv[0]) return true;
+    const char* q = csv;
+    while (*q) {
+        const char* start = q;
+        while (*q && *q != ',') ++q;
+        std::string name, opts;
+        feat_token_split(std::string(start, q), name, opts);
+        bool found = false;
+        for (const ModFeature& feature : package.features) {
+            if (feature.id == name) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            if (error) *error = package.id + ": unknown netplay feature " + name;
+            return false;
+        }
+        if (*q == ',') ++q;
+    }
+    return true;
+}
+
+static bool apply_host_mod_plan(const PsxLobbyMatchCaps& caps, std::string* error) {
+    RuntimeMods& s = state();
+    if (!s.initialized) return true;
+    for (int i = 0; i < caps.mod_count; ++i) {
+        const PsxLobbyModPkg& pkg = caps.mods[i];
+        if (!pkg.id[0]) continue;
+        std::string err;
+        if (pkg.ver[0] && !s.manager.select_version(pkg.id, pkg.ver, &err)) {
+            if (error) *error = err.empty()
+                ? (std::string(pkg.id) + " " + pkg.ver + " is not installed")
+                : err;
+            return false;
+        }
+    }
+    for (int pass = 0; pass < 8; ++pass) {
+        bool changed = false;
+        for (const auto& item : s.manager.packages()) {
+            const std::string& package_id = item.first;
+            const ModPackage* package = s.manager.selected_package(package_id);
+            if (!package) continue;
+            int required = -1;
+            for (int i = 0; i < caps.mod_count; ++i) {
+                if (package_id == caps.mods[i].id) {
+                    required = i;
+                    break;
+                }
+            }
+            const bool legacy = package->features.size() == 1 &&
+                                package->features.front().legacy;
+            if (legacy) {
+                const bool want = required >= 0;
+                const bool have = package_has_enabled_feature(*package);
+                if (want == have) continue;
+                std::string err;
+                if (!s.manager.set_enabled(package_id, want, &err) && want) {
+                    if (error) *error = err;
+                    return false;
+                }
+                changed = true;
+                continue;
+            }
+            for (const ModFeature& feature : package->features) {
+                const bool want = required >= 0 &&
+                    feat_csv_wants(caps.mods[required].feats, feature.id);
+                const bool have = s.manager.feature_enabled(package_id, feature.id);
+                if (want == have) continue;
+                std::string err;
+                if (!s.manager.set_feature_enabled(package_id, feature.id, want, &err)) {
+                    if (want) {
+                        if (error) *error = err;
+                        return false;
+                    }
+                    continue;
+                }
+                changed = true;
+            }
+        }
+        if (!changed) break;
+    }
+    for (int i = 0; i < caps.mod_count; ++i) {
+        const PsxLobbyModPkg& pkg = caps.mods[i];
+        if (!pkg.id[0]) continue;
+        const ModPackage* package = s.manager.selected_package(pkg.id);
+        if (!package) {
+            if (error) *error = std::string(pkg.id) + " is not installed";
+            return false;
+        }
+        const bool legacy = package->features.size() == 1 &&
+                            package->features.front().legacy;
+        if (!legacy && !feat_csv_all_known(*package, pkg.feats, error))
+            return false;
+        std::string err;
+        if (legacy) {
+            if (!s.manager.set_enabled(pkg.id, true, &err)) {
+                if (error) *error = err;
+                return false;
+            }
+            continue;
+        }
+        for (const ModFeature& feature : package->features) {
+            const bool want = feat_csv_wants(pkg.feats, feature.id);
+            if (!s.manager.set_feature_enabled(pkg.id, feature.id, want, &err) && want) {
+                if (error) *error = err;
+                return false;
+            }
+            if (want && !feat_csv_apply_options(s.manager, pkg.id, feature.id,
+                                                  pkg.feats, error))
+                return false;
+        }
+    }
+    return true;
+}
+
+static std::string& session_plan_fp() {
+    static std::string fp;
+    return fp;
+}
+
+/* resolve() hashes and snapshots declared media before returning it. Only
+ * that form has a path-independent identity; loose folders/files do not. */
+static bool netplay_resources_verified(const ModResolution& plan,
+                                       std::string* error = nullptr) {
+    for (const auto& resource : plan.resources) {
+        if (resource.bytes && resource.sha256.size() == 64) continue;
+        if (error) *error = resource.package_id + "/" + resource.feature_id +
+            ": netplay requires a verified size and SHA-256 for resource " +
+            resource.id;
+        return false;
+    }
+    return true;
+}
+
 bool mod_runtime_prepare_resources(const std::filesystem::path& disc_path, std::string* error) {
     RuntimeMods& s = state();
     if (!s.initialized) return true;
@@ -1325,7 +1549,9 @@ bool mod_runtime_prepare_resources(const std::filesystem::path& disc_path, std::
     return true;
 }
 
-bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* error) {
+bool mod_runtime_verify_session_plan_fp(std::string* error);
+
+bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* error, bool save_selection) {
     RuntimeMods& s = state();
     if (!s.initialized) return true;
     if (disc_path != s.disc_path) {
@@ -1356,6 +1582,11 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* err
         if (error) *error = s.error;
         return false;
     }
+    if (!save_selection && (!netplay_resources_verified(plan, &s.error) ||
+                           !mod_runtime_verify_session_plan_fp(&s.error))) {
+        if (error) *error = s.error;
+        return false;
+    }
     for (const ModResolution::Overlay& overlay : plan.overlays) {
         if (overlay.expected_sha256.empty()) continue;
         std::string actual;
@@ -1375,7 +1606,7 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* err
         if (error) *error = s.error;
         return false;
     }
-    if (!s.manager.save_state(&s.error)) {
+    if (save_selection && !s.manager.save_state(&s.error)) {
         if (error) *error = s.error;
         return false;
     }
@@ -1391,6 +1622,103 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* err
     s.main_applied = false;
     s.error.clear();
     return true;
+}
+
+void mod_runtime_set_session_plan_fp(const std::string& fp) {
+    session_plan_fp() = fp;
+}
+
+const std::string& mod_runtime_session_plan_fp() {
+    return session_plan_fp();
+}
+
+std::string mod_runtime_plan_fingerprint_portable() {
+    RuntimeMods& s = state();
+    if (!s.initialized) return {};
+    ModResolution plan = s.manager.resolve(s.game_id, s.exe_sha256, std::string());
+    if (!plan.ok || !netplay_resources_verified(plan)) return {};
+    return plan.fingerprint;
+}
+
+bool mod_runtime_verify_session_plan_fp(std::string* error) {
+    const std::string& want = session_plan_fp();
+    if (want.empty()) return true;
+    const std::string got = mod_runtime_plan_fingerprint_portable();
+    if (!got.empty() && got == want) return true;
+    if (error) {
+        *error = "this machine resolves the session's mods differently from the host";
+        if (!got.empty()) *error += " (host " + want.substr(0, 16) + ", here " + got.substr(0, 16) + ")";
+    }
+    return false;
+}
+
+bool mod_runtime_commit_for_netplay(const std::filesystem::path& disc_path,
+                                    std::string* error) {
+    RuntimeMods& s = state();
+    const PsxLobbyMatchCaps* caps = psx_lobby_match_caps();
+    if (!caps || !caps->valid)
+        return mod_runtime_commit_for_direct_netplay(disc_path, error);
+    if (caps->mod_count <= 0) {
+        session_plan_fp().clear();
+        return mod_runtime_clear_for_netplay(error);
+    }
+    if (!caps->mod_plan_fp[0]) {
+        if (error) *error = "Netplay mod plan is missing its fingerprint.";
+        return false;
+    }
+    ModPackageManager prior_manager = s.manager;
+    const std::string prior_fp = session_plan_fp();
+    mod_runtime_set_session_plan_fp(caps->mod_plan_fp);
+    if (!apply_host_mod_plan(*caps, error) ||
+        !mod_runtime_commit(disc_path, error, false)) {
+        s.manager = std::move(prior_manager);
+        mod_runtime_set_session_plan_fp(prior_fp);
+        return false;
+    }
+    if (!offline_manager_before_netplay)
+        offline_manager_before_netplay = std::move(prior_manager);
+    return true;
+}
+
+bool mod_runtime_commit_for_direct_netplay(const std::filesystem::path& disc_path,
+                                           std::string* error) {
+    RuntimeMods& s = state();
+    /* No mod runtime (no mods root): vanilla on every peer, no content gate. */
+    if (!s.initialized) {
+        session_plan_fp().clear();
+        return true;
+    }
+    ModPackageManager prior_manager = s.manager;
+    const std::string prior_fp = session_plan_fp();
+    session_plan_fp().clear();
+    // Resource preparation and immutable-byte verification are shared with
+    // online sessions. No host selection or generated paths are saved offline.
+    if (!mod_runtime_commit(disc_path, error, false)) {
+        s.manager = std::move(prior_manager);
+        session_plan_fp() = prior_fp;
+        return false;
+    }
+    const std::string fp = mod_runtime_plan_fingerprint_portable();
+    if (fp.size() != 64) {
+        if (error) *error = "LAN mods did not produce a verified content fingerprint.";
+        s.manager = std::move(prior_manager);
+        session_plan_fp() = prior_fp;
+        return false;
+    }
+    session_plan_fp() = fp;
+    if (!offline_manager_before_netplay)
+        offline_manager_before_netplay = std::move(prior_manager);
+    return true;
+}
+
+void mod_runtime_end_netplay() {
+    if (!offline_manager_before_netplay) return;
+    RuntimeMods& s = state();
+    mod_runtime_clear_for_netplay();
+    s.manager = std::move(*offline_manager_before_netplay);
+    offline_manager_before_netplay.reset();
+    session_plan_fp().clear();
+    s.validation = s.manager.resolve(s.game_id, s.exe_sha256, s.disc_sha256, true);
 }
 
 const std::string& mod_runtime_fingerprint() {

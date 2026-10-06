@@ -912,6 +912,12 @@ struct GameConfig {
     // pause menu drawn across both halves, every peer sees the whole frame.
     uint32_t              netplay_local_viewport_state_addr = 0;
     std::vector<uint32_t> netplay_local_viewport_state_values;
+    // [netplay] content_negotiation: opt in to host-published mod plans in
+    // online/LAN lobbies, full-plan content agreement before LAN/direct guest
+    // execution, the MOTK6 LAN plan messages and headless injected-pad
+    // routing. Off (default): netplay clears every mod, and the LAN wire
+    // protocol and lobby messages stay unchanged.
+    bool                  netplay_content_negotiation = false;
 
     // [recompiler] block
     std::filesystem::path seeds_path;     // absolute path to seeds (text or json)

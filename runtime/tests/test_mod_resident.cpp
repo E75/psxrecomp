@@ -5,6 +5,7 @@
 #include "mod_runtime.h"
 #include "mod_plugins.h"
 #include "psx_sha256.h"
+#include "psx_lobby_client.h"
 #include "gpu.h"
 
 #include <array>
@@ -56,6 +57,10 @@ extern "C" int gpu_ws_configured_x_reveal(void) { return 0; }
 extern "C" void gpu_ws_tag_hud_prim(uint32_t, int) {}
 extern "C" void gpu_ws_tag_screen_mask_quad(uint32_t) {}
 extern "C" void gpu_ws_tag_radial_screen_mask_quad(uint32_t, float) {}
+/* mod_runtime.cpp's lobby netplay commit reads the negotiated match caps.
+ * No lobby match is negotiated in this test. */
+static PsxLobbyMatchCaps no_match_caps;
+extern "C" const PsxLobbyMatchCaps* psx_lobby_match_caps(void) { return &no_match_caps; }
 
 static void check(bool ok, const char* what) {
     if (!ok) { std::cerr << "FAIL: " << what << "\n"; failures++; }

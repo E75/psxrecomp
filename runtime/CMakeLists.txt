@@ -812,6 +812,10 @@ if(BUILD_TESTING)
         ../recompiler/lib/toml11)
     add_test(NAME text_xlate_fix_only_test COMMAND text_xlate_fix_only_test)
 
+    add_executable(netplay_content_gate_test tests/test_netplay_content_gate.c)
+    target_include_directories(netplay_content_gate_test PRIVATE include)
+    add_test(NAME netplay_content_gate_test COMMAND netplay_content_gate_test)
+
     add_executable(mod_runtime_test
         tests/test_mod_runtime.cpp
         src/iso_reader_c.cpp
@@ -1044,6 +1048,15 @@ if(BUILD_TESTING)
     add_executable(gpu_uv_test tests/test_gpu_uv.c)
     target_include_directories(gpu_uv_test PRIVATE src)
     add_test(NAME gpu_uv_test COMMAND gpu_uv_test)
+
+    # Netplay CPU-authoritative VRAM ignores PGXP overrides and texture
+    # filtering (sw_set_faithful_authority).
+    add_executable(sw_faithful_authority_test tests/test_sw_faithful_authority.c)
+    target_include_directories(sw_faithful_authority_test PRIVATE include src)
+    if(NOT WIN32)
+        target_link_libraries(sw_faithful_authority_test PRIVATE m)
+    endif()
+    add_test(NAME sw_faithful_authority_test COMMAND sw_faithful_authority_test)
 
     add_executable(gpu_vk_upload_alignment_test
         tests/test_gpu_vk_upload_alignment.c)
