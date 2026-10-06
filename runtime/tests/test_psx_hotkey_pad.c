@@ -61,6 +61,28 @@ int main(void) {
         CHECK(psx_hotkey_claim_update(&latched, 0, 1u << Y) == 0); /* fresh press */
         CHECK(psx_hotkey_claim_update(&latched, 0, 0) == 0 && latched == 0);
     }
+    /* Direct allowance in force: title-allowed, and for Rewind only while
+     * Rewind is enabled and the title has not blocked it. */
+    {
+        const uint32_t allowed = 1u << 0;  /* shortcut 0 (Rewind) */
+        CHECK(psx_hotkey_direct_active(allowed, 0, 1, 1, 0));
+        CHECK(!psx_hotkey_direct_active(allowed, 0, 1, 0, 0)); /* disabled */
+        CHECK(!psx_hotkey_direct_active(allowed, 0, 1, 1, 1)); /* blocked */
+        CHECK(!psx_hotkey_direct_active(0, 0, 1, 1, 0));       /* not allowed */
+        CHECK(psx_hotkey_direct_active(1u << 2, 2, 0, 0, 1));  /* not Rewind */
+        CHECK(!psx_hotkey_direct_active(~0u, -1, 0, 1, 0));
+        CHECK(!psx_hotkey_direct_active(~0u, 32, 0, 1, 0));
+        /* Blocked mid-press: the claim stops but the held button stays
+         * suppressed until release, then reaches the guest. */
+        uint32_t latched = 0;
+        CHECK(psx_hotkey_claim_update(&latched, 1u << Y, 1u << Y) == (1u << Y));
+        CHECK(psx_hotkey_claim_update(&latched, 0, 1u << Y) == (1u << Y));
+        CHECK(psx_hotkey_claim_update(&latched, 0, 0) == 0);
+        CHECK(psx_hotkey_claim_update(&latched, 0, 1u << Y) == 0);
+        /* Not in force: a one-button binding needs Select, like legacy. */
+        held = 1u << Y;
+        CHECK(!pressed(combo(1u << Y), psx_hotkey_direct_active(allowed, 0, 1, 1, 1)));
+    }
     fprintf(stderr, "psx_hotkey_pad: passed\n");
     return 0;
 }

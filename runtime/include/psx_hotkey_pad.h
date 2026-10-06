@@ -56,6 +56,19 @@ static inline int psx_hotkey_pad_down(int binding, int direct_allowed, int back,
     }
 }
 
+/* Whether the direct allowance for `shortcut` is in force: allowed by the
+ * title and, for Rewind (`is_rewind`), Rewind enabled and not blocked by the
+ * title (psx_mod_set_rewind_blocked). When not in force the button is not
+ * claimed and a one-button binding falls back to Select + button. */
+static inline int psx_hotkey_direct_active(uint32_t allowed_mask, int shortcut,
+                                           int is_rewind, int rewind_enabled,
+                                           int rewind_blocked) {
+    if (shortcut < 0 || shortcut >= 32 || !(allowed_mask & (1u << shortcut)))
+        return 0;
+    if (is_rewind && (!rewind_enabled || rewind_blocked)) return 0;
+    return 1;
+}
+
 /* Per-frame claim of direct-shortcut host buttons. `claimed` is the mask of
  * buttons claimed this frame, `held` the buttons physically held. Returns
  * the mask to remove from the guest pad; *latched carries a claim through

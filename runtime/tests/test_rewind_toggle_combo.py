@@ -83,3 +83,15 @@ assert "s_actions[HOST_KEYMAP_TURBO].count == 0" not in KEYMAP_C
 assert "if (want_default(HOST_KEYMAP_TURBO))" in KEYMAP_C
 
 print("host shortcut guard passed")
+
+# Title Rewind block (psx_mod_set_rewind_blocked): refuses opening, stops
+# capture, drops the direct Rewind claim, and clears at every mod session.
+REW = (ROOT / "runtime" / "src" / "psx_rewind.c").read_text(encoding="utf-8")
+assert 'extern "C" void psx_mod_set_rewind_blocked(int blocked) {' in MAIN
+assert "        psx_rewind_set_title_blocked(0);\n" in MAIN
+assert "if (!direct_shortcut_active(i)) continue;" in MAIN
+assert "const int direct = direct_shortcut_active(shortcut);" in MAIN
+assert "psx_rewind_title_blocked());" in MAIN
+assert "    if (!psx_rewind_enabled() || s_open || psx_netplay_active() ||\n        s_title_blocked)\n        return;" in REW
+assert "!psx_netplay_active() && !s_title_blocked)\n        (void)do_capture" in REW
+assert 'host_osd_push("Rewind is off in this mode", 1500);' in REW

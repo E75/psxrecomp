@@ -1357,6 +1357,10 @@ extern "C" int psx_mod_allow_direct_shortcut(uint32_t shortcut) {
     g_direct_shortcut_allowed |= 1u << shortcut;
     return 1;
 }
+
+extern "C" void psx_mod_set_rewind_blocked(int blocked) {
+    psx_rewind_set_title_blocked(blocked);
+}
 static uint32_t      g_savestate_input_guard_min_until = 0;
 static uint32_t      g_savestate_input_guard_max_until = 0;
 static int           g_headless       = 0;   /* debug/CI frontend: no SDL window/audio */
@@ -7087,14 +7091,24 @@ static int p1_host_present(void) {
     return host_pad_layer(&word, st, &lt, &rt) || g_players[0].handle;
 }
 
+/* Whether the title's direct allowance for `shortcut` is in force. Rewind's
+ * needs Rewind enabled and not blocked by the title; otherwise its button is
+ * neither claimed nor a one-button shortcut and reaches the guest pad. */
+static int direct_shortcut_active(int shortcut) {
+    if (shortcut < 0 || shortcut >= 32) return 0;
+    return psx_hotkey_direct_active(
+        g_direct_shortcut_allowed, shortcut,
+        shortcut == PSX_ASSIST_BIND_REWIND, g_rewind_enabled,
+        psx_rewind_title_blocked());
+}
+
 /* Whether host shortcut `shortcut` (PSX_ASSIST_BIND_*) bound to `binding` is
  * held. A one-button combination is direct only while the title allows that
  * shortcut; otherwise it is Select + button, like the legacy encoding. */
 static int hotkey_shortcut_down(int shortcut, int binding) {
     if (!p1_host_present() || binding == 0)
         return 0;
-    const int direct = shortcut >= 0 &&
-        (g_direct_shortcut_allowed & (1u << shortcut)) != 0;
+    const int direct = direct_shortcut_active(shortcut);
     return psx_hotkey_pad_down(binding, direct, SDL_CONTROLLER_BUTTON_BACK,
                                p1_host_button_down, p1_host_axis_value,
                                nullptr);
@@ -7102,7 +7116,8 @@ static int hotkey_shortcut_down(int shortcut, int binding) {
 
 /* Per frame, before P1 is sampled: the SDL buttons claimed by allowed direct
  * shortcuts leave the guest pad (claimed, and through release once claimed
- * while held). Rewind claims its button only while Rewind is enabled. */
+ * while held). Rewind claims its button only while Rewind is enabled and the
+ * title has not blocked it. */
 static void direct_shortcut_claim_update(void) {
     const int bindings[PSX_ASSIST_BIND_COUNT] = {
         g_hotkey_pad_rewind, g_hotkey_pad_save_state_menu,
@@ -7110,8 +7125,7 @@ static void direct_shortcut_claim_update(void) {
     };
     uint32_t claimed = 0, held = 0;
     for (int i = 0; i < PSX_ASSIST_BIND_COUNT; ++i) {
-        if (!(g_direct_shortcut_allowed & (1u << i))) continue;
-        if (i == PSX_ASSIST_BIND_REWIND && !g_rewind_enabled) continue;
+        if (!direct_shortcut_active(i)) continue;
         const int b = psx_hotkey_pad_single_button(bindings[i]);
         if (b >= 0) claimed |= 1u << b;
     }
@@ -16470,6 +16484,7 @@ int main(int argc, char** argv) {
         mod_pad_transform_reset();
         g_direct_shortcut_allowed = 0;
         g_p1_claimed_buttons = 0;
+        psx_rewind_set_title_blocked(0);
         for (auto& policy : g_mod_controller_policy)
             policy = ModControllerPresentationPolicy{};
         g_mod_load_wall_multiplier = -1;

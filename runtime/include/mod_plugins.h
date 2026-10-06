@@ -876,6 +876,16 @@ enum {
 };
 int psx_mod_allow_direct_shortcut(uint32_t shortcut);
 
+/* Refuse local Rewind while the title is in a mode it must not rewind (e.g.
+ * local split-screen multiplayer). While blocked, opening Rewind is refused
+ * with an OSD note, no history is captured (snapshots already in the ring are
+ * kept), and an allowed direct Rewind shortcut is not in force: its button is
+ * not claimed and reaches the guest pad / title transform as if Rewind were
+ * disabled. Netplay already refuses Rewind on its own. Opt-in: call with 1
+ * when the mode starts and 0 when it ends (setting it every frame from the
+ * title's state is fine). Cleared at every mod/session reset. */
+void psx_mod_set_rewind_blocked(int blocked);
+
 /* Local P1 mouse policy. The runtime delivers ordered events on the SDL owner
  * (main) thread, owns relative capture and folds the resulting right-stick
  * bytes after native input/presentation (and after any controller source),
