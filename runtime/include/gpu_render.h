@@ -25,6 +25,7 @@ typedef enum {
 
 void      gr_set_backend(GrBackend backend);  /* call before gr_init() */
 GrBackend gr_backend(void);                   /* effective backend after init */
+void      gr_refresh_backend(void);           /* re-fetch the GL table (render thread) */
 
 /* Lifecycle / global state */
 void gr_init(uint16_t *vram);

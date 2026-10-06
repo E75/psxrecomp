@@ -88,6 +88,10 @@ void gpu_vram_dirty_mark_row_impl(uint32_t y){(void)y;}
 void gpu_vram_dirty_mark_rect(int x,int y,int w,int h){(void)x;(void)y;(void)w;(void)h;}
 void gpu_vram_dirty_mark_all(void){}
 int psx_netplay_active(void){return 0;}
+/* The renderer's facade hooks (gpu_render.c) for the render thread, which
+ * these fixtures never start. */
+GrBackend gr_backend(void){return GR_BACKEND_OPENGL;}
+void gr_refresh_backend(void){}
 int gpu_display_is_depth24(void){return 0;}
 void gpu_get_display_info(GpuDisplayInfo *out){memset(out,0,sizeof(*out));out->width=320;out->height=240;}
 int psx_ws_prim_in_backdrop(void){return 0;}
