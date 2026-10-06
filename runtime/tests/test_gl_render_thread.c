@@ -18,6 +18,13 @@
  *     stream latch that flips mid-frame (sent as state);
  *   - presents and frame boundaries every frame, with readbacks (GPUREAD
  *     style gr_vram_read, VRAM->CPU transfer_out) in some frames only.
+ * With argv[4] == "dynres" ([video] dynamic_resolution) the surfaces are
+ * allocated at the scale and the level steps between frames
+ * (gl_renderer_step_internal_scale_now after a frame boundary, as the
+ * controller does): recorded in stream order with the thread on, run at once
+ * with it off, or at once when the frame is held at a sync point; the
+ * render thread's frame cost is measured too. Back at the ceiling before the
+ * final readbacks.
  * Printed: rb (digest of every value the "guest" read back), digest (native
  * VRAM at the end), hires (frame at internal resolution), wide (native-wide
  * surface), and with the thread on its record/acquire counters.
@@ -220,6 +227,7 @@ int main(int argc, char **argv) {
     int scale = argc > 1 ? atoi(argv[1]) : 1;
     int threaded = argc > 2 && argv[2][0] == '1';
     int frames = argc > 3 ? atoi(argv[3]) : 80;
+    int dynres = argc > 4 && !strcmp(argv[4], "dynres");
     /* No video device, window or GL context (headless, Windows over SSH):
      * exit 77, which the harness reports as a CTest skip. */
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
@@ -250,6 +258,7 @@ int main(int argc, char **argv) {
     gr_set_backend(GR_BACKEND_OPENGL);
     gr_init(vram);
     gr_set_scale(scale);
+    if (dynres) gl_renderer_set_dynamic_resolution(1);
     gl_renderer_set_swap_interval(0);
     if (!gl_renderer_init_context(win)) { fprintf(stderr, "FAIL context\n"); return 2; }
     check(gr_backend() == GR_BACKEND_OPENGL, "OpenGL backend");
@@ -259,7 +268,44 @@ int main(int argc, char **argv) {
         check(gl_renderer_render_thread_start(2) == 1, "render thread started");
         check(gl_renderer_render_thread_active(), "render thread active");
     }
-    for (int f = 0; f < frames; f++) frame(f, (f & 1) ? 512 : 0);
+    if (dynres) {
+        check(gl_renderer_dynamic_resolution_ceiling() == scale, "dynres ceiling");
+        if (threaded) gl_renderer_render_thread_measure(1);
+    }
+    static const int levels[] = { 2, 1, 3, 1, 4, 2 };
+    int nsteps = 0, level = scale;
+    for (int f = 0; f < frames; f++) {
+        frame(f, (f & 1) ? 512 : 0);
+        if (dynres && f % 7 == 6) {   /* includes frames held at a sync point */
+            int l = levels[(f / 7) % 6];
+            if (l > scale) l = scale;
+            if (l != level) nsteps++;
+            level = l;
+            check(gl_renderer_step_internal_scale_now(l) == 1, "dynres step");
+            GlDynresStats ds;
+            gl_renderer_dynres_stats(&ds);
+            check(ds.level == l, "dynres level as asked");
+            check(gr_scale() == l, "gr_scale follows the level");
+        }
+    }
+    if (dynres) {
+        if (level != scale) nsteps++;
+        check(gl_renderer_step_internal_scale_now(scale) == 1, "dynres back to the ceiling");
+        gl_renderer_render_thread_sync("test");
+        GlDynresStats ds;
+        gl_renderer_dynres_stats(&ds);
+        printf("dyn_steps=%llu asked=%d\n", (unsigned long long)ds.steps, nsteps);
+        check(ds.steps == (uint64_t)nsteps && ds.level == scale, "every step applied");
+        if (threaded) {
+            GlRthCosts co;
+            gl_renderer_render_thread_costs(&co);
+            printf("rth_cost_frames=%llu gpu_frames=%llu dropped=%llu mean_ms=%.3f\n",
+                   (unsigned long long)co.frames, (unsigned long long)co.gpu_frames,
+                   (unsigned long long)co.dropped,
+                   co.frames ? (double)co.cost_ns / (double)co.frames * 1e-6 : 0.0);
+            check(co.frames > 0, "render-thread frame costs measured");
+        }
+    }
 
     /* Guest-visible VRAM, the frame at internal resolution, the wide surface. */
     static uint16_t native[1024 * 512];

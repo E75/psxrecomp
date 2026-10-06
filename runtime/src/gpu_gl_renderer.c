@@ -9793,13 +9793,13 @@ static void gl_rth_exec(void *user, const RtCmd *c, const void *payload) {
         break;
 #ifndef PSX_NO_DEBUG_TOOLS
     case RTH_RING_CAPTURE: rth_ring_capture_now(v); break;
+#endif
     case RTH_DYN_STEP:
         s_dyn_rth_disp_valid = 1;
         memcpy(s_dyn_rth_disp, v + 1, sizeof s_dyn_rth_disp);
         (void)dyn_apply(v[0]);
         s_dyn_rth_disp_valid = 0;
         break;
-#endif
     case RTH_PEEK: {
         uint64_t ptr = (uint64_t)(uint32_t)v[4] | ((uint64_t)(uint32_t)v[5] << 32);
         (void)gl_renderer_fbo_peek(v[0], v[1], v[2], v[3], (uint16_t *)(uintptr_t)ptr);
