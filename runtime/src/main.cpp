@@ -7837,6 +7837,20 @@ static void headless_present_image_ring_capture(void) {
     gpu_get_display_info(&di);
     if (di.disabled || di.width == 0 || di.height == 0 || di.depth24) return;
     const bool fmv_frame = !g_ws_engaged || gpu_ws_present_native_43() != 0;
+#ifndef PSX_SDL_NO_RENDER
+    /* Render thread: the same capture, queued at this point of the frame
+     * instead of a per-frame sync point (gl_renderer_ring_capture). */
+    if (g_headless_opengl && gl_renderer_render_thread_active()) {
+        int slot = netplay_local_viewport_slot();
+        int cw = slot >= 0 ? (int)di.width / 2 : (int)di.width;
+        int cx = (int)di.display_x + (slot == 1 ? (int)di.width - cw : 0);
+        gl_renderer_ring_capture((uint32_t)s_frame_count,
+                                 (!fmv_frame && ws_native_wide_active() && gr_wide_supported()) ? 1 : 0,
+                                 (int)di.display_x, (int)di.display_y, (int)di.height,
+                                 cx, (int)di.display_y, cw, (int)di.height);
+        return;
+    }
+#endif
     static std::vector<uint32_t> buf;
     int w = 0, h = 0;
     uint32_t vx = 0, vy = 0, vw = di.width, vh = di.height;
