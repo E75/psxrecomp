@@ -36,6 +36,9 @@ static void cpu_relax(void) { YieldProcessor(); }
 #else
 #  include <pthread.h>
 #  include <sched.h>
+#  if defined(__APPLE__)
+#    include <pthread/qos.h>
+#  endif
 #  include <time.h>
 typedef pthread_mutex_t rt_mutex;
 typedef pthread_cond_t  rt_cond;
@@ -392,7 +395,16 @@ int rt_start(const RtConfig *cfg) {
     R.thread = CreateThread(NULL, 0, render_main, NULL, 0, NULL);
     int ok = R.thread != NULL;
 #else
-    int ok = pthread_create(&R.thread, NULL, render_main, NULL) == 0;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+#  if defined(__APPLE__)
+    /* A plain pthread gets the default QoS and, on a busy host, efficiency
+     * cores. The render thread is on the frame's critical path, like the
+     * emulation (main) thread, so it asks for the same class. */
+    pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INTERACTIVE, 0);
+#  endif
+    int ok = pthread_create(&R.thread, &attr, render_main, NULL) == 0;
+    pthread_attr_destroy(&attr);
 #endif
     if (!ok) {
         atomic_store(&R.running, 0);
