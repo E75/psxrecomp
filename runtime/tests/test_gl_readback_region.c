@@ -9,7 +9,7 @@ uint32_t psx_mod_gpu_dma_memory_alloc(uint32_t n,uint32_t a){(void)n;(void)a;ret
 uint32_t psx_mod_read_word(uint32_t a){(void)a;return 0;}
 static uint16_t image[1024*512], oracle[1024*512];
 int g_psx_vram_dirty_tracking=0;
-uint64_t psx_cycle_count=0;uint32_t g_psx_vblank_cycles=564480u;
+uint32_t g_psx_vblank_cycles=564480u;
 uint64_t s_frame_count=0;
 void gpu_vram_dirty_mark_row_impl(uint32_t y){}
 void gpu_vram_dirty_mark_rect(int x,int y,int w,int h){}
@@ -242,7 +242,7 @@ static void verify_camera_plane_clip(int scale) {
  * above its draw area; canonical VRAM clips it at the band top, and the wide
  * surface must clip it there too instead of painting the other band. */
 static void verify_wide_overlay_band(void) {
- const int S=s_scale,W=426*S,H=512*S;
+ const int S=s_out_scale,W=426*S,H=512*S;
  uint32_t *wide=(uint32_t*)malloc((size_t)W*H*sizeof(uint32_t));
  int ow=0,oh=0;
  check(wide!=NULL,"wide dump alloc");if(!wide)return;
@@ -263,7 +263,7 @@ static void verify_wide_overlay_band(void) {
  * queued. They must reach the reveal before the strip, and the strip must
  * blend exactly once in both the centre and the reveal. No retail payload. */
 static void verify_wide_overlay_order(void) {
- const int S=s_scale,W=426*S,H=512*S;
+ const int S=s_out_scale,W=426*S,H=512*S;
  uint32_t *wide=(uint32_t*)malloc((size_t)W*H*sizeof(uint32_t));
  int ow=0,oh=0;
  check(wide!=NULL,"overlay order alloc");if(!wide)return;
@@ -295,7 +295,7 @@ static void verify_wide_overlay_order(void) {
  free(wide);
 }
 static void verify_presentation_capture(void) {
- const int w=7*s_scale,h=3*s_scale,stride=w+3;
+ const int w=7*s_out_scale,h=3*s_out_scale,stride=w+3;
  uint32_t *out=malloc((size_t)stride*h*4);
  s_cpu_auth_dual=1;
  glb_set_draw_area(0,0,1023,511);glb_set_mask_bits(0,0);glb_set_semi_transparency(0,0);

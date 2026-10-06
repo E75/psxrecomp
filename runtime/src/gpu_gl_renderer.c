@@ -3904,6 +3904,10 @@ static int  glb_render_display_hires(uint32_t *o,int p,int dx,int dy,int dw,int 
  * the GL surface cannot serve, keeps the mirror resolve. The backend's
  * render_display_hires (present fallback, screenshot_hires) is unchanged. */
 int gl_renderer_capture_display_hires(uint32_t *o, int p, int dx, int dy, int dw, int dh) {
+    /* A pitch shorter than one scaled row would make either path below write
+     * rows over each other and past a pitch*height buffer. */
+    if (!o || dw <= 0 || dh <= 0 || (int64_t)p < (int64_t)dw * s_out_scale * 4)
+        return 0;
     depth24_upload_policy();
     if (s_raster_ok && !s_depth24_skip_up && p > 0 && p % 4 == 0) {
         int n = gl_read_display_argb(dx, dy, dw, dh, o, p, INT_MAX, NULL, NULL);
