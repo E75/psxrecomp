@@ -1340,6 +1340,15 @@ if(BUILD_TESTING AND Python3_Interpreter_FOUND AND CMAKE_C_COMPILER_ID STREQUAL 
             --cc ${CMAKE_C_COMPILER})
 endif()
 
+# Presentation capture ring: distinct-presentation dedupe and bounded slots.
+if(BUILD_TESTING)
+    add_executable(present_image_ring_test
+        ../runtime/tests/test_present_image_ring.c
+        ../runtime/src/present_image_ring.c)
+    target_include_directories(present_image_ring_test PRIVATE ../runtime/include)
+    add_test(NAME present_image_ring_test COMMAND present_image_ring_test)
+endif()
+
 # ---- test-registration completeness guard -----------------------------------
 if(BUILD_TESTING AND Python3_Interpreter_FOUND AND NOT MSVC)
     add_test(NAME gpu_upload_history

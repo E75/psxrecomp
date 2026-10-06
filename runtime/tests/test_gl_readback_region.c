@@ -259,6 +259,41 @@ static void verify_wide_overlay_band(void) {
  free(wide);
  glb_set_draw_area(0,0,1023,511);glb_wide_disable_target();glb_wide_configure(0,0);
 }
+/* A fog strip changes the blend key while earlier world triangles are still
+ * queued. They must reach the reveal before the strip, and the strip must
+ * blend exactly once in both the centre and the reveal. No retail payload. */
+static void verify_wide_overlay_order(void) {
+ const int S=s_scale,W=426*S,H=512*S;
+ uint32_t *wide=(uint32_t*)malloc((size_t)W*H*sizeof(uint32_t));
+ int ow=0,oh=0;
+ check(wide!=NULL,"overlay order alloc");if(!wide)return;
+ gl_renderer_select_texture_bank(0);
+ for(int textured=0;textured<2;++textured) {
+ glb_set_mask_bits(0,0);glb_set_semi_transparency(0,0);
+ glb_set_draw_area(0,0,1023,511);
+ glb_draw_flat_rect(0,0,1024,512,0x0421);flush_flat_batch();
+ glb_vram_write(512,0,0x001f);flush_cpu_upload();
+ glb_wide_configure(426,53);glb_wide_set_target(0);
+ glb_wide_clear(0,0,512,0x0421);
+ glb_set_draw_area(0,240,319,479);
+ if(textured) {
+  glb_draw_shaded_textured_triangle(200,320,0,0,0x808080,400,320,0,0,0x808080,300,440,0,0,0x808080,0,0,0x108,1);
+  check(s_tb_n>0,"textured predecessor is queued");
+ }else glb_draw_gouraud_triangle(200,320,0x001f,400,320,0x001f,300,440,0x001f);
+ glb_set_semi_transparency(1,0);
+ glb_draw_flat_rect(0,340,320,1,0x7fff);
+ flush_flat_batch();
+ check(glb_wide_dump_full(wide,W*H,&ow,&oh,0)>0&&ow==W&&oh==H,"overlay order dump");
+ const uint32_t edge=wide[(340*S)*W+403*S],centre=wide[(340*S)*W+333*S];
+ check(((edge>>16)&0xff)>=0xf0,textured?"queued textured face survives fog in reveal":"queued world triangle survives fog in reveal");
+ check(((edge>>8)&0xff)>=120&&((edge>>8)&0xff)<=128,"fog blends once in reveal");
+ check(((centre>>16)&0xff)>=0xf0&&((centre>>8)&0xff)>=120&&((centre>>8)&0xff)<=128,"fog blends once in centre");
+ check(glGetError()==GL_NO_ERROR,"overlay order GL error");
+ gl_renderer_select_texture_bank(0);glb_set_semi_transparency(0,0);
+ glb_set_draw_area(0,0,1023,511);glb_wide_disable_target();glb_wide_configure(0,0);
+ }
+ free(wide);
+}
 static void verify_presentation_capture(void) {
  const int w=7*s_scale,h=3*s_scale,stride=w+3;
  uint32_t *out=malloc((size_t)stride*h*4);
@@ -434,7 +469,7 @@ int main(int argc,char **argv){
  glb_wide_set_view(0,0,0,0);
  check(wide_dx()==53,"disabled view preserves original origin");
  free(wide_pixels);
- for(test_full_composite=0;test_full_composite<2;test_full_composite++)verify_wide_overlay_band();
+ for(test_full_composite=0;test_full_composite<2;test_full_composite++){verify_wide_overlay_band();verify_wide_overlay_order();}
  test_full_composite=0;
  verify_presentation_capture();
  printf("checks=%d failures=%d\n",checks,failures);

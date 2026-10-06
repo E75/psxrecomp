@@ -5772,6 +5772,8 @@ static const char *cdrom_trace_kind_name(uint8_t kind)
     case 's': return "sector_skip";
     case 'A': return "xa_audio";
     case 'a': return "xa_skip";
+    case 'd': return "cdda_sector";
+    case 'P': return "int1_lost";
     case 'X': return "xa_unsupported";
     case 'O': return "overwrite";
     case 'R': return "read";
@@ -6065,7 +6067,7 @@ static void handle_cdrom_trace_dump(int id, const char *json)
     uint64_t start = (total > (uint64_t)count) ? total - (uint64_t)count : 0;
     if (start < oldest) start = oldest;
 
-    size_t bufsz = 256u + (size_t)count * 360u;
+    size_t bufsz = 256u + (size_t)count * 640u;
     char *buf = (char *)malloc(bufsz);
     if (!buf) { send_err(id, "oom"); return; }
 
@@ -6074,7 +6076,7 @@ static void handle_cdrom_trace_dump(int id, const char *json)
     pos += snprintf(buf + pos, bufsz - pos,
                     "{\"id\":%d,\"ok\":true,\"total\":%llu,\"oldest\":%llu,\"entries\":[",
                     id, (unsigned long long)total, (unsigned long long)oldest);
-    for (uint64_t seq = start; seq < total && pos < bufsz - 400; seq++) {
+    for (uint64_t seq = start; seq < total && pos < bufsz - 640; seq++) {
         const CDROMTraceEntry *e = &entries[seq % CDROM_TRACE_CAP];
         if (e->seq != seq) continue;
         if (frame_lo >= 0 && (int)e->frame < frame_lo) continue;
@@ -9994,31 +9996,37 @@ void debug_server_capture_mark(void)
 static void handle_present_image_ring_stats(int id, const char *json)
 {
     (void)json;
-    uint32_t lo = 0, hi = 0; int n = 0;
+    uint32_t lo = 0, hi = 0, seq_lo = 0, seq_hi = 0; int n = 0;
     present_image_ring_span(&lo, &hi, &n);
+    present_image_ring_sequence_span(&seq_lo, &seq_hi);
     send_fmt("{\"id\":%d,\"ok\":true,\"oldest\":%u,\"newest\":%u,\"count\":%d,"
-             "\"frozen\":%d,\"capacity\":%d,\"height\":%d}",
-             id, lo, hi, n, present_image_ring_frozen(),
+             "\"oldest_sequence\":%u,\"newest_sequence\":%u,\"frozen\":%d,\"capacity\":%d,\"height\":%d}",
+             id, lo, hi, n, seq_lo, seq_hi, present_image_ring_frozen(),
              PRESENT_IMAGE_RING_CAP, PRESENT_IMAGE_RING_H);
 }
 static void handle_present_image_ring_get(int id, const char *json)
 {
     int f = json_get_int(json, "frame", -1);
+    int seq = json_get_int(json, "sequence", -1);
     char path[512];
-    if (f < 0 || !json_get_str(json, "path", path, sizeof path)) {
-        send_err(id, "need frame and path"); return;
+    if ((f < 0 && seq < 0) || !json_get_str(json, "path", path, sizeof path)) {
+        send_err(id, "need frame or sequence and path"); return;
     }
     uint8_t *rgb = NULL; int w = 0, h = 0;
-    if (!present_image_ring_get_rgb((uint32_t)f, &rgb, &w, &h)) {
-        send_err(id, "frame not in presented-image ring"); return;
+    uint32_t frame = f < 0 ? 0u : (uint32_t)f;
+    int found = seq >= 0
+        ? present_image_ring_get_sequence_rgb((uint32_t)seq, &rgb, &w, &h, &frame)
+        : present_image_ring_get_rgb(frame, &rgb, &w, &h);
+    if (!found) {
+        send_err(id, "image not in presented-image ring"); return;
     }
     FILE *fp = fopen(path, "wb");
     int ok = fp && png_write_rgb(fp, rgb, (uint32_t)w, (uint32_t)h);
     if (fp) fclose(fp);
     free(rgb);
     if (!ok) { send_err(id, "png write failed"); return; }
-    send_fmt("{\"id\":%d,\"ok\":true,\"frame\":%d,\"width\":%d,\"height\":%d}",
-             id, f, w, h);
+    send_fmt("{\"id\":%d,\"ok\":true,\"frame\":%u,\"sequence\":%d,\"width\":%d,\"height\":%d}",
+             id, frame, seq, w, h);
 }
 
 /* {"cmd":"capture_mark","op":"status"|"mark"|"release"}

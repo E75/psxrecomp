@@ -5,6 +5,7 @@
 
 typedef struct {
     uint32_t frame;
+    uint32_t sequence;
     uint16_t w;
     uint8_t  valid;
     uint16_t *px;   /* PRESENT_IMAGE_RING_MAX_W * PRESENT_IMAGE_RING_H, RGB565 */
@@ -13,6 +14,7 @@ typedef struct {
 static PresentImage s_ring[PRESENT_IMAGE_RING_CAP];
 static uint16_t *s_pixels = NULL;
 static uint32_t s_head = 0;
+static uint32_t s_sequence = 0;
 static int s_enabled = -1;
 static int s_frozen = 0;
 
@@ -48,6 +50,7 @@ static PresentImage *next_slot(uint32_t frame, int w) {
     PresentImage *e = &s_ring[s_head];
     s_head = (s_head + 1) % PRESENT_IMAGE_RING_CAP;
     e->frame = frame;
+    e->sequence = ++s_sequence;
     e->w = (uint16_t)w;
     e->valid = 1;
     return e;
@@ -114,11 +117,23 @@ void present_image_ring_span(uint32_t *oldest, uint32_t *newest, int *count) {
     if (count) *count = n;
 }
 
-int present_image_ring_get_rgb(uint32_t frame, uint8_t **rgb, int *w, int *h) {
+void present_image_ring_sequence_span(uint32_t *oldest, uint32_t *newest) {
+    uint32_t lo = UINT32_MAX, hi = 0;
+    for (int i = 0; i < PRESENT_IMAGE_RING_CAP; i++) {
+        if (!s_ring[i].valid) continue;
+        if (s_ring[i].sequence < lo) lo = s_ring[i].sequence;
+        if (s_ring[i].sequence > hi) hi = s_ring[i].sequence;
+    }
+    if (oldest) *oldest = hi ? lo : 0;
+    if (newest) *newest = hi;
+}
+
+static int get_rgb(uint32_t key, int by_sequence, uint8_t **rgb, int *w, int *h,
+                   uint32_t *frame) {
     if (!rgb || !s_pixels) return 0;
     for (int i = 0; i < PRESENT_IMAGE_RING_CAP; i++) {
         const PresentImage *e = &s_ring[i];
-        if (!e->valid || e->frame != frame) continue;
+        if (!e->valid || (by_sequence ? e->sequence : e->frame) != key) continue;
         const size_t n = (size_t)e->w * PRESENT_IMAGE_RING_H;
         uint8_t *out = (uint8_t *)malloc(n * 3);
         if (!out) return 0;
@@ -131,7 +146,17 @@ int present_image_ring_get_rgb(uint32_t frame, uint8_t **rgb, int *w, int *h) {
         *rgb = out;
         if (w) *w = e->w;
         if (h) *h = PRESENT_IMAGE_RING_H;
+        if (frame) *frame = e->frame;
         return 1;
     }
     return 0;
+}
+
+int present_image_ring_get_rgb(uint32_t frame, uint8_t **rgb, int *w, int *h) {
+    return get_rgb(frame, 0, rgb, w, h, NULL);
+}
+
+int present_image_ring_get_sequence_rgb(uint32_t sequence, uint8_t **rgb,
+                                       int *w, int *h, uint32_t *frame) {
+    return get_rgb(sequence, 1, rgb, w, h, frame);
 }

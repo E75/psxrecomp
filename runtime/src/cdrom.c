@@ -1840,7 +1840,7 @@ static void process_cdda_stream(uint32_t cycles) {
         cd_apply_decode_volume(pcm, CDDA_SECTOR_FRAMES);
         spu_cd_audio_push(pcm, CDDA_SECTOR_FRAMES);
         cdda_sectors_played++;
-        trace_cdrom('a', 0, cdda_lba, (uint32_t)cdda_track);
+        trace_cdrom('d', 0, cdda_lba, (uint32_t)cdda_track);
 
         cdda_lba++;
         delivered++;
