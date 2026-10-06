@@ -567,6 +567,13 @@ struct RuntimeConfig {
     // draw in far fewer batches. Off by default; a game opts in.
     bool                  video_texture_window_batching = false;
 
+    // render_thread: OpenGL only. Run the GL backend on its own thread: the
+    // emulation thread records each frame's draw work and the render thread
+    // replays and presents it, so GPU driver stalls stop blocking the guest.
+    // Guest-visible results are identical (docs/RENDER_THREAD.md). Off by
+    // default; PSX_RENDER_THREAD=0/1 overrides.
+    bool                  video_render_thread = false;
+
     // low_latency_input: re-sample the pad after the wall-clock pacer (just
     // before present) so the next CPU frame reads near-fresh input instead of
     // input ~one frame stale. Default on. vsync: present/swap mode —
