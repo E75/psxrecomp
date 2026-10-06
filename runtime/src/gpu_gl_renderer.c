@@ -772,6 +772,12 @@ static inline int wide_dx(void) { return g_wide_off + view_shift - g_wide_cur_ba
 static int    s_wst_x0[WIDE_MAX_SURF], s_wst_y0[WIDE_MAX_SURF];
 static int    s_wst_x1[WIDE_MAX_SURF], s_wst_y1[WIDE_MAX_SURF];
 static uint64_t s_wst_rebuilds = 0, s_wst_px = 0, s_wst_deferred = 0;
+/* PSX_GL_WIDE_STENCIL_FULL=1: rebuild whole surfaces, as before (A/B). */
+static int wst_full(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("PSX_GL_WIDE_STENCIL_FULL"); v = e && e[0] == '1'; }
+    return v;
+}
 static int wide_index(GLuint fbo) {
     for (int i = 0; fbo && i < WIDE_MAX_SURF; i++)
         if (s_wide_fbo[i] == fbo) return i;
@@ -2027,8 +2033,11 @@ static void rebuild_mask_stencils(void) {
         /* Wide surfaces: their stale rects (s_wst_*), the centre columns
          * left for later while the centre is spliced from hr. */
         int defer = wide_fast_center_valid() && !view_enabled;
-        for (int i = 0; i < WIDE_MAX_SURF; i++)
-            if (s_wide_fbo[i]) wst_rebuild(i, defer);
+        for (int i = 0; i < WIDE_MAX_SURF; i++) {
+            if (!s_wide_fbo[i]) continue;
+            if (wst_full()) wst_all(i);
+            wst_rebuild(i, defer && !wst_full());
+        }
     }
     rect_clear(&s_stencil_stale);
     s_stencil_valid = 1;
@@ -2069,7 +2078,7 @@ static void wst_rebuild(int i, int defer) {
  * everywhere, including a centre part a rebuild left stale. Called before
  * any GL state for the draw is set (it binds its own). */
 static void wide_stencil_ready(void) {
-    if (!g_wide_cur || !s_mask_check || s_out_scale <= 1) return;
+    if (!g_wide_cur || !s_mask_check || s_out_scale <= 1 || wst_full()) return;
     int i = wide_index(g_wide_cur);
     if (i < 0 || s_wst_x1[i] <= s_wst_x0[i] || s_wst_y1[i] <= s_wst_y0[i]) return;
     if (wide_fast_center_valid() && !view_enabled) return;
@@ -2534,7 +2543,7 @@ static void mark_prim_dirty(const int *xs, const int *ys, int n, int textured) {
  * top/bottom edge flicker (16:9 GL only). */
 /* Wide-surface scissor: full wide width, draw-area rows (see above). Every
  * draw into a wide surface uses it, including the full-screen-overlay pass. */
-static void wide_band_scissor_x(int x, int w) {
+static void wide_band_rows(int *out_sy, int *out_sh) {
     int y1 = s_area_y1, y2 = s_area_y2;
     if (s_pass_active) {   /* render pass: stay inside the backed-up band */
         if (y1 < s_pass_y) y1 = s_pass_y;
@@ -2544,6 +2553,11 @@ static void wide_band_scissor_x(int x, int w) {
     if (sy < 0) { sh += sy; sy = 0; }
     if (sy + sh > VRAM_H) sh = VRAM_H - sy;
     if (sh < 0) sh = 0;
+    *out_sy = sy; *out_sh = sh;
+}
+static void wide_band_scissor_x(int x, int w) {
+    int sy, sh;
+    wide_band_rows(&sy, &sh);
     glEnable(GL_SCISSOR_TEST);
     glScissor(x * s_out_scale, sy * s_out_scale, w * s_out_scale, sh * s_out_scale);
 }
@@ -2834,6 +2848,13 @@ static int mirror_batch_center_only(int nverts) {
  * one pass per wide surface. Every other write to a wide surface (clears,
  * the full-screen overlay rect, reallocation) and every read of one
  * (present, capture, dumps) flushes the queue first. */
+/* The same queue carries the native-wide mirrors when the window is not
+ * engaged (wide_queue_live): at a 10x Match display allocation each per-batch
+ * switch to a wide surface and back ended two render passes over surfaces
+ * 4270x5120 (wide) and 10240x5120 (hr) and held a 16:9 R4 race to ~47
+ * frames/s; queued, the mirrors land in one pass per wide surface at the same
+ * sync points. Lines drawn as GL_LINES (1x) are not queued; they flush the
+ * queue and mirror at once. PSX_GL_WIDE_QUEUE=0 turns the queue off. */
 enum { HQ_TEX = 1, HQ_GEO = 2 };
 typedef struct {
     uint8_t kind;
@@ -2842,12 +2863,14 @@ typedef struct {
     uint8_t check;           /* mask-check state at draw time */
     uint8_t filter;
     GLuint  tex;             /* sampled texture (bank or raw mirror) */
+    GLuint  ptex;            /* palette texture (bank, or the raw mirror) */
     int     ax0, ay0, ax1, ay1;  /* draw area, inclusive */
     size_t  vfirst;          /* float offset into s_hq_v */
     int     vcount;          /* vertices */
     GLuint  wfbo;            /* native-wide mirror target, 0: none */
     int     wdx;             /* its x shift (wide_dx()) */
     float   wscale, wcenter; /* its backdrop stretch (wide_bd_scale) */
+    int     wsx, wsy, wsw, wsh;  /* its wide-surface scissor (native px) */
 } HiCmd;
 static HiCmd  *s_hq = NULL;
 static int     s_hq_n = 0, s_hq_cap = 0;
@@ -2896,10 +2919,30 @@ static int hiw_area_touches(void) {
 static int hiw_wide_queue_ok(int mirror) {
     return mirror && g_wide_cur && s_ws_ablate == 0;
 }
+static int s_wide_queue = -1;   /* PSX_GL_WIDE_QUEUE (default on) */
+static int wide_queue_live(void) {
+    if (s_wide_queue < 0) {
+        const char *e = getenv("PSX_GL_WIDE_QUEUE");
+        s_wide_queue = !(e && e[0] == '0');
+    }
+    return s_wide_queue && !s_hiw && g_wide_cur && s_ws_ablate == 0;
+}
+static void wide_band_rows(int *sy, int *sh);
 static void hiw_wide_set(HiCmd *c, int gate) {
     c->wfbo = g_wide_cur;
     c->wdx = wide_dx();
     wide_bd_scale(gate, &c->wscale, &c->wcenter);
+    if (s_hiw) {   /* the window's replay: full width, the draw area's rows */
+        int sy = c->ay0, sh = c->ay1 - c->ay0 + 1;
+        if (sy < 0) { sh += sy; sy = 0; }
+        if (sy + sh > VRAM_H) sh = VRAM_H - sy;
+        if (sh < 0) sh = 0;
+        c->wsx = 0; c->wsw = g_wide_w; c->wsy = sy; c->wsh = sh;
+    } else {       /* what wide_target_begin sets */
+        c->wsx = view_pad_left;
+        c->wsw = g_wide_w - view_pad_left - view_pad_right;
+        wide_band_rows(&c->wsy, &c->wsh);
+    }
 }
 
 /* Queue a textured batch for the window, and its native-wide mirror when
@@ -2914,6 +2957,7 @@ static int hiw_enqueue_tex(int nverts, int semi, int mirror, int gate) {
     c->mask = (uint8_t)s_tb_mask;
     c->filter = (uint8_t)s_tb_filter;
     c->tex = s_tb_bank_tex ? s_tb_bank_tex : s_raw_tex;
+    c->ptex = s_tb_bank_tex && !s_tb_bank_live_clut ? s_tb_bank_tex : s_raw_tex;
     if (wq) hiw_wide_set(c, gate);
     return wq;
 }
@@ -2951,15 +2995,12 @@ static void hiw_replay_wide(void) {
             p_glUniform1f(s_tex_uShift, s_shift_hi);
             p_glUniform1f(s_tex_uXhalf, (float)g_wide_w / 2.0f);
             p_glUniform1i(s_uVram, 0);
+            p_glUniform1i(s_uPalette, 1);
             p_glActiveTexture(PSXGL_TEXTURE0);
             bound = c->wfbo;
             cur = 0;
         }
-        int sy = c->ay0, sh = c->ay1 - c->ay0 + 1;
-        if (sy < 0) { sh += sy; sy = 0; }
-        if (sy + sh > VRAM_H) sh = VRAM_H - sy;
-        if (sh < 0) sh = 0;
-        glScissor(0, sy * S, g_wide_w * S, sh * S);
+        glScissor(c->wsx * S, c->wsy * S, c->wsw * S, c->wsh * S);
         if (c->kind == HQ_TEX) {
             if (cur != HQ_TEX) {
                 p_glUseProgram(s_tex_prog);
@@ -2970,6 +3011,9 @@ static void hiw_replay_wide(void) {
             p_glUniform1f(s_tex_uXoff, (float)c->wdx);
             p_glUniform1f(s_tex_uXscale, c->wscale);
             p_glUniform1f(s_tex_uXcenter, c->wcenter);
+            p_glActiveTexture(PSXGL_TEXTURE0 + 1);
+            glBindTexture(GL_TEXTURE_2D, c->ptex);
+            p_glActiveTexture(PSXGL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, c->tex);
             p_glUniform1i(s_uMaskset, c->mask);
             p_glUniform1i(s_uFilter, c->filter);
@@ -3006,9 +3050,14 @@ static void hiw_replay_wide(void) {
 /* Replay the queued draws into every tile they touch: the window projection
  * and each command's draw area (clipped to the tile) as the scissor. A tile no
  * command touches is not bound. */
+static void hiw_flush_tail(void);
 static void hiw_flush_queue(void) {
     if (s_hq_n == 0) return;
-    if (!hiw_on()) { s_hq_n = 0; s_hq_vn = 0; return; }
+    if (!hiw_on()) {   /* native-wide mirrors only (wide_queue_live) */
+        s_hq_flushes++;
+        hiw_flush_tail();
+        return;
+    }
     int S = s_out_scale;
     s_hq_flushes++;
     for (int t = 0; t < s_hiw_n; t++) {
@@ -3046,6 +3095,10 @@ static void hiw_flush_queue(void) {
                     p_glBindBuffer(PSXGL_ARRAY_BUFFER, s_tex_vbo);
                     cur = HQ_TEX;
                 }
+                p_glUniform1i(s_uPalette, 1);
+                p_glActiveTexture(PSXGL_TEXTURE0 + 1);
+                glBindTexture(GL_TEXTURE_2D, c->ptex);
+                p_glActiveTexture(PSXGL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, c->tex);
                 p_glUniform1i(s_uMaskset, c->mask);
                 p_glUniform1i(s_uFilter, c->filter);
@@ -3067,6 +3120,12 @@ static void hiw_flush_queue(void) {
             }
         }
     }
+    hiw_flush_tail();
+}
+
+/* The native-wide mirrors (both modes), then the canonical projection back
+ * on both programs. */
+static void hiw_flush_tail(void) {
     hiw_replay_wide();
     /* Canonical projection back on both programs. */
     p_glUseProgram(s_geo_prog);
@@ -3078,6 +3137,9 @@ static void hiw_flush_queue(void) {
     p_glUniform1f(s_tex_uXoff, 0.0f);
     p_glUniform1f(s_tex_uXhalf, 512.0f);
     hr_end();
+    /* Native-wide only: leave the hr surface bound, as an immediate mirror
+     * (wide_target_end) does. */
+    if (!s_hiw) p_glBindFramebuffer(PSXGL_FRAMEBUFFER, s_hr_fbo);
     s_hq_n = 0;
     s_hq_vn = 0;
 }
@@ -3121,7 +3183,8 @@ static void flush_tex_batch(void) {
     /* Windowed high-resolution surface: the same batch at S, queued and
      * replayed in one render pass at the next sync point (see s_hq), with its
      * native-wide mirror. No-op unless that mode is engaged. */
-    if (hiw_on() && hiw_enqueue_tex(nverts, semi, mirror, s_tb_gate)) mirror = 0;
+    if ((hiw_on() || (mirror && wide_queue_live())) &&
+        hiw_enqueue_tex(nverts, semi, mirror, s_tb_gate)) mirror = 0;
 
     if (mirror) {   /* native-wide mirror */
         int dx = wide_dx();
@@ -3195,6 +3258,8 @@ static void flat_batch_draw_hr_lines(int nverts, int nl) {
 static void flush_flat_batch(void) {
     if (s_fb_n == 0) return;
     wide_stencil_ready();   /* before any of this batch's GL state */
+    if (s_fb_mode != GL_TRIANGLES && !hiw_on())
+        hiw_flush_queue();  /* GL_LINES mirror at once: queued mirrors first */
     int nverts = s_fb_n, semi = s_fb_semi, mask = s_fb_mask, nl = s_fbl_n;
     GLenum fmode = s_fb_mode;
     s_fb_n = 0;
@@ -3219,7 +3284,8 @@ static void flush_flat_batch(void) {
         wide_bd_scale(s_fb_gate, &sc, &ce);
         wst_note_draw(g_wide_cur, s_fb, nverts, 6, wide_dx(), sc, ce, s_mask_check);
     }
-    if (hiw_on() && hiw_enqueue_geo(s_fb, nverts, semi, mask, mirror, s_fb_gate)) mirror = 0;
+    if ((hiw_on() || (mirror && fmode == GL_TRIANGLES && wide_queue_live())) &&
+        hiw_enqueue_geo(s_fb, nverts, semi, mask, mirror, s_fb_gate)) mirror = 0;
 
     if (mirror) {
         int dx = wide_dx();
@@ -3390,6 +3456,8 @@ static void gpu_geometry(GLenum mode, const int *xs, const int *ys,
             draw_mode = GL_TRIANGLES; draw_verts = quad; draw_n = 6;
         }
         wide_stencil_ready();   /* before any of this draw's GL state */
+        if (draw_mode != GL_TRIANGLES && !hiw_on())
+            hiw_flush_queue();  /* GL_LINES mirror at once: queued mirrors first */
         hr_begin(1);
         if (semi >= 0) apply_psx_blend(semi); else glDisable(GL_BLEND);
         mask_stencil(s_mask_set);
@@ -3413,7 +3481,7 @@ static void gpu_geometry(GLenum mode, const int *xs, const int *ys,
             wide_bd_scale(bd_prim_gate(xs, n, 0), &sc, &ce);
             wst_note_draw(g_wide_cur, verts, n, 6, wide_dx(), sc, ce, s_mask_check);
         }
-        if (hiw_on() &&
+        if ((hiw_on() || (mirror && draw_mode == GL_TRIANGLES && wide_queue_live())) &&
             hiw_enqueue_geo(draw_mode == GL_TRIANGLES && is_line ? quad : verts,
                             draw_n, semi, s_mask_set, mirror, bd_prim_gate(xs, n, 0)))
             mirror = 0;
@@ -5250,6 +5318,7 @@ void gl_renderer_diag(int *gpu_dirty, int pending[5], int pack[5]) {
  * ------------------------------------------------------------------------- */
 
 static void wide_free_all(void) {
+    if (s_ctx) hiw_flush_queue();   /* queued mirrors target these surfaces */
     for (int i = 0; i < WIDE_MAX_SURF; i++) {
         if (s_wide_fbo[i]) { p_glDeleteFramebuffers(1, &s_wide_fbo[i]); s_wide_fbo[i] = 0; }
         if (s_wide_tex[i]) { glDeleteTextures(1, &s_wide_tex[i]); s_wide_tex[i] = 0; }
@@ -6436,11 +6505,14 @@ static int pass_gen_reserve(int gi, uint32_t need, int w, int h) {
  * refreshes the band's canonical centre, as the wide present does. */
 static void pass_capture_into(GLuint tex, const PassGen *g) {
     int S = s_hr_scale;
+    hiw_flush_queue();   /* queued wide mirrors land before the capture reads */
     if (g->source_path == GL_PRES_WIDE) {
         GLuint wf = pass_wide_fbo_for(g->x);
         int native_w = g_wide_w - 2 * g_wide_off;
         if (!wf) return;
         if (s_wide_fast && native_w > 0) {
+            /* Colour only: the centre's stencil is left behind (s_wst_*). */
+            wst_add(wide_index(wf), g_wide_off, g->y, g_wide_off + native_w, g->y + g->h);
             p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, s_hr_fbo);
             p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, wf);
             glDisable(GL_SCISSOR_TEST);
@@ -6465,6 +6537,7 @@ static void pass_capture_into(GLuint tex, const PassGen *g) {
 
 static void pass_blit(GLuint src, GLuint dst, int sx, int sy, int dx, int dy,
                       int w, int h, GLbitfield mask) {
+    hiw_flush_queue();   /* queued wide mirrors land before a copy reads or writes */
     p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, src);
     p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, dst);
     glDisable(GL_SCISSOR_TEST);
@@ -6476,6 +6549,7 @@ static void pass_blit(GLuint src, GLuint dst, int sx, int sy, int dx, int dy,
 
 static void pass_verify_read(uint8_t **hr, size_t *hr_cap, uint8_t **raw,
                              size_t *raw_cap) {
+    hiw_flush_queue();
     int S = s_hr_scale;
     size_t hn = (size_t)s_pass_w * S * (size_t)s_pass_h * S * 4u;
     size_t rn = (size_t)s_pass_w * (size_t)s_pass_h * 2u;

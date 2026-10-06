@@ -282,12 +282,17 @@ static int lines_main(int scale, int window) {
     glb_draw_line(5, 160, 90, 190, 0x7fff);
     glb_set_draw_area(0, 0, 1023, 511);
     {
-        /* Windowed: the batches' native-wide mirrors wait in the window's
-         * queue (replayed in one pass per surface at the next sync point). */
+        /* The batches' native-wide mirrors wait in the queue (replayed in
+         * one pass per surface at the next sync point): in the window mode,
+         * and above 1x on the full-VRAM surface unless PSX_GL_WIDE_QUEUE=0
+         * (at 1x lines mirror as GL_LINES, at once). */
         int wq = 0;
+        const char *qe = getenv("PSX_GL_WIDE_QUEUE");
+        int qoff = !window && qe && qe[0] == '0';
         for (int i = 0; i < s_hq_n; i++) wq += s_hq[i].wfbo != 0;
-        if (window && wq < 3) fprintf(stderr, "queued wide mirrors=%d\n", wq);
-        check(window ? wq >= 3 : s_hq_n == 0, "windowed: native-wide mirrors queued");
+        if ((window || scale > 1) && !qoff && wq < 3) fprintf(stderr, "queued wide mirrors=%d\n", wq);
+        if (window || scale > 1)
+            check(qoff ? s_hq_n == 0 : wq >= 3, "native-wide mirrors queued");
     }
     gl_renderer_sync_cpu();
     check(gl_renderer_fbo_peek(0, 0, 1024, 512, peek), "native peek");
@@ -595,6 +600,92 @@ static int twin_main(int scale, int window, int on) {
         if (got) wide = fnv(wb, (size_t)ww * wh * 4, 0xcbf29ce484222325ull);
         free(wb);
     }
+    check(glGetError() == GL_NO_ERROR, "GL error");
+    printf("digest=%016llx\n", (unsigned long long)digest);
+    printf("hires=%016llx\n", (unsigned long long)hires);
+    printf("wide=%016llx\n", (unsigned long long)wide);
+    printf("checks=%d failures=%d\n", checks, failures);
+    return failures ? 1 : 0;
+}
+
+/* ---- mode "wmask": the native-wide mask stencil ---------------------------
+ * argv[3] "0"/"1": the centre splice (gl_wide_fast) off/on. Set-mask draws
+ * into both native-wide margins, unchecked opaque draws over them (the
+ * stencil falls behind alpha), the mask check turned on (the stencil is
+ * rebuilt) and checked draws across the margins and the centre, a dump in
+ * between (the centre splice at a present), then the same again with a
+ * full-frame overlay rect. The runner checks the native VRAM, the frame at S
+ * and the wide surface are the same with the mirror queue and the stale-rect
+ * stencil rebuild off and on (PSX_GL_WIDE_QUEUE=0, PSX_GL_WIDE_STENCIL_FULL=1). */
+static void wmask_dump(int scale, uint64_t *wide) {
+    int ww = 426 * scale, wh = 512 * scale, gw = 0, gh = 0;
+    uint32_t *wb = (uint32_t *)malloc((size_t)ww * wh * 4);
+    int got = wb ? glb_wide_dump_full(wb, ww * wh, &gw, &gh, 0) : 0;
+    check(got == ww * wh && gw == ww && gh == wh, "wide surface dump size");
+    if (got && wide) *wide = fnv(wb, (size_t)ww * wh * 4, 0xcbf29ce484222325ull);
+    free(wb);
+}
+static int wmask_main(int scale, int window, int fast) {
+    static uint16_t page[64 * 64], clut[16];
+    for (int i = 0; i < 64 * 64; i++) page[i] = (uint16_t)((i * 0x2469u) ^ (i >> 2) ^ 0x1111u);
+    for (int i = 0; i < 16; i++) clut[i] = (uint16_t)(i ? (0x0421u * (uint16_t)i) | ((i & 3) == 3 ? 0x8000u : 0) : 0);
+    glb_vram_transfer_in(512, 0, 64, 64, page);
+    glb_vram_transfer_in(512, 256, 16, 1, clut);
+    gl_renderer_set_wide_fast(fast);
+    glb_set_draw_area(0, 0, 1023, 511);
+    glb_set_draw_offset(0, 0);
+    glb_set_mask_bits(0, 0);
+    glb_set_semi_transparency(0, 0);
+    glb_set_color_modulation(128, 128, 128, 0);
+    if (window) check(hiw_ensure(0, FRAME_W) != NULL, "window covers the frame");
+    glb_fill_rect(0, 0, FRAME_W, FRAME_H, 0x0c63);
+    glb_wide_configure(426, 53);
+    glb_wide_set_target(0);
+    glb_set_draw_area(0, 0, FRAME_W - 1, FRAME_H - 1);
+    for (int round = 0; round < 2; round++) {
+        int y = round * 110;
+        /* Set-mask draws reaching both margins. */
+        glb_set_mask_bits(1, 0);
+        glb_draw_flat_rect(-40, y + 10, 100, 40, 0x001f);
+        glb_draw_textured_rect(290, y + 20, 64, 30, 0, 0, 512, 256, 0x0008);
+        glb_draw_gouraud_triangle(-30, y + 60, 0x001f, 60, y + 55, 0x7c00, 10, y + 100, 0x03e0);
+        /* Unchecked opaque draws over part of them: stencil behind alpha. */
+        glb_set_mask_bits(0, 0);
+        glb_draw_flat_rect(-50, y + 30, 60, 10, 0x03e0);
+        glb_draw_textured_rect(320, y + 35, 40, 10, 8, 8, 512, 256, 0x0008);
+        glb_draw_flat_triangle(140, y + 5, 200, y + 5, 170, y + 40, 0x7c1f);
+        /* The check on: rebuilt; checked draws across margins and centre. */
+        glb_set_mask_bits(0, 1);
+        glb_draw_flat_rect(-45, y + 15, 380, 12, 0x7fff);
+        glb_draw_textured_rect(-20, y + 40, 360, 20, 4, 4, 512, 256, 0x0008);
+        glb_draw_line(-30, y + 70, 360, y + 80, 0x5ef7);
+        glb_set_semi_transparency(1, 1);
+        glb_draw_flat_triangle(-40, y + 85, 360, y + 90, 150, y + 105, 0x2108);
+        glb_set_semi_transparency(0, 0);
+        wmask_dump(scale, NULL);   /* a present: the centre splice */
+        glb_set_mask_bits(0, 0);
+        glb_draw_flat_rect(30, y + 45, 280, 8, 0x4210);   /* centre, unchecked */
+        glb_set_mask_bits(0, 1);
+        glb_draw_flat_rect(-50, y + 44, 420, 12, 0x7c00);
+        if (round == 1) {   /* a full-frame overlay rect, checked */
+            glb_set_semi_transparency(1, 0);
+            glb_draw_flat_rect(0, 0, FRAME_W, FRAME_H, 0x0842);
+            glb_set_semi_transparency(0, 0);
+        }
+    }
+    glb_set_mask_bits(0, 0);
+    glb_set_draw_area(0, 0, 1023, 511);
+    gl_renderer_sync_cpu();
+    check(gl_renderer_fbo_peek(0, 0, 1024, 512, peek), "native peek");
+    uint64_t digest = fnv(peek, sizeof peek, 0xcbf29ce484222325ull);
+    int fw = FRAME_W * scale, fh = FRAME_H * scale, ow = 0, oh = 0;
+    uint32_t *img = (uint32_t *)malloc((size_t)fw * fh * 4);
+    int n = img ? gl_renderer_read_display_hires(0, 0, FRAME_W, FRAME_H, img, fw * fh, &ow, &oh) : 0;
+    check(n == fw * fh && ow == fw && oh == fh, "hires readback size");
+    uint64_t hires = n ? fnv(img, (size_t)fw * fh * 4, 0xcbf29ce484222325ull) : 0;
+    free(img);
+    uint64_t wide = 0;
+    wmask_dump(scale, &wide);
     check(glGetError() == GL_NO_ERROR, "GL error");
     printf("digest=%016llx\n", (unsigned long long)digest);
     printf("hires=%016llx\n", (unsigned long long)hires);
@@ -1144,6 +1235,12 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "twin")) {
         if (si.windowed) check(si.hr_scale == 1, "window mode engaged");
         int rc = twin_main(scale, si.windowed, argc > 3 && argv[3][0] == '1');
+        gl_renderer_shutdown(); SDL_DestroyWindow(win); SDL_Quit();
+        return rc;
+    }
+    if (!strcmp(mode, "wmask")) {
+        if (si.windowed) check(si.hr_scale == 1, "window mode engaged");
+        int rc = wmask_main(scale, si.windowed, argc > 3 && argv[3][0] == '1');
         gl_renderer_shutdown(); SDL_DestroyWindow(win); SDL_Quit();
         return rc;
     }
