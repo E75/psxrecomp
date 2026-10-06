@@ -9,7 +9,7 @@ uint32_t psx_mod_gpu_dma_memory_alloc(uint32_t n,uint32_t a){(void)n;(void)a;ret
 uint32_t psx_mod_read_word(uint32_t a){(void)a;return 0;}
 static uint16_t image[1024*512], oracle[1024*512];
 int g_psx_vram_dirty_tracking=0;
-uint64_t psx_cycle_count=0;uint32_t g_psx_vblank_cycles=564480u;
+uint32_t g_psx_vblank_cycles=564480u;
 uint64_t s_frame_count=0;
 void gpu_vram_dirty_mark_row_impl(uint32_t y){}
 void gpu_vram_dirty_mark_rect(int x,int y,int w,int h){}
@@ -242,7 +242,7 @@ static void verify_camera_plane_clip(int scale) {
  * above its draw area; canonical VRAM clips it at the band top, and the wide
  * surface must clip it there too instead of painting the other band. */
 static void verify_wide_overlay_band(void) {
- const int S=s_scale,W=426*S,H=512*S;
+ const int S=s_out_scale,W=426*S,H=512*S;
  uint32_t *wide=(uint32_t*)malloc((size_t)W*H*sizeof(uint32_t));
  int ow=0,oh=0;
  check(wide!=NULL,"wide dump alloc");if(!wide)return;
@@ -263,7 +263,7 @@ static void verify_wide_overlay_band(void) {
  * queued. They must reach the reveal before the strip, and the strip must
  * blend exactly once in both the centre and the reveal. No retail payload. */
 static void verify_wide_overlay_order(void) {
- const int S=s_scale,W=426*S,H=512*S;
+ const int S=s_out_scale,W=426*S,H=512*S;
  uint32_t *wide=(uint32_t*)malloc((size_t)W*H*sizeof(uint32_t));
  int ow=0,oh=0;
  check(wide!=NULL,"overlay order alloc");if(!wide)return;
@@ -294,8 +294,56 @@ static void verify_wide_overlay_order(void) {
  }
  free(wide);
 }
+/* Render-pass capture of an anchored wide frame (frame interpolation). The
+ * camera view translates world draws by its shift, so the mirror drew the whole
+ * wide surface and the canonical frame is NOT its centre. A capture taken on the
+ * fast centre path must equal one taken with the fast path off; copying the
+ * unshifted canonical frame over the centre shows stale margins beside a
+ * displaced centre, alternating with the game's own frames (flicker). */
+static int capture_wide_pass(GLuint tex,int fast){
+ PassGen g;memset(&g,0,sizeof g);
+ g.source_path=GL_PRES_WIDE;g.x=0;g.y=0;g.w=320;g.h=240;
+ flush_flat_batch();flush_tex_batch();
+ s_wide_fast=fast;pass_capture_into(tex,&g);s_wide_fast=1;
+ return glGetError()==GL_NO_ERROR;
+}
+static void verify_anchored_pass_capture(int scale,int shift){
+ const int W=426*scale,H=240*scale;const size_t n=(size_t)W*H*4;
+ uint8_t *fast=malloc(n),*full=malloc(n),*again=malloc(n);
+ if(!fast||!full||!again){check(0,"anchored pass capture allocation");free(fast);free(full);free(again);return;}
+ GLuint tex[2];glGenTextures(2,tex);
+ for(int i=0;i<2;i++){
+  glBindTexture(GL_TEXTURE_2D,tex[i]);
+  glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,W,H,0,GL_RGBA,GL_UNSIGNED_BYTE,NULL);
+ }
+ /* Full mirror first: a capture that copied the canonical frame into the live
+  * wide surface would also corrupt every later read of it. */
+ check(capture_wide_pass(tex[1],0),"anchored pass capture, full mirror");
+ check(capture_wide_pass(tex[0],1),"anchored pass capture, fast centre path");
+ glPixelStorei(GL_PACK_ALIGNMENT,1);
+ glBindTexture(GL_TEXTURE_2D,tex[0]);glGetTexImage(GL_TEXTURE_2D,0,GL_RGBA,GL_UNSIGNED_BYTE,fast);
+ glBindTexture(GL_TEXTURE_2D,tex[1]);glGetTexImage(GL_TEXTURE_2D,0,GL_RGBA,GL_UNSIGNED_BYTE,full);
+ size_t diff=0;for(size_t i=0;i<n;i++)diff+=fast[i]!=full[i];
+ if(diff)fprintf(stderr,"anchored pass capture shift %d: %zu bytes differ\n",shift,diff);
+ check(diff==0,"anchored pass capture keeps the mirrored centre");
+ check(capture_wide_pass(tex[1],0),"anchored pass capture, full mirror again");
+ glBindTexture(GL_TEXTURE_2D,tex[1]);glGetTexImage(GL_TEXTURE_2D,0,GL_RGBA,GL_UNSIGNED_BYTE,again);
+ glBindTexture(GL_TEXTURE_2D,0);glPixelStorei(GL_PACK_ALIGNMENT,4);
+ diff=0;for(size_t i=0;i<n;i++)diff+=again[i]!=full[i];
+ check(diff==0,"anchored pass capture leaves the live wide surface unchanged");
+ /* The anchored world marker is in the capture where the view put it. */
+ int at_view=0,at_canonical=0;
+ for(int y=0;y<H;y++){
+  const uint8_t *v=fast+((size_t)y*W+(size_t)(213+shift)*scale)*4;
+  const uint8_t *c=fast+((size_t)y*W+(size_t)213*scale)*4;
+  at_view+=v[1]>200&&v[0]<64&&v[2]<64;at_canonical+=c[1]>200&&c[0]<64&&c[2]<64;
+ }
+ check(at_view>0,"anchored marker captured at the view position");
+ if(shift)check(at_canonical==0,"no canonical-position marker in the anchored capture");
+ glDeleteTextures(2,tex);free(fast);free(full);free(again);
+}
 static void verify_presentation_capture(void) {
- const int w=7*s_scale,h=3*s_scale,stride=w+3;
+ const int w=7*s_out_scale,h=3*s_out_scale,stride=w+3;
  uint32_t *out=malloc((size_t)stride*h*4);
  s_cpu_auth_dual=1;
  glb_set_draw_area(0,0,1023,511);glb_set_mask_bits(0,0);glb_set_semi_transparency(0,0);
@@ -465,6 +513,7 @@ int main(int argc,char **argv){
   check(wide_pixels[(20*scale)*(426*scale)+213*scale]==0xfff80000u,"centered dialogue marker");
   check(wide_pixels[(60*scale)*(426*scale)]==0xff0000f8u,"anchored left edge");
   check(wide_pixels[(60*scale)*(426*scale)+425*scale]==0xff0000f8u,"anchored right edge");
+  verify_anchored_pass_capture(scale,shift);
  }
  glb_wide_set_view(0,0,0,0);
  check(wide_dx()==53,"disabled view preserves original origin");
