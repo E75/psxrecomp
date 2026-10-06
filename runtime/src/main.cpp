@@ -1951,7 +1951,10 @@ static void refresh_widescreen_projection() {
     const bool native_wide = (g_netplay_local_viewport == 1)
         ? local_native_wide
         : (g_ws_native_wide != 0);
-    const int mode = wide ? (native_wide ? 2 : 1) : 0;
+    /* Squash changes the GTE projection, which the guest sees: never while
+     * widescreen is a netplay peer's own-view presentation. */
+    const int mode = wide ? (native_wide ? 2 : (gpu_ws_local_view_only() ? 0 : 1))
+                          : 0;
     int proj_num = g_video_aspect_num;
     int proj_den = g_video_aspect_den;
     if (mode == 1) {
@@ -16149,7 +16152,8 @@ int main(int argc, char** argv) {
          * from disk. Skip commit entirely when this session is netplay. */
         std::string mod_error;
         if (net_cfg.enabled) {
-            if (!PSXRecompV4::mod_runtime_clear_for_netplay(&mod_error)) {
+            if (!PSXRecompV4::mod_runtime_commit_netplay_view(resolved_disc,
+                                                              &mod_error)) {
                 std::fprintf(stderr,
                              "psxrecomp: cannot clear mods for netplay: %s\n",
                              mod_error.c_str());
@@ -16191,6 +16195,10 @@ int main(int argc, char** argv) {
                       "reset_mod_owned_presentation() would clobber a launcher "
                       "setting; restore only when the feature is mod-owned");
         reset_mod_owned_presentation();
+        /* Netplay own-view mods: the widescreen margin follows them into the
+         * sandboxed own view only; the shared game keeps the stock cull. */
+        gpu_ws_set_local_view_only(
+            netplay && PSXRecompV4::mod_runtime_netplay_view_active() ? 1 : 0);
         mod_runtime_activate_plugins();
         apply_netplay_local_viewport_aspect(netplay);
         for (int i = 0; i < PSX_MAX_PLAYERS; ++i) {
@@ -18235,7 +18243,8 @@ soft_return_lobby:
             {
                 std::string mod_error;
                 if (net_cfg.enabled) {
-                    if (!PSXRecompV4::mod_runtime_clear_for_netplay(&mod_error)) {
+                    if (!PSXRecompV4::mod_runtime_commit_netplay_view(
+                            resolved_disc, &mod_error)) {
                         std::fprintf(stderr,
                                      "psxrecomp: cannot clear mods for netplay "
                                      "rematch: %s\n",

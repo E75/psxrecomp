@@ -88,6 +88,9 @@ struct RuntimeMods {
     bool main_applied = false;
     bool disc_enabled = false;
     bool disc_guard_failed = false;
+    /* The plan is a netplay match's own-view set: its hooks run only inside
+     * psx_mod_render_local_view, its vblank/savestate callbacks not at all. */
+    bool netplay_view_plan = false;
     const ModResolution::Plugin* current_plugin = nullptr;
     CPUState* current_function_cpu = nullptr;
     bool current_function_finished = false;
@@ -1309,24 +1312,28 @@ bool mod_runtime_clear_for_netplay(std::string* error) {
     s.main_applied = false;
     s.disc_enabled = false;
     s.disc_guard_failed = false;
+    s.netplay_view_plan = false;
     s.error.clear();
     if (error) error->clear();
     std::fprintf(stdout, "psxrecomp: mods cleared for netplay (vanilla session)\n");
     return true;
 }
 
-bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* error) {
-    RuntimeMods& s = state();
-    if (!s.initialized) return true;
-    if (disc_path != s.disc_path) {
-        std::string hash_error;
-        std::string digest;
-        if (!sha256_file(disc_path, digest, &hash_error)) digest.clear();
-        s.disc_path = disc_path;
-        s.disc_sha256 = std::move(digest);
-    }
-    ModResolution plan =
-        s.manager.resolve(s.game_id, s.exe_sha256, s.disc_sha256);
+namespace {
+
+void note_disc(RuntimeMods& s, const std::filesystem::path& disc_path) {
+    if (disc_path == s.disc_path) return;
+    std::string hash_error;
+    std::string digest;
+    if (!sha256_file(disc_path, digest, &hash_error)) digest.clear();
+    s.disc_path = disc_path;
+    s.disc_sha256 = std::move(digest);
+}
+
+/* Validate a resolved plan against the disc, materialize its derived disc,
+ * optionally persist the player's selection, and make it the session plan. */
+bool install_plan(RuntimeMods& s, ModResolution plan, bool save,
+                  std::string* error) {
     s.validation = plan;
     /* A derived activation is not in state.toml, so name it: a player (or a
      * test) reading the log can see why a hidden feature is running. */
@@ -1365,7 +1372,7 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* err
         if (error) *error = s.error;
         return false;
     }
-    if (!s.manager.save_state(&s.error)) {
+    if (save && !s.manager.save_state(&s.error)) {
         if (error) *error = s.error;
         return false;
     }
@@ -1379,6 +1386,93 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* err
     s.effective_disc_path = std::move(effective_disc);
     s.main_applied = false;
     s.error.clear();
+    return true;
+}
+
+} // namespace
+
+bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* error) {
+    RuntimeMods& s = state();
+    if (!s.initialized) return true;
+    s.netplay_view_plan = false;
+    note_disc(s, disc_path);
+    return install_plan(
+        s, s.manager.resolve(s.game_id, s.exe_sha256, s.disc_sha256),
+        /*save*/ true, error);
+}
+
+std::vector<std::string> mod_runtime_netplay_view_features(const ModResolution& plan) {
+    /* A feature stays on online only when everything it contributes is a
+     * local-view plugin: no EXE/disc write, overlay or derived disc (those
+     * change the shared game) and no plugin without netplay = "local_view". */
+    std::map<std::string, bool> ok;
+    for (const ModResolution::Plugin& p : plan.plugins) {
+        const std::string key = p.package_id + "/" + p.feature_id;
+        auto it = ok.find(key);
+        const bool good = p.netplay_local_view;
+        ok[key] = it == ok.end() ? good : (it->second && good);
+    }
+    for (const ModResolution::Write& w : plan.writes)
+        ok[w.package_id + "/" + w.feature_id] = false;
+    for (const ModResolution::Overlay& o : plan.overlays)
+        ok[o.package_id + "/" + o.feature_id] = false;
+    for (const ModResolution::DerivedDisc& d : plan.derived_discs)
+        ok[d.package_id + "/*"] = false;
+    std::vector<std::string> out;
+    for (const auto& [key, good] : ok) {
+        if (!good) continue;
+        const std::string pkg = key.substr(0, key.find('/'));
+        if (ok.count(pkg + "/*")) continue;
+        out.push_back(key);
+    }
+    return out;
+}
+
+bool mod_runtime_netplay_view_active() {
+    const RuntimeMods& s = state();
+    return s.netplay_view_plan && s.plan.ok && !s.plan.plugins.empty();
+}
+
+bool mod_runtime_commit_netplay_view(const std::filesystem::path& disc_path,
+                                     std::string* error) {
+    RuntimeMods& s = state();
+    std::string why;
+    (void)mod_runtime_clear_for_netplay(&why);
+    if (!s.initialized) return true;
+    note_disc(s, disc_path);
+    const ModResolution full =
+        s.manager.resolve(s.game_id, s.exe_sha256, s.disc_sha256);
+    if (!full.ok) return true; /* the player's set does not resolve: vanilla */
+    const std::vector<std::string> keep = mod_runtime_netplay_view_features(full);
+    if (keep.empty()) return true;
+    /* The player's selection with every other feature off. */
+    std::map<std::string, ModSelection> reduced = s.manager.selections();
+    for (const auto& [id, versions] : s.manager.packages()) {
+        (void)versions;
+        const ModPackage* package = s.manager.selected_package(id);
+        if (!package) continue;
+        for (const ModFeature& f : package->features) {
+            if (f.legacy) continue;
+            const bool on = std::find(keep.begin(), keep.end(),
+                                      id + "/" + f.id) != keep.end();
+            ModFeatureSelection& fs = reduced[id].features[f.id];
+            if (!on) { fs.enabled = false; fs.has_enabled = true; }
+        }
+    }
+    std::map<std::string, ModSelection> player =
+        s.manager.exchange_selections(std::move(reduced));
+    ModResolution plan = s.manager.resolve(s.game_id, s.exe_sha256, s.disc_sha256);
+    (void)s.manager.exchange_selections(std::move(player));
+    if (!install_plan(s, std::move(plan), /*save*/ false, &why)) {
+        std::fprintf(stderr, "psxrecomp: netplay own-view mods unavailable (%s)\n",
+                     why.c_str());
+        return mod_runtime_clear_for_netplay(error);
+    }
+    s.netplay_view_plan = true;
+    for (const std::string& k : keep)
+        std::fprintf(stdout, "psxrecomp: netplay keeps %s for this player's own "
+                     "view only\n", k.c_str());
+    if (error) error->clear();
     return true;
 }
 
@@ -1436,7 +1530,7 @@ extern "C" void mod_runtime_on_dispatch(uint32_t target) {
 extern "C" void mod_runtime_on_savestate_loaded(void) {
     using namespace PSXRecompV4;
     RuntimeMods& s = state();
-    if (!s.initialized || !s.plan.ok) return;
+    if (!s.initialized || !s.plan.ok || s.netplay_view_plan) return;
 
     if (!s.main_applied) {
         uint32_t failed_at = 0;
@@ -1722,7 +1816,8 @@ extern "C" void mod_runtime_on_vblank(void) {
     using namespace PSXRecompV4;
     ++g_mod_vblanks;
     RuntimeMods& s = state();
-    if (!s.initialized || !s.plan.ok) return;
+    /* An own-view plan never touches the shared simulation. */
+    if (!s.initialized || !s.plan.ok || s.netplay_view_plan) return;
     for (const ModResolution::Plugin& plugin : s.plan.plugins) {
         PluginCallbackScope scope(s, &plugin);
         mod_invoke_vblank_plugin(plugin.id);
@@ -1961,9 +2056,17 @@ extern "C" int psx_mod_register_guest_function_plugin(
     return id && PSXRecompV4::mod_register_guest_function_plugin(id, address, callback);
 }
 
+extern "C" int psx_mod_local_view_scope(void);
+/* A netplay own-view plan's hooks wait for the sandboxed own-view render; the
+ * shared simulation never runs them. */
+static int mod_plan_hooks_parked(void) {
+    return PSXRecompV4::state().netplay_view_plan && !psx_mod_local_view_scope();
+}
+
 extern "C" int psx_mod_dispatch_guest_function(CPUState* cpu, uint32_t address) {
     using namespace PSXRecompV4;
     if (!g_psx_mod_guest_functions || !cpu || address >= 0xC0000000u) return 0;
+    if (mod_plan_hooks_parked()) return 0;
     const auto& functions = active_guest_functions();
     const uint32_t key = function_entry_key(address);
     auto it = std::lower_bound(functions.begin(), functions.end(), key,
@@ -1983,6 +2086,7 @@ extern "C" int psx_mod_register_instruction_plugin(const char* id, uint32_t addr
 extern "C" void psx_mod_instruction(CPUState* cpu, uint32_t address, uint32_t instruction) {
     using namespace PSXRecompV4;
     if (!g_psx_mod_instruction_hooks || !cpu || address >= 0xC0000000u) return;
+    if (mod_plan_hooks_parked()) return;
     const auto& hooks = active_instruction_hooks();
     const auto key = function_entry_key(address);
     auto it = std::lower_bound(hooks.begin(), hooks.end(), key,
@@ -2003,6 +2107,7 @@ extern "C" int psx_mod_function_entry(CPUState* cpu, uint32_t address) {
     using namespace PSXRecompV4;
     if (!g_psx_mod_function_entry_hooks || !cpu) return 0;
     RuntimeMods& s = state();
+    if (mod_plan_hooks_parked()) return game_netplay_function_entry(cpu, address);
     const auto& table = active_function_entry_hooks();
     const uint32_t key = function_entry_key(address);
     auto it = std::lower_bound(

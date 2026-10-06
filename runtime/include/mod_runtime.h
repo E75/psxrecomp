@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include "mod_packages.h"
 #if defined(RECOMP_LAUNCHER)
 #include "recomp_launcher.h"
 #endif
@@ -23,6 +24,17 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path = {},
  * user's persisted offline selection on disk. Netplay is always vanilla for
  * now (no synced mod plans). */
 bool mod_runtime_clear_for_netplay(std::string* error = nullptr);
+/* Netplay: clear the plan, then keep only the player's own features whose
+ * every contribution is a [[plugin]] with netplay = "local_view" (no writes,
+ * overlays or derived discs). They activate as usual, but their hooks run
+ * only inside psx_mod_render_local_view and their vblank/savestate callbacks
+ * not at all, so the shared simulation stays stock. Never saves state.toml. */
+bool mod_runtime_commit_netplay_view(const std::filesystem::path& disc_path,
+                                     std::string* error = nullptr);
+/* 1 while the session plan is such an own-view plan. */
+bool mod_runtime_netplay_view_active();
+/* "package/feature" keys of `plan` that qualify as own-view features. */
+std::vector<std::string> mod_runtime_netplay_view_features(const ModResolution& plan);
 const std::string& mod_runtime_fingerprint();
 const std::filesystem::path& mod_runtime_effective_disc_path();
 /* Read an effective-disc file as whole sectors (true end-of-file tail bytes

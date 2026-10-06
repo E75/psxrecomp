@@ -60,6 +60,7 @@ extern int      psx_get_in_exception(void);
 extern int      psx_netplay_active(void);
 extern int      psx_netplay_is_resimulating(void);
 extern void     psx_netplay_local_view_clear(void);
+extern void     gpu_ws_set_local_view_scope(int on);
 extern int      psx_selfcheck_resim_active(void);
 extern int      psx_rewind_is_open(void);
 extern int      psx_presentation_fast_forward(void);
@@ -602,6 +603,13 @@ static void note_fault(const char *what) {
     }
 }
 
+static int s_local_scope = 0;
+static void local_scope_set(int on) {
+    s_local_scope = on;
+    gpu_ws_set_local_view_scope(on);
+}
+int psx_mod_local_view_scope(void) { return s_local_scope; }
+
 static int transaction_kind(int eye) {
     return eye >= 0 ? 1 : eye == RP_EYE_LOCAL ? 2 : 0;
 }
@@ -698,6 +706,9 @@ static int render_transaction(struct CPUState *cpu, const PSXModRenderPass *pass
     }
     (void)psx_cycle_freeze_begin(&s_freeze, watchdog_cycles(),
                                  watchdog_overrun);
+    /* A netplay local view is the one place a peer's presentation-only mods
+     * act on guest code (own-view plugins, widescreen cull margin). */
+    if (eye == RP_EYE_LOCAL) local_scope_set(1);
     if (setjmp(s_abort_jmp) == 0) {
         s_pass_cpu = cpu;
         s_abort_armed = 1;
@@ -740,6 +751,7 @@ static int render_transaction(struct CPUState *cpu, const PSXModRenderPass *pass
         if (eye >= 0) s_stereo.last_failure = "eye_capture";
     }
     te = gl_renderer_perf_ticks();
+    local_scope_set(0);
     checkpoint_restore(cpu);
     psx_cycle_freeze_end(&s_freeze);
     s_nesting = 0;

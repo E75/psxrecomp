@@ -528,6 +528,11 @@ int psx_mod_render_local_view(struct CPUState* cpu,
                               const PSXModRenderPass* rect,
                               PSXModRenderPassFn fn, void* user);
 uint32_t psx_mod_render_local_view_status(void);
+/* 1 while a psx_mod_render_local_view draw runs. In that scope a netplay
+ * match's own-view mods ([[plugin]] netplay = "local_view") run their hooks
+ * and the widescreen cull margin is this peer's; outside it neither touches
+ * the shared simulation. */
+int psx_mod_local_view_scope(void);
 /* Simultaneous stereo capture, independent of temporal interpolation. Each
  * eye starts from the same guest state; CPU/RAM/devices/VRAM are restored
  * before the other eye and on failure. Publish only after both succeed.

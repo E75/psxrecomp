@@ -139,7 +139,8 @@ Internal resolution is not a mod, so it is not cleared for netplay: each peer
 keeps its own preset, clamped to its own GPU, and one peer at 4K next to another
 at Native is a supported match. Only the GL present surface changes; the 1×
 software authority, the digests and the rollback snapshots are the same on every
-peer. Widescreen and frame-rate mods, by contrast, are cleared for netplay.
+peer. Mods are cleared for netplay, except a player's own-view mods (below),
+which stay per player and never touch the shared game.
 
 ### Each peer's own view (presentation only)
 
@@ -329,9 +330,43 @@ Generate & rebuild / prepare flows should point at the **`.cue`**, not a lone
   netplay.
 - **VERSION / lobby match pin:** peers should run the same release pin so
   generated code and protocol stay compatible.
-- **Mods:** disabled for all netplay sessions (lobby / LAN / direct / rematch).
-  Launcher `commit_netplay` and the runtime clear the in-session plan without
-  touching the user's offline mod selection. Synced mod plans are deferred.
+- **Mods:** cleared for all netplay sessions (lobby / LAN / direct / rematch)
+  without touching the user's offline mod selection, except own-view mods.
+
+### Own-view mods (per player)
+
+The shared simulation stays stock on every peer; a mod that only changes
+what one player sees runs for that player alone, inside the sandboxed own-view
+render (`psx_mod_render_local_view`). A package opts in per plugin:
+
+```toml
+[[plugin]]
+feature = "widescreen"
+id = "r4.widescreen"
+netplay = "local_view"
+```
+
+At a netplay session start the runtime resolves the player's own selection
+and keeps only features whose every contribution is such a plugin (no EXE or
+disc write, overlay or derived disc; `mod_runtime_commit_netplay_view`). They
+activate as usual (presentation state: aspect, scene predicates), but:
+
+- their function-entry, filter, guest-function and instruction hooks run only
+  while `psx_mod_local_view_scope()` is 1, i.e. inside a local-view draw, whose
+  guest-side effects the sandbox discards; vblank and savestate callbacks do
+  not run in a match;
+- `gpu_ws_set_local_view_only(1)`: the widescreen cull margin
+  (`psx_ws_x_margin()`) is the stock 0 in the shared game and this peer's own
+  margin only inside the local-view draw; squash widescreen (which changes the
+  GTE projection) is not used.
+
+So the canonical frame, rollback snapshots and digests are identical on every
+peer whatever each player chose, there is nothing to negotiate or hash, and
+each player keeps their own aspect (Fit follows their own window). Nothing is
+written to `mods/state.toml`. A title without an own view simply shows its
+canonical frame. A plugin must not keep host state that feeds guest writes
+outside the scope; anything that persists guest state across frames is not an
+own-view mod.
 
 ---
 

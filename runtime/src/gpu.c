@@ -1385,7 +1385,18 @@ int psx_ws_aspect_cone_site(CPUState *cpu, uint32_t pc, uint32_t instr,
     return 1;
 }
 
+/* Netplay presentation-only widescreen (gpu_ws_set_local_view_only): the
+ * shared simulation keeps the stock 4:3 cull everywhere; the widened margin
+ * exists only while this peer's sandboxed own view is drawn, whose guest-side
+ * effects the sandbox discards. */
+static int ws_local_view_only = 0;
+static int ws_local_view_scope = 0;
+void gpu_ws_set_local_view_only(int on) { ws_local_view_only = on ? 1 : 0; }
+void gpu_ws_set_local_view_scope(int on) { ws_local_view_scope = on ? 1 : 0; }
+int gpu_ws_local_view_only(void) { return ws_local_view_only; }
+
 int psx_ws_x_margin(void) {
+    if (ws_local_view_only && !ws_local_view_scope) return 0;
     if (ws_margin_override >= 0) return ws_margin_override;
     /* Native-wide: widen the world-space draw cull by the per-side reveal
      * (== the centering OFFSET in screen px) so the game SUBMITS the geometry

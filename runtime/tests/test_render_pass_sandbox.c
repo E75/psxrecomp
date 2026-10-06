@@ -158,6 +158,8 @@ static int s_netplay, s_resim, s_crop_clears;
 int  psx_netplay_active(void) { return s_netplay; }
 int  psx_netplay_is_resimulating(void) { return s_resim; }
 void psx_netplay_local_view_clear(void) { s_crop_clears++; }
+static int s_ws_scope;
+void gpu_ws_set_local_view_scope(int on) { s_ws_scope = on; }
 int  psx_selfcheck_resim_active(void) { return 0; }
 int  psx_selfcheck_enabled(void) { return 0; }
 int  psx_rewind_is_open(void) { return 0; }
@@ -733,6 +735,8 @@ static void test_stereo(void) {
 static int local_draw(CPUState *cpu, void *user, uint32_t alpha) {
     (void)user;
     CHECK(alpha == 0, "a local view has no phase");
+    CHECK(s_ws_scope == 1 && psx_mod_local_view_scope() == 1,
+          "own-view presentation scope open while the local view draws");
     cpu->gpr[8] = 0xBEEFu;
     s_ram[0x456] = 0x11;            /* the game's draw code writes RAM */
     psx_advance_cycles(5000u);
@@ -778,6 +782,8 @@ static void test_local_view(void) {
     CHECK(st.local_views == 1 && s_local_kept == 1 && s_open_passes == 0 &&
           st.passes == 0, "one kept local image, transaction closed");
     CHECK(s_crop_clears == 1, "the committed image cancels the crop request");
+    CHECK(s_ws_scope == 0 && psx_mod_local_view_scope() == 0,
+          "own-view scope closed after the local view");
     CHECK(cpu.gpr[8] == 7 && s_ram[0x456] == 0x77 && psx_cycle_count == cycle,
           "guest state restored after the local view");
     r.x = 900;

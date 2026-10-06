@@ -106,6 +106,7 @@ int  psx_get_in_exception(void) { return 0; }
 int  psx_netplay_active(void) { return 0; }
 int  psx_netplay_is_resimulating(void) { return 0; }
 void psx_netplay_local_view_clear(void) {}
+void gpu_ws_set_local_view_scope(int on) { (void)on; }
 int  psx_selfcheck_resim_active(void) { return 0; }
 int  psx_selfcheck_enabled(void) { return 0; }
 int  psx_rewind_is_open(void) { return 0; }
