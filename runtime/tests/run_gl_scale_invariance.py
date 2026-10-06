@@ -33,6 +33,14 @@ from the VRAM, so a decode error both ways share still fails.
 Pass runs (mode passes, where the renderer has the frame-rate stack's render
 passes) check that the window mode refuses them and the full-VRAM surface
 offers them.
+Step runs (mode steps, dynamic resolution) keep the surfaces at a ceiling and
+change the scale at run time. "fresh" steps before drawing: the native VRAM,
+the frame at S and the wide surface must equal the fixed-scale run at the
+final level. "chain" draws, then steps through a list: each step must leave
+the native VRAM unchanged and rescale the displayed rect, the draw area and
+the wide margins from their own pixels (the fixture checks every pixel); the
+scene drawn again at the final level must equal the fixed-scale run there.
+The window mode refuses steps.
 
 macOS/Linux: pass the SDL3 include directory and static library (for example
 from a runtime build tree's _deps/sdl3-src/include and
@@ -299,6 +307,38 @@ def main():
               r.stderr.strip()[-600:])
         if r.returncode or not parsed or parsed[1]:
             ok = False
+    # Dynamic resolution steps: (ceiling, levels, kind, env). The final level
+    # must be one of --scales (its fixed-scale run is the reference).
+    step_runs = (
+        (9, "5", "fresh", {}), (9, "3,9", "fresh", {}), (9, "1", "fresh", {}),
+        (5, "2", "fresh", {}),
+        (9, "8,5,9,3,1,2,9", "chain", {}), (5, "3,5,1,2", "chain", {}),
+        (9, "5", "chain", {"PSX_GL_HIRES_WINDOW": "1"}),
+    )
+    for ceiling, levels, kind, extra in step_runs:
+        e = dict(env)
+        e.update(extra)
+        r = run([dest / "probe", ceiling, "steps", levels, kind], env=e)
+        parsed = parse_run(r.stdout)
+        label = f"steps {kind} {ceiling}x [{levels}]" + (" window" if extra else "")
+        print(f"{label}: exit={r.returncode}",
+              [ln for ln in r.stdout.strip().splitlines() if ln.startswith("step ")][-8:],
+              r.stdout.strip().splitlines()[-1:], r.stderr.strip()[-600:])
+        if r.returncode or not parsed or parsed[1]:
+            ok = False
+        if extra:
+            continue   # the window mode only has to refuse
+        final = int(levels.split(",")[-1])
+        if parsed:
+            digests[("steps", ceiling, levels, kind)] = parsed[2]
+        got = (parse_hires(r.stdout), parse_hires(r.stdout, "wide"))
+        if final not in hires_full or None in got or got != hires_full[final]:
+            print(f"FAIL {label}: frame/wide surface differ from the fixed {final}x run:",
+                  got, hires_full.get(final))
+            ok = False
+    if not digests_agree(digests):
+        print("FAIL native VRAM digest differs across steps:", digests)
+        ok = False
     for label, s, budget in (("over-limit", 32, None), ("budget", 12, "40")):
         e = dict(env)
         if budget is not None:
