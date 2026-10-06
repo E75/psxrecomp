@@ -104,4 +104,30 @@ void iso_close(void* handle) {
     delete reader;
 }
 
+/* Audio-only overrides never affect filesystem reads, XA or disc validation. */
+int iso_cdda_track_count(void* handle) {
+    const int count=mod_runtime_cdda_track_count();
+    return count?count:iso_track_count(handle);
+}
+uint32_t iso_cdda_track_start_lba(void* handle,int track) {
+    return mod_runtime_cdda_track_count()?mod_runtime_cdda_track_start(track):iso_track_start_lba(handle,track);
+}
+uint32_t iso_cdda_track_pregap_lba(void* handle,int track) {
+    return mod_runtime_cdda_track_count()?mod_runtime_cdda_track_start(track):iso_track_pregap_lba(handle,track);
+}
+int iso_cdda_track_is_audio(void* handle,int track) {
+    const int count=mod_runtime_cdda_track_count();
+    return count?(track>=2 && track<=count):iso_track_is_audio(handle,track);
+}
+uint32_t iso_cdda_sector_count(void* handle) {
+    return mod_runtime_cdda_track_count()?mod_runtime_cdda_track_start(0):iso_sector_count(handle);
+}
+int iso_read_cdda_sector(void* handle,uint32_t lba,uint8_t* buffer,int size) {
+    if(!handle || !buffer || size<2352) return 0;
+    if(!mod_runtime_cdda_track_count()) return iso_read_raw_sector(handle,lba,buffer,size);
+    uint32_t source=0;
+    const int kind=mod_runtime_read_cdda_sector(lba,buffer,size,&source);
+    return kind==1 || (kind==2 && static_cast<PS1::ISOReader*>(handle)->ReadRawSector(source,buffer));
+}
+
 } /* extern "C" */

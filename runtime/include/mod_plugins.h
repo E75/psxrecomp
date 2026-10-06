@@ -335,6 +335,22 @@ int psx_mod_current_resource_bytes(const char* resource_id,
 int psx_mod_append_disc_extent(const char* resource_id, uint64_t byte_offset,
                                uint32_t sector_count, uint32_t* first_lba);
 
+/* Optional CD-DA playlist, built only during activation. Audio has a separate
+ * TOC/timeline (track 1 is a data placeholder); data/XA LBAs are unchanged.
+ * Sources are verified immutable raw 2352-byte stereo PCM sectors, or audio
+ * tracks on the mounted disc. Playback, reports and saves use the native CD
+ * controller. No conversion, resampling or host clock is involved. */
+typedef struct PSXModCDDATrack {
+    const char* resource_id; /* non-NULL: verified external raw PCM */
+    uint64_t byte_offset;
+    uint32_t sector_count;
+    uint32_t disc_track;    /* resource_id == NULL: mounted audio track */
+} PSXModCDDATrack;
+/* Append the whole group atomically. Both output arrays have count elements;
+ * failure leaves the previous playlist intact and clears all outputs. */
+int psx_mod_append_cdda_tracks(const PSXModCDDATrack* tracks, uint32_t count,
+                              uint32_t* first_lbas, uint32_t* sector_counts);
+
 /* Display aspects have no framework ceiling: the native-wide surfaces size
  * themselves from the live width, and each title caps its own view at what
  * it has validated (fixed ratio, or the adaptive maximum below). Requests
@@ -611,6 +627,10 @@ enum {
     PSX_MOD_RENDER_PASS_FLIP_SHOWN = 1
 };
 int psx_mod_set_render_pass_flip(uint32_t mode);
+/* A trusted title may opt into presentation-only passes during forward
+ * netplay. Resimulation and lockstep replay still refuse them. The backend
+ * restores authoritative CPU VRAM as well as the captured display surface. */
+int psx_mod_set_render_pass_netplay(int enabled);
 
 /*
  * The per-frame plumbing every frame-rate plugin repeats (render_pass_frame.c).

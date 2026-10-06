@@ -194,6 +194,14 @@ static uint64_t media_size;
 static int media_access, foreign_media_access;
 static uint32_t mounted_lba;
 static int extent_ok, invalid_extent, foreign_extent;
+static int audio_ok, audio_invalid, audio_foreign, audio_data_rejected;
+static uint32_t audio_lba, audio_lba2;
+static void test_disc_audio_plugin() {
+    PSXModCDDATrack tracks[]={{nullptr,0,0,2},{nullptr,0,0,3}};
+    uint32_t starts[2]{},counts[2]{};
+    if(!psx_mod_append_cdda_tracks(tracks,2,starts,counts) ||
+       starts[0]!=150 || starts[1]!=153 || counts[0]!=3 || counts[1]!=2) failures++;
+}
 static void test_media_plugin(void) {
     media_access = psx_mod_current_resource_bytes("rom", &media_snapshot, &media_size);
     const uint8_t* foreign = nullptr;
@@ -203,6 +211,18 @@ static void test_media_plugin(void) {
     uint32_t bad=99;
     invalid_extent=psx_mod_append_disc_extent("xa",1,2,&bad);
     foreign_extent=psx_mod_append_disc_extent("private",0,1,&bad);
+    PSXModCDDATrack sources[]={{"xa",0,1,0},{"xa",2320,1,0}};
+    uint32_t starts[2]{},counts[2]{};
+    audio_ok=psx_mod_append_cdda_tracks(sources,2,starts,counts);
+    audio_lba=starts[0];audio_lba2=starts[1];
+    sources[1].byte_offset=2321;
+    audio_invalid=psx_mod_append_cdda_tracks(sources,2,starts,counts);
+    if(starts[0] || counts[0]) failures++;
+    sources[1]={"private",0,1,0};
+    audio_foreign=psx_mod_append_cdda_tracks(sources,2,starts,counts);
+    sources[1]={nullptr,0,0,1};
+    audio_data_rejected=!psx_mod_append_cdda_tracks(sources,2,starts,counts);
+
 }
 
 extern "C" {
@@ -215,6 +235,11 @@ uint32_t iso_sector_count(void*);
 int iso_track_count(void*);
 uint32_t iso_track_start_lba(void*,int);
 int iso_track_is_audio(void*,int);
+int iso_cdda_track_count(void*);
+uint32_t iso_cdda_track_start_lba(void*,int);
+uint32_t iso_cdda_sector_count(void*);
+int iso_cdda_track_is_audio(void*,int);
+int iso_read_cdda_sector(void*,uint32_t,uint8_t*,int);
 }
 
 static int big_ram_activations;
@@ -1022,11 +1047,25 @@ int main() {
           std::equal(rom.begin(), rom.end(), media_snapshot), "plugin receives exact verified bytes");
     check(!foreign_media_access, "inactive feature cannot supply bytes to another feature");
     check(extent_ok && mounted_lba==24 && !invalid_extent && !foreign_extent,"activation mounts only owned bounded resource extents");
+    check(audio_ok && audio_lba==150 && audio_lba2==151 && !audio_invalid &&
+          !audio_foreign && audio_data_rejected,"audio playlist validates bounds, ownership and audio source kind");
     uint32_t bad_lba=1;
     check(!psx_mod_append_disc_extent("xa",0,1,&bad_lba)&&!bad_lba,"late mounting refused");
     void* mounted=iso_open(iso_path.string().c_str());
     check(mounted&&iso_sector_count(mounted)==24,"BIOS sees original disc before activation is enabled");
+    check(iso_cdda_track_count(mounted)==1,"audio override is invisible during BIOS boot");
     mod_runtime_enable_disc_patches();
+    check(iso_cdda_track_count(mounted)==3 && iso_cdda_track_start_lba(mounted,2)==150 &&
+          iso_cdda_track_start_lba(mounted,3)==151 && iso_cdda_sector_count(mounted)==152 &&
+          !iso_cdda_track_is_audio(mounted,1) && iso_cdda_track_is_audio(mounted,3) &&
+          !iso_cdda_track_is_audio(mounted,4),"audio-only TOC and lead-out stay separate from XA extents");
+    check(iso_read_cdda_sector(mounted,150,sector.data(),sector.size()) &&
+          std::equal(sector.begin(),sector.begin()+2352,xa.begin()),"lossless external CD audio sector");
+    check(iso_read_cdda_sector(mounted,151,sector.data(),sector.size()) &&
+          std::equal(sector.begin(),sector.begin()+2352,xa.begin()+2320),"audio track boundary resolves next resource slice");
+    check(!iso_read_cdda_sector(mounted,152,sector.data(),sector.size()) &&
+          !iso_read_cdda_sector(mounted,149,sector.data(),sector.size()) &&
+          !iso_read_cdda_sector(mounted,150,sector.data(),2351),"audio end, data placeholder and short buffer rejected");
     std::array<uint8_t,12> subq{};int valid=0;
     check(iso_sector_count(mounted)==26&&iso_track_count(mounted)==2&&
           iso_track_start_lba(mounted,2)==24&&!iso_track_is_audio(mounted,2),"appended extents expose one data track and leadout");
@@ -1041,6 +1080,9 @@ int main() {
     check(iso_read_raw_sector(mounted,24,sector.data(),sector.size())&&sector[24]==0x52,"streaming uses verified snapshot after external file changes");
     mod_runtime_activate_plugins();
     check(mounted_lba==24&&iso_sector_count(mounted)==26,"reactivation has stable LBAs and no duplicate extents");
+    check(iso_cdda_track_count(mounted)==3 && iso_cdda_sector_count(mounted)==152 &&
+          iso_read_cdda_sector(mounted,150,sector.data(),sector.size()) && sector[8]==0x52,
+          "reactivation retains audio identity and immutable snapshot");
     rom[32] ^= 1;
     write_bytes(rom_path, rom);
     check(media_snapshot && media_snapshot[32] == 0x5a, "committed bytes survive owner file changes");
@@ -1048,6 +1090,37 @@ int main() {
     check(PSXRecompV4::mod_runtime_clear_for_netplay(&error), "netplay clears donor plan");
     check(iso_sector_count(mounted)==24&&iso_track_count(mounted)==1&&
           !iso_read_raw_sector(mounted,24,sector.data(),sector.size()),"clearing plan removes all donor sectors and restores TOC");
+    check(iso_cdda_track_count(mounted)==1 && iso_cdda_sector_count(mounted)==24,
+          "clearing plan also restores original audio TOC");
+    iso_close(mounted);
+    // The audio timeline skips INDEX00 pregaps and maps into the unchanged
+    // mounted BIN, including a second audio track sharing the same file.
+    const auto audio_root=root/"disc-audio";
+    std::vector<uint8_t> pcm(8*2352);
+    for(unsigned i=0;i<pcm.size();++i)pcm[i]=uint8_t(i/2352+17);
+    const auto pcm_path=audio_root/"audio.bin";write_bytes(pcm_path,pcm);
+    const auto audio_cue_path=audio_root/"disc.cue";
+    write_text(audio_cue_path,"FILE \""+raw_path.generic_string()+"\" BINARY\n"
+        "  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n"
+        "FILE \"audio.bin\" BINARY\n"
+        "  TRACK 02 AUDIO\n    INDEX 00 00:00:00\n    INDEX 01 00:00:02\n"
+        "  TRACK 03 AUDIO\n    INDEX 00 00:00:05\n    INDEX 01 00:00:06\n");
+    write_text(audio_root/"packages/audio.test/1.0.0/manifest.toml",
+        "format_version = 8\nid = \"audio.test\"\nversion = \"1.0.0\"\nname = \"Audio\"\n"
+        "[[target]]\ngame_id = \"READER\"\n[[feature]]\nid = \"active\"\nname = \"Active\"\ndefault_enabled = true\n"
+        "[[plugin]]\nfeature = \"active\"\nid = \"audio.test.plugin\"\n");
+    check(psx_mod_register_activation_plugin("audio.test.plugin",test_disc_audio_plugin),"register mounted audio fixture");
+    check(PSXRecompV4::mod_runtime_initialize(audio_root,"READER",0,{},&error) &&
+          PSXRecompV4::mod_runtime_commit(audio_cue_path,&error),"mount audio fixture");
+    mod_runtime_activate_plugins();mod_runtime_enable_disc_patches();
+    mounted=iso_open(audio_cue_path.string().c_str());
+    check(mounted && iso_cdda_sector_count(mounted)==155 &&
+          iso_read_cdda_sector(mounted,150,sector.data(),sector.size()) &&
+          std::all_of(sector.begin(),sector.begin()+2352,[](auto b){return b==19;}),"first mounted audio track excludes pregap");
+    check(iso_read_cdda_sector(mounted,153,sector.data(),sector.size()) &&
+          std::all_of(sector.begin(),sector.begin()+2352,[](auto b){return b==23;}),"shared-file second track maps its INDEX01");
+    check(iso_read_sector(mounted,22,sector.data(),sector.size()) && sector[1]==7,"audio remapping preserves data reads");
+    check(!iso_read_cdda_sector(mounted,155,sector.data(),sector.size()),"mounted audio leadout is exclusive");
     iso_close(mounted);
     /* Plugin activation (native asset preparation) runs before the emulated
      * drive's disc patches are enabled. Host reads must already return the

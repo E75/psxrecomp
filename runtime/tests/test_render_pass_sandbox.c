@@ -154,8 +154,9 @@ uint32_t mdec_snapshot_bytes(void) { return 0; }
 void mdec_snapshot_write(uint8_t *p) { (void)p; }
 
 int  psx_get_in_exception(void) { return 0; }
-int  psx_netplay_active(void) { return 0; }
-int  psx_netplay_is_resimulating(void) { return 0; }
+static int s_netplay_active, s_netplay_resim;
+int  psx_netplay_active(void) { return s_netplay_active; }
+int  psx_netplay_is_resimulating(void) { return s_netplay_resim; }
 int  psx_selfcheck_resim_active(void) { return 0; }
 int  psx_selfcheck_enabled(void) { return 0; }
 int  psx_rewind_is_open(void) { return 0; }
@@ -499,6 +500,19 @@ static void test_pass(void) {
     render_pass_get_stats(&st);
     CHECK(!st.last_failure.reason && st.pass_attempts == 0,
           "session reset clears failure diagnostics");
+    s_netplay_active = 1;
+    CHECK(psx_mod_render_pass_status() == PSX_MOD_RENDER_PASS_SESSION, "netplay requires explicit title opt-in");
+    psx_mod_set_render_pass_netplay(1);
+    CHECK(psx_mod_render_pass_status() == PSX_MOD_RENDER_PASS_READY, "forward netplay can render in the sandbox");
+    s_netplay_resim = 1;
+    CHECK(psx_mod_render_pass_status() == PSX_MOD_RENDER_PASS_SESSION, "rollback replay refuses extra rendering");
+    s_netplay_resim = 0;
+    g_ls_replay_active = 1;
+    CHECK(psx_mod_render_pass_status() == PSX_MOD_RENDER_PASS_SESSION, "lockstep replay refuses extra rendering");
+    g_ls_replay_active = 0;
+    render_pass_reset_session();
+    CHECK(!render_pass_netplay_enabled(), "netplay opt-in does not carry into the next session");
+    s_netplay_active = 0;
 }
 
 /* ---- 2b. 8 MiB main RAM live (psx.enhancement.8mb-ram) ------------------ */

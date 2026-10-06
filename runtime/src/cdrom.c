@@ -42,12 +42,15 @@ extern int iso_read_subq(void* handle, uint32_t lba, uint8_t* buffer, int size,
                          int* valid);
 extern int iso_has_subq_replacements(void* handle);
 extern uint32_t iso_sector_count(void* handle);
+extern uint32_t iso_cdda_sector_count(void* handle);
+extern int iso_read_cdda_sector(void* handle, uint32_t lba, uint8_t* buffer, int size);
 extern void iso_close(void* handle);
 /* Multi-track TOC accessors (CD-DA / multi-track discs). track is 1-based. */
+extern int iso_cdda_track_count(void* handle);
 extern int iso_track_count(void* handle);
-extern uint32_t iso_track_start_lba(void* handle, int track);
-extern uint32_t iso_track_pregap_lba(void* handle, int track);
-extern int iso_track_is_audio(void* handle, int track);
+extern uint32_t iso_cdda_track_start_lba(void* handle, int track);
+extern uint32_t iso_cdda_track_pregap_lba(void* handle, int track);
+extern int iso_cdda_track_is_audio(void* handle, int track);
 
 /* I_STAT owned by memory.c — set bit 2 for CDROM IRQ */
 extern uint32_t i_stat;
@@ -1726,7 +1729,7 @@ static void deliver_cdda_report(const int16_t* pcm) {
     if (af % 10) return;
     if (irq_flag != 0) return;
 
-    int track_lba = (int)iso_track_start_lba(iso_handle, cdda_track);
+    int track_lba = (int)iso_cdda_track_start_lba(iso_handle, cdda_track);
     int index = ((int)cdda_lba >= track_lba) ? 1 : 0;
 
     int32_t peak = 0;
@@ -1761,20 +1764,20 @@ static void deliver_cdda_report(const int16_t* pcm) {
 }
 
 static int cdda_track_for_lba(uint32_t lba) {
-    int count = iso_handle ? iso_track_count(iso_handle) : 0;
+    int count = iso_handle ? iso_cdda_track_count(iso_handle) : 0;
     int found = 0;
     for (int track = 1; track <= count; ++track) {
-        if (iso_track_pregap_lba(iso_handle, track) > lba) break;
+        if (iso_cdda_track_pregap_lba(iso_handle, track) > lba) break;
         found = track;
     }
     return found;
 }
 
 static uint32_t cdda_track_end_lba(int track) {
-    int count = iso_handle ? iso_track_count(iso_handle) : 0;
+    int count = iso_handle ? iso_cdda_track_count(iso_handle) : 0;
     if (track > 0 && track < count)
-        return iso_track_pregap_lba(iso_handle, track + 1);
-    return iso_handle ? iso_sector_count(iso_handle) : 0;
+        return iso_cdda_track_pregap_lba(iso_handle, track + 1);
+    return iso_handle ? iso_cdda_sector_count(iso_handle) : 0;
 }
 
 static int start_cdda_playback(int requested_track) {
@@ -1782,7 +1785,7 @@ static int start_cdda_playback(int requested_track) {
     int track;
     if (requested_track > 0) {
         track = requested_track;
-        lba = iso_track_start_lba(iso_handle, track);
+        lba = iso_cdda_track_start_lba(iso_handle, track);
     } else {
         int pos = s_setloc_lba >= 0
             ? s_setloc_lba
@@ -1792,8 +1795,8 @@ static int start_cdda_playback(int requested_track) {
         track = cdda_track_for_lba(lba);
     }
 
-    if (track <= 0 || track > iso_track_count(iso_handle) ||
-        !iso_track_is_audio(iso_handle, track))
+    if (track <= 0 || track > iso_cdda_track_count(iso_handle) ||
+        !iso_cdda_track_is_audio(iso_handle, track))
         return 0;
 
     stop_read_stream();
@@ -1819,7 +1822,7 @@ static void process_cdda_stream(uint32_t cycles) {
     while (cdda_playing && cdda_delay <= 0 && delivered < 16) {
         uint8_t raw[RAW_SECTOR_SIZE];
         int16_t pcm[CDDA_SECTOR_FRAMES * 2];
-        if (!iso_read_raw_sector(iso_handle, cdda_lba, raw, sizeof(raw))) {
+        if (!iso_read_cdda_sector(iso_handle, cdda_lba, raw, sizeof(raw))) {
             memset(pcm, 0, sizeof(pcm));
         } else {
             /* BIN/CUE CD-DA sectors store signed 16-bit interleaved stereo in
@@ -1846,9 +1849,9 @@ static void process_cdda_stream(uint32_t cycles) {
         uint32_t track_end = cdda_track_end_lba(cdda_track);
         if (track_end == 0 || cdda_lba >= track_end) {
             int next = cdda_track + 1;
-            int count = iso_track_count(iso_handle);
+            int count = iso_cdda_track_count(iso_handle);
             if ((mode_reg & 0x02u) || next > count ||
-                !iso_track_is_audio(iso_handle, next)) {
+                !iso_cdda_track_is_audio(iso_handle, next)) {
                 stop_cdda_playback();
                 cdda_data_end_pending = 1;
                 deliver_cdda_data_end();
@@ -1971,15 +1974,15 @@ static void cd_bisect_cmd_log(const char *kind, uint8_t cmd,
     seek_lba = msf_to_lba(seek_min, seek_sec, seek_sect);
     /* TOC helpers: binary track count / resolved GetTD LBA (mount-side). */
     if (cmd == 0x13u)
-        tracks = iso_handle ? iso_track_count(iso_handle) : 0;
+        tracks = iso_handle ? iso_cdda_track_count(iso_handle) : 0;
     else if (cmd == 0x14u && params && nparam >= 1) {
         int raw = (int)params[0];
         int track = bcd_to_bin(raw);
         if (raw == 0xAA || track == 0) {
-            uint32_t sectors = iso_handle ? iso_sector_count(iso_handle) : 0u;
+            uint32_t sectors = iso_handle ? iso_cdda_sector_count(iso_handle) : 0u;
             td_lba = sectors ? (int)sectors : 0;
         } else {
-            td_lba = iso_handle ? (int)iso_track_start_lba(iso_handle, track) : 0;
+            td_lba = iso_handle ? (int)iso_cdda_track_start_lba(iso_handle, track) : 0;
         }
     }
     fprintf(stderr,
@@ -2319,7 +2322,7 @@ static void exec_command(uint8_t cmd) {
         if (cdda_playing) {
             lba = (int)cdda_lba;
             track = cdda_track;
-            track_lba = (int)iso_track_start_lba(iso_handle, track);
+            track_lba = (int)iso_cdda_track_start_lba(iso_handle, track);
         } else if (reading) {
             /* GetlocP reports the drive/sub-Q position. During a read the
              * sector stream has already advanced past the data-ready sector. */
@@ -2354,7 +2357,7 @@ static void exec_command(uint8_t cmd) {
         response_push(stat_reg);
         response_push(0x01); /* first track is always 1 */
         {
-            int last = iso_handle ? iso_track_count(iso_handle) : 1;
+            int last = iso_handle ? iso_cdda_track_count(iso_handle) : 1;
             if (last < 1) last = 1;
             response_push(bin_to_bcd(last));
         }
@@ -2374,12 +2377,12 @@ static void exec_command(uint8_t cmd) {
         int lba;
         if (raw == 0xAA || track == 0) {
             /* Lead-out: end of the whole image. */
-            uint32_t sectors = iso_sector_count(iso_handle);
+            uint32_t sectors = iso_cdda_sector_count(iso_handle);
             lba = sectors ? (int)sectors : 0;
         } else {
             /* .bin-relative start LBA of the requested track (0 for track 1
              * data; the CD-DA audio track's real start for multi-track discs). */
-            lba = iso_handle ? (int)iso_track_start_lba(iso_handle, track) : 0;
+            lba = iso_handle ? (int)iso_cdda_track_start_lba(iso_handle, track) : 0;
         }
 
         int m, s, f;

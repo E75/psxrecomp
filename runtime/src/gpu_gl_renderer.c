@@ -81,6 +81,7 @@
 #include "mod_texture_banks.h"
 #include "frame_interpolation.h"
 #include "render_pass_plan.h"
+#include "render_pass.h"
 #include "psx_cycles.h"
 #include "psx_video_timing.h"
 #include "mod_plugins.h"      /* PSX_MOD_RENDER_PASS_* reasons */
@@ -100,6 +101,7 @@
 #else
 #include <SDL_opengl.h>
 #endif
+#include <limits.h>
 #include <math.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -3758,7 +3760,12 @@ static void glb_set_draw_offset(int x,int y) { flush_flat_batch(); flush_tex_bat
 static void depth24_upload_policy(void);
 static int cpu_raster_required(void) {
     depth24_upload_policy();
-    return !s_raster_ok || cpu_vram_authoritative();
+    /* A render pass admitted under dual-raster netplay (title opt-in,
+     * render_pass_netplay_enabled) draws a presentation-only image into the
+     * GPU surface. The CPU mirror stays the authoritative record of the real
+     * frame, so the pass never rasterizes into it. depth24 scanout still
+     * presents from the CPU mirror and keeps its write-through. */
+    return !s_raster_ok || s_depth24_skip_up || (s_cpu_auth_dual && !s_pass_active);
 }
 /* The sub-pixel / perspective override describes exactly one triangle; drop it
  * once that triangle has been submitted so a later prim can never inherit it. */
@@ -3879,8 +3886,27 @@ static void glb_draw_shaded_line(int x0,int y0,uint16_t c0,int x1,int y1,uint16_
     if (!s_raster_ok) return;
     gpu_line(x0,y0,c0, x1,y1,c1, s_semi_en?s_semi_mode:-1);
 }
+static int gl_read_display_argb(int x, int y, int w, int h, uint32_t *out,
+                                int pitch_bytes, int cap_px, int *ow, int *oh);
 static int  glb_render_display(uint32_t *o,int p,int dx,int dy,int dw,int dh){ depth24_upload_policy(); ensure_cpu(); return sw_render_display(o,p,dx,dy,dw,dh); }
 static int  glb_render_display_hires(uint32_t *o,int p,int dx,int dy,int dw,int dh){ depth24_upload_policy(); ensure_cpu(); return sw_render_display_hires(o,p,dx,dy,dw,dh); }
+/* Capture the presented surface at internal resolution (--headless-opengl
+ * presentation ring). Read it straight from the GL surface (hr FBO, or the
+ * high-resolution window tile) without ever writing CPU VRAM: in dual-raster
+ * netplay ensure_cpu deliberately keeps the software mirror, which cannot
+ * validate the OpenGL image shown to the player. depth24 scanout presents the
+ * CPU mirror (packed RGB888 never reaches the FBO), so that mode, and any rect
+ * the GL surface cannot serve, keeps the mirror resolve. The backend's
+ * render_display_hires (present fallback, screenshot_hires) is unchanged. */
+int gl_renderer_capture_display_hires(uint32_t *o, int p, int dx, int dy, int dw, int dh) {
+    depth24_upload_policy();
+    if (s_raster_ok && !s_depth24_skip_up && p > 0 && p % 4 == 0) {
+        int n = gl_read_display_argb(dx, dy, dw, dh, o, p, INT_MAX, NULL, NULL);
+        if (n > 0) return n;
+    }
+    ensure_cpu();
+    return sw_render_display_hires(o, p, dx, dy, dw, dh);
+}
 /* While GP1 depth24 is on, packed RGB888 lives in the CPU mirror and is
  * presented via gl_renderer_present — never as 1555 FBO texels. Queuing those
  * MDEC A0 rects hits UP_RECTS_MAX (16) and force-flushes mid-movie (MotK intro
@@ -4599,12 +4625,16 @@ int gl_renderer_scale_info(GlScaleInfo *out) {
  * native (the software mirror stays 1x), so this is the only capture that
  * shows what the internal resolution actually rendered. cap_px bounds the
  * output; returns the pixel count, 0 when unavailable or too large. */
-int gl_renderer_read_display_hires(int x, int y, int w, int h, uint32_t *out,
-                                   int cap_px, int *ow, int *oh) {
+/* pitch_bytes: output row stride (>= W*4, multiple of 4). Saves and restores
+ * the read framebuffer, pixel-pack buffer and pack state, so it is safe from
+ * any capture point (present ring, debug server) mid-frame. */
+static int gl_read_display_argb(int x, int y, int w, int h, uint32_t *out,
+                                int pitch_bytes, int cap_px, int *ow, int *oh) {
     if (!s_raster_ok || !s_ctx || !out || w <= 0 || h <= 0) return 0;
     if (x < 0 || y < 0 || x + w > VRAM_W || y + h > VRAM_H) return 0;
     int S = s_out_scale, W = w * S, H = h * S;
     if ((int64_t)W * H > (int64_t)cap_px) return 0;
+    if (pitch_bytes < W * 4 || pitch_bytes % 4) return 0;
     flush_flat_batch();
     flush_tex_batch();
     flush_cpu_upload();
@@ -4618,16 +4648,36 @@ int gl_renderer_read_display_hires(int x, int y, int w, int h, uint32_t *out,
         fbo = T->fbo;
         rx = x - T->x0;
     }
+    if (!fbo) return 0;
+    GLint read_fbo = 0, pack_buffer = 0, pack_row = 0, pack_align = 4;
+    glGetIntegerv(0x8CAA /* READ_FRAMEBUFFER_BINDING */, &read_fbo);
+    glGetIntegerv(0x88ED /* PIXEL_PACK_BUFFER_BINDING */, &pack_buffer);
+    glGetIntegerv(PSXGL_PACK_ROW_LENGTH, &pack_row);
+    glGetIntegerv(GL_PACK_ALIGNMENT, &pack_align);
+    p_glBindBuffer(0x88EB /* PIXEL_PACK_BUFFER */, 0);
     p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, fbo);
+    glPixelStorei(PSXGL_PACK_ROW_LENGTH, pitch_bytes / 4);
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     glReadPixels(rx * S, y * S, W, H, GL_BGRA, GL_UNSIGNED_BYTE, out);
-    p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, 0);
+    glPixelStorei(PSXGL_PACK_ROW_LENGTH, pack_row);
+    glPixelStorei(GL_PACK_ALIGNMENT, pack_align);
+    p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, (GLuint)read_fbo);
+    p_glBindBuffer(0x88EB /* PIXEL_PACK_BUFFER */, (GLuint)pack_buffer);
     /* The hr FBO stores PS1 y=0 at GL row 0 and glReadPixels reads bottom-up,
      * so row 0 is already the display's top line (see glb_render_wide_display). */
-    for (int64_t i = 0; i < (int64_t)W * H; i++) out[i] |= 0xFF000000u;
+    for (int row = 0; row < H; row++) {
+        uint32_t *r = (uint32_t *)((uint8_t *)out + (size_t)row * (size_t)pitch_bytes);
+        for (int col = 0; col < W; col++) r[col] |= 0xFF000000u;
+    }
     if (ow) *ow = W;
     if (oh) *oh = H;
     return W * H;
+}
+
+int gl_renderer_read_display_hires(int x, int y, int w, int h, uint32_t *out,
+                                   int cap_px, int *ow, int *oh) {
+    return gl_read_display_argb(x, y, w, h, out, w * s_out_scale * 4,
+                                cap_px, ow, oh);
 }
 
 int gl_renderer_select_texture_bank(uint16_t id) {
@@ -6103,7 +6153,7 @@ uint32_t gl_renderer_pass_unavailable(void) {
         s_interp_source != 1 || !(s_interp_source_hz > 0.0))
         return PSX_MOD_RENDER_PASS_NO_PRESENTER;
     /* Dual raster (netplay CPU-authoritative VRAM) or a debug refusal. */
-    if (s_cpu_auth_dual || s_pass_force_refuse)
+    if ((s_cpu_auth_dual && !render_pass_netplay_enabled()) || s_pass_force_refuse)
         return PSX_MOD_RENDER_PASS_BACKEND;
     /* Windowed high-resolution mode: the presented surfaces are the window
      * tiles at s_out_scale, which a pass (backing up s_hr_fbo at

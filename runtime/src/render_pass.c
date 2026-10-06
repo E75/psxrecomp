@@ -11,7 +11,8 @@
  * place (memory.c render_pass_store).
  *
  * Nothing here runs unless a trusted plugin calls the API, and the plan
- * refuses in netplay, rollback, rewind, fast-forward, self-check
+ * refuses in netplay without explicit plugin opt-in, rollback resimulation,
+ * rewind, fast-forward, self-check
  * resimulation, or without the OpenGL presenter's flip-aware interpolation
  * (psx_mod_render_pass_status says which). */
 
@@ -70,6 +71,7 @@ extern int      g_psx_dispatch_depth;
 extern int      g_psx_call_bail;
 extern int      g_ls_mode;
 extern int      g_ls_replay_active;
+static int      s_netplay_allowed;
 extern void   (*g_overlay_flush_pending_cycles)(void);
 /* Host nesting that runtime frames set on entry and put back on exit. */
 extern int      g_call_unit_depth;        /* overlay_loader_call_native */
@@ -307,6 +309,7 @@ void render_pass_get_stats(RenderPassStats *out) {
 }
 
 void render_pass_reset_session(void) {
+    s_netplay_allowed = 0;
     memset(&s_stats, 0, sizeof s_stats);
     memset(g_render_pass_dropped_writes, 0, sizeof g_render_pass_dropped_writes);
     s_open_generation = 0;
@@ -319,6 +322,12 @@ void render_pass_reset_session(void) {
     gl_renderer_stereo_reset();
     gl_renderer_pass_set_flip_shown(0);
 }
+
+int psx_mod_set_render_pass_netplay(int enabled) {
+    s_netplay_allowed = enabled ? 1 : 0;
+    return 1;
+}
+int render_pass_netplay_enabled(void) { return s_netplay_allowed; }
 
 int psx_mod_set_render_pass_flip(uint32_t mode) {
     if (mode != PSX_MOD_RENDER_PASS_FLIP_PENDING &&
@@ -333,7 +342,7 @@ int psx_mod_set_render_pass_flip(uint32_t mode) {
 static uint32_t transaction_status(int stereo) {
     uint32_t gl;
     if (s_stats.disabled) return PSX_MOD_RENDER_PASS_DISABLED;
-    if (psx_netplay_active() || psx_netplay_is_resimulating() ||
+    if ((psx_netplay_active() && !s_netplay_allowed) || psx_netplay_is_resimulating() ||
         psx_selfcheck_resim_active() || psx_rewind_is_open() ||
         g_ls_mode || g_ls_replay_active)
         return PSX_MOD_RENDER_PASS_SESSION;
