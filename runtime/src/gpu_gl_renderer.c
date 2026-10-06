@@ -449,11 +449,14 @@ static int           s_hr_scale = 1;
 /* Dynamic internal resolution ([video] dynamic_resolution; the step block
  * near the end of this file). 0 = off, and then every surface is allocated at
  * the scale it renders at, exactly as before. Otherwise the scale the hr
- * surface was allocated at (the ceiling): the current level (s_hr_scale ==
- * s_out_scale, never above it) renders into its lower-left VRAM*S corner.
- * Only allocation and the present's normalised UVs read it; everything else
- * keeps taking the two scales above at use. Native-wide surfaces are
- * allocated at the level instead (s_wide_as) and reallocated at each step. */
+ * ceiling: the highest level (the scale the surfaces were first allocated
+ * at, which the GPU limit and memory budget were checked against). Every
+ * surface is allocated at the current level (s_hr_scale == s_out_scale,
+ * never above the ceiling) and reallocated at each step (dyn_apply): on
+ * Apple's GL-on-Metal every render pass into an attachment loads and stores
+ * the whole attachment, so a surface held at the ceiling cost the ceiling's
+ * bandwidth at every level. s_hr_alloc and s_wide_as hold the allocations
+ * (above the level only where a reallocation failed). */
 static int           s_alloc_scale = 0;
 /* The scale a surface rendering at `cur` is (to be) allocated at. */
 static inline int    alloc_scale_for(int cur) {
@@ -652,6 +655,9 @@ static int s_selected_bank_live_clut, s_tb_bank_live_clut;
 
 /* Authoritative VRAM: hr color texture + stencil (mask bit) FBO. */
 static GLuint        s_hr_tex = 0, s_hr_fbo = 0, s_hr_rb = 0;
+/* The scale s_hr_tex/s_hr_rb are allocated at (dynamic resolution
+ * reallocates them at every step; see s_alloc_scale). */
+static int           s_hr_alloc = 0;
 /* Native raw-1555 sampling mirror + readback source. */
 static GLuint        s_raw_tex = 0, s_raw_fbo = 0;
 /* CPU->VRAM upload staging (native RGBA8). */
@@ -4806,6 +4812,38 @@ static int make_fbo(GLuint *out_fbo, GLuint color_tex, GLuint stencil_rb) {
     return 1;
 }
 
+/* A new hr surface (colour texture, depth-stencil RB, FBO) at scale S for a
+ * dynamic-resolution step, depth and stencil cleared. 0 on failure (nothing
+ * left allocated). */
+static int hr_alloc_surface(int S, GLuint *tex, GLuint *rb, GLuint *fbo) {
+    while (glGetError() != GL_NO_ERROR) {}
+    int hw = VRAM_W * S, hh = VRAM_H * S;
+    *tex = make_tex(GL_RGBA8, hw, hh, GL_RGBA, GL_UNSIGNED_BYTE);
+    p_glGenRenderbuffers(1, rb);
+    p_glBindRenderbuffer(PSXGL_RENDERBUFFER, *rb);
+    p_glRenderbufferStorage(PSXGL_RENDERBUFFER, PSXGL_DEPTH24_STENCIL8, hw, hh);
+    p_glBindRenderbuffer(PSXGL_RENDERBUFFER, 0);
+    int ok = glGetError() == GL_NO_ERROR;
+    if (ok) ok = make_fbo(fbo, *tex, *rb);
+    if (ok) {
+        p_glBindFramebuffer(PSXGL_FRAMEBUFFER, *fbo);
+        glDisable(GL_SCISSOR_TEST);
+        glClearStencil(0);
+        glClearDepth(1.0);
+        glStencilMask(0xFF);
+        glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        p_glBindFramebuffer(PSXGL_FRAMEBUFFER, 0);
+        ok = glGetError() == GL_NO_ERROR;
+    }
+    if (!ok) {
+        if (*fbo) p_glDeleteFramebuffers(1, fbo);
+        if (*tex) glDeleteTextures(1, tex);
+        if (*rb) p_glDeleteRenderbuffers(1, rb);
+        *fbo = *tex = *rb = 0;
+    }
+    return ok;
+}
+
 /* Release the scale-dependent render targets (hr colour + depth-stencil +
  * copy scratch). Used when an allocation fails and init steps S down. */
 static void free_hr_targets(void) {
@@ -4843,6 +4881,7 @@ static int alloc_hr_targets(int S) {
     if (ok) ok = make_fbo(&s_scratch_fbo, s_scratch_tex, 0);
     if (ok) ok = glGetError() == GL_NO_ERROR;
     if (!ok) free_hr_targets();
+    s_hr_alloc = ok ? S : 0;
     return ok;
 }
 
@@ -5152,8 +5191,8 @@ int gl_renderer_scale_info(GlScaleInfo *out) {
     out->clamp_reason = s_scale_clamp_reason;
     out->alloc_retries = s_scale_alloc_retries;
     out->budget_mib = (int)(s_vram_budget >> 20);
-    out->fbo_w = s_raster_ok ? VRAM_W * alloc_scale_for(s_hr_scale) : 0;
-    out->fbo_h = s_raster_ok ? VRAM_H * alloc_scale_for(s_hr_scale) : 0;
+    out->fbo_w = s_raster_ok ? VRAM_W * s_hr_alloc : 0;
+    out->fbo_h = s_raster_ok ? VRAM_H * s_hr_alloc : 0;
     out->hr_scale = s_raster_ok ? s_hr_scale : 0;
     out->windowed = s_hiw;
     {
@@ -8426,7 +8465,7 @@ int gl_renderer_present_hold_last(void) {
  * alloc_scale_for(scale) that holds `units` native columns or rows: units
  * itself unless dynamic resolution renders it below its allocation. */
 static float present_alloc_extent(int units, int scale) {
-    const int as = alloc_scale_for(scale);
+    const int as = s_hr_alloc > scale ? s_hr_alloc : scale;
     if (as <= scale || scale < 1) return (float)units;
     return (float)units * (float)as / (float)scale;
 }
@@ -8833,7 +8872,7 @@ static void dyn_context_ready(void) {
         if (dyn_resources()) {
             s_alloc_scale = s_hr_scale;
             fprintf(stdout, "psxrecomp: GL dynamic resolution: levels 1x..%dx "
-                    "(surfaces allocated at %dx)\n", s_alloc_scale, s_alloc_scale);
+                    "(surfaces allocated at the level, ceiling %dx)\n", s_alloc_scale, s_alloc_scale);
         } else {
             fprintf(stdout, "psxrecomp: GL dynamic resolution unavailable (step "
                     "resources failed); the scale stays %dx\n", s_hr_scale);
@@ -9033,7 +9072,28 @@ static int dyn_apply(int snew) {
         p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, 0);
     }
     const uint64_t t2 = dyn_mark();
-    /* 3. Reseed the corner at the new scale. */
+    /* 3. The hr surface at the new level: a new allocation of exactly
+     *    VRAM*snew (the old one is only read through the 1x image and the
+     *    scratch from here on), reseeded whole. If the allocation fails, a
+     *    step down reseeds the old surface's corner in place; a step up past
+     *    the old allocation is refused. */
+    GLuint ntex = 0, nrb = 0, nfbo = 0;
+    if (!hr_alloc_surface(snew, &ntex, &nrb, &nfbo)) {
+        if (snew > s_hr_alloc) {
+            s_dyn_stats.refused++;
+            fprintf(stdout, "psxrecomp: dynamic resolution %dx -> %dx refused (the "
+                    "surface could not be allocated)\n", sold, snew);
+            return 0;
+        }
+    } else {
+        p_glDeleteFramebuffers(1, &s_hr_fbo);
+        glDeleteTextures(1, &s_hr_tex);
+        p_glDeleteRenderbuffers(1, &s_hr_rb);
+        s_hr_fbo = nfbo; s_hr_tex = ntex; s_hr_rb = nrb;
+        s_hr_alloc = snew;
+        s_dyn_stats.hr_reallocs++;
+    }
+    /*    Reseed at the new scale. */
     dyn_pass_begin(s_dyn_seed_prog, s_hr_fbo, 0, 0, VRAM_W * snew, VRAM_H * snew,
                    s_dyn_tl_tex);
     p_glUniform1i(s_dyn_seed_uSrc, 0);
