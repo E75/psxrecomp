@@ -1292,6 +1292,11 @@ static int           g_video_dynres = 0;
 static int           g_video_dynres_min = 720;
 static int           g_video_dynres_env = -1;
 static int           g_video_dynres_min_env = PSX_IR_UNSET;
+/* [video] dynamic_resolution_priority: DYNRES_PRIORITY_RESOLUTION (default)
+ * or _FRAME_RATE (the level makes room for render passes). PSX_DYNRES_PRIORITY
+ * (resolution | frame_rate) wins for one run. */
+static int           g_video_dynres_priority = DYNRES_PRIORITY_RESOLUTION;
+static int           g_video_dynres_priority_env = -1;
 /* The controller and its per-interval books (dynres_tick). */
 struct DynresHost {
     bool active = false;
@@ -8642,6 +8647,8 @@ static void dynres_setup(void) {
     if (floor_s > ceiling) floor_s = ceiling;
     DynresParams params;
     dynres_default_params(&params);
+    params.priority = g_video_dynres_priority_env >= 0 ? g_video_dynres_priority_env
+                                                       : g_video_dynres_priority;
     dynres_init(&g_dynres.ctl, &params, floor_s, ceiling, ceiling);
     g_dynres.active = floor_s < ceiling;
     if (const char* e = std::getenv("PSX_DYNRES_FORCE")) {
@@ -8658,9 +8665,11 @@ static void dynres_setup(void) {
         std::fprintf(g_dynres.trace, "t_s,level,load,late,vblank_hz,decision\n");
     g_dynres.t0_s = (double)SDL_GetPerformanceCounter() /
                     (double)SDL_GetPerformanceFrequency();
-    std::fprintf(stdout, "psxrecomp: dynamic resolution %s: %dx..%dx (%d..%d lines)\n",
+    std::fprintf(stdout, "psxrecomp: dynamic resolution %s: %dx..%dx (%d..%d lines), "
+                 "priority %s\n",
                  g_dynres.active ? "on" : "inert (floor = ceiling)", floor_s, ceiling,
-                 floor_s * g_video_ref_lines, ceiling * g_video_ref_lines);
+                 floor_s * g_video_ref_lines, ceiling * g_video_ref_lines,
+                 params.priority == DYNRES_PRIORITY_FRAME_RATE ? "frame rate" : "resolution");
 }
 
 static void dynres_apply_level(int level) {
@@ -8710,6 +8719,11 @@ static void dynres_tick(void) {
     const bool late = wall > period * g_dynres.ctl.p.late_factor;
     const double swap_idle = (late && pass <= 0.0) ? 0.0 : swap;
     const double work = wall - pacer - idle - swap_idle - pass - extra - step;
+    /* Render passes: what they wanted but were refused (the controller's
+     * frame-rate priority), and whether the pace guard cut them (the swap
+     * left out above then counts as work for the window). */
+    const double shed = (double)(led.pass_shed_ticks - p0.pass_shed_ticks) / freq;
+    const int pace_cut = led.pace_cuts != p0.pace_cuts ? 1 : 0;
     g_dynres.last_t = now;
     g_dynres.last_ledger = led;
     g_dynres.last_pacer = g_dynres.pacer_ticks;
@@ -8759,7 +8773,7 @@ static void dynres_tick(void) {
     if (why) g_dynres.hold_reason = why;
     else if (now_s >= g_dynres.ctl.hold_until) g_dynres.hold_reason = "";
 
-    DynresSample smp{ period, wall, work, held };
+    DynresSample smp{ period, wall, work, held, pass, shed, swap_idle, pace_cut };
     const int level = dynres_sample(&g_dynres.ctl, now_s, &smp);
     if (g_dynres.trace && g_dynres.ctl.windows != g_dynres.last_windows) {
         g_dynres.last_windows = g_dynres.ctl.windows;
@@ -8813,7 +8827,9 @@ extern "C" int psx_dynres_status_json(char *out, int cap) {
         "\"held_windows\":%llu,\"steps\":%llu,\"deferred\":%llu,\"last_from\":%d,"
         "\"last_to\":%d,\"last_ms\":%.3f,\"last_interval_ms\":%.3f,\"last_prep_ms\":%.3f,"
         "\"last_seed_ms\":%.3f,\"last_rects_ms\":%.3f,\"last_wide_ms\":%.3f,"
-        "\"step_cost_ms\":%.3f,\"down_blocked_s\":%.1f,\"up_blocked\":{%s}",
+        "\"step_cost_ms\":%.3f,\"down_blocked_s\":%.1f,\"up_blocked\":{%s},"
+        "\"priority\":\"%s\",\"pass_load\":%.3f,\"shed_load\":%.3f,\"shed_windows\":%d,"
+        "\"shed_downs\":%llu,\"shed_blocked_s\":%.1f,\"pace_cut_windows\":%llu",
         g_dynres.active ? 1 : 0, dynres_requested(), st.ceiling,
         g_dynres.active ? c.floor : 0, st.level, st.level * g_video_ref_lines, c.forced,
         c.last_load, c.last_late, c.last_vblank_hz, c.f,
@@ -8823,7 +8839,10 @@ extern "C" int psx_dynres_status_json(char *out, int cap) {
         (unsigned long long)st.deferred, st.last_from, st.last_to, st.last_ms,
         g_dynres.step_interval_ms, st.last_prep_ms, st.last_seed_ms, st.last_rects_ms,
         st.last_wide_ms, c.step_cost_s * 1000.0,
-        c.down_block_until > now_s ? c.down_block_until - now_s : 0.0, blocked);
+        c.down_block_until > now_s ? c.down_block_until - now_s : 0.0, blocked,
+        c.p.priority == DYNRES_PRIORITY_FRAME_RATE ? "frame_rate" : "resolution",
+        c.last_pass_load, c.last_shed_load, c.shed_windows, c.shed_downs,
+        c.shed_block_until > now_s ? c.shed_block_until - now_s : 0.0, c.pace_cut_windows);
 }
 
 static void sdl_vblank_present(void) {
@@ -14422,6 +14441,7 @@ int main(int argc, char** argv) {
             g_video_ref_lines    = gc.runtime.video_resolution_reference_lines;
             g_video_dynres       = gc.runtime.video_dynamic_resolution ? 1 : 0;
             g_video_dynres_min   = gc.runtime.video_dynamic_resolution_min;
+            g_video_dynres_priority = gc.runtime.video_dynamic_resolution_priority;
             if (gc.runtime.video_window_width > 0) {
                 g_video_win_w = gc.runtime.video_window_width;
             }
@@ -14884,6 +14904,8 @@ int main(int argc, char** argv) {
         if (us.has_internal_resolution) g_video_internal_res = us.internal_resolution;
         if (us.has_dynamic_resolution) g_video_dynres = us.dynamic_resolution ? 1 : 0;
         if (us.has_dynamic_resolution_min) g_video_dynres_min = us.dynamic_resolution_min;
+        if (us.has_dynamic_resolution_priority)
+            g_video_dynres_priority = us.dynamic_resolution_priority;
         if (us.has_window_width)   g_video_win_w     = us.window_width;
         if (us.has_antialiasing)   g_video_aa        = us.antialiasing;
         if (us.has_texture_filter) g_video_texfilter = us.texture_filter;
@@ -16649,6 +16671,12 @@ session_reboot:
         if (psx_ir_parse(e, &v) && v != PSX_IR_DISPLAY) g_video_dynres_min_env = v;
         else std::fprintf(stdout, "psxrecomp: PSX_DYNRES_MIN=%s not understood "
                           "(native, 720p, 1080p, 1440p, 4k, 5k, 8k, or lines)\n", e);
+    }
+    if (const char* e = std::getenv("PSX_DYNRES_PRIORITY")) {
+        if (!std::strcmp(e, "frame_rate")) g_video_dynres_priority_env = DYNRES_PRIORITY_FRAME_RATE;
+        else if (!std::strcmp(e, "resolution")) g_video_dynres_priority_env = DYNRES_PRIORITY_RESOLUTION;
+        else std::fprintf(stdout, "psxrecomp: PSX_DYNRES_PRIORITY=%s not understood "
+                          "(resolution or frame_rate)\n", e);
     }
     {
         /* Per-backend ceiling. OpenGL allocates its hr surface at context init

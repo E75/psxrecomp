@@ -672,6 +672,13 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
             }
             rt.video_dynamic_resolution_min = value;
         }
+        if (video.contains("dynamic_resolution_priority")) {
+            const auto v = toml::find<std::string>(video, "dynamic_resolution_priority");
+            if (v == "resolution") rt.video_dynamic_resolution_priority = 0;
+            else if (v == "frame_rate") rt.video_dynamic_resolution_priority = 1;
+            else throw std::runtime_error(
+                "[video] dynamic_resolution_priority must be \"resolution\" or \"frame_rate\"");
+        }
         if (video.contains("resolution_reference_lines")) {
             const auto n = toml::find<int64_t>(video, "resolution_reference_lines");
             if (n < 120 || n > 1024) {
@@ -2673,6 +2680,13 @@ UserSettings load_user_settings(const fs::path& path) {
                 }
             }
         });
+        if (v.contains("dynamic_resolution_priority")) try_get([&]{
+            const auto p = toml::find<std::string>(v, "dynamic_resolution_priority");
+            if (p == "resolution" || p == "frame_rate") {
+                s.dynamic_resolution_priority = p == "frame_rate" ? 1 : 0;
+                s.has_dynamic_resolution_priority = true;
+            }
+        });
         if (v.contains("window_width")) try_get([&]{
             const auto n = toml::find<int64_t>(v, "window_width");
             if (n >= 640 && n <= 7680) { s.window_width = (int)n; s.has_window_width = true; }
@@ -3069,6 +3083,9 @@ bool save_user_settings(const fs::path& path, const UserSettings& s) {
         else
             f << "dynamic_resolution_min = " << s.dynamic_resolution_min << "\n";
     }
+    if (s.has_dynamic_resolution_priority)
+        f << "dynamic_resolution_priority = \""
+          << (s.dynamic_resolution_priority ? "frame_rate" : "resolution") << "\"\n";
     if (s.has_window_width)
         f << "window_width      = " << s.window_width << "\n";
     if (s.has_antialiasing)

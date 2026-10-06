@@ -435,6 +435,12 @@ struct RuntimeConfig {
     // internal_resolution (720 = "720p"; 1 = native).
     bool                  video_dynamic_resolution = false;
     int                   video_dynamic_resolution_min = 720;
+    // dynamic_resolution_priority: what gives first when the host is short
+    // of time. "resolution" (0, the default): render passes (frame
+    // interpolation's in-between frames) take what the resolution leaves.
+    // "frame_rate" (1): the level also steps down, never below the minimum,
+    // while passes keep being shed, and steps up only when their demand fits.
+    int                   video_dynamic_resolution_priority = 0;
     // resolution_reference_lines: the title's usual display height, which a
     // preset divides into (S = ceil(target / reference)). 240 for NTSC
     // 320x240 games; 120..1024.
@@ -1367,6 +1373,7 @@ struct UserSettings {
     // still move in a later release.
     bool has_dynamic_resolution = false; bool dynamic_resolution = false;
     bool has_dynamic_resolution_min = false; int dynamic_resolution_min = 720;
+    bool has_dynamic_resolution_priority = false; int dynamic_resolution_priority = 0;
     // Window size: width in px; height is always width*3/4 (PSX 4:3). Applies to
     // both the launcher and the emulator window so they boot at the same size.
     bool has_window_width   = false; int  window_width   = 1280; // -> 1280x960

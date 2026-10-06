@@ -31,6 +31,10 @@ void dynres_default_params(DynresParams *p) {
     p->prior_scaled = 0.6;
     p->learn_rate = 0.3;
     p->step_cost_s = 0.004;
+    p->priority = DYNRES_PRIORITY_RESOLUTION;
+    p->shed_up_max = 0.02;
+    p->shed_down = 0.05;
+    p->shed_down_windows = 4;
 }
 
 static int clamp_level(const DynresController *c, int l) {
@@ -56,6 +60,7 @@ void dynres_init(DynresController *c, const DynresParams *p, int floor_level,
     c->last_down_t = -1e9;
     c->verify_last_fail = -1e9;
     c->verify_dur = c->p.verify_block_s;
+    c->shed_block_dur = c->p.verify_block_s;
     c->step_cost_s = c->p.step_cost_s;
     for (int i = 0; i <= DYNRES_MAX_LEVEL; i++) {
         c->up_reached_t[i] = -1e9;
@@ -79,6 +84,8 @@ double dynres_up_blocked_s(const DynresController *c, int level, double now_s) {
 static void window_reset(DynresController *c) {
     c->win_period = c->win_work = c->win_wall = 0.0;
     c->win_n = c->win_late = 0;
+    c->win_pass = c->win_shed = c->win_swap = 0.0;
+    c->win_pace_cut = 0;
 }
 
 /* Everything that needs consecutive clean windows starts over. */
@@ -88,6 +95,7 @@ static void discard(DynresController *c) {
     c->prev_load = -1.0;
     c->up_streak_s = 0.0;
     c->up_ready = 0;
+    c->shed_windows = 0;
     /* A step's effect is judged on clean windows only: drop the judgement
      * (no learning, no undo) rather than blame a hold on the resolution. */
     c->post_active = 0;
@@ -138,12 +146,12 @@ static void begin_post(DynresController *c, int from, int to, double load_before
     c->post_down = down;
     c->post_load_before = load_before;
     c->post_pred = dynres_predict(c, load_before, from, to);
+    c->post_shed = 0;
 }
 
-static int step_down(DynresController *c, double now, double load, const char *why) {
-    int from = c->level, to = c->floor;
-    for (int l = from - 1; l >= c->floor; l--)
-        if (dynres_predict(c, load, from, l) <= c->p.target_load) { to = l; break; }
+static int step_down_to(DynresController *c, double now, double load, int to,
+                        const char *why) {
+    int from = c->level;
     /* Relapse: an up step into this level failed within relapse_s. */
     if (now - c->up_reached_t[from] < c->p.relapse_s) {
         c->up_block_until[from] = now + c->relapse_dur[from];
@@ -160,10 +168,18 @@ static int step_down(DynresController *c, double now, double load, const char *w
     c->up_streak_s = 0.0;
     c->up_ready = 0;
     c->prev_load = -1.0;
+    c->shed_windows = 0;
     c->downs++;
     c->last_reason = why;
     c->last_decision_t = now;
     return c->level;
+}
+
+static int step_down(DynresController *c, double now, double load, const char *why) {
+    int from = c->level, to = c->floor;
+    for (int l = from - 1; l >= c->floor; l--)
+        if (dynres_predict(c, load, from, l) <= c->p.target_load) { to = l; break; }
+    return step_down_to(c, now, load, to, why);
 }
 
 static int step_up(DynresController *c, double now, double load, int to, const char *why) {
@@ -184,9 +200,19 @@ static int step_up(DynresController *c, double now, double load, int to, const c
 
 /* A window closed: judge a recent step, then the rules. */
 static int close_window(DynresController *c, double now) {
+    /* The pace guard cut passes: the swap's block was the GPU, not vsync. */
+    if (c->win_pace_cut) {
+        c->win_work += c->win_swap;
+        c->pace_cut_windows++;
+    }
     const double load = c->win_work / c->win_period;
+    const double pass_load = c->win_pass / c->win_period;
+    const double shed_load = c->win_shed / c->win_period;
+    const int frame_rate = c->p.priority == DYNRES_PRIORITY_FRAME_RATE;
     const int late = c->win_late;
     const double dur = c->win_period;
+    c->last_pass_load = pass_load;
+    c->last_shed_load = shed_load;
     c->last_load = load;
     c->last_late = late;
     c->last_vblank_hz = c->win_wall > 0.0 ? (double)c->win_n / c->win_wall : 0.0;
@@ -199,7 +225,24 @@ static int close_window(DynresController *c, double now) {
         c->post_active = 0;
         double fell = c->post_load_before - load;
         double want = c->post_load_before - c->post_pred;
-        if (c->post_down && want > 0.0 && fell < c->p.verify_fraction * want) {
+        if (c->post_shed) {
+            /* A shed down step must have given the passes room. */
+            if (shed_load > c->post_shed_before * (1.0 - c->p.verify_fraction)) {
+                if (now - c->verify_last_fail > c->p.verify_forget_s)
+                    c->shed_block_dur = c->p.verify_block_s;
+                c->shed_block_until = now + c->shed_block_dur;
+                c->shed_block_dur *= 2.0;
+                if (c->shed_block_dur > c->p.verify_block_max_s)
+                    c->shed_block_dur = c->p.verify_block_max_s;
+                c->verify_last_fail = now;
+                c->undo_level = c->post_from;
+                c->undo_at = now + c->p.verify_undo_s;
+                c->last_reason = "down step did not stop the render passes shedding";
+                c->last_decision_t = now;
+            } else {
+                learn(c, c->post_load_before, load, c->post_from, c->post_to);
+            }
+        } else if (c->post_down && want > 0.0 && fell < c->p.verify_fraction * want) {
             /* Not resolution-bound: undo, and block down steps a while. */
             if (now - c->verify_last_fail > c->p.verify_forget_s)
                 c->verify_dur = c->p.verify_block_s;
@@ -255,9 +298,26 @@ static int close_window(DynresController *c, double now) {
                                                     : "busy for two windows");
         return c->level;
     }
+    if (frame_rate) {
+        /* Passes that keep being shed get room: one level down. */
+        c->shed_windows = shed_load >= c->p.shed_down ? c->shed_windows + 1 : 0;
+        if (c->shed_windows >= c->p.shed_down_windows && c->level > c->floor &&
+            now >= c->shed_block_until &&
+            now - c->last_down_t >= c->p.cooldown_down_s) {
+            int r = step_down_to(c, now, load, c->level - 1, "render passes shed");
+            c->post_shed = 1;
+            c->post_shed_before = shed_load;
+            c->shed_downs++;
+            return r;
+        }
+    }
     if (c->level >= c->ceiling) { c->up_streak_s = 0.0; c->up_ready = 0; return c->level; }
     const int next = c->level + 1;
-    if (late == 0 && dynres_predict(c, load, c->level, next) <= c->p.up_load)
+    /* Frame rate first: no up step while passes are shed, and the passes'
+     * whole demand must fit at the next level too. */
+    const double up_basis = frame_rate ? load + pass_load + shed_load : load;
+    if (late == 0 && (!frame_rate || shed_load <= c->p.shed_up_max) &&
+        dynres_predict(c, up_basis, c->level, next) <= c->p.up_load)
         c->up_streak_s += dur;
     else {
         c->up_streak_s = 0.0;
@@ -295,6 +355,10 @@ int dynres_sample(DynresController *c, double now_s, const DynresSample *s) {
     c->win_work += work;
     c->win_wall += s->wall_s;
     c->win_n++;
+    if (s->pass_s > 0.0) c->win_pass += s->pass_s;
+    if (s->shed_s > 0.0) c->win_shed += s->shed_s;
+    if (s->swap_s > 0.0) c->win_swap += s->swap_s;
+    if (s->pace_cut) c->win_pace_cut = 1;
     if (s->wall_s > s->period_s * c->p.late_factor) c->win_late++;
     if (c->win_period >= c->p.window_s - 1e-9) return close_window(c, now_s);
     return c->level;

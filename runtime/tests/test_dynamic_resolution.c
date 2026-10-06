@@ -300,6 +300,170 @@ static void test_learns_scaling(void) {
     CHECK(c.f > c.p.prior_scaled, "learn: f rose from %.2f to %.2f", c.p.prior_scaled, c.f);
 }
 
+/* ---- Render passes (frame-rate priority) ---------------------------------
+ * The game's load at level S is base + k*S^2; the render passes want
+ * demand(S) of every interval and get what the leftover planner admits
+ * (share of what the game leaves); the rest is shed. Passes run in the
+ * leftover time, so an interval stays one period long. */
+typedef struct PassScene {
+    double base, k;           /* game load */
+    double d0, dk;            /* pass demand: d0 + dk*S^2 */
+    double share;             /* of the leftover */
+} PassScene;
+
+typedef struct PassRun {
+    Run    r;
+    double shed_last;         /* shed load at the current level */
+} PassRun;
+
+static void pass_simulate(DynresController *c, PassRun *pr, double seconds,
+                          const PassScene *ps) {
+    Run *r = &pr->r;
+    double end = r->t + seconds;
+    while (r->t < end) {
+        double S2 = (double)r->level * (double)r->level;
+        double load = ps->base + ps->k * S2;
+        double demand = ps->d0 + ps->dk * S2;
+        double left = 1.0 - load;
+        double budget = left > 0.0 ? left * ps->share : 0.0;
+        double run = demand < budget ? demand : budget;
+        double shed = demand - run;
+        double work = load * kPeriod;
+        double wall = work > kPeriod ? work : kPeriod;
+        r->t += wall;
+        pr->shed_last = shed;
+        DynresSample s = { kPeriod, wall, work, 0, run * kPeriod, shed * kPeriod, 0.0, 0 };
+        int l = dynres_sample(c, r->t, &s);
+        r->time_at[r->level] += wall;
+        if (l != r->level) {
+            r->steps++;
+            if (l < r->level) r->downs++; else r->ups++;
+            r->level = l;
+            if (l < r->min_level) r->min_level = l;
+            if (l > r->max_level) r->max_level = l;
+            dynres_note_step_cost(c, 0.002);
+        }
+    }
+}
+
+static DynresController make_prio(int floor, int ceiling, int priority) {
+    DynresParams p;
+    DynresController c;
+    dynres_default_params(&p);
+    p.priority = priority;
+    dynres_init(&c, &p, floor, ceiling, ceiling);
+    return c;
+}
+
+/* The default priority never trades resolution for passes. */
+static void test_resolution_priority_ignores_shedding(void) {
+    DynresController c = make_prio(3, 10, DYNRES_PRIORITY_RESOLUTION);
+    PassRun pr; memset(&pr, 0, sizeof pr); run_init(&pr.r, 10);
+    PassScene ps = { 0.30, 0.002, 0.0, 0.004, 0.65 };   /* 10x: game 0.50, passes want 0.40 */
+    pass_simulate(&c, &pr, 120.0, &ps);
+    CHECK(pr.r.steps == 0 && pr.r.level == 10,
+          "resolution priority: %d steps, level %d (passes shed %.2f)",
+          pr.r.steps, pr.r.level, pr.shed_last);
+}
+
+/* Frame-rate priority: sustained shedding steps down, one level at a time,
+ * until the passes fit, and the level then holds still. */
+static void test_frame_rate_priority_makes_room(void) {
+    DynresController c = make_prio(3, 10, DYNRES_PRIORITY_FRAME_RATE);
+    PassRun pr; memset(&pr, 0, sizeof pr); run_init(&pr.r, 10);
+    PassScene ps = { 0.30, 0.002, 0.0, 0.004, 0.65 };
+    /* 10x: 0.50 game, 0.40 wanted, 0.325 admitted (0.075 shed);
+     * 9x: 0.462/0.324/0.35 -> nothing shed. */
+    pass_simulate(&c, &pr, 60.0, &ps);
+    CHECK(pr.r.level < 10, "frame rate: stepped down for the passes (level %d)", pr.r.level);
+    CHECK(pr.r.level >= 8, "frame rate: no deeper than needed (level %d)", pr.r.level);
+    CHECK(pr.shed_last < 0.02, "frame rate: passes fit (shed %.3f)", pr.shed_last);
+    CHECK(c.shed_downs >= 1, "frame rate: counted as a shed down step");
+    int before = pr.r.steps;
+    pass_simulate(&c, &pr, 600.0, &ps);
+    CHECK(pr.r.steps - before <= 4, "frame rate: %d steps in the next 600 s (oscillation)",
+          pr.r.steps - before);
+    CHECK(pr.r.time_at[10] < 60.0, "frame rate: %.1f s back at the shedding level",
+          pr.r.time_at[10]);
+}
+
+/* Never below the floor, however much the passes want. */
+static void test_frame_rate_priority_floor(void) {
+    DynresController c = make_prio(6, 10, DYNRES_PRIORITY_FRAME_RATE);
+    PassRun pr; memset(&pr, 0, sizeof pr); run_init(&pr.r, 10);
+    PassScene ps = { 0.30, 0.002, 0.0, 0.03, 0.65 };   /* shed at every level */
+    pass_simulate(&c, &pr, 300.0, &ps);
+    CHECK(pr.r.min_level >= 6, "floor: min level %d", pr.r.min_level);
+}
+
+/* Shedding the resolution does not cure (a demand that does not scale with
+ * the pixel count) is undone, and shed down steps back off. */
+static void test_frame_rate_priority_not_resolution_bound(void) {
+    DynresController c = make_prio(3, 10, DYNRES_PRIORITY_FRAME_RATE);
+    PassRun pr; memset(&pr, 0, sizeof pr); run_init(&pr.r, 10);
+    PassScene ps = { 0.30, 0.002, 0.60, 0.0, 0.65 };   /* passes want 0.6 at any level */
+    pass_simulate(&c, &pr, 600.0, &ps);
+    CHECK(c.undos >= 1, "not resolution-bound: undone (%llu)", c.undos);
+    CHECK(pr.r.time_at[10] > 480.0, "not resolution-bound: %.0f s of 600 at the ceiling",
+          pr.r.time_at[10]);
+    CHECK(pr.r.steps <= 12, "not resolution-bound: %d steps in 600 s", pr.r.steps);
+}
+
+/* Up steps wait while passes are shed (frame-rate priority), and need the
+ * passes' demand to fit at the next level; the default priority steps up on
+ * the game's load alone. */
+static void test_frame_rate_priority_blocks_up(void) {
+    PassScene ps = { 0.20, 0.002, 0.0, 0.005, 0.65 };
+    /* 9x: game 0.36, passes want 0.405, admitted 0.416 -> fit;
+     * 10x: game 0.40, want 0.50, admitted 0.39 -> shed. Game alone fits 10x. */
+    DynresController c = make_prio(3, 10, DYNRES_PRIORITY_FRAME_RATE);
+    c.level = 9;
+    PassRun pr; memset(&pr, 0, sizeof pr); run_init(&pr.r, 9);
+    pass_simulate(&c, &pr, 300.0, &ps);
+    CHECK(pr.r.ups == 0 && pr.r.level == 9,
+          "frame rate: no up step into shedding (ups %d, level %d)", pr.r.ups, pr.r.level);
+    DynresController d = make_prio(3, 10, DYNRES_PRIORITY_RESOLUTION);
+    d.level = 9;
+    PassRun pq; memset(&pq, 0, sizeof pq); run_init(&pq.r, 9);
+    pass_simulate(&d, &pq, 300.0, &ps);
+    CHECK(pq.r.level == 10, "resolution: steps up on the game's load (level %d)", pq.r.level);
+    /* Shedding a little at 9x (above shed_up_max) blocks the up step too. */
+    DynresController e = make_prio(3, 10, DYNRES_PRIORITY_FRAME_RATE);
+    e.level = 9;
+    int ups = 0;
+    double t = 0.0;
+    for (int i = 0; i < 300 * 60; i++) {
+        t += kPeriod;
+        DynresSample s = { kPeriod, kPeriod, 0.30 * kPeriod, 0, 0.0, 0.05 * kPeriod, 0.0, 0 };
+        if (dynres_sample(&e, t, &s) > 9) ups++;
+    }
+    CHECK(ups == 0, "frame rate: up steps while shedding: %d", ups);
+}
+
+/* Swap time left out as vsync wait is work in a window in which the pace
+ * guard cut passes (the guest slipped: the swap waited on the GPU). */
+static void test_swap_counts_after_pace_cut(void) {
+    for (int cut = 0; cut <= 1; cut++) {
+        DynresController c = make_prio(3, 10, DYNRES_PRIORITY_RESOLUTION);
+        double t = 0.0;
+        int level = 10;
+        for (int i = 0; i < 10 * 60; i++) {
+            t += kPeriod;
+            /* 0.60 of measured work, 0.35 blocked in the swap */
+            DynresSample s = { kPeriod, kPeriod, 0.60 * kPeriod, 0, 0.0, 0.0,
+                               0.35 * kPeriod, cut && (i % 4) == 0 };
+            level = dynres_sample(&c, t, &s);
+            if (level < 10) break;
+        }
+        if (cut)
+            CHECK(level < 10 && c.pace_cut_windows >= 1,
+                  "pace cut: swap counted (level %d, load %.2f)", level, c.last_load);
+        else
+            CHECK(level == 10 && c.last_load < 0.7,
+                  "no pace cut: swap is idle (level %d, load %.2f)", level, c.last_load);
+    }
+}
+
 int main(void) {
     test_light_scene_stays_at_ceiling();
     test_heavy_scene_settles_without_oscillation();
@@ -315,6 +479,12 @@ int main(void) {
     test_force();
     test_up_waits_for_idle();
     test_learns_scaling();
+    test_resolution_priority_ignores_shedding();
+    test_frame_rate_priority_makes_room();
+    test_frame_rate_priority_floor();
+    test_frame_rate_priority_not_resolution_bound();
+    test_frame_rate_priority_blocks_up();
+    test_swap_counts_after_pace_cut();
     printf("dynamic_resolution_test: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

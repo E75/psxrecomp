@@ -38,6 +38,26 @@
  *    relapse_s is blocked for up steps for relapse_block_s, doubling up to
  *    relapse_block_max_s; an up step that holds the level for
  *    relapse_forget_s resets that.
+ *  - frame-rate priority (priority = DYNRES_PRIORITY_FRAME_RATE, opt-in:
+ *    [video] dynamic_resolution_priority = "frame_rate"). Render passes (the
+ *    in-between frames of frame interpolation) are a per-frame consumer of
+ *    the time left over and never change the resolution themselves; this
+ *    controller learns what they want. A sample's shed_s is the pass time
+ *    the passes wanted but were refused (shed). With this priority, up steps
+ *    wait while a window's shed load (shed / guest time) is above
+ *    shed_up_max, and need the game's load plus the passes' (pass_s and
+ *    shed_s), predicted at the next level, at or below up_load; after
+ *    shed_down_windows windows in a row at or above shed_down, the level
+ *    steps down one (never below the floor; the cooldown and relapse rules
+ *    as for any down step). Its verify: the second window after it must show
+ *    the shed load fallen by verify_fraction; otherwise it is undone and
+ *    shed down steps are blocked like failed load down steps. The default
+ *    priority (DYNRES_PRIORITY_RESOLUTION) ignores shed_s: passes take what
+ *    the resolution leaves.
+ *  - swap: the host leaves time blocked in the swap out of work_s when it
+ *    was the display's vsync wait, and reports it as swap_s. In a window in
+ *    which the pace guard cut passes (a sample's pace_cut: the guest slipped
+ *    behind its schedule, so the swap waited on the GPU), that time is work.
  *  - holds: the host's holds (turbo, loads, FMV, compiles, savestate loads,
  *    resizes, the first seconds of the game), and any interval longer than
  *    gap_factor intervals, discard the window in progress; nothing is sampled
@@ -51,6 +71,10 @@ extern "C" {
 #endif
 
 #define DYNRES_MAX_LEVEL 32
+
+/* What gives first when the host is short of time (DynresParams.priority). */
+#define DYNRES_PRIORITY_RESOLUTION 0   /* passes take what is left (default) */
+#define DYNRES_PRIORITY_FRAME_RATE 1   /* the level makes room for passes */
 
 typedef struct DynresParams {
     double window_s;                 /* decision window, guest time */
@@ -74,6 +98,10 @@ typedef struct DynresParams {
     double prior_scaled;             /* f before any step was measured */
     double learn_rate;
     double step_cost_s;              /* step cost before one was measured */
+    int    priority;                 /* DYNRES_PRIORITY_* */
+    double shed_up_max;              /* frame rate: up steps wait above it */
+    double shed_down;                /* frame rate: a shedding window */
+    int    shed_down_windows;        /* that many in a row step down */
 } DynresParams;
 
 void dynres_default_params(DynresParams *p);
@@ -83,6 +111,10 @@ typedef struct DynresSample {
     double wall_s;     /* this interval's wall time */
     double work_s;     /* see LOAD above */
     int    held;       /* the host holds: not a sample, the window restarts */
+    double pass_s;     /* render passes run (not in work_s) */
+    double shed_s;     /* render-pass time wanted but shed */
+    double swap_s;     /* swap block left out of work_s as vsync wait */
+    int    pace_cut;   /* the pace guard cut passes in this interval */
 } DynresSample;
 
 typedef struct DynresController {
@@ -92,8 +124,13 @@ typedef struct DynresController {
     /* the window in progress */
     double win_period, win_work, win_wall;
     int    win_n, win_late;
+    double win_pass, win_shed, win_swap;
+    int    win_pace_cut;
     /* the last closed window */
     double last_load, last_vblank_hz;
+    double last_pass_load, last_shed_load;   /* the last window's, per guest s */
+    int    shed_windows;                     /* shedding windows in a row */
+    double shed_block_until, shed_block_dur;
     int    last_late, last_valid;
     double prev_load;                 /* the window before it (-1 = none) */
     double hold_until;
@@ -108,11 +145,14 @@ typedef struct DynresController {
     /* after a step: the window it is judged on */
     int    post_active, post_from, post_to, post_windows, post_down;
     double post_load_before, post_pred;
+    int    post_shed;                 /* a shed down step: judged on the shed */
+    double post_shed_before;
     int    undo_level;
     double undo_at;
     double step_cost_s;
     /* telemetry */
     unsigned long long downs, ups, undos, relapses, windows, held_windows;
+    unsigned long long shed_downs, pace_cut_windows;
     const char *last_reason;
     double last_decision_t;
 } DynresController;
