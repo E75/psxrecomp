@@ -52,6 +52,12 @@ typedef struct RtCmd {
  * (current == 0; the backend flushes first). */
 typedef void (*RtExecFn)(void *user, const RtCmd *cmd, const void *payload);
 typedef void (*RtCtxFn)(void *user, int current);
+/* tick (optional): timed work on the render thread while it holds the
+ * context (frame generation). Called with the current time before a record
+ * is executed and while the ring is empty, once the deadline it last
+ * returned has passed; returns the next deadline (rt_now_ns clock), 0 for
+ * none. An idle render thread sleeps no later than that deadline. */
+typedef uint64_t (*RtTickFn)(void *user, uint64_t now_ns);
 
 typedef struct RtConfig {
     size_t   ring_bytes;   /* power of two; >= 1 MiB */
@@ -59,6 +65,7 @@ typedef struct RtConfig {
     RtExecFn exec;
     RtCtxFn  ctx;
     void    *user;
+    RtTickFn tick;         /* optional (NULL) */
 } RtConfig;
 
 /* Start: the context must be current on the calling thread; on success it is
@@ -89,6 +96,14 @@ int  rt_frames_ahead(void);
 /* Render-thread query: the consumer's running idle total (waiting for
  * records, or parked while the emulation thread holds the context). */
 uint64_t rt_render_idle_ns(void);
+/* Monotonic nanoseconds (the clock tick deadlines use). */
+uint64_t rt_now_ns(void);
+/* Any thread: running count of times the emulation thread blocked on the
+ * in-flight bound or a full ring (it waited on the render thread). */
+uint64_t rt_backpressure_events(void);
+/* Render thread, from tick or exec: ask for tick at `deadline_ns` (earliest
+ * wins over the one tick last returned). */
+void rt_tick_at(uint64_t deadline_ns);
 
 /* Sync point. Drain, then move the context to the calling thread (held).
  * reason is a static string kept in the acquire ring. No-op when already held

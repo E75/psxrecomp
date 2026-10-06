@@ -167,6 +167,7 @@ resolution (below), not of this layer.
 | render passes | first `gl_renderer_pass_*` call in a frame is a sync point; the rest of that frame is synchronous. Recommended: leave `render_thread` off with the frame-rate mod |
 | frame interpolation | ineligible (held) while enabled; not started when it is on at boot |
 | OpenXR | ineligible while a session is active |
+| frame generation | `[video] frame_generation`: in-between frames drawn by the render thread from recorded lists, docs/FRAME_GENERATION.md |
 | native-wide / widescreen | recorded; tags, latch and wide-surface mirror as above |
 | internal resolution changes | `gr_set_scale` and every resolution entry point are sync points; dynamic-resolution level steps are recorded (below) |
 | screenshots / debug captures | `screenshot*` sync; `present_shot` is fulfilled on the render thread |

@@ -10419,6 +10419,18 @@ static void handle_render_thread(int id, const char *json)
     send_fmt("{\"id\":%d,\"ok\":true,%s}", id, buf[0] ? buf : "\"active\":0");
 }
 
+/* Frame generation ([video] frame_generation, docs/FRAME_GENERATION.md):
+ *   {"cmd":"frame_gen"} -> enabled, active, generated / real presents, flips,
+ *   the last plan (in-between frames per game frame, display slots), costs,
+ *   match counts, breaker. Not a sync point (render-thread counters, racy). */
+static void handle_frame_gen(int id, const char *json)
+{
+    (void)json;
+    char buf[1024];
+    if (gl_renderer_frame_gen_json(buf, sizeof buf) <= 0) buf[0] = 0;
+    send_fmt("{\"id\":%d,\"ok\":true,%s}", id, buf[0] ? buf : "\"enabled\":0");
+}
+
 /* Presented-image ring (see present_image_ring.h):
  *   {"cmd":"present_image_ring_stats"} -> oldest, newest, count, frozen
  *   {"cmd":"present_image_ring_get","frame":N,"path":"x.png"} */
@@ -15493,6 +15505,7 @@ static const CmdEntry s_commands[] = {
     { "capture_mark",      handle_capture_mark },
     { "present_image_ring_stats", handle_present_image_ring_stats },
     { "render_thread",     handle_render_thread },
+    { "frame_gen",         handle_frame_gen },
     { "present_image_ring_get",   handle_present_image_ring_get },
     { "kernel_bless",      handle_kernel_bless },
     { "ws_aspect",         handle_ws_aspect },

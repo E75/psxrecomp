@@ -326,6 +326,18 @@ typedef struct GlDynresStats {
     uint64_t hr_reallocs, wide_reallocs; /* surfaces reallocated at a step */
 } GlDynresStats;
 void gl_renderer_dynres_stats(GlDynresStats *out);
+/* Frame generation ([video] frame_generation, docs/FRAME_GENERATION.md):
+ * in-between frames drawn by the render thread from the last two game
+ * frames' draw lists when it has time to spare. Off by default; with it off
+ * nothing changes. set: a sync point. configure: the display's refresh and
+ * the guest's frame rate (any thread). hold: trip the breaker (generation
+ * stays off for a few seconds), e.g. while dynamic resolution is over budget.
+ * json: the debug server's {"cmd":"frame_gen"} fields (no sync point). */
+void gl_renderer_set_frame_generation(int on);
+int  gl_renderer_frame_generation(void);
+void gl_renderer_frame_gen_configure(double refresh_hz, double guest_hz);
+void gl_renderer_frame_gen_hold(const char *reason);
+int  gl_renderer_frame_gen_json(char *out, int cap);
 /* Host time the renderer spent, as running totals in performance-counter
  * ticks (only kept while dynamic resolution is on): waits for the frame
  * blend's next present, render passes, blend presents' own work, and time

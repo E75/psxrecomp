@@ -1,19 +1,12 @@
-"""Build and run test_gl_render_thread.c on a hidden real OpenGL context.
+"""Build and run test_gl_frame_gen.c on a hidden real OpenGL context.
 
-Each scale runs twice, render thread off and on ([video] render_thread). The
-values the scripted guest read back (rb), the native VRAM (digest), the frame
-at internal resolution (hires) and the native-wide surface (wide) must be the
-same both ways, and the threaded run must actually have recorded and replayed
-the stream (its own checks). A third run per scale with one frame in flight
-(PSX_TEST_RT_FRAMES is not needed: the fixture takes the bound as argv) is not
-required; the in-flight bound itself is covered by render_thread_test.
-
-macOS/Linux/Windows (MinGW): pass the SDL3 include directory and static
-library and a C compiler, as for run_gl_scale_invariance.py. Evidence
-(commands, output) is written to receipt.json under --output. When the host
-cannot create a hidden window with a GL 3.3 core context (headless, or Windows
-over SSH) the fixture exits SKIP_EXIT and so does this script: CTest reports a
-skip, not a pass.
+Frame generation ([video] frame_generation, docs/FRAME_GENERATION.md): per
+scale and present path (VRAM, native-wide), the fixture runs with the render
+thread on and generation off, then on (forced). The real presented images, in
+order, must be identical; the run with generation on must have presented
+generated frames and passes its own endpoint checks (phase 1 = the newer real
+image, phase 0 = the older one). Build flags and skips as
+run_gl_render_thread.py.
 """
 import argparse
 import json
@@ -34,7 +27,7 @@ WIN_LIBS = ["opengl32", "kernel32", "user32", "gdi32", "winmm", "imm32", "ole32"
             "oleaut32", "version", "uuid", "advapi32", "setupapi", "shell32", "dinput8"]
 SKIP_EXIT = 77
 WINDOWS = os.name == "nt" or platform.system().startswith(("MINGW", "MSYS", "CYGWIN"))
-KEYS = ("rb", "digest", "hires", "wide")
+KEYS = ("real",)
 
 
 def parse(stdout):
@@ -54,16 +47,16 @@ def main():
     ap.add_argument("--sdl-library", required=True)
     ap.add_argument("--output", required=True)
     ap.add_argument("--fixture", type=pathlib.Path)
-    ap.add_argument("--scales", default="1,4")
-    ap.add_argument("--frames", default="80")
+    ap.add_argument("--scales", default="1,3")
+    ap.add_argument("--frames", default="24")
     args = ap.parse_args()
     sdl_includes = [str(pathlib.Path(d).resolve()) for d in args.sdl_include.split(";") if d]
     args.sdl_library = str(pathlib.Path(args.sdl_library).resolve())
     framework = pathlib.Path(__file__).resolve().parents[2]
-    fixture = args.fixture or framework / "runtime/tests/test_gl_render_thread.c"
+    fixture = args.fixture or framework / "runtime/tests/test_gl_frame_gen.c"
     out_root = pathlib.Path(args.output).resolve()
     out_root.mkdir(parents=True, exist_ok=True)
-    dest = pathlib.Path(tempfile.mkdtemp(prefix="rth-", dir=out_root))
+    dest = pathlib.Path(tempfile.mkdtemp(prefix="fg-", dir=out_root))
     print("Evidence directory:", dest)
     receipt = []
 
@@ -119,44 +112,32 @@ def main():
     ok = True
     first = True
     for s in [int(v) for v in args.scales.split(",") if v]:
-        runs = {}
-        for threaded in (0, 1):
-            r = run([probe, s, threaded, args.frames])
-            if first and r.returncode == SKIP_EXIT:
-                # No window/GL context on this host: skip. Only the first
-                # run may skip; after it, 77 is a failure like any other.
-                print("SKIP:", r.stderr.strip()[-600:])
-                return SKIP_EXIT
-            first = False
-            p = parse(r.stdout)
-            tail = r.stdout.strip().splitlines()[-6:]
-            print(f"scale {s} render_thread={threaded}: exit={r.returncode}", tail,
-                  r.stderr.strip()[-800:])
-            if r.returncode or p["failures"] != 0 or any(p[k] is None for k in KEYS):
+        for path, timing in (("vram", "flip"), ("wide", "flip"), ("vram", "late"), ("wide", "late")):
+            runs = {}
+            for fg in (0, 1):
+                r = run([probe, s, fg, path, args.frames, timing])
+                if first and r.returncode == SKIP_EXIT:
+                    print("SKIP:", r.stderr.strip()[-600:])
+                    return SKIP_EXIT
+                first = False
+                p = parse(r.stdout)
+                tail = r.stdout.strip().splitlines()[-6:]
+                print(f"scale {s} {path} {timing} frame_generation={fg}: exit={r.returncode}", tail,
+                      r.stderr.strip()[-800:])
+                if r.returncode or p["failures"] != 0 or p["real"] is None:
+                    ok = False
+                m = re.search(r"^presents=(\d+) generated=(\d+)$", r.stdout, re.M)
+                p["presents"] = int(m[1]) if m else -1
+                p["generated"] = int(m[2]) if m else -1
+                runs[fg] = p
+            if runs[0]["real"] != runs[1]["real"] or runs[0]["presents"] != runs[1]["presents"]:
+                print(f"FAIL scale {s} {path} {timing}: the real frames differ with generation on "
+                      f"({runs[0]['real']}/{runs[0]['presents']} off, "
+                      f"{runs[1]['real']}/{runs[1]['presents']} on)")
                 ok = False
-            runs[threaded] = p
-        for k in KEYS:
-            if runs[0][k] != runs[1][k]:
-                print(f"FAIL scale {s}: {k} differs with the render thread on "
-                      f"({runs[0][k]} off, {runs[1][k]} on)")
-                ok = False
-    # Dynamic resolution: the same level steps between frames, recorded with
-    # the thread on (scales above 1 only; 1x has no levels below it).
-    for s in [int(v) for v in args.scales.split(",") if v and int(v) > 1]:
-        runs = {}
-        for threaded in (0, 1):
-            r = run([probe, s, threaded, args.frames, "dynres"])
-            p = parse(r.stdout)
-            tail = r.stdout.strip().splitlines()[-7:]
-            print(f"scale {s} dynres render_thread={threaded}: exit={r.returncode}", tail,
-                  r.stderr.strip()[-800:])
-            if r.returncode or p["failures"] != 0 or any(p[k] is None for k in KEYS):
-                ok = False
-            runs[threaded] = p
-        for k in KEYS:
-            if runs[0][k] != runs[1][k]:
-                print(f"FAIL scale {s} dynres: {k} differs with the render thread on "
-                      f"({runs[0][k]} off, {runs[1][k]} on)")
+            if runs[0]["generated"] != 0 or runs[1]["generated"] <= 0:
+                print(f"FAIL scale {s} {path} {timing}: generated frames off={runs[0]['generated']} "
+                      f"on={runs[1]['generated']}")
                 ok = False
     print("PASS" if ok else "FAIL")
     return 0 if ok else 1
