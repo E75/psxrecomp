@@ -41,7 +41,9 @@ static _Atomic int exec_errors;
 static _Atomic int exec_off_thread;
 static _Atomic int exec_without_ctx;
 static _Atomic int stale_seen;
+static _Atomic int far_behind_seen;   /* two complete frames queued after this one */
 static int exec_delay_us;
+static int g_max_frames = 1;
 
 static void sleep_us(int us) {
     struct timespec ts = { us / 1000000, (long)(us % 1000000) * 1000 };
@@ -56,7 +58,9 @@ static void fake_exec(void *user, const RtCmd *c, const void *payload) {
     if (!rt_on_render_thread()) atomic_fetch_add(&exec_off_thread, 1);
     if (atomic_load(&ctx_owner) != 2) atomic_fetch_add(&exec_without_ctx, 1);
     if (c->op == OP_PRESENT) {
-        if (rt_newer_frame_queued()) atomic_fetch_add(&stale_seen, 1);
+        if (rt_frames_ahead() >= 1) atomic_fetch_add(&stale_seen, 1);
+        if (rt_frames_ahead() >= 2) atomic_fetch_add(&far_behind_seen, 1);
+        if (rt_frames_ahead() > g_max_frames) atomic_fetch_add(&exec_errors, 1);  /* the bound */
     } else if (c->op == OP_DATA) {
         const uint64_t *p = (const uint64_t *)payload;
         if (c->payload < 8 || p[0] != exec_next) atomic_fetch_add(&exec_errors, 1);
@@ -89,12 +93,14 @@ static void reset_state(void) {
     atomic_store(&exec_off_thread, 0);
     atomic_store(&exec_without_ctx, 0);
     atomic_store(&stale_seen, 0);
+    atomic_store(&far_behind_seen, 0);
     atomic_store(&ctx_violations, 0);
     atomic_store(&ctx_owner, 1);      /* the "context" starts current here */
     exec_delay_us = 0;
 }
 
 static int start(size_t ring, int frames) {
+    g_max_frames = frames;
     RtConfig cfg = { ring, frames, fake_exec, fake_ctx, NULL };
     return rt_start(&cfg);
 }
@@ -157,7 +163,8 @@ static void test_backpressure(void) {
     RtStats st; rt_get_stats(&st);
     CHECK(worst <= 2, "in-flight bound held (worst %llu)", (unsigned long long)worst);
     CHECK(st.backpressure_waits > 0, "producer was held back");
-    CHECK(atomic_load(&stale_seen) > 0, "stale presents detected while behind");
+    CHECK(atomic_load(&stale_seen) > 0, "presents one frame behind seen");
+    CHECK(atomic_load(&far_behind_seen) > 0, "presents two frames behind seen (skip case)");
     CHECK(atomic_load(&exec_errors) == 0, "order kept under backpressure");
     rt_stop();
 

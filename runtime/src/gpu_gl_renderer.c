@@ -9283,9 +9283,12 @@ static int rth_record_present(uint16_t op, int n, const int32_t *v) {
 static void rth_replay_present(const RtCmd *c, const uint8_t *p) {
     RthOvHdr hd;
     memcpy(&hd, p, sizeof hd);
-    if (rt_newer_frame_queued()) {
-        /* Behind: a later frame is already recorded. Drawing this one only
-         * delays it; the guest never waits for a present. */
+    if (rt_frames_ahead() >= 2) {
+        /* Two later frames are already recorded, so the emulation thread is
+         * at (or near) the in-flight bound waiting on us. Showing this frame
+         * would only delay those; skip its present (its drawing has been
+         * replayed and stays). One frame behind is the normal pipelined
+         * state and still presents every frame. */
         s_rth_presents_stale++;
         return;
     }
