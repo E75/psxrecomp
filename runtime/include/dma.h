@@ -168,6 +168,30 @@ void dma_debug_get_gpu_ot_stats(DMAGpuOtStats* out);
 uint64_t dma_debug_get_cdrom_history(const DMACDROMHistoryEntry** out_entries);
 void dma_debug_clear_cdrom_history(void);
 
+/* Always-on record of every CPU hold for a kicked GPU linked-list walk
+ * (the kicking store returns only when the walk ends). Ring is the newest
+ * DMA_GPU_HOLD_RING_CAP holds; stats are cumulative since boot. */
+#define DMA_GPU_HOLD_RING_CAP 4096u
+typedef struct {
+    uint64_t seq;
+    uint64_t cycle;         /* guest cycle at the kick */
+    uint32_t held_cycles;   /* guest cycles the CPU was held */
+    uint32_t words;         /* list words the walk moved during the hold */
+    uint32_t steps;         /* advance+service iterations the hold ran */
+    uint32_t host_us;       /* host wall time spent inside the hold */
+    uint32_t frame;
+    uint32_t kick_pc;       /* guest store PC that kicked the walk */
+    uint32_t madr;
+    uint8_t  in_exception;  /* kick came from inside an exception handler */
+    uint8_t  still_active;  /* hold ended with the walk still running */
+} DMAGpuHoldEntry;
+typedef struct {
+    uint64_t count, held_cycles, host_us, words, steps;
+    uint64_t exc_count, exc_held_cycles, exc_host_us;
+} DMAGpuHoldStats;
+void dma_debug_get_gpu_hold(DMAGpuHoldStats *out_stats,
+                            const DMAGpuHoldEntry **out_ring);
+
 #ifdef __cplusplus
 }
 #endif

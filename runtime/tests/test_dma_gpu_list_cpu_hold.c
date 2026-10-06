@@ -21,6 +21,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "dma.h"
+
 void     dma_init(void);
 void     dma_write(uint32_t addr, uint32_t val);
 void     dma_advance(uint32_t cycles);
@@ -87,6 +89,8 @@ void event_ring_record_aux(uint16_t kind, uint8_t detail, uint32_t aux) {
     (void)kind; (void)detail; (void)aux;
 }
 void psx_irq_raise(uint32_t bit, uint32_t detail) { (void)bit; (void)detail; }
+static int s_in_exception;
+int psx_get_in_exception(void) { return s_in_exception; }
 
 /* ---- scenario ------------------------------------------------------------ */
 #define NODE_A 0x00001000u
@@ -152,6 +156,30 @@ int main(void) {
           s_gp0[2] == 0x01000003u,
           "GPU received %u words (%08X %08X %08X), expected A's and B's payload",
           s_gp0_n, s_gp0[0], s_gp0[1], s_gp0[2]);
+
+    /* The hold is recorded in the always-on hold ring (dma_hold_stats /
+     * dma_hold_ring): A's header + 2 words, B's header + 1 word, C's header. */
+    {
+        DMAGpuHoldStats st; const DMAGpuHoldEntry *ring = NULL;
+        dma_debug_get_gpu_hold(&st, &ring);
+        CHECK(st.count == 1u && st.exc_count == 0u, "hold count %llu exc %llu",
+              (unsigned long long)st.count, (unsigned long long)st.exc_count);
+        CHECK(ring && ring[0].words == 6u && ring[0].held_cycles == psx_cycle_count - before
+              && ring[0].cycle == before && ring[0].in_exception == 0u
+              && ring[0].still_active == 0u,
+              "hold entry words %u held %u cycle %llu", ring ? ring[0].words : 0u,
+              ring ? ring[0].held_cycles : 0u,
+              ring ? (unsigned long long)ring[0].cycle : 0ull);
+        /* A kick from inside an exception handler is attributed to it. */
+        s_in_exception = 1;
+        kick(0);
+        s_in_exception = 0;
+        dma_debug_get_gpu_hold(&st, &ring);
+        CHECK(st.count == 2u && st.exc_count == 1u && ring[1].in_exception == 1u &&
+              st.exc_held_cycles == ring[1].held_cycles,
+              "exception-kick attribution: count %llu exc %llu",
+              (unsigned long long)st.count, (unsigned long long)st.exc_count);
+    }
 
     /* Control: a kick from inside the device service is not held. */
     CHECK(kick(1), "a kick from inside the device service was held");

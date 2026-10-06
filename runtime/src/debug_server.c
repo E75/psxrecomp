@@ -6371,6 +6371,8 @@ static void handle_a0_history(int id, const char *json)
 }
 
 extern int gpu_get_c0_count(void);
+extern uint64_t gpu_get_c0_total(void);
+extern uint32_t gpu_get_c0_frame(int index);
 extern int gpu_get_c0_history(int index, int *x, int *y, int *w, int *h,
                               uint32_t *func, uint32_t *sp, uint32_t *s1,
                               uint32_t *fw0, uint32_t *fw1, int *rcount);
@@ -6379,17 +6381,18 @@ static void handle_c0_history(int id, const char *json)
 {
     (void)json;
     int count = gpu_get_c0_count();
-    char buf[8192];
-    int pos = snprintf(buf, sizeof(buf), "{\"id\":%d,\"ok\":true,\"count\":%d,\"reads\":[", id, count);
+    char buf[65536];
+    int pos = snprintf(buf, sizeof(buf), "{\"id\":%d,\"ok\":true,\"count\":%d,\"total\":%llu,\"reads\":[",
+                       id, count, (unsigned long long)gpu_get_c0_total());
     for (int i = 0; i < count && pos < (int)sizeof(buf) - 300; i++) {
         int x, y, w, h, rcount;
         uint32_t func, sp, s1, fw0, fw1;
         gpu_get_c0_history(i, &x, &y, &w, &h, &func, &sp, &s1, &fw0, &fw1, &rcount);
         pos += snprintf(buf + pos, sizeof(buf) - pos,
-            "%s{\"i\":%d,\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,"
+            "%s{\"i\":%d,\"frame\":%u,\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,"
             "\"func\":\"0x%08X\",\"sp\":\"0x%08X\",\"s1\":\"0x%08X\","
             "\"fw0\":\"0x%08X\",\"fw1\":\"0x%08X\",\"reads\":%d}",
-            i ? "," : "", i, x, y, w, h, func, sp, s1, fw0, fw1, rcount);
+            i ? "," : "", i, gpu_get_c0_frame(i), x, y, w, h, func, sp, s1, fw0, fw1, rcount);
     }
     pos += snprintf(buf + pos, sizeof(buf) - pos, "]}");
     send_fmt("%s", buf);
@@ -11016,13 +11019,103 @@ static void handle_d44_ring(int id, const char *json)
  * callback word [0x80079D44], CD-DMA-active + dma-depth, and COP0/IRQ state. Shows
  * whether VBlank was delivered while 0x80079D44 was the clobbered 0x016F0110 AND a
  * CD DMA was mid-transfer (the VSync-in-DMA-window bug). */
+/* irq_exc_stats: cumulative per-source exception accounting since boot
+ * (interrupts.c). Each delivery is charged to every I_STAT&I_MASK bit pending
+ * at entry ("sw" = software interrupt only), with the guest cycles from entry
+ * to the exit restore decision. Diff two snapshots for a window. */
+static void handle_irq_exc_stats(int id, const char *json)
+{
+    (void)json;
+    extern uint64_t g_exc_src_deliveries[12], g_exc_src_cycles[12];
+    extern uint64_t g_exc_cycles_total, g_exc_exits_total, g_irqctx_seq;
+    static const char *names[12] = { "vblank", "gpu", "cdrom", "dma", "tmr0",
+        "tmr1", "tmr2", "sio0", "sio1", "spu", "lightpen", "sw" };
+    char buf[2048];
+    size_t pos = 0;
+    pos += snprintf(buf + pos, sizeof(buf) - pos,
+                    "{\"id\":%d,\"ok\":true,\"cycle\":%llu,\"frame\":%llu,"
+                    "\"deliveries\":%llu,\"exits\":%llu,\"exc_cycles\":%llu,\"src\":{",
+                    id, (unsigned long long)psx_get_cycle_count(),
+                    (unsigned long long)s_frame_count,
+                    (unsigned long long)g_irqctx_seq,
+                    (unsigned long long)g_exc_exits_total,
+                    (unsigned long long)g_exc_cycles_total);
+    for (int b = 0; b < 12; b++)
+        pos += snprintf(buf + pos, sizeof(buf) - pos,
+                        "%s\"%s\":{\"n\":%llu,\"cyc\":%llu}", b ? "," : "", names[b],
+                        (unsigned long long)g_exc_src_deliveries[b],
+                        (unsigned long long)g_exc_src_cycles[b]);
+    snprintf(buf + pos, sizeof(buf) - pos, "}}");
+    debug_server_send_line(buf);
+}
+
+/* dma_hold_stats: cumulative totals for CPU holds on kicked GPU linked-list
+ * walks (dma.c), split by kicks made inside an exception handler. */
+static void handle_dma_hold_stats(int id, const char *json)
+{
+    (void)json;
+    DMAGpuHoldStats st;
+    dma_debug_get_gpu_hold(&st, NULL);
+    send_fmt("{\"id\":%d,\"ok\":true,\"frame\":%llu,\"count\":%llu,\"held_cycles\":%llu,"
+             "\"host_us\":%llu,\"words\":%llu,\"steps\":%llu,\"exc_count\":%llu,"
+             "\"exc_held_cycles\":%llu,\"exc_host_us\":%llu}",
+             id, (unsigned long long)s_frame_count,
+             (unsigned long long)st.count, (unsigned long long)st.held_cycles,
+             (unsigned long long)st.host_us, (unsigned long long)st.words,
+             (unsigned long long)st.steps, (unsigned long long)st.exc_count,
+             (unsigned long long)st.exc_held_cycles, (unsigned long long)st.exc_host_us);
+}
+
+/* dma_hold_ring: newest `count` held kicks (default 256, max ring cap),
+ * optionally windowed by frame_lo/frame_hi. */
+static void handle_dma_hold_ring(int id, const char *json)
+{
+    int count = json_get_int(json, "count", 256);
+    int flo = json_get_int(json, "frame_lo", -1);
+    int fhi = json_get_int(json, "frame_hi", -1);
+    if (count < 1) count = 1;
+    if (count > (int)DMA_GPU_HOLD_RING_CAP) count = (int)DMA_GPU_HOLD_RING_CAP;
+    DMAGpuHoldStats st;
+    const DMAGpuHoldEntry *ring = NULL;
+    dma_debug_get_gpu_hold(&st, &ring);
+    uint64_t total = st.count;
+    uint32_t avail = total < DMA_GPU_HOLD_RING_CAP ? (uint32_t)total : DMA_GPU_HOLD_RING_CAP;
+    uint32_t n = (uint32_t)count < avail ? (uint32_t)count : avail;
+    size_t BUF_SZ = 256u + (size_t)n * 260u;
+    char *buf = (char *)malloc(BUF_SZ);
+    if (!buf) { send_err(id, "oom"); return; }
+    size_t pos = 0;
+    int emitted = 0;
+    pos += snprintf(buf + pos, BUF_SZ - pos,
+                    "{\"id\":%d,\"ok\":true,\"total\":%llu,\"entries\":[",
+                    id, (unsigned long long)total);
+    for (uint32_t i = 0; i < n && pos < BUF_SZ - 260; i++) {
+        const DMAGpuHoldEntry *e = &ring[(total - n + i) & (DMA_GPU_HOLD_RING_CAP - 1u)];
+        if (flo >= 0 && (int)e->frame < flo) continue;
+        if (fhi >= 0 && (int)e->frame > fhi) continue;
+        pos += snprintf(buf + pos, BUF_SZ - pos,
+            "%s{\"seq\":%llu,\"cycle\":%llu,\"frame\":%u,\"held_cycles\":%u,"
+            "\"words\":%u,\"steps\":%u,\"host_us\":%u,\"kick_pc\":\"0x%08X\","
+            "\"madr\":\"0x%08X\",\"in_exc\":%u,\"still_active\":%u}",
+            emitted ? "," : "", (unsigned long long)e->seq,
+            (unsigned long long)e->cycle, e->frame, e->held_cycles, e->words,
+            e->steps, e->host_us, e->kick_pc, e->madr,
+            (unsigned)e->in_exception, (unsigned)e->still_active);
+        emitted++;
+    }
+    pos += snprintf(buf + pos, BUF_SZ - pos, "],\"emitted\":%d}", emitted);
+    debug_server_send_line(buf);
+    free(buf);
+}
+
 static void handle_irqctx_ring(int id, const char *json)
 {
     typedef struct { uint64_t seq, cycle; uint32_t frame, istat, imask, sr, d44,
                      cdrom_active, is_vblank; int dma_depth;
                      uint32_t take_pc, real_epc, exit_pc, exit_reason, same_thread,
                      restored, v0_exit, v0_saved, v1_exit, v1_saved, ra_exit,
-                     ra_saved, redirects, entry_sp, pump_site; } E;
+                     ra_saved, redirects, entry_sp, pump_site;
+                     uint64_t exit_cycle; } E;   /* must match IrqCtxEntry */
     extern E g_irqctx_ring[]; extern uint64_t g_irqctx_seq;
     /* Ring cap must track IRQCTX_RING_CAP in interrupts.c. */
     uint32_t cap = 4096u;
@@ -11036,7 +11129,7 @@ static void handle_irqctx_ring(int id, const char *json)
     uint64_t total = g_irqctx_seq;
     uint32_t avail = total < cap ? (uint32_t)total : cap;
     uint32_t n = (uint32_t)count < avail ? (uint32_t)count : avail;
-    size_t BUF_SZ = 512u + (size_t)n * 410u;
+    size_t BUF_SZ = 512u + (size_t)n * 480u;
     char *buf = (char *)malloc(BUF_SZ); if (!buf) { send_err(id, "oom"); return; }
     size_t pos = 0;
     pos += snprintf(buf + pos, BUF_SZ - pos,
@@ -11057,13 +11150,14 @@ static void handle_irqctx_ring(int id, const char *json)
             "\"v0_exit\":\"0x%08X\",\"v0_saved\":\"0x%08X\","
             "\"v1_exit\":\"0x%08X\",\"v1_saved\":\"0x%08X\","
             "\"ra_exit\":\"0x%08X\",\"ra_saved\":\"0x%08X\",\"redirects\":%u,"
-            "\"entry_sp\":\"0x%08X\",\"pump_site\":%u}",
+            "\"entry_sp\":\"0x%08X\",\"pump_site\":%u,\"exit_cycle\":%llu}",
             emitted ? "," : "", (unsigned long long)e->seq, (unsigned long long)e->cycle,
             e->frame, e->is_vblank, e->d44, e->cdrom_active, e->dma_depth,
             e->sr, e->istat, e->imask,
             e->take_pc, e->real_epc, e->exit_pc, e->exit_reason, e->same_thread,
             e->restored, e->v0_exit, e->v0_saved, e->v1_exit, e->v1_saved,
-            e->ra_exit, e->ra_saved, e->redirects, e->entry_sp, e->pump_site);
+            e->ra_exit, e->ra_saved, e->redirects, e->entry_sp, e->pump_site,
+            (unsigned long long)e->exit_cycle);
         emitted++;
     }
     pos += snprintf(buf + pos, BUF_SZ - pos, "],\"emitted\":%d}", emitted);
@@ -15083,6 +15177,9 @@ static const CmdEntry s_commands[] = {
     { "freeze_check",      handle_freeze_check },
     { "d44_ring",          handle_d44_ring },
     { "irqctx_ring",       handle_irqctx_ring },
+    { "irq_exc_stats",     handle_irq_exc_stats },
+    { "dma_hold_stats",    handle_dma_hold_stats },
+    { "dma_hold_ring",     handle_dma_hold_ring },
     { "sp_ring",           handle_sp_ring },
     { "disp_ring",         handle_disp_ring },
     { "cyc_watch",         handle_cyc_watch },
