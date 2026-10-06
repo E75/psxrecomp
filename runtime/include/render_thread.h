@@ -12,8 +12,9 @@
  *     ring end; payloads are copied, so the producer may reuse its buffers.
  *   - rt_frame_end() closes a guest frame. At most max_frames closed frames may
  *     wait in the ring; past that the emulation thread blocks (backpressure).
- *     While replaying, rt_newer_frame_queued() tells the backend a later frame
- *     is already recorded, so it may skip presenting a stale one.
+ *     While replaying, rt_frames_ahead() counts the complete frames already
+ *     recorded after the one being replayed, so the backend can skip
+ *     presenting a frame it is far behind on.
  *   - rt_acquire() is the one sync point: it waits until every record has been
  *     executed, has the render thread release the context, and makes it
  *     current on the calling (emulation) thread. The emulation thread then
@@ -22,7 +23,7 @@
  *     thread at all.
  *   - No lock is held while exec() runs. Locks only guard sleeping/waking.
  *
- * Every function except the rt_on_render_thread() / rt_newer_frame_queued()
+ * Every function except the rt_on_render_thread() / rt_frames_ahead()
  * queries is emulation-thread only. */
 #ifndef PSX_RENDER_THREAD_H
 #define PSX_RENDER_THREAD_H
@@ -81,9 +82,9 @@ void  rt_cmd_commit(void);
  * max_frames closed frames are unconsumed. */
 void rt_frame_end(void);
 
-/* Render-thread query while executing: a frame marker newer than the record
- * being executed is already queued (the frame being replayed is stale). */
-int  rt_newer_frame_queued(void);
+/* Render-thread query while executing: how many complete frames are queued
+ * after the frame whose record is being executed (0 = it is the newest). */
+int  rt_frames_ahead(void);
 
 /* Sync point. Drain, then move the context to the calling thread (held).
  * reason is a static string kept in the acquire ring. No-op when already held
