@@ -482,6 +482,8 @@ void gl_renderer_render_thread_frame_boundary(void);
 void gl_renderer_render_thread_sync(const char *reason);
 int  gl_renderer_render_thread_json(char *out, size_t cap);
 int  gl_renderer_fbo_peek_deferred(int x, int y, int w, int h, uint16_t *out);
+void gl_renderer_ring_capture(uint32_t frame, int wide, int base_x, int disp_y, int disp_h,
+                              int cx, int cy, int cw, int ch);
 
 #ifdef __cplusplus
 }
