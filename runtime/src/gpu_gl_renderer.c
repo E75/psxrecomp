@@ -9843,7 +9843,7 @@ static int      s_rthf_nseg[RTHF_Q];
 static uint64_t s_rthf_slot_cpu[RTHF_Q];
 static int      s_rthf_paused = 0;           /* a pause ended this frame's query */
 static uint64_t s_rthf_pause_t0 = 0, s_rthf_pause_swap = 0, s_rthf_excl = 0;
-static void     fg_note_real_cost(uint64_t cost_ns);   /* frame generation */
+static void     fg_note_real_cost(uint64_t cpu_ns, uint64_t gpu_ns, int has_gpu);   /* frame generation */
 static unsigned s_rthf_head = 0, s_rthf_tail = 0;
 static int      s_rthf_open = 0, s_rthf_taint = 0, s_rthf_has_q = 0;
 static uint64_t s_rthf_t0 = 0, s_rthf_idle0 = 0, s_rthf_swap0 = 0;
@@ -9864,11 +9864,9 @@ static void rthf_publish(uint64_t cpu, uint64_t gpu, int has_gpu) {
     }
     atomic_fetch_add(&s_rthf_cost_ns, cost);
     atomic_fetch_add(&s_rthf_frames, 1);   /* last: the totals above are in */
-    /* Frame generation budgets with the CPU time: on macOS a TIME_ELAPSED
-     * span also counts the GPU waiting for a frame's records to arrive, so
-     * it reads close to the whole interval whatever the work. GPU overload
-     * shows up as a slow swap and a queue that backs up (the breaker). */
-    fg_note_real_cost(cpu);
+    /* Frame generation budgets with the CPU time (see
+     * fg_note_real_cost for why only the CPU time plans). */
+    fg_note_real_cost(cpu, gpu, has_gpu);
 }
 
 /* Read every finished query pair, oldest first, without waiting. */
@@ -10041,7 +10039,7 @@ static int32_t  *s_fg_match = NULL; static uint32_t s_fg_match_cap = 0;
 static FgMatchStats s_fg_mst;
 static FgBreaker s_fg_brk;
 static int       s_fg_brk_init = 0;
-static uint64_t  s_fg_bp_seen = 0;
+static uint64_t  s_fg_bp_seen = 0, s_fg_bp_ns_seen = 0;
 static double    s_fg_real_ema = 0.0;   /* seconds */
 /* A generated frame's cost: cold samples discarded, a blocking estimate
  * re-probed (frame_gen.h FgCost). s_fg_fit_s: what one may cost to fit. */
@@ -10100,9 +10098,20 @@ static void fg_note_swap(uint64_t ns) {
     s_fg_swap_ema = s_fg_swap_ema > 0.0 ? s_fg_swap_ema * 0.9 + c * 0.1 : c;
 }
 
-static void fg_note_real_cost(uint64_t cost_ns) {
-    const double c = (double)cost_ns * 1e-9;
+/* A real VBlank frame's render-thread cost, for the plan: its CPU time. Its
+ * GPU span is kept for the debug output only: on macOS it also counts the
+ * GPU waiting for records, so with generation off it reads most of the
+ * VBlank (R4 1P: 10 ms for ~3 ms of work) and would leave no room. GPU
+ * overload shows as a queue that backs up instead: the breaker, and the
+ * ceiling that lowers the plan by one per such trip (FgCeiling). */
+static double s_fg_real_gpu_ema = 0.0;
+static void fg_note_real_cost(uint64_t cpu_ns, uint64_t gpu_ns, int has_gpu) {
+    const double c = (double)cpu_ns * 1e-9;
     s_fg_real_ema = s_fg_real_ema > 0.0 ? s_fg_real_ema * 0.9 + c * 0.1 : c;
+    if (has_gpu) {
+        const double g = (double)gpu_ns * 1e-9;
+        s_fg_real_gpu_ema = s_fg_real_gpu_ema > 0.0 ? s_fg_real_gpu_ema * 0.9 + g * 0.1 : g;
+    }
 }
 
 static void fg_list_clear(FgList *l) {
@@ -10428,13 +10437,16 @@ static void fg_surfaces_free(void) {
     s_fg_real_fbo = s_fg_real_tex = 0; s_fg_real_w = s_fg_real_h = 0; s_fg_real_kept = 0;
 }
 
+/* Colour only: a depth-stencil blit costs the CPU milliseconds on macOS
+ * (most of a generated frame at high levels). The stencil is the mask-bit
+ * mirror of alpha; the caller marks it stale and it is rebuilt from the
+ * copied alpha only if a generated draw checks the mask. */
 static void fg_blit(GLuint src, GLuint dst, int x, int y, int w, int h) {
     p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, src);
     p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, dst);
     glDisable(GL_SCISSOR_TEST);
-    glStencilMask(0xFF);
     p_glBlitFramebuffer(x, y, x + w, y + h, x, y, x + w, y + h,
-                        GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT, GL_NEAREST);
+                        GL_COLOR_BUFFER_BIT, GL_NEAREST);
     p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, 0);
     p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, 0);
 }
@@ -10668,6 +10680,10 @@ static int fg_generate(double t, int swap) {
         s_wide_tex[iw] = s_fg_w_tex; s_wide_fbo[iw] = s_fg_w_fbo; s_wide_rb[iw] = s_fg_w_rb;
         s_wide_as[iw] = S;
     }
+    /* The copied stencil is stale: rebuilt from alpha if a draw needs it. */
+    s_stencil_valid = 0;
+    rect_add(&s_stencil_stale, b->disp[0], dy, b->disp[0] + b->disp[2] - 1, dy + dh - 1);
+    if (iw >= 0) wst_add(iw, 0, dy, g_wide_w, dy + dh);
     s_fg_drawing = 1;
     fg_replay(a, b, t, iw >= 0 ? s_fg_w_fbo : 0);
     fg_compose(b, iw >= 0 ? s_fg_w_fbo : 0, iw >= 0 ? s_fg_w_tex : 0, b->linear, b->force43);
@@ -10704,9 +10720,29 @@ static void rth_present_payload(uint16_t op, const uint8_t *p);   /* below */
 /* Short first hold, doubling on repeats within 2 s of the last hold's end,
  * up to 8 s: one hiccup costs a fraction of a second of generation. */
 #define FG_BRK_INIT() do { if (!s_fg_brk_init) { fg_breaker_init(&s_fg_brk, 0.5, 8.0, 2.0); s_fg_brk_init = 1; } } while (0)
+static FgCeiling s_fg_ceil;
+static int       s_fg_ceil_init = 0;
+static FgCeiling *fg_ceil(void) {
+    if (!s_fg_ceil_init) { fg_ceiling_init(&s_fg_ceil, 7, 2.0); s_fg_ceil_init = 1; }
+    return &s_fg_ceil;
+}
+static uint32_t s_fg_trip_late = 0, s_fg_trip_bp = 0, s_fg_trip_behind = 0;
 static void fg_trip(const char *why) {
     FG_BRK_INIT();
-    fg_breaker_trip(&s_fg_brk, fg_now_s(), why);
+    if (why[0] == 'g') s_fg_trip_late++;
+    else s_fg_trip_bp++;
+    const double now = fg_now_s();
+    fg_breaker_trip(&s_fg_brk, now, why);
+    fg_ceiling_trip(fg_ceil(), s_fg_pending ? s_fg_n : s_fg_last_n, now);
+}
+/* The render thread a frame behind (a stale present, two frames queued):
+ * proportional, not a stop. 2P races show stale presents with generation
+ * off as well, so it lowers the plan's ceiling by one (recovering one per
+ * 2 s) and the real frame shows at once; the breaker is for the guest
+ * slipping or stalling on the queue. */
+static void fg_overload(void) {
+    s_fg_trip_behind++;
+    fg_ceiling_trip(fg_ceil(), s_fg_pending ? s_fg_n : s_fg_last_n, fg_now_s());
 }
 
 static void fg_gen_cost_poll(void) {
@@ -10833,9 +10869,9 @@ static uint64_t fg_tick(void *user, uint64_t now) {
     const uint64_t bp = rt_backpressure_events();
     const int ahead = rt_frames_ahead();
     if (!s_fg_force && (ahead >= 1 || bp != s_fg_bp_seen)) {
-        if (bp != s_fg_bp_seen) {
-            if (fg_recently_generated()) fg_trip("queue backed up"); else s_fg_ignored_bp++;
-        } else if (ahead >= 2) fg_trip("render thread behind");
+        /* Backpressure itself is judged at the flip, by how long the guest
+         * waited (fg_on_present); here it only shows the real frame now. */
+        if (bp == s_fg_bp_seen && ahead >= 2 && fg_recently_generated()) fg_overload();
         s_fg_bp_seen = bp;
         fg_flush();
         return 0;
@@ -10916,12 +10952,25 @@ static int fg_on_present(uint16_t op, const uint8_t *p, uint32_t bytes, int stal
     const char *why = atomic_exchange(&s_fg_hold_reason, NULL);
     if (why) s_fg_hold_why = why;
     const int held = rt_now_ns() < atomic_load(&s_fg_hold_until);
+    /* The guest waiting on the queue trips the breaker when the wait since
+     * the last flip was a stall (a quarter of the game frame), not the short
+     * waits a 2P race shows with generation off as well. */
     const uint64_t bp = rt_backpressure_events();
-    if (bp != s_fg_bp_seen) {
-        s_fg_bp_seen = bp;
-        if (gen_recent) fg_trip("queue backed up"); else s_fg_ignored_bp++;
+    s_fg_bp_seen = bp;
+    {
+        RtStats rs;
+        rt_get_stats(&rs);
+        const uint64_t bns = rs.backpressure_ns + rs.ring_full_ns;
+        const double waited = (double)(bns - s_fg_bp_ns_seen) * 1e-9;
+        const double ghz0 = atomic_load(&s_fg_guest_hz);
+        s_fg_bp_ns_seen = bns;
+        if (waited > 0.25 * (double)s_fg_flip_vb / (ghz0 > 1.0 ? ghz0 : 59.94)) {
+            if (gen_recent) fg_trip("queue backed up"); else s_fg_ignored_bp++;
+        } else if (waited > 0.0) {
+            s_fg_ignored_bp++;
+        }
     }
-    if (stale) fg_trip("render thread behind");
+    if (stale && gen_recent) fg_overload();
     FG_BRK_INIT();
     const double ghz = atomic_load(&s_fg_guest_hz), rhz = atomic_load(&s_fg_refresh_hz);
     const double flip_s = (double)s_fg_flip_vb / (ghz > 1.0 ? ghz : 59.94);
@@ -10939,7 +10988,8 @@ static int fg_on_present(uint16_t op, const uint8_t *p, uint32_t bytes, int stal
         if (s_fg_force) n = slots > 1 ? slots - 1 : 1;
         else if (fg_breaker_open(&s_fg_brk, now) && !stale && !held) {
             const double est = fg_cost_estimate(fg_cost(), now, s_fg_fit_s);
-            n = fg_plan(flip_s, rhz, real_s, est > 0.0 ? est + s_fg_swap_ema : 0.0, 0.85, 7);
+            n = fg_plan(flip_s, rhz, real_s, est > 0.0 ? est + s_fg_swap_ema : 0.0, 0.85,
+                        fg_ceiling_get(fg_ceil(), now));
         }
         if (n == 0) s_fg_skipped_plan++;
     }
@@ -11034,7 +11084,9 @@ int gl_renderer_frame_gen_json(char *out, int cap) {
         "\"prims\":%u,\"matched\":%u,\"moved\":%u,\"unmatched\":%u,"
         "\"breaker_s\":%.2f,\"trips\":%u,\"last_trip\":\"%s\",\"held_s\":%.2f,"
         "\"last_hold\":\"%s\",\"swaps\":%llu,\"gen_samples\":%u,\"gen_cold\":%u,"
-        "\"gen_probes\":%u,\"ignored_late\":%llu,\"ignored_bp\":%llu",
+        "\"gen_probes\":%u,\"ignored_late\":%llu,\"ignored_bp\":%llu,"
+        "\"real_cpu_ms\":%.3f,\"real_gpu_ms\":%.3f,\"ceiling\":%d,"
+        "\"trips_late\":%u,\"trips_backed_up\":%u,\"trips_behind\":%u",
         s_fg_on, s_fg_on && s_rth_on && open, s_fg_force,
         (unsigned long long)s_fg_generated, (unsigned long long)s_fg_real_presents,
         (unsigned long long)s_fg_flips, (unsigned long long)s_fg_dups,
@@ -11050,7 +11102,9 @@ int gl_renderer_frame_gen_json(char *out, int cap) {
                      ? atomic_load(&s_fg_hold_until) - rt_now_ns() : 0) * 1e-9,
         s_fg_hold_why ? s_fg_hold_why : "", (unsigned long long)s_swaps_total,
         fg_cost()->samples, fg_cost()->discarded, fg_cost()->probes,
-        (unsigned long long)s_fg_ignored_late, (unsigned long long)s_fg_ignored_bp);
+        (unsigned long long)s_fg_ignored_late, (unsigned long long)s_fg_ignored_bp,
+        s_fg_real_ema * 1e3, s_fg_real_gpu_ema * 1e3, fg_ceil()->cap,
+        s_fg_trip_late, s_fg_trip_bp, s_fg_trip_behind);
 }
 
 /* ---- the recording vtable ------------------------------------------------ */

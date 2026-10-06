@@ -210,7 +210,25 @@ static void test_pace(void) {
     check(trips > 0 && trips < 20, "a steadily slow guest is late now and then");
 }
 
+static void test_ceiling(void) {
+    FgCeiling c;
+    fg_ceiling_init(&c, 7, 2.0);
+    check(fg_ceiling_get(&c, 0.0) == 7, "no ceiling before a trip");
+    fg_ceiling_trip(&c, 3, 1.0);
+    check(fg_ceiling_get(&c, 1.5) == 2, "an overload at three plans two");
+    fg_ceiling_trip(&c, 2, 1.6);
+    check(fg_ceiling_get(&c, 1.7) == 1, "another lowers it again");
+    fg_ceiling_trip(&c, 1, 1.8);
+    check(fg_ceiling_get(&c, 1.9) == 1, "never below one (the breaker stops generation)");
+    check(fg_ceiling_get(&c, 3.7) == 1 && fg_ceiling_get(&c, 3.9) == 2, "recovers one per 2 s");
+    check(fg_ceiling_get(&c, 7.9) == 4, "and keeps recovering");
+    fg_ceiling_trip(&c, 0, 8.0);
+    check(fg_ceiling_get(&c, 8.0) == 4, "a trip with nothing planned is not an overload");
+    check(fg_ceiling_get(&c, 100.0) == 7, "up to the maximum");
+}
+
 int main(void) {
+    test_ceiling();
     test_cost();
     test_pace();
     test_identical_and_moved();
