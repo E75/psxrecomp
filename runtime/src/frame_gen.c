@@ -190,3 +190,66 @@ void fg_breaker_trip(FgBreaker *b, double now, const char *reason) {
 }
 
 int fg_breaker_open(const FgBreaker *b, double now) { return now >= b->until; }
+
+void fg_cost_init(FgCost *c, double probe_s, double max_probe_s) {
+    memset(c, 0, sizeof *c);
+    c->base_probe_s = c->probe_s = probe_s;
+    c->max_probe_s = max_probe_s;
+    c->blocked_since = -1.0;
+}
+
+void fg_cost_cold(FgCost *c, int n) { if (n > c->cold) c->cold = n; }
+
+void fg_cost_add(FgCost *c, double cost_s, double fit_s) {
+    if (cost_s <= 0.0) return;
+    if (c->cold > 0) { c->cold--; c->discarded++; return; }
+    c->samples++;
+    if (c->probing || c->ema <= 0.0) {
+        c->ema = cost_s;
+        if (c->probing) {
+            c->probing = 0;
+            if (fit_s > 0.0 && cost_s > fit_s) {
+                c->probe_s *= 2.0;
+                if (c->probe_s > c->max_probe_s) c->probe_s = c->max_probe_s;
+            } else {
+                c->probe_s = c->base_probe_s;
+            }
+        }
+    } else {
+        c->ema = c->ema * 0.8 + cost_s * 0.2;
+    }
+    if (fit_s <= 0.0 || c->ema <= fit_s) c->blocked_since = -1.0;
+}
+
+double fg_cost_estimate(FgCost *c, double now, double fit_s) {
+    if (c->ema <= 0.0) return 0.0;
+    if (c->probing) {
+        /* A probe in flight; one never drawn (no room) is given up. */
+        if (now - c->probe_at < c->probe_s) return c->ema;
+        c->probing = 0;
+        c->blocked_since = now;
+    }
+    if (fit_s > 0.0 && c->ema > fit_s) {
+        if (c->blocked_since < 0.0) c->blocked_since = now;
+        else if (now - c->blocked_since >= c->probe_s) {
+            c->blocked_since = now;
+            c->probing = 1;
+            c->probe_at = now;
+            c->probes++;
+            return 0.0;
+        }
+    } else {
+        c->blocked_since = -1.0;
+    }
+    return c->ema;
+}
+
+int fg_pace_note(FgPace *p, double now, double period_s, double slack_s) {
+    if (period_s <= 0.0) return 0;
+    if (!p->primed) { p->primed = 1; p->next = now + period_s; return 0; }
+    int late = 0;
+    if (now > p->next + slack_s) { late = 1; p->next = now; }
+    else if (now < p->next - period_s) p->next = now;   /* early: pull in */
+    p->next += period_s;
+    return late;
+}
