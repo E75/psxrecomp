@@ -140,6 +140,24 @@ def main():
                 print(f"FAIL scale {s}: {k} differs with the render thread on "
                       f"({runs[0][k]} off, {runs[1][k]} on)")
                 ok = False
+    # Dynamic resolution: the same level steps between frames, recorded with
+    # the thread on (scales above 1 only; 1x has no levels below it).
+    for s in [int(v) for v in args.scales.split(",") if v and int(v) > 1]:
+        runs = {}
+        for threaded in (0, 1):
+            r = run([probe, s, threaded, args.frames, "dynres"])
+            p = parse(r.stdout)
+            tail = r.stdout.strip().splitlines()[-7:]
+            print(f"scale {s} dynres render_thread={threaded}: exit={r.returncode}", tail,
+                  r.stderr.strip()[-800:])
+            if r.returncode or p["failures"] != 0 or any(p[k] is None for k in KEYS):
+                ok = False
+            runs[threaded] = p
+        for k in KEYS:
+            if runs[0][k] != runs[1][k]:
+                print(f"FAIL scale {s} dynres: {k} differs with the render thread on "
+                      f"({runs[0][k]} off, {runs[1][k]} on)")
+                ok = False
     print("PASS" if ok else "FAIL")
     return 0 if ok else 1
 
