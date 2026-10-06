@@ -174,6 +174,61 @@ resolution (below), not of this layer.
 | headless | `--headless` (software) never starts it; `--headless-opengl` runs it on the hidden context (no present; the frame boundary still closes every frame), which is what `fp_identity` exercises |
 | Vulkan / software | never started (log line says why) |
 
+## Present thread (`[video] present_thread`)
+
+Opt-in, under the render thread, off by default (`present_thread = true`;
+`PSX_PRESENT_THREAD=0/1`, `PSX_PRESENT_THREAD_SLOTS=2..4`, default 3). On
+macOS a swap on the render thread cost 6-9 ms of waiting on the window
+compositor (`[NSOpenGLContext flushBuffer]` on GL-on-Metal) in every frame,
+real or generated; with this it costs a fence and a hand-off.
+
+- **Slots.** While it runs, framebuffer 0 of the composing context (the
+  render thread's, or the emulation thread's while it holds the context at a
+  sync point) is an offscreen slot: every `glBindFramebuffer(..., 0)` goes
+  through `gl_bind_fb_redirect` and lands on the current slot, an RGBA8 (RGB8
+  if the window has no alpha) texture plus depth-stencil at the window's
+  drawable size, reallocated when the window changes. Everything that used
+  to be drawn into the back buffer (display quad, OSD, hold-last captures,
+  `present_shot`, frame generation's kept real frame) is drawn into it
+  unchanged; the two `glReadBuffer(GL_BACK)` reads read its attachment.
+- **Swap.** `gl_present_swap`: a fence (`glFenceSync`), `glFlush`, queue the
+  slot to the present thread, take the next free slot (waiting only while
+  every other slot is queued or on screen: the display is the bottleneck;
+  that wait is what the dynamic-resolution and frame-generation ledgers count
+  as the swap), and `glWaitSync` on the fence the present thread left after
+  its last copy out of that slot.
+- **Present thread** (`present_thread.c`, backend-neutral core; GL callbacks
+  in `gpu_gl_renderer.c`): owns a second context created on the same window
+  with `SDL_GL_SHARE_WITH_CURRENT_CONTEXT` (textures and syncs are shared;
+  FBOs are per context, so it keeps its own read FBO per slot). Per slot, in
+  submission order: `glWaitSync` on the ready fence, a 1:1 `GL_NEAREST`
+  blit to the real framebuffer 0 (scaled only if the window changed since
+  the frame was composed), a done fence, the swap. The swap interval is
+  applied on its context. `QOS_CLASS_USER_INTERACTIVE` on macOS, above-normal
+  priority on Windows.
+- **Fallback.** No sync objects, no shared context or a failed start: a log
+  line and direct swaps, as without it. It starts and stops with the render
+  thread (stop presents what is queued first).
+- **Pixels.** The window shows exactly the composed image (gl_frame_gen_test
+  reads the window back after each copy). Compared with composing straight
+  into the window, the composed image is bit-identical at 1x and for every
+  native-wide present; on Apple GL-on-Metal a VRAM present resolved down
+  into a smaller window (area resolve) rounded 1 pixel by 1 LSB in 2 of 24
+  frames: rasterizing into a texture instead of the drawable. The test
+  allows at most 1 LSB on 0.05 % of the pixels and reports it.
+- **Latency.** Up to `slots - 1` composed frames can wait for the display.
+  Frame generation already paces presents to the refresh, so the queue
+  normally holds at most one.
+- **R4** (Match display 10x ceiling, dynres, Fit widescreen, 120 Hz panel,
+  host at load average 22-26): the render thread's swap went from 4.5-7.8 ms
+  to 0.02-0.08 ms; the present thread's swap takes 8-10 ms. 2P VS guest
+  56.6-57.6 → 57.2-58.6 Hz; with generation forced (test knob) 1P guest
+  25 → 41-44 Hz and presented 50 → 78-85 Hz.
+
+`{"cmd":"render_thread"}` carries `present_thread`: active, slots, submits,
+presents, waits and wait time (composing side blocked), swap time (avg/max,
+on the present thread), queue high water.
+
 ## Dynamic resolution (`[video] dynamic_resolution`)
 
 Opt-in as before (`dynamic_resolution = true`, `dynamic_resolution_min`;
@@ -227,6 +282,19 @@ full rules and `dynrt_default_params` the numbers):
   30 % of the predicted cost (and did not end the backpressure) is a strike;
   a second in a row means the cost is not the pixels: both steps are undone
   and down steps are blocked for 20 s, doubling to 320 s.
+- Fast first descent: armed when the controller starts (session start,
+  render-thread start, a new resolution) and on a savestate load, game entry
+  or window resize, for 6 s from the first judged window. While armed, a
+  window at or over the whole interval, or two over budget, jumps straight
+  to the highest level whose pure-area prediction (load × (S′/S)²) is at or
+  below 0.78; the jump is judged like any step and, if still over, jumps
+  again from the new measurement. A fixed part of the cost only makes the
+  target dearer than predicted, so a jump never lands below the level that
+  fits, and the level above it is predicted over the 0.70 up threshold, so no
+  up step follows. A fit after a step, an up step or a failed judgement
+  disarm it; single steps fine-tune. R4 2P VS from a 10x ceiling (busy
+  host): 10→5 or 10→6, then 4-3; guest at 59 Hz or more from 1.2-2.3 s
+  after the load (one level per judged window: 3.3 s).
 - Up, one level, after 3 s of windows with no backpressure and the next level
   predicted at 0.70 or less, 2 s after the last step, never above the
   ceiling. The prediction (load × ((1−f) + f·(S′/S)²)) learns f from each
@@ -279,7 +347,21 @@ means), `guest_bound`, the step counters and `up_blocked`.
   are poisoned after each call. It fails for each of these deliberate
   mistakes: replay reading the tags live, staging uploads from the guest
   array, dropping the stream state.
-- `video_enhancement_settings_test`: the key defaults off and parses.
+- `video_enhancement_settings_test`: the keys (`render_thread`,
+  `present_thread`) default off and parse.
+- `present_thread_test` (`test_present_thread.c`): the present core against
+  a fake presenter: presentation order is submission order over 600 frames
+  with 2-4 slots, a slot is never composed while queued or on screen, each
+  done token reaches the composer that next takes its slot, a slow display
+  blocks the composer, stop presents the queue and disposes leftover tokens,
+  a context failure fails the start. Clean under ThreadSanitizer.
+- `gl_frame_gen_test` present-thread runs: generation off and on, VRAM and
+  native-wide, flip and late timing: the window shows every composed image,
+  in order, bit for bit; real frames match the direct-swap run (see Pixels).
+- Windows (MinGW): the runtime builds with the Win32 path of
+  `render_thread.c` (SRW lock, condition variable, `CreateThread`), and
+  `render_thread_test` and `gl_render_thread_test` run there (the GL test
+  exits 77, a CTest skip, on a host with no GL 3.3 context).
 - `dynamic_resolution_rt_test` (`test_dynamic_resolution_rt.c`): the
   render-thread controller against a synthetic two-stage pipeline (guest E,
   render a + b·S², two frames in flight, costs four frames late): overrun ->
@@ -288,14 +370,13 @@ means), `guest_bound`, the step counters and `up_blocked`.
   no step; a cost that does not scale -> two strikes, undo, back-off; queue
   full with an under-reading meter -> down; floor and ceiling; a heavy
   stretch whose first window is mixed -> one strike, not an undo; holds;
-  thin windows; pins.
+  thin windows; pins; fast descent (10x→5x in one jump in 0.68 s vs 3.88 s
+  one level at a time, no overshoot, no step in the next 120 s; re-armed by
+  `dynrt_arm_descent`, single steps when not armed; light windows first do
+  not use it up; a flat cost still ends in the undo; the target function).
 - `gl_render_thread_test` dynres mode: the same level steps between frames
   with the thread off (applied at once) and on (recorded, and directly in
   held frames) give identical readbacks, VRAM, frame and wide surface.
-- Windows (MinGW): the runtime builds with the Win32 path of
-  `render_thread.c` (SRW lock, condition variable, `CreateThread`), and
-  `render_thread_test` and `gl_render_thread_test` run there (the GL test
-  exits 77, a CTest skip, on a host with no GL 3.3 context).
 - In game (R4, see the PR): `tools/fp_identity.py` guest identity render
   thread off vs on under `--headless-opengl`, and A/B frame rates from a race
   savestate at Native, 4K and Match display, 4:3 and widescreen.

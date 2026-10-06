@@ -59,7 +59,10 @@ has measured time to spare.
   real frame's `TIME_ELAPSED` span reads close to the whole interval (it
   counts the GPU waiting for records), so it is not used here; GPU overload
   shows as backpressure. The measured frame cost dynamic resolution uses
-  excludes generation (its query is paused, segments summed).
+  excludes generation (its query is paused, segments summed). With the
+  present thread (`[video] present_thread`, docs/RENDER_THREAD.md) a swap
+  here is the hand-off to it, and its cost is the time spent waiting for a
+  free slot, not the compositor's round trip.
 - **Breaker.** Off for 3 s (doubling to 24 s on repeats within 10 s) after
   the queue backed up (the guest waited), the render thread fell two frames
   behind, or a guest frame took over 1.5 intervals. While dynamic resolution
@@ -81,6 +84,10 @@ has measured time to spare.
 `{"cmd":"frame_gen"}` (not a sync point): generated / real presents, flips,
 dups, plan (`last_n`, `slots`), costs (`real_ms`, `gen_ms`, `swap_ms`), last
 match counts, breaker, last hold, total swaps.
+
+`PSX_PRESENT_SHOT_GENERATED=1` (diagnostic): a staged `present_shot` is
+taken at the next generated frame instead of the next present, to inspect
+in-between images in game.
 
 ## Tests
 
