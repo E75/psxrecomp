@@ -596,7 +596,14 @@ int main(void) {
         CHECK(pgxp_probe_precise_vertex(ADDR_A, PACKED, 160, 80) ==
               PGXP_SRC_DATAFLOW);
         CHECK(pgxp_probe_precise_vertex(ADDR_A, PACKED, 161, 80) ==
-              PGXP_SRC_NATIVE);
+              PGXP_SRC_NATIVE);                /* truncation reject */
+        CHECK(pgxp_probe_precise_vertex(ADDR_A, PACKED ^ 1u, 160, 80) ==
+              PGXP_SRC_NATIVE);                /* value mismatch */
+        const float tolerance_was = pgxp_tolerance();
+        pgxp_set_tolerance(0.1f);
+        CHECK(pgxp_probe_precise_vertex(ADDR_A, PACKED, 160, 80) ==
+              PGXP_SRC_NATIVE);                /* tolerance reject */
+        pgxp_set_tolerance(tolerance_was);
         pgxp_get_stats(&b);
         CHECK(std::memcmp(&a, &b, sizeof a) == 0);
         pgxp_note_rect_bypass(1);

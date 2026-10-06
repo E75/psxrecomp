@@ -1093,7 +1093,11 @@ static int pgxp_get_precise_vertex_impl(uint32_t addr, uint32_t packet_word,
                                         int32_t int_x, int32_t int_y,
                                         int32_t *x16, int32_t *y16,
                                         uint16_t *sz, int probe) {
-    s_stats.lookups++;
+    /* A probe asks the same question without recording it (the rectangle
+     * shortcut runs one per corner before drawing): it skips every counter
+     * instead of copying the whole statistics record around the call. */
+    const int count = !probe;
+    if (count) s_stats.lookups++;
 
     int32_t px = 0, py = 0;
     uint16_t pz = 0;
@@ -1108,7 +1112,7 @@ static int pgxp_get_precise_vertex_impl(uint32_t addr, uint32_t packet_word,
                 py = pv->y16;
                 pz = (pv->flags & PGXP_F_VZ) ? pv->z : 0;
                 have = PGXP_SRC_DATAFLOW;
-            } else {
+            } else if (count) {
                 s_stats.value_mismatch++;
             }
         }
@@ -1135,25 +1139,27 @@ static int pgxp_get_precise_vertex_impl(uint32_t addr, uint32_t packet_word,
          * tolerance clamp. */
         const int why = pgxp_accept(px, py, int_x, int_y, packet_word);
         if (why == 1) {
-            s_stats.trunc_reject++;
+            if (count) s_stats.trunc_reject++;
             have = 0;
         } else if (why == 2) {
-            s_stats.tolerance_reject++;
+            if (count) s_stats.tolerance_reject++;
             have = 0;
         }
     }
 
     if (!have) {
-        s_stats.native++;
+        if (count) s_stats.native++;
         *x16 = int_x << 16;
         *y16 = int_y << 16;
         *sz = 0;
         return PGXP_SRC_NATIVE;
     }
 
-    if (have == PGXP_SRC_DATAFLOW) s_stats.dataflow_hit++;
-    else                           s_stats.fallback_hit++;
-    if (pz != 0) s_stats.w_valid++;
+    if (count) {
+        if (have == PGXP_SRC_DATAFLOW) s_stats.dataflow_hit++;
+        else                           s_stats.fallback_hit++;
+        if (pz != 0) s_stats.w_valid++;
+    }
     *x16 = px;
     *y16 = py;
     *sz = pz;
@@ -1170,13 +1176,10 @@ extern "C" int pgxp_get_precise_vertex(uint32_t addr, uint32_t packet_word,
 
 extern "C" int pgxp_probe_precise_vertex(uint32_t addr, uint32_t packet_word,
                                          int32_t int_x, int32_t int_y) {
-    const PGXPStats saved = s_stats;
     int32_t x16, y16;
     uint16_t sz;
-    const int src = pgxp_get_precise_vertex_impl(addr, packet_word, int_x, int_y,
-                                                 &x16, &y16, &sz, 1);
-    s_stats = saved;
-    return src;
+    return pgxp_get_precise_vertex_impl(addr, packet_word, int_x, int_y,
+                                        &x16, &y16, &sz, 1);
 }
 
 /* ------------------------------------------------------------------------- */
