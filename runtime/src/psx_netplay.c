@@ -467,6 +467,7 @@ void psx_netplay_present_local_view(uint32_t x, uint32_t y,
     (void)w;
     (void)h;
 }
+void psx_netplay_local_view_clear(void) {}
 int psx_netplay_local_view(uint32_t display_w, uint32_t display_h,
                            uint32_t *x, uint32_t *y,
                            uint32_t *w, uint32_t *h)
@@ -3390,6 +3391,11 @@ void psx_netplay_present_local_view(uint32_t x, uint32_t y,
     (void)psx_netplay_local_view_set(&s_local_view,
                                      rnet_session_sim_tick(g_np.session),
                                      x, y, w, h);
+}
+
+void psx_netplay_local_view_clear(void)
+{
+    psx_netplay_local_view_reset(&s_local_view);
 }
 
 int psx_netplay_local_view(uint32_t display_w, uint32_t display_h,

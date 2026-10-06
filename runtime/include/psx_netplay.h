@@ -143,6 +143,10 @@ int psx_netplay_sim_pad(int seat, PsxNetPad *out);
  * up. Ignored while netplay is off. */
 void psx_netplay_present_local_view(uint32_t x, uint32_t y,
                                     uint32_t w, uint32_t h);
+/* Drop any current request at once (the full frame is presented again).
+ * A committed psx_mod_render_local_view() image calls it: the peer's own
+ * image of the display supersedes a crop of the canonical frame. */
+void psx_netplay_local_view_clear(void);
 /* 1 and the rectangle while a current request fits a display of
  * display_w x display_h. */
 int psx_netplay_local_view(uint32_t display_w, uint32_t display_h,

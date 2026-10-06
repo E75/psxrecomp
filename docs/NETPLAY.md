@@ -161,6 +161,16 @@ that identical frame; only what its window shows changes:
   savestate, and is ignored offline. The headless present-image ring records
   the same rectangle, which is how a harness checks it. Vulkan, which netplay
   replaces with the software present, ignores it.
+- `psx_mod_render_local_view(cpu, rect, fn, user)` (`mod_plugins.h`): this
+  peer draws its *own* image of a display rect with the game's code, for
+  example its seat's single full-screen view, inside the render-pass sandbox
+  (docs/RENDER_PASSES.md, "Netplay local view"). The machine is restored
+  afterwards, so the canonical frame stays in the authoritative VRAM, rollback
+  snapshots and digests; only the OpenGL presenter's surface keeps the image.
+  A committed image cancels any `psx_netplay_present_local_view` crop
+  (`psx_netplay_local_view_clear`). Forward netplay frames only; a title falls
+  back to the crop when `psx_mod_render_local_view_status()` is not ready
+  (software present, Vulkan, resimulation).
 
 ---
 

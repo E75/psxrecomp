@@ -500,6 +500,34 @@ enum {
     PSX_MOD_RENDER_PASS_BUSY = 6
 };
 uint32_t psx_mod_render_pass_status(void);
+/*
+ * Netplay local view: this peer's own image of a display rect, drawn by the
+ * game's code inside the render-pass sandbox, replaces what the presenter
+ * shows of that rect. For a title whose netplay frame draws every seat's view
+ * (so guest state stays identical on every peer) but whose players should
+ * each see their own seat's single full-screen view.
+ *
+ * `fn` runs as a render pass does (frozen guest time, sandboxed stores, the
+ * watchdog; CPU with the GTE, RAM, scratchpad, devices and the authoritative
+ * VRAM restored afterwards) and draws into rect->x/y/w/h; alpha_q16 is 0. When
+ * it returns nonzero the presenter's own copy of the rect keeps the image
+ * until the guest draws there again: the canonical frame stays in the
+ * authoritative VRAM, savestates, rollback snapshots and digests. A committed
+ * image also cancels any psx_netplay_present_local_view() crop. Call it where
+ * the next flip will show rect and the guest has finished drawing it.
+ *
+ * Only in a netplay session on forward frames, with the OpenGL presenter
+ * keeping a surface separate from the authoritative VRAM (dual raster); never
+ * while resimulating, in rewind, lockstep replay, fast-forward, inside an
+ * exception or a pass. psx_mod_render_local_view_status() says why not, with
+ * the PSX_MOD_RENDER_PASS_* reasons; a title then shows its canonical frame
+ * (for example its own view's part of it through
+ * psx_netplay_present_local_view). Returns 1 when the image was committed.
+ */
+int psx_mod_render_local_view(struct CPUState* cpu,
+                              const PSXModRenderPass* rect,
+                              PSXModRenderPassFn fn, void* user);
+uint32_t psx_mod_render_local_view_status(void);
 /* Simultaneous stereo capture, independent of temporal interpolation. Each
  * eye starts from the same guest state; CPU/RAM/devices/VRAM are restored
  * before the other eye and on failure. Publish only after both succeed.
