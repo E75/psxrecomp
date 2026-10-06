@@ -9361,10 +9361,12 @@ static void dynres_tick_rt(double now_s, double wall, double period, int held,
     const int prev_level = c.level;
     const int level = dynrt_sample(&c, now_s, &smp);
     /* Frame generation only spends surplus: not while the real frames are
-     * over budget or the level is stepping down. */
-    if (level < prev_level || c.over_streak > 0)
-        gl_renderer_frame_gen_hold(level < prev_level ? "dynres stepped down"
-                                                      : "dynres over budget");
+     * over budget (renewed every over-budget sample) and briefly after a
+     * step down, while the new level's first frames settle. */
+    if (level < prev_level)
+        gl_renderer_frame_gen_hold("dynres stepped down", 0.25);
+    else if (c.over_streak > 0)
+        gl_renderer_frame_gen_hold("dynres over budget", 0.1);
     if (c.windows != g_dynres.rt_last_windows) {
         g_dynres.rt_last_windows = c.windows;
         g_dynres.rt_win_cpu_ms = g_dynres.rt_acc_frames
