@@ -8494,7 +8494,15 @@ static void gl_swap_with_osd(void) {
         extern int  present_shot_take(char *out, int n);
         extern void present_shot_done(int ok);
         char shot_path[512];
-        if (present_shot_take(shot_path, (int)sizeof(shot_path))) {
+        /* PSX_PRESENT_SHOT_GENERATED=1 (diagnostic): a staged present_shot
+         * waits for the next generated frame (frame generation). */
+        static int gen_only = -1;
+        if (gen_only < 0) {
+            const char *e = getenv("PSX_PRESENT_SHOT_GENERATED");
+            gen_only = (e && *e && *e != '0') ? 1 : 0;
+        }
+        if ((!gen_only || s_fg_presenting) &&
+            present_shot_take(shot_path, (int)sizeof(shot_path))) {
             int ww = 0, wh = 0;
             int wrote = 0;
             SDL_GL_GetDrawableSize(s_win, &ww, &wh);
