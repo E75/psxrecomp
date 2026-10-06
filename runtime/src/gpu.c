@@ -3484,15 +3484,18 @@ static uint32_t v_display_y2;
 /* GPUREAD latch (GP1(10h) get-info result, or VRAM read data) */
 static uint32_t gpuread_latch;
 
-/* C0 (VRAM→CPU) capture slot — forward declaration for gpu_read_gpuread */
-#define C0_HISTORY_CAP_FWD 32
+/* C0 (VRAM→CPU) history: an always-on ring of the most recent reads
+ * (it used to keep only the first 32 since boot, so gameplay readbacks were
+ * invisible). Forward declaration for gpu_read_gpuread. */
+#define C0_HISTORY_CAP_FWD 256
 static struct C0HistEntry {
     uint16_t x, y, w, h;
     uint32_t func_addr, sp_val, s1_val;
     uint32_t first_words[4];
     int read_count;
+    uint32_t frame;
 } c0_history_fwd[C0_HISTORY_CAP_FWD];
-static int c0_history_count_fwd = 0;
+static uint64_t c0_history_count_fwd = 0;   /* total reads since boot */
 static int c0_capture_slot_fwd = -1;
 
 /* Vblank presentation callback */
@@ -5747,11 +5750,18 @@ static void gp0_exec_cpu_to_vram(void) {
 #define c0_history_count c0_history_count_fwd
 #define c0_capture_slot c0_capture_slot_fwd
 
-int gpu_get_c0_count(void) { return c0_history_count; }
+/* Total GP0 C0 reads since boot; the ring holds the newest C0_HISTORY_CAP. */
+uint64_t gpu_get_c0_total(void) { return c0_history_count; }
+int gpu_get_c0_count(void) {
+    return c0_history_count < C0_HISTORY_CAP ? (int)c0_history_count : C0_HISTORY_CAP;
+}
+/* index 0 = oldest entry still in the ring. */
 int gpu_get_c0_history(int index, int *x, int *y, int *w, int *h,
                        uint32_t *func, uint32_t *sp, uint32_t *s1,
                        uint32_t *fw0, uint32_t *fw1, int *rcount) {
-    if (index < 0 || index >= c0_history_count) return 0;
+    if (index < 0 || index >= gpu_get_c0_count()) return 0;
+    if (c0_history_count > C0_HISTORY_CAP)
+        index = (int)((c0_history_count + (uint64_t)index) % C0_HISTORY_CAP);
     *x = c0_history[index].x; *y = c0_history[index].y;
     *w = c0_history[index].w; *h = c0_history[index].h;
     *func = c0_history[index].func_addr;
@@ -5761,6 +5771,12 @@ int gpu_get_c0_history(int index, int *x, int *y, int *w, int *h,
     *fw1 = c0_history[index].first_words[1];
     *rcount = c0_history[index].read_count;
     return 1;
+}
+uint32_t gpu_get_c0_frame(int index) {
+    if (index < 0 || index >= gpu_get_c0_count()) return 0;
+    if (c0_history_count > C0_HISTORY_CAP)
+        index = (int)((c0_history_count + (uint64_t)index) % C0_HISTORY_CAP);
+    return c0_history[index].frame;
 }
 
 static void gp0_exec_vram_to_cpu(void) {
@@ -5777,8 +5793,9 @@ static void gp0_exec_vram_to_cpu(void) {
     vram_read_h = (h == 0) ? 0x200 : (uint16_t)h;
 
     /* Record for debug */
-    if (c0_history_count < C0_HISTORY_CAP) {
-        int slot = c0_history_count++;
+    {
+        int slot = (int)(c0_history_count++ % C0_HISTORY_CAP);
+        c0_history[slot].frame = (uint32_t)s_frame_count;
         c0_history[slot].x = vram_read_x;
         c0_history[slot].y = vram_read_y;
         c0_history[slot].w = vram_read_w;

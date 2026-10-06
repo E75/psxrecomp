@@ -82,9 +82,18 @@ typedef struct {
      * corrupt snapshot (0x801384AC paired with 0x801EFE80). */
     uint32_t entry_sp;     /* cpu->gpr[29] at exception entry */
     uint32_t pump_site;    /* g_cosim_dirty_pump_site at entry (which delivery path) */
+    uint64_t exit_cycle;   /* guest cycle at the exit restore decision (0 = not exited) */
 } IrqCtxEntry;
 IrqCtxEntry g_irqctx_ring[IRQCTX_RING_CAP];
 uint64_t    g_irqctx_seq = 0;
+/* Always-on per-source exception accounting (irq_exc_stats). A delivery is
+ * charged to every I_STAT&I_MASK bit pending at entry (index 11 = software
+ * interrupt only); cycles are guest cycles from entry to the exit restore
+ * decision, so a handler that stalls (e.g. a held DMA kick) shows up here. */
+uint64_t g_exc_src_deliveries[12];
+uint64_t g_exc_src_cycles[12];
+uint64_t g_exc_cycles_total;
+uint64_t g_exc_exits_total;
 extern uint64_t psx_get_cycle_count(void);
 
 /* Record an interrupt-delivery decision into the event ring. GATE outcomes are
@@ -2000,6 +2009,20 @@ irq_deliver_eval:
         e->v1_saved    = saved_gpr[3];
         e->ra_exit     = cpu->gpr[31];
         e->ra_saved    = saved_gpr[31];
+        e->exit_cycle  = psx_get_cycle_count();
+        {
+            const uint64_t spent = e->exit_cycle - e->cycle;
+            const uint32_t pend = (e->istat & e->imask) & 0x7FFu;
+            g_exc_cycles_total += spent;
+            g_exc_exits_total++;
+            if (!pend) { g_exc_src_deliveries[11]++; g_exc_src_cycles[11] += spent; }
+            for (int b = 0; b < 11; b++) {
+                if (pend & (1u << b)) {
+                    g_exc_src_deliveries[b]++;
+                    g_exc_src_cycles[b] += spent;
+                }
+            }
+        }
     }
     if (do_restore) {
         for (int i = 0; i < 32; i++) cpu->gpr[i] = saved_gpr[i];

@@ -31,6 +31,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #include "gpu_timeline.h"
 
 /* Word-aligned main-RAM offset of a DMA address (MADR / stepped cursor)
@@ -807,16 +817,78 @@ static void start_async_gpu_linked_list(void) {
  * its text packets from a template, clearing the link) cannot reach it before
  * the walk does. A cyclic list still ends at the walker's node limit. The hold
  * also ends if an advance moves no list word. */
+/* Always-on hold observability (dma_hold_stats / dma_hold_ring). Every held
+ * kick is recorded with its guest cost, its host wall time and whether it was
+ * made from inside an exception handler: a kick from an IRQ callback runs the
+ * whole walk (and the GPU work it feeds) with in_exception set, which is what
+ * the phase profiler's exc_share then measures. */
+extern int psx_get_in_exception(void);
+static DMAGpuHoldEntry s_hold_ring[DMA_GPU_HOLD_RING_CAP];
+static DMAGpuHoldStats s_hold_stats;
+
+static uint64_t hold_host_ticks(void) {
+#ifdef _WIN32
+    LARGE_INTEGER c; QueryPerformanceCounter(&c); return (uint64_t)c.QuadPart;
+#else
+    struct timespec ts; timespec_get(&ts, TIME_UTC);   /* C11; diagnostics only */
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+#endif
+}
+
+static uint64_t hold_host_ticks_per_sec(void) {
+#ifdef _WIN32
+    LARGE_INTEGER f; QueryPerformanceFrequency(&f); return (uint64_t)f.QuadPart;
+#else
+    return 1000000000ull;
+#endif
+}
+
 static void hold_cpu_for_gpu_linked_list(void) {
     if (psx_in_device_service || g_ls_replay_active || g_psx_render_pass_active)
         return;
+    const uint64_t cyc0 = psx_cycle_count;
+    const uint64_t host0 = hold_host_ticks();
+    const uint32_t words0 = gpu_linked_list.total_words;
+    uint32_t steps = 0;
     while (gpu_linked_list.active && ((channels[2].chcr >> 24) & 1u) &&
            channel_enabled(2)) {
         const uint32_t moved = gpu_linked_list.total_words;
         psx_advance_cycles(dma_gpu_ll_cycles_to_event(&gpu_linked_list));
         psx_devices_service_to_now();
+        steps++;
         if (gpu_linked_list.active && gpu_linked_list.total_words == moved) break;
     }
+    const uint64_t host_us = (hold_host_ticks() - host0) * 1000000ull /
+                             hold_host_ticks_per_sec();
+    const int in_exc = psx_get_in_exception() != 0;
+    DMAGpuHoldEntry *e = &s_hold_ring[s_hold_stats.count & (DMA_GPU_HOLD_RING_CAP - 1u)];
+    e->seq = s_hold_stats.count;
+    e->cycle = cyc0;
+    e->held_cycles = (uint32_t)(psx_cycle_count - cyc0);
+    e->words = gpu_linked_list.total_words - words0;
+    e->steps = steps;
+    e->host_us = (uint32_t)(host_us > 0xFFFFFFFFull ? 0xFFFFFFFFull : host_us);
+    e->frame = (uint32_t)s_frame_count;
+    e->kick_pc = g_debug_last_store_pc;
+    e->madr = channels[2].madr;
+    e->in_exception = (uint8_t)in_exc;
+    e->still_active = (uint8_t)(gpu_linked_list.active != 0);
+    s_hold_stats.count++;
+    s_hold_stats.held_cycles += e->held_cycles;
+    s_hold_stats.host_us += host_us;
+    s_hold_stats.words += e->words;
+    s_hold_stats.steps += steps;
+    if (in_exc) {
+        s_hold_stats.exc_count++;
+        s_hold_stats.exc_held_cycles += e->held_cycles;
+        s_hold_stats.exc_host_us += host_us;
+    }
+}
+
+void dma_debug_get_gpu_hold(DMAGpuHoldStats *out_stats,
+                            const DMAGpuHoldEntry **out_ring) {
+    if (out_stats) *out_stats = s_hold_stats;
+    if (out_ring) *out_ring = s_hold_ring;
 }
 
 static uint32_t execute_ch2_gpu(void) {

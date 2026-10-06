@@ -65,6 +65,9 @@ Columns: **N** = native, **D** = DuckStation oracle.
 | `sio_state` | ✓ | ✓ | — | SIO registers + (native only) pad/memcard protocol + TX/RX history |
 | `irq_state` | ✓ | ✓ | — | `I_STAT`, `I_MASK` (both), plus chain state on native |
 | `dma_state` | ✓ | ✓ | — | DPCR, DICR, all 7 channel states (madr/bcr/chcr) |
+| `irq_exc_stats` | ✓ |   | — | Cumulative per-source exception accounting since boot: deliveries and guest cycles from entry to exit, charged to every `I_STAT & I_MASK` bit pending at entry (`sw` = software interrupt only). Diff two snapshots for a window. `irqctx_ring` entries carry the matching `exit_cycle` |
+| `dma_hold_stats` | ✓ |   | — | Cumulative CPU holds for kicked GPU linked-list walks (the kicking store returns only when the walk ends): count, guest `held_cycles`, host `host_us`, words, advance steps, and the `exc_*` share for kicks made inside an exception handler (that host time is what `phase_profile` reports as `exc_share`) |
+| `dma_hold_ring` | ✓ |   | `count`, `frame_lo`, `frame_hi` | Newest held kicks (ring of 4096): cycle, frame, held cycles, words, steps, host µs, kick PC, MADR, `in_exc`, `still_active` |
 | `event_state` |   | ✓ | — | EvCB table summary (stub on DS — events are BIOS-level) |
 | `overlay_state` |   | ✓ | — | Current overlay info |
 | `cdrom_sector_dump` | ✓ |   | `offset`, `len` | Dump bytes from the last CD-ROM sector observed by the controller, including LBA/mode metadata |
@@ -431,9 +434,9 @@ The TCP server is the canonical instrumentation surface. Rule 3 in `CLAUDE.md` i
 
 ## Complete command index (generated)
 
-**345 commands registered** — 332 on the native server (`runtime/src/debug_server.c`), 61 on the Beetle server (`runtime/src/beetle_debug_server.c`).
+**348 commands registered** — 335 on the native server (`runtime/src/debug_server.c`), 61 on the Beetle server (`runtime/src/beetle_debug_server.c`).
 
-63 of 345 have prose above; **282 are index-only**. An index-only command still works — it just has no description here yet. Send it `{"cmd":"<name>"}` and read the reply, or find its `handle_*` function in the server source.
+68 of 348 have prose above; **280 are index-only**. An index-only command still works — it just has no description here yet. Send it `{"cmd":"<name>"}` and read the reply, or find its `handle_*` function in the server source.
 
 Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this block has drifted from the code.
 
@@ -517,6 +520,8 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `display_ring_get` | ✓ |  |  |
 | `display_ring_stats` | ✓ |  |  |
 | `dma_cdrom_history` | ✓ |  |  |
+| `dma_hold_ring` | ✓ |  | ✓ |
+| `dma_hold_stats` | ✓ |  | ✓ |
 | `dma_state` | ✓ |  | ✓ |
 | `dma_trace_clear` | ✓ |  |  |
 | `dma_trace_dump` | ✓ |  |  |
@@ -592,8 +597,9 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `insn_freeze_snapshot` | ✓ |  |  |
 | `insn_freeze_status` | ✓ |  |  |
 | `insn_freeze_target` | ✓ |  |  |
+| `irq_exc_stats` | ✓ |  | ✓ |
 | `irq_state` | ✓ |  | ✓ |
-| `irqctx_ring` | ✓ |  |  |
+| `irqctx_ring` | ✓ |  | ✓ |
 | `kernel_bless` | ✓ |  |  |
 | `latency` | ✓ |  |  |
 | `load_transitions` | ✓ |  |  |
@@ -649,7 +655,7 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `pgxp_miss_ring` | ✓ |  |  |
 | `pgxp_shadow` | ✓ |  |  |
 | `phase_hot` | ✓ |  |  |
-| `phase_profile` | ✓ |  |  |
+| `phase_profile` | ✓ |  | ✓ |
 | `ping` | ✓ | ✓ | ✓ |
 | `present_image_ring_get` | ✓ |  |  |
 | `present_image_ring_stats` | ✓ |  |  |
