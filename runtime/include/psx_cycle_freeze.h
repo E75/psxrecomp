@@ -1,7 +1,8 @@
 #ifndef PSX_CYCLE_FREEZE_H
 #define PSX_CYCLE_FREEZE_H
 
-/* Render-pass time freeze (render_pass.c, docs/RENDER_PASSES.md).
+/* Guest-time freeze: render passes (render_pass.c, docs/RENDER_PASSES.md)
+ * and uncharged guest calls (mod_plugins.h psx_mod_call_guest_uncharged).
  *
  * Runtime-only: generated and overlay code never sees this header. It is kept
  * out of psx_cycles.h on purpose, because psx_cycles.h is part of the
@@ -24,6 +25,10 @@ extern "C" {
 #endif
 
 extern int g_psx_render_pass_active;
+/* Set while guest time is frozen, by a render pass or an uncharged call:
+ * devices are not serviced and no interrupt is delivered. Pass-only effects
+ * (rolled-back stores, synchronous DMA) key on g_psx_render_pass_active. */
+extern int g_psx_guest_time_frozen;
 typedef struct PsxCycleFreeze {
     uint64_t cycle_count;
     uint64_t next_service;
@@ -41,6 +46,18 @@ typedef struct PsxCycleFreeze {
 int  psx_cycle_freeze_begin(PsxCycleFreeze *save, uint64_t watchdog_cycles,
                             void (*overrun)(void));
 void psx_cycle_freeze_end(const PsxCycleFreeze *save);
+
+/* Uncharged span: the same freeze without the pass's rollback. Code run
+ * between begin and end keeps every effect on RAM, registers and devices, as
+ * if it executed in an instant at the start cycle: end() puts the clock back,
+ * so none of its cycles are charged, no device advanced and no interrupt was
+ * taken meanwhile. A span that executes more than `budget_cycles` (0 = no
+ * limit) thaws: from then on it runs on the live clock and all its cycles are
+ * charged, so a callee that waits on a device still completes. begin()
+ * returns 0 while time is already frozen (the caller then simply runs the
+ * code). end() returns 1 when the span stayed uncharged. Spans do not nest. */
+int  psx_cycle_uncharged_begin(PsxCycleFreeze *save, uint64_t budget_cycles);
+int  psx_cycle_uncharged_end(const PsxCycleFreeze *save);
 
 #ifdef __cplusplus
 }

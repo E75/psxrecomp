@@ -144,6 +144,23 @@ void psx_mod_write_code_word(uint32_t address, uint32_t value);
 uint32_t psx_mod_call_guest(struct CPUState* cpu, uint32_t function,
                             uint32_t return_address, uint32_t a0, uint32_t a1,
                             uint32_t a2, uint32_t a3);
+/* psx_mod_call_guest in zero guest time, for CPU/RAM work a game spends guest
+ * time on while it loads (allocators, decoders, table builds). Every RAM,
+ * register and device effect of the callee is kept, as if it executed in an
+ * instant at the call's guest cycle: none of its cycles are charged, no
+ * device advances and no interrupt is taken while it runs, and the caller's
+ * pending mult/div, GTE and load-pipeline timing is as it was before the
+ * call. Device work the callee starts (a DMA, a CD command) proceeds in guest
+ * time after the return. A callee that executes more than budget_cycles
+ * (0 = no limit) is charged in full from then on, so one that waits on a
+ * device still completes; *charged (optional) is then set to 1. Inside a
+ * render pass or another uncharged call, time is already frozen and this is
+ * psx_mod_call_guest. The outcome depends only on guest state, so netplay
+ * peers and rollback re-simulation agree. Returns v0. */
+uint32_t psx_mod_call_guest_uncharged(struct CPUState* cpu, uint32_t function,
+                                      uint32_t return_address, uint32_t a0,
+                                      uint32_t a1, uint32_t a2, uint32_t a3,
+                                      uint32_t budget_cycles, int* charged);
 /* Deliver disc sectors into RAM exactly as a completed CD-ROM DMA would
  * (overlay capture, executable-page invalidation, CD DMA log when lba >= 0).
  * Word-aligned address and length. Returns 0 when the span leaves RAM. */

@@ -1008,6 +1008,14 @@ if(BUILD_TESTING)
     target_include_directories(render_pass_freeze_test PRIVATE include)
     add_test(NAME render_pass_freeze_test COMMAND render_pass_freeze_test)
 
+    # Uncharged guest-time spans (psx_mod_call_guest_uncharged's time layer)
+    # against the same mock devices.
+    add_executable(uncharged_span_test
+        tests/test_uncharged_span.c
+        src/psx_cycles.c)
+    target_include_directories(uncharged_span_test PRIVATE include)
+    add_test(NAME uncharged_span_test COMMAND uncharged_span_test)
+
     # Render-pass watchdog abort from nested guest frames: the real
     # render_pass.c and psx_cycles.c against mock memory, devices and
     # presenter (the frames use GCC/Clang cleanup handlers, as generated
