@@ -253,3 +253,24 @@ int fg_pace_note(FgPace *p, double now, double period_s, double slack_s) {
     p->next += period_s;
     return late;
 }
+
+void fg_ceiling_init(FgCeiling *c, int max, double recover_s) {
+    c->cap = c->max = max;
+    c->last = -1e30;
+    c->recover_s = recover_s;
+}
+
+void fg_ceiling_trip(FgCeiling *c, int n_planned, double now) {
+    if (n_planned <= 0) return;
+    const int to = n_planned - 1 > 1 ? n_planned - 1 : 1;
+    if (to < c->cap) c->cap = to;
+    c->last = now;
+}
+
+int fg_ceiling_get(FgCeiling *c, double now) {
+    while (c->cap < c->max && now - c->last >= c->recover_s) {
+        c->cap++;
+        c->last = c->last < -1e29 ? now : c->last + c->recover_s;
+    }
+    return c->cap;
+}

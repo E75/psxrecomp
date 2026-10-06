@@ -117,6 +117,14 @@ void   fg_cost_add(FgCost *c, double cost_s, double fit_s);
  * `fit_s` as above: an estimate above it is what blocks the plan. */
 double fg_cost_estimate(FgCost *c, double now, double fit_s);
 
+/* A ceiling on the plan for what the cost estimate cannot see (the real
+ * frames' GPU work): an overload trip while n frames were planned lowers
+ * it to n - 1; each `recover_s` without one raises it by one, up to max. */
+typedef struct FgCeiling { int cap, max; double last; double recover_s; } FgCeiling;
+void fg_ceiling_init(FgCeiling *c, int max, double recover_s);
+void fg_ceiling_trip(FgCeiling *c, int n_planned, double now);
+int  fg_ceiling_get(FgCeiling *c, double now);
+
 /* The guest's own pacing: frame boundaries against a schedule that advances
  * one interval per frame. Late only when the guest slipped more than `slack_s`
  * behind its schedule (jitter, a long frame followed by a short one, does not
