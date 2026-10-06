@@ -43,6 +43,10 @@ int  present_image_ring_frozen(void);
 
 /* Oldest/newest recorded frame numbers and how many entries are valid. */
 void present_image_ring_span(uint32_t *oldest, uint32_t *newest, int *count);
+/* Unique presentation IDs distinguish extra swaps within one guest frame. */
+void present_image_ring_sequence_span(uint32_t *oldest, uint32_t *newest);
+int present_image_ring_get_sequence_rgb(uint32_t sequence, uint8_t **rgb,
+                                       int *w, int *h, uint32_t *frame);
 
 /* Copy entry for `frame` as RGB888 top-down into a malloc'd buffer the
  * caller frees. Returns 0 if the frame is not in the ring. */

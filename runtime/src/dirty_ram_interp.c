@@ -3503,7 +3503,7 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
                 /* A patched prologue can force entry through the interpreter,
                  * while the remaining static ranges at a later continuation
                  * are still safe to run as compiled code. */
-                if (clean_game_text_miss && interp_enter_compiled(cpu, target)) {
+                if (!forced && clean_game_text_miss && interp_enter_compiled(cpu, target)) {
                     g_dirty_ram_native_handoffs++;
                     g_dirty_ram_blocks_run++;
                     if (pc_entry) pc_entry->insns += (uint64_t)insns_executed;
@@ -3564,7 +3564,10 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
          * RAM-byte check. Require the continuation's complete emitted range to
          * match before this straight-line handoff. Control-transfer handoffs
          * retain suffix validation because they are explicit guest entries. */
-        if (clean_game_text_miss && psx_game_text_native_ok_full(pc) &&
+        /* A bounded replay owns every instruction through stop_addr. A
+         * compiled continuation can fall through past that stop, including
+         * when the continuation itself begins exactly at stop_addr. */
+        if (!forced && clean_game_text_miss && psx_game_text_native_ok_full(pc) &&
             interp_enter_compiled(cpu, pc)) {
             g_dirty_ram_native_handoffs++;
             g_dirty_ram_blocks_run++;

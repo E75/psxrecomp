@@ -3520,16 +3520,21 @@ static void gpu_flat_rect(int x,int y,int w,int h,uint16_t c,int semi) {
     }
     if (overlay) {
         flush_line_batch();  /* queued lines mirror as they arrived */
+        /* Earlier world geometry still needs its ordinary wide mirror. Drain
+         * it before suppressing only this overlay's canonical triangles. */
+        flush_flat_batch();
+        flush_tex_batch();
         s_wide_suppress = 1;
     }
     gpu_triangle(x,   y,   c, x+w, y,   c, x,   y+h, c, semi);
     gpu_triangle(x+w, y,   c, x,   y+h, c, x+w, y+h, c, semi);
     if (overlay) {
+        /* gpu_triangle queues flat geometry. Finish these two triangles while
+         * their mirror remains suppressed, before the direct wide overlay. */
+        flush_flat_batch();
         s_wide_suppress = 0;
-        /* The two canonical triangles drew into the hr FBO already (each
-         * gpu_triangle ran its own hr_begin/hr_end). Re-open the bracket just
-         * for the full-width wide pass so blend/scissor/program state is
-         * clean. */
+        /* Re-open the bracket for the full-width wide pass so
+         * blend/scissor/program state is clean. */
         if (s_ws_ablate != 1) {
             hiw_flush_queue();   /* windowed: queued wide mirrors land first */
             hr_begin(0);
@@ -6345,7 +6350,7 @@ static void pass_capture_into(GLuint tex, const PassGen *g) {
         GLuint wf = pass_wide_fbo_for(g->x);
         int native_w = g_wide_w - 2 * g_wide_off;
         if (!wf) return;
-        if (s_wide_fast && native_w > 0) {
+        if (wide_fast_center_valid() && native_w > 0) {
             p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, s_hr_fbo);
             p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, wf);
             glDisable(GL_SCISSOR_TEST);
