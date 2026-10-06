@@ -2,6 +2,7 @@
 #include "mod_packages.h"
 #include "mod_plugins.h"
 #include "psx_sha256.h"
+#include "psx_lobby_client.h"
 
 #include "gpu.h"
 #include "cpu_state.h"
@@ -23,6 +24,10 @@ static int failures;
 static int activation_calls;
 static int plugin_calls;
 static int restore_calls;
+static PsxLobbyMatchCaps test_match_caps;
+extern "C" const PsxLobbyMatchCaps* psx_lobby_match_caps(void) {
+    return &test_match_caps;
+}
 
 extern "C" uint8_t psx_read_byte(uint32_t address) {
     return ram[address & 0x1fffffu];
@@ -1039,6 +1044,46 @@ int main() {
     check(psx_mod_register_activation_plugin("media.test.plugin", test_media_plugin), "register media consumer");
     check(PSXRecompV4::mod_runtime_initialize(media_root, "READER", 0, {}, &error), "media initialize");
     check(PSXRecompV4::mod_runtime_commit(iso_path, &error), "verify and commit owner media");
+    const std::string host_media_fp = PSXRecompV4::mod_runtime_plan_fingerprint_portable();
+    check(host_media_fp.size() == 64, "verified external media has a portable netplay identity");
+    test_match_caps = {};
+    check(PSXRecompV4::mod_runtime_commit_for_direct_netplay(iso_path, &error), "LAN retains verified selected content");
+    check(PSXRecompV4::mod_runtime_session_plan_fp() == host_media_fp, "LAN announces full portable plan identity");
+    PSXRecompV4::mod_runtime_end_netplay();
+    check(PSXRecompV4::mod_runtime_session_plan_fp().empty(), "LAN return retires session identity");
+    const auto guest_rom_path = media_root / "different-machine" / "guest.z64";
+    write_bytes(guest_rom_path, rom);
+    const std::string guest_state =
+        "format_version = 2\n[[feature]]\npackage_id = \"media.test\"\nid = \"active\"\nenabled = false\n"
+        "[feature.resources]\nrom = \"" + guest_rom_path.generic_string() + "\"\nxa = \"" + xa_path.generic_string() + "\"\n";
+    write_text(media_root / "state.toml", guest_state);
+    auto read_guest_state = [&]() {
+        std::ifstream in(media_root / "state.toml", std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    const std::string guest_state_bytes = read_guest_state();
+    check(PSXRecompV4::mod_runtime_initialize(media_root, "READER", 0, {}, &error), "guest media initialize");
+    test_match_caps.valid = 1;
+    test_match_caps.mod_count = 1;
+    std::snprintf(test_match_caps.mods[0].id, sizeof(test_match_caps.mods[0].id), "media.test");
+    std::snprintf(test_match_caps.mods[0].ver, sizeof(test_match_caps.mods[0].ver), "1.0.0");
+    std::snprintf(test_match_caps.mods[0].feats, sizeof(test_match_caps.mods[0].feats), "active");
+    std::snprintf(test_match_caps.mod_plan_fp, sizeof(test_match_caps.mod_plan_fp), "%s", host_media_fp.c_str());
+    check(PSXRecompV4::mod_runtime_commit_for_netplay(iso_path, &error), "host plan enables guest media with different local paths");
+    check(PSXRecompV4::mod_runtime_plan_fingerprint_portable() == host_media_fp, "guest content identity matches host");
+    check(read_guest_state() == guest_state_bytes, "online plan preserves offline selection and resource paths byte for byte");
+    const std::string committed_fp = PSXRecompV4::mod_runtime_fingerprint();
+    test_match_caps.mod_plan_fp[0] = host_media_fp[0] == 'a' ? 'b' : 'a';
+    check(!PSXRecompV4::mod_runtime_commit_for_netplay(iso_path, &error), "mismatched host content fingerprint refused");
+    check(PSXRecompV4::mod_runtime_fingerprint() == committed_fp, "mismatch leaves previous committed plan intact");
+    test_match_caps.mod_plan_fp[0] = '\0';
+    check(!PSXRecompV4::mod_runtime_commit_for_netplay(iso_path, &error), "missing host fingerprint refused");
+    std::snprintf(test_match_caps.mod_plan_fp, sizeof(test_match_caps.mod_plan_fp), "%s", host_media_fp.c_str());
+    auto bad_rom = rom; bad_rom[33] ^= 1; write_bytes(guest_rom_path, bad_rom);
+    check(!PSXRecompV4::mod_runtime_commit_for_netplay(iso_path, &error), "changed donor media refused before online launch");
+    check(read_guest_state() == guest_state_bytes, "failed online launch leaves offline state untouched");
+    write_bytes(guest_rom_path, rom);
+    check(PSXRecompV4::mod_runtime_commit_for_netplay(iso_path, &error), "valid donor media recovers after refused launch");
     const uint8_t* unavailable = nullptr;
     uint64_t unavailable_size = 0;
     check(!psx_mod_current_resource_bytes("rom", &unavailable, &unavailable_size), "bytes unavailable outside plugin callback");
@@ -1084,7 +1129,7 @@ int main() {
           iso_read_cdda_sector(mounted,150,sector.data(),sector.size()) && sector[8]==0x52,
           "reactivation retains audio identity and immutable snapshot");
     rom[32] ^= 1;
-    write_bytes(rom_path, rom);
+    write_bytes(guest_rom_path, rom);
     check(media_snapshot && media_snapshot[32] == 0x5a, "committed bytes survive owner file changes");
     check(!PSXRecompV4::mod_runtime_commit({}, &error), "new commit rejects modified media");
     check(PSXRecompV4::mod_runtime_clear_for_netplay(&error), "netplay clears donor plan");
@@ -1093,6 +1138,71 @@ int main() {
     check(iso_cdda_track_count(mounted)==1 && iso_cdda_sector_count(mounted)==24,
           "clearing plan also restores original audio TOC");
     iso_close(mounted);
+    PSXRecompV4::mod_runtime_end_netplay();
+    check(PSXRecompV4::mod_runtime_session_plan_fp().empty(), "leaving online clears host fingerprint");
+    check(PSXRecompV4::mod_runtime_commit(iso_path, &error), "offline commit after netplay uses original disabled media selection");
+    mod_runtime_activate_plugins();
+    const uint8_t* ended_bytes = nullptr; uint64_t ended_size = 0;
+    check(!psx_mod_current_resource_bytes("rom", &ended_bytes, &ended_size), "online media is retired after session");
+    {
+        PSXRecompV4::ModPackageManager offline;
+        offline.set_root(media_root);
+        check(offline.scan(&error) && offline.load_state(&error) && !offline.feature_enabled("media.test", "active"),
+              "later offline save keeps original disabled feature rather than host selection");
+    }
+    /* Path-only files are still usable offline, but never portable online. */
+    const auto loose_root = root / "unverified-media";
+    write_text(loose_root / "packages/loose.test/1.0.0/manifest.toml",
+        "format_version = 8\nid = \"loose.test\"\nversion = \"1.0.0\"\nname = \"Loose\"\n"
+        "[[target]]\ngame_id = \"READER\"\n[[feature]]\nid = \"active\"\nname = \"Active\"\ndefault_enabled = true\n"
+        "[[resource]]\nfeature = \"active\"\nid = \"file\"\nlabel = \"File\"\nformat = \"file\"\nrequired = true\n");
+    write_text(loose_root / "state.toml",
+        "format_version = 2\n[[feature]]\npackage_id = \"loose.test\"\nid = \"active\"\nenabled = true\n"
+        "[feature.resources]\nfile = \"" + rom_path.generic_string() + "\"\n");
+    check(PSXRecompV4::mod_runtime_initialize(loose_root, "READER", 0, {}, &error), "loose resource initialize");
+    check(PSXRecompV4::mod_runtime_commit(iso_path, &error), "unverified file remains usable offline");
+    check(PSXRecompV4::mod_runtime_plan_fingerprint_portable().empty(), "unverified resource has no online fingerprint");
+    check(!PSXRecompV4::mod_runtime_commit(iso_path, &error, false), "online commit rejects unverified resource");
+    check(!PSXRecompV4::mod_runtime_commit_for_direct_netplay(iso_path, &error), "LAN also refuses unverified resources");
+    test_match_caps = {};
+    test_match_caps.valid = 1;
+    check(PSXRecompV4::mod_runtime_commit_for_netplay(iso_path, &error), "explicit empty host plan remains vanilla");
+    // A guest may own the source without ever enabling/preparing the host's
+    // feature offline. Preparation must precede the portable hash comparison.
+    {
+        const auto prepared_root = root / "prepared-netplay";
+        const auto prepared_asset = prepared_root / "generated" / "rom.z64";
+        int prepare_calls = 0;
+        check(PSXRecompV4::mod_register_media_preparer("test.netplay.prepare",
+            [&](const PSXRecompV4::ModPrepareContext&,
+                std::map<std::string, fs::path>& output, std::string&) {
+                ++prepare_calls; write_bytes(prepared_asset, rom);
+                output["rom"] = prepared_asset; return true;
+            }), "register netplay preparation fixture");
+        write_text(prepared_root / "packages/prepared.test/1.0.0/manifest.toml",
+            "format_version = 9\nid = \"prepared.test\"\nversion = \"1.0.0\"\nname = \"Prepared\"\nprepare = \"test.netplay.prepare\"\n"
+            "[[target]]\ngame_id = \"READER\"\n[[feature]]\nid = \"active\"\nname = \"Active\"\ndefault_enabled = true\n"
+            "[[resource]]\nfeature = \"active\"\nid = \"rom\"\nlabel = \"ROM\"\nformat = \"n64-rom\"\nhidden = true\nrequired = true\nsize = 64\nsha256 = \"" + sha256_hex(rom) + "\"\n");
+        PSXRecompV4::mod_runtime_end_netplay(); test_match_caps = {};
+        check(PSXRecompV4::mod_runtime_initialize(prepared_root, "READER", 0, {}, &error) &&
+              PSXRecompV4::mod_runtime_commit_for_netplay(iso_path, &error), "direct launch prepares its selected resources");
+        const std::string prepared_fp = PSXRecompV4::mod_runtime_session_plan_fp();
+        PSXRecompV4::mod_runtime_end_netplay();
+        const std::string disabled = "format_version = 2\n[[feature]]\npackage_id = \"prepared.test\"\nid = \"active\"\nenabled = false\n";
+        write_text(prepared_root / "state.toml", disabled);
+        check(PSXRecompV4::mod_runtime_initialize(prepared_root, "READER", 0, {}, &error), "unprepared guest initialize");
+        test_match_caps.valid = 1; test_match_caps.mod_count = 1;
+        std::snprintf(test_match_caps.mod_plan_fp, sizeof(test_match_caps.mod_plan_fp), "%s", prepared_fp.c_str());
+        std::snprintf(test_match_caps.mods[0].id, sizeof(test_match_caps.mods[0].id), "prepared.test");
+        std::snprintf(test_match_caps.mods[0].ver, sizeof(test_match_caps.mods[0].ver), "1.0.0");
+        std::snprintf(test_match_caps.mods[0].feats, sizeof(test_match_caps.mods[0].feats), "active");
+        check(PSXRecompV4::mod_runtime_commit_for_netplay(iso_path, &error), "host enables and prepares guest feature before verification");
+        check(prepare_calls == 2 && PSXRecompV4::mod_runtime_plan_fingerprint_portable() == prepared_fp,
+              "prepared guest resolves identical verified bytes");
+        std::ifstream saved(prepared_root / "state.toml");
+        check(std::string(std::istreambuf_iterator<char>(saved), {}) == disabled, "prepared online launch preserves disabled offline choice");
+        PSXRecompV4::mod_runtime_end_netplay(); test_match_caps = {};
+    }
     // The audio timeline skips INDEX00 pregaps and maps into the unchanged
     // mounted BIN, including a second audio track sharing the same file.
     const auto audio_root=root/"disc-audio";
@@ -1109,6 +1219,7 @@ int main() {
         "format_version = 8\nid = \"audio.test\"\nversion = \"1.0.0\"\nname = \"Audio\"\n"
         "[[target]]\ngame_id = \"READER\"\n[[feature]]\nid = \"active\"\nname = \"Active\"\ndefault_enabled = true\n"
         "[[plugin]]\nfeature = \"active\"\nid = \"audio.test.plugin\"\n");
+    PSXRecompV4::mod_runtime_end_netplay();
     check(psx_mod_register_activation_plugin("audio.test.plugin",test_disc_audio_plugin),"register mounted audio fixture");
     check(PSXRecompV4::mod_runtime_initialize(audio_root,"READER",0,{},&error) &&
           PSXRecompV4::mod_runtime_commit(audio_cue_path,&error),"mount audio fixture");

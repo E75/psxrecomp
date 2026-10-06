@@ -42,6 +42,14 @@ uint32_t sw_perspective_triangle_count(void);
 void sw_set_texture_filter(int bilinear);
 int  sw_texture_filter(void);
 
+/* Netplay CPU-authoritative VRAM (dual-raster SW@1x or the software GPU):
+ * on = ignore the precise/perspective overrides and texture filtering, so the
+ * guest-visible VRAM (GP0 C0 readback, savestates) is the hardware image on
+ * every peer. The filter request is remembered and restored when it goes off.
+ * The GPU presentation surface keeps every enhancement. */
+void sw_set_faithful_authority(int on);
+int  sw_faithful_authority(void);
+
 /* Draw state — must be set by gpu.c before each primitive */
 void sw_set_semi_transparency(int enabled, int mode);
 void sw_set_mask_bits(int set_bit, int check_bit);

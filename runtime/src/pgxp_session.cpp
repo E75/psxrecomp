@@ -29,6 +29,7 @@ extern "C" PSXPgxpSessionArm psx_pgxp_session_arm(
     in.video_texture = config->video_texture ? 1 : 0;
     in.video_cpu_mode = config->video_cpu_mode ? 1 : 0;
     in.mod_only = config->mod_only ? 1 : 0;
+    in.netplay = config->netplay ? 1 : 0;
     /* Take, not peek: the request belongs to this session alone. */
     in.mod_enabled = pgxp_mod_request_take(&in.mod_cpu_mode, &in.mod_culling);
 

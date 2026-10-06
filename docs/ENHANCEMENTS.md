@@ -1052,7 +1052,14 @@ path (UI boxes; none seen in R4's 3D); a PGXP depth buffer; savestates of the
 hook and base flavors are not interchangeable; above native resolution the GL
 native pack comes from the corrected high-resolution surface, so a title that
 reads VRAM back to the CPU would see it (R4 issued no GP0 C0 read from boot
-through a 2P race).
+through a 2P race). Vigilante 8: 2nd Offense does: in battle it reads one
+VRAM pixel with GP0 C0 about every third frame (`c0_history`, now an
+always-on ring), and the reads that land in the drawn frame return the
+corrected pixels, so PGXP on and off write different RAM values (same PC
+path and cycles; measured over 3000 frames from one savestate). Netplay
+therefore draws its CPU-authoritative VRAM faithfully
+(`sw_set_faithful_authority`: no PGXP override, no texture filter), so
+peers agree whatever their shadows or Display filter.
 
 ### G1.12 — Precise culling, the mod as a title's one switch (2026-10-01)
 
@@ -1083,8 +1090,11 @@ DuckStation's "PGXP culling" with a minimal footprint.
 
 This changes guest-visible MAC0, and so the game's control flow, which is
 why it is opt-in at three levels:
-- only the mod arms it, so netplay, which clears every mod, never runs it,
-  and there is deliberately no `[video]` key for it;
+- only the mod arms it, and there is deliberately no `[video]` key for it;
+- a netplay session never arms it (`PSXPgxpSessionConfig.netplay`), even
+  when the published netplay plan carries the mod (content negotiation,
+  MOD_PACKAGES.md) and even from `PSX_PGXP_CULLING`: the shadows it reads
+  are host-only, and a rollback load drops them on one peer only;
 - it needs geometry correction (`psx_pgxp_session_resolve`);
 - it is held off in every pass that is compared against another execution:
   the speculative and replay passes, which record no shadows, and the whole

@@ -18,14 +18,30 @@ bool mod_runtime_initialize(const std::filesystem::path& root,
                             const std::filesystem::path& exe_path = {},
                             std::string* error = nullptr);
 bool mod_runtime_commit(const std::filesystem::path& disc_path = {},
-                        std::string* error = nullptr);
+                        std::string* error = nullptr,
+                        bool save_selection = true);
 /* Prepare enabled media without installing a guest plan or saving choices. */
 bool mod_runtime_prepare_resources(const std::filesystem::path& disc_path,
                                    std::string* error = nullptr);
-/* Drop the in-session mod plan for a netplay launch without rewriting the
- * user's persisted offline selection on disk. Netplay is always vanilla for
- * now (no synced mod plans). */
+/* Apply a host-published online/LAN plan without rewriting persisted offline
+ * choices. An explicit empty host plan means vanilla; direct launches without
+ * a published plan retain local choices and require transport consensus. */
+bool mod_runtime_commit_for_netplay(const std::filesystem::path& disc_path = {},
+                                    std::string* error = nullptr);
+/* Direct/LAN: retain the locally selected verified plan. The transport must
+ * compare session_plan_fp() on every peer before executing the guest. */
+bool mod_runtime_commit_for_direct_netplay(const std::filesystem::path& disc_path,
+                                           std::string* error = nullptr);
 bool mod_runtime_clear_for_netplay(std::string* error = nullptr);
+/* [netplay] content_negotiation from game.toml. Off (default): the launcher's
+ * netplay commit clears the plan exactly like mod_runtime_clear_for_netplay. */
+void mod_runtime_set_netplay_content_negotiation(bool enabled);
+bool mod_runtime_netplay_content_negotiation();
+/* Restore the pre-session selection before returning to the launcher. */
+void mod_runtime_end_netplay();
+void mod_runtime_set_session_plan_fp(const std::string& fp);
+const std::string& mod_runtime_session_plan_fp();
+std::string mod_runtime_plan_fingerprint_portable();
 const std::string& mod_runtime_fingerprint();
 const std::filesystem::path& mod_runtime_effective_disc_path();
 /* Read an effective-disc file as whole sectors (true end-of-file tail bytes

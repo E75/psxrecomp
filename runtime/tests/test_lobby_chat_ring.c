@@ -147,12 +147,60 @@ static void case_long_line_is_truncated_not_dropped(void)
        "and still NUL-terminated");
 }
 
+static void case_mod_caps_roundtrip(void)
+{
+    PsxLobbyMatchCaps caps = {0};
+    char wire[4096];
+    caps.valid = 1;
+    caps.aspect_num = 4;
+    caps.aspect_den = 3;
+    caps.rollback = 1;
+    caps.mod_count = 2;
+    memset(caps.mod_plan_fp, 'a', 64);
+    strcpy(caps.mods[0].id, "content.cars");
+    strcpy(caps.mods[0].ver, "1.0.0");
+    strcpy(caps.mods[0].name, "Cars \"Original\"");
+    strcpy(caps.mods[0].feats, "roster,view=mode~fit");
+    strcpy(caps.mods[1].id, "content.arena");
+    strcpy(caps.mods[1].ver, "0.1.0");
+    strcpy(caps.mods[1].feats, "arena");
+    ck(append_match_caps_json(wire, sizeof(wire), &caps), "serialize host mod caps");
+    ingest_match_caps_from_json(wire);
+    ck(g_lc.match_caps.valid && g_lc.match_caps.rollback &&
+       g_lc.match_caps.mod_count == 2, "roundtrip two required packages");
+    ck(!strcmp(g_lc.match_caps.mod_plan_fp, caps.mod_plan_fp) &&
+       !strcmp(g_lc.match_caps.mods[0].id, "content.cars") &&
+       !strcmp(g_lc.match_caps.mods[0].feats, "roster,view=mode~fit") &&
+       !strcmp(g_lc.match_caps.mods[1].ver, "0.1.0"),
+       "roundtrip fingerprint, versions, features and options");
+    ck(strstr(wire, "resources") == NULL && strstr(wire, "path") == NULL,
+       "lobby plan carries no donor paths or asset bytes");
+    {
+        PsxLobbyMatchCaps received = {0};
+        char tiny[32];
+        ck(psx_lobby_encode_match_caps(wire, sizeof(wire), &caps), "LAN uses same host caps serializer");
+        ck(psx_lobby_decode_match_caps(wire, &received) && received.mod_count == 2 &&
+           !strcmp(received.mod_plan_fp, caps.mod_plan_fp) &&
+           !strcmp(received.mods[0].feats, caps.mods[0].feats), "LAN preserves host selections and options");
+        ck(!psx_lobby_encode_match_caps(tiny, sizeof(tiny), &caps), "truncated LAN plans fail closed");
+        wire[strlen(wire) - 2] = '\0';
+        ck(!psx_lobby_decode_match_caps(wire, &received), "incomplete LAN caps rejected");
+        psx_lobby_set_local_match_caps(&caps);
+        ck(psx_lobby_match_caps()->mod_count == 2, "LAN plan supplied to launch provider");
+        psx_lobby_set_local_match_caps(NULL);
+        ck(!psx_lobby_match_caps()->valid, "leaving LAN retires host plan");
+    }
+    parse_match_caps_object("{\"mod_plan_fp\":\"invalid!\",\"mods\":[]}", &caps);
+    ck(!caps.mod_plan_fp[0], "invalid fingerprint rejected");
+}
+
 int main(void)
 {
     case_room_order();
     case_wrap_drops_oldest();
     case_empty_and_clear();
     case_long_line_is_truncated_not_dropped();
+    case_mod_caps_roundtrip();
     if (g_failures == 0) {
         printf("lobby_chat_ring_test: ok\n");
         return 0;

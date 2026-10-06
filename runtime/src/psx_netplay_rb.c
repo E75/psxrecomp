@@ -8806,6 +8806,8 @@ void psx_netplay_rb_pump(void)
 
     while (rnet_session_take_rb_sync(s, &epoch, &mismatch, &load, &target, &cslot, &op,
                                      &wire_flags)) {
+        if (psx_netplay_content_note(epoch, mismatch, load, target, cslot, op, wire_flags))
+            continue;
         if (op == RNET_RB_SYNC_OP_COMMIT) {
             /* §42c: peer committed epoch at tick (load field) and left it.
              * Record for the tip-extend abandon; also fold into the RESOLVED

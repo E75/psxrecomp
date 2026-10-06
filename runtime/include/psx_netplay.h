@@ -98,6 +98,9 @@ typedef struct PsxNetplayConfig {
      * Must be identical on every peer (the lobby decides it at start).
      * Env PSX_NET_GUEST_MEMCARD=1 overrides. */
     int         guest_memcard;
+    /* Nonempty for direct/LAN sessions: full portable mod-plan SHA-256.
+     * Gameplay waits for every occupied peer to agree. */
+    char        content_fingerprint[65];
     uint32_t    session_id;
     char        bind_hostport[64];
     char        peer_hostport[64];
@@ -106,6 +109,9 @@ typedef struct PsxNetplayConfig {
 void psx_netplay_config_defaults(PsxNetplayConfig *cfg);
 void psx_netplay_apply_env(PsxNetplayConfig *cfg);
 
+/* Internal RB_SYNC demultiplexing; returns 1 for a content identity packet. */
+int psx_netplay_content_note(uint32_t epoch, uint32_t word0, uint32_t word1,
+                             uint32_t seen, uint8_t slot, uint8_t op, uint8_t flags);
 int  psx_netplay_active(void);
 int  psx_netplay_is_running(void);
 /* "ice" | "lan" | "none" */
@@ -115,6 +121,8 @@ int  psx_netplay_ice_failed(void);
 /* Optional JSONL samples when PSX_NET_DIAG=1 (saves/netplay/net_diag.jsonl). */
 void psx_netplay_diag_tick(void);
 int  psx_netplay_local_slot(void);
+/* Guest controller port of this peer; differs from session slot after seat swaps. */
+int  psx_netplay_local_port(void);
 /* 1 while this build is watching rather than playing. */
 int  psx_netplay_is_spectator(void);
 /* 1 when the local peer is the host running the match from the gallery. */

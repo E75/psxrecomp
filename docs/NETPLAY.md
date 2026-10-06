@@ -23,6 +23,25 @@ appears when the host advertises `GameInfo.netplay_supported`.
 
 ## Rollback netcode
 
+Titles that opt in with `[netplay] content_negotiation = true` (game.toml,
+default false) get content negotiation; every other title keeps vanilla
+netplay (mods cleared), the MOTK1 LAN protocol and plan-free lobby caps.
+
+Online rooms can publish a host-selected mod plan: package versions, enabled
+features/options and a portable plan fingerprint. Every peer resolves and
+verifies that plan locally before launch. External media is allowed only when
+the manifest declares its exact size and SHA-256 and resolution creates a
+verified immutable byte snapshot; path-only resources and folders are refused.
+Paths and donor bytes are never exchanged. Local bindings may differ, but the
+verified content must match. The guest's offline selection is restored on return
+to the launcher and is not overwritten by the session. LAN / Direct IP retains
+the vanilla-content policy.
+
+The read-only debug command `netplay_status` reports active mode, player count,
+simulation tick, matched-state watermark, admission stall and input desync state.
+Headless peers accept the usual injected local pad inputs through the same
+session-slot routing as windowed peers.
+
 Default match mode for opted-in titles is **rollback** (GGPO-style tip
 prediction + resimulation), with **delay-sync** still available as an opt-out
 (“Disable Rollback” in lobby settings, or `PSX_NET_MODE=delay`).
@@ -298,9 +317,12 @@ Generate & rebuild / prepare flows should point at the **`.cue`**, not a lone
   netplay.
 - **VERSION / lobby match pin:** peers should run the same release pin so
   generated code and protocol stay compatible.
-- **Mods:** disabled for all netplay sessions (lobby / LAN / direct / rematch).
-  Launcher `commit_netplay` and the runtime clear the in-session plan without
-  touching the user's offline mod selection. Synced mod plans are deferred.
+- **Mods:** disabled for netplay sessions unless the title sets
+  `[netplay] content_negotiation = true`. With it, online and LAN lobbies publish the host's portable verified plan.
+  Each peer prepares its own required media, then compares the complete content
+  fingerprint before entering guest execution. Direct launches retain local
+  choices and require matching plans. No assets or local paths are transferred;
+  the guest's saved offline selection survives the session.
 
 ---
 
