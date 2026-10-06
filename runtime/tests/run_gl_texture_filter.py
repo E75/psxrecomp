@@ -39,6 +39,8 @@ def main():
              ('rp',fw/'runtime/src/render_pass_plan.c')]
     if (fw/'runtime/src/psx_openxr.c').exists():
         sources.append(('xr',fw/'runtime/src/psx_openxr.c'))
+    if (fw/'runtime/src/render_thread.c').exists():
+        sources.append(('rth',fw/'runtime/src/render_thread.c'))
     objects=[]
     for name,source in sources:
         obj=out/(name+'.o'); run([args.cc,*flags,'-c',source,'-o',obj]); objects.append(obj)
