@@ -335,6 +335,21 @@ static void test_render_thread() {
     fs::remove(q);
 }
 
+/* [video] present_thread (docs/RENDER_THREAD.md): opt-in, off by default. */
+static void test_present_thread() {
+    fs::path p = write_game_toml("psxrecomp_pt_default.toml", "");
+    auto gc = PSXRecompV4::load_game_config(p);
+    check(!gc.runtime.video_present_thread, "present_thread defaults OFF");
+    fs::remove(p);
+    fs::path q = write_game_toml("psxrecomp_pt_on.toml",
+        "[video]\n"
+        "render_thread = true\n"
+        "present_thread = true\n");
+    auto gq = PSXRecompV4::load_game_config(q);
+    check(gq.runtime.video_present_thread, "[video] present_thread = true is honoured");
+    fs::remove(q);
+}
+
 /* [video] frame_generation (docs/FRAME_GENERATION.md): opt-in, off by default. */
 static void test_frame_generation() {
     fs::path p = write_game_toml("psxrecomp_fg_default.toml", "");
@@ -416,6 +431,7 @@ int main() {
     test_texture_window_batching();
     test_render_thread();
     test_frame_generation();
+    test_present_thread();
     test_pgxp_title_keys();
 
     if (failures) {

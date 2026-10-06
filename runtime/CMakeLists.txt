@@ -1159,6 +1159,13 @@ if(BUILD_TESTING)
         find_package(Threads REQUIRED)
         target_link_libraries(render_thread_test PRIVATE Threads::Threads)
         add_test(NAME render_thread_test COMMAND render_thread_test)
+        # Present thread core ([video] present_thread): submission order is
+        # presentation order, slots are never composed while queued or on
+        # screen, done tokens reach the next composer, stop drains.
+        add_executable(present_thread_test tests/test_present_thread.c src/present_thread.c)
+        target_include_directories(present_thread_test PRIVATE include)
+        target_link_libraries(present_thread_test PRIVATE Threads::Threads)
+        add_test(NAME present_thread_test COMMAND present_thread_test)
     endif()
 
     # Same family of bug as frame_pacing: the starvation watchdog's staleness

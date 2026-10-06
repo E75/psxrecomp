@@ -18,6 +18,11 @@
  * Original source-owned scene; no retail payload. */
 static void fixture_present(int generated);
 #define GL_PRESENT_TEST_HOOK(gen) fixture_present(gen)
+/* argv[6] == "pt": the present thread is on; every image it puts in the
+ * window (read back after its copy, before its swap) must be the image the
+ * composing side presented, in the same order. */
+static void fixture_window(int slot);
+#define GL_PRESENT_THREAD_TEST_HOOK(slot) fixture_window(slot)
 #include "gpu_gl_renderer.c"
 #include "gpu_hd_texture_stubs.inc"
 #include "mod_texture_banks.c"
@@ -105,7 +110,37 @@ static uint64_t read_back(uint32_t *dst) {
     glReadPixels(0, 0, ww, wh, GL_RGBA, GL_UNSIGNED_BYTE, dst);
     return fnv(dst, (size_t)ww * wh * 4, 0xcbf29ce484222325ull);
 }
+#define MAX_SHOWN 4096
+static int pt_mode;
+static uint64_t composed_d[MAX_SHOWN], window_d[MAX_SHOWN];
+static int n_composed, n_window;
+static void fixture_window(int slot) {
+    (void)slot;
+    int ww = 0, wh = 0;
+    SDL_GL_GetDrawableSize(s_win, &ww, &wh);
+    uint32_t *px = (uint32_t *)malloc((size_t)ww * wh * 4);
+    p_glBindFramebuffer_raw(PSXGL_READ_FRAMEBUFFER, 0);
+    glReadBuffer(GL_BACK);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glReadPixels(0, 0, ww, wh, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    if (n_window < MAX_SHOWN)
+        window_d[n_window] = fnv(px, (size_t)ww * wh * 4, 0xcbf29ce484222325ull);
+    n_window++;
+    free(px);
+}
 static void fixture_present(int generated) {
+    if (pt_mode) {
+        int ww = 0, wh = 0;
+        SDL_GL_GetDrawableSize(s_win, &ww, &wh);
+        uint32_t *px = (uint32_t *)malloc((size_t)ww * wh * 4);
+        p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, 0);
+        glPixelStorei(GL_PACK_ALIGNMENT, 4);
+        glReadPixels(0, 0, ww, wh, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        if (n_composed < MAX_SHOWN)
+            composed_d[n_composed] = fnv(px, (size_t)ww * wh * 4, 0xcbf29ce484222325ull);
+        n_composed++;
+        free(px);
+    }
     if (generated) { n_gen++; return; }
     int ww = 0, wh = 0;
     SDL_GL_GetDrawableSize(s_win, &ww, &wh);
@@ -187,6 +222,7 @@ int main(int argc, char **argv) {
     /* "late": the game flips to a frame one VBlank after it starts drawing
      * the next one (as R4 does), so a flip is not a list boundary. */
     int late = argc > 5 && !strcmp(argv[5], "late");
+    pt_mode = argc > 6 && !strcmp(argv[6], "pt");
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         fprintf(stderr, "SKIP no video (%s)\n", SDL_GetError());
         return 77;
@@ -218,7 +254,9 @@ int main(int argc, char **argv) {
     if (!gl_renderer_init_context(win)) { fprintf(stderr, "FAIL context\n"); return 2; }
     textures();
     if (wide_mode) gr_wide_configure(426, 53);
+    if (pt_mode) gl_renderer_set_present_thread(1, 3);
     check(gl_renderer_render_thread_start(2) == 1, "render thread started");
+    if (pt_mode) check(gl_renderer_present_thread_active(), "present thread started");
     if (fg) {
         setenv("PSX_FRAME_GEN_FORCE", "1", 1);
         gl_renderer_set_frame_generation(1);
@@ -284,8 +322,14 @@ int main(int argc, char **argv) {
     check(glGetError() == GL_NO_ERROR, "GL error");
     printf("real=%016llx\n", (unsigned long long)real_seq);
     printf("presents=%llu generated=%llu\n", (unsigned long long)n_real, (unsigned long long)n_gen);
+    gl_renderer_shutdown();   /* stops the render and present threads: all shown */
+    if (pt_mode) {
+        int same = n_composed == n_window && n_composed <= MAX_SHOWN && n_composed > 0;
+        for (int i = 0; same && i < n_composed; i++) same = composed_d[i] == window_d[i];
+        printf("pt composed=%d shown=%d\n", n_composed, n_window);
+        check(same, "the window shows every composed image, in order");
+    }
     printf("checks=%d failures=%d\n", checks, failures);
-    gl_renderer_shutdown();
     SDL_DestroyWindow(win);
     SDL_Quit();
     return failures ? 1 : 0;

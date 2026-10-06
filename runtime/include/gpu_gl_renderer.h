@@ -503,6 +503,14 @@ int  gl_renderer_render_thread_active(void);
 void gl_renderer_render_thread_frame_boundary(void);
 void gl_renderer_render_thread_sync(const char *reason);
 int  gl_renderer_render_thread_json(char *out, size_t cap);
+/* [video] present_thread (docs/RENDER_THREAD.md "Present thread"): set before
+ * gl_renderer_render_thread_start; with the render thread, composed frames go
+ * to `slots` (2..4) offscreen slots and a present thread with a shared context
+ * does the copy + swap. Falls back to direct swaps when it cannot start.
+ * json: the "present_thread" member for the render_thread debug command. */
+void gl_renderer_set_present_thread(int on, int slots);
+int  gl_renderer_present_thread_active(void);
+int  gl_renderer_present_thread_json(char *out, size_t cap);
 int  gl_renderer_fbo_peek_deferred(int x, int y, int w, int h, uint16_t *out);
 void gl_renderer_ring_capture(uint32_t frame, int wide, int base_x, int disp_y, int disp_h,
                               int cx, int cy, int cw, int ch);
