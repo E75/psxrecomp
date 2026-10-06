@@ -180,7 +180,18 @@ include(CheckIncludeFile)
 function(_psx_header_compiles out header)
     cmake_parse_arguments(_psx_hc "" "" "INCLUDES;LIBRARIES" ${ARGN})
     set(CMAKE_REQUIRED_INCLUDES ${_psx_hc_INCLUDES})
-    set(CMAKE_REQUIRED_LIBRARIES ${_psx_hc_LIBRARIES})
+    set(CMAKE_REQUIRED_LIBRARIES "")
+    foreach(_library IN LISTS _psx_hc_LIBRARIES)
+        # Older CMake try_compile cannot export an alias of a local imported
+        # target (system SDL3 on Ubuntu). Pass its underlying imported target.
+        if(TARGET "${_library}")
+            get_target_property(_alias "${_library}" ALIASED_TARGET)
+            if(_alias)
+                set(_library "${_alias}")
+            endif()
+        endif()
+        list(APPEND CMAKE_REQUIRED_LIBRARIES "${_library}")
+    endforeach()
     set(CMAKE_REQUIRED_QUIET ON)
     string(MAKE_C_IDENTIFIER
            "_psx_have_${header}_${_psx_hc_INCLUDES}_${_psx_hc_LIBRARIES}"

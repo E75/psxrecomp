@@ -1054,8 +1054,14 @@ if(BUILD_TESTING)
     # Portable rollback helpers — required for MotK netplay unit tests that use
     # the netplay_* compatibility shims. The peer-facing ones (hash_confirm,
     # input_hist, rb_post) live in recomp-net; the snap ring in retcomm-rbengine.
-    set(_RBE_ROOT "${PSXRECOMP_ROOT}/lib/retcomm-rbengine")
-    set(_RNET_ROOT "${PSXRECOMP_ROOT}/lib/recomp-net")
+    set(_RBE_ROOT "${RECOMP_RBENGINE_ROOT}")
+    if(NOT _RBE_ROOT)
+        set(_RBE_ROOT "${PSXRECOMP_ROOT}/lib/retcomm-rbengine")
+    endif()
+    set(_RNET_ROOT "${RECOMP_NET_ROOT}")
+    if(NOT _RNET_ROOT)
+        set(_RNET_ROOT "${PSXRECOMP_ROOT}/lib/recomp-net")
+    endif()
     if(EXISTS "${_RBE_ROOT}/CMakeLists.txt" AND EXISTS "${_RNET_ROOT}/CMakeLists.txt")
         if(NOT TARGET recomp_net)
             set(RNET_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)

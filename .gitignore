@@ -21,6 +21,7 @@ ghidra/
 .happypath/
 
 # Build artifacts
+/build-integration-*/
 recompiler/build/
 recompiler/build-asan/
 recompiler/build-asan2/
