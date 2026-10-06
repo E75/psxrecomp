@@ -1202,6 +1202,15 @@ if(BUILD_TESTING)
         target_link_libraries(dynamic_resolution_test PRIVATE m)
     endif()
     add_test(NAME dynamic_resolution_test COMMAND dynamic_resolution_test)
+    # The render-thread controller (dynrt_*) against a synthetic pipeline.
+    add_executable(dynamic_resolution_rt_test
+        tests/test_dynamic_resolution_rt.c
+        src/dynamic_resolution.c)
+    target_include_directories(dynamic_resolution_rt_test PRIVATE include)
+    if(NOT MSVC)
+        target_link_libraries(dynamic_resolution_rt_test PRIVATE m)
+    endif()
+    add_test(NAME dynamic_resolution_rt_test COMMAND dynamic_resolution_rt_test)
 
     # Render-pass time freeze against mock devices (psx_cycles.c only).
     add_executable(render_pass_freeze_test

@@ -133,6 +133,121 @@ double dynres_predict(const DynresController *c, double load, int from, int to);
 /* Up steps into `level` blocked for this many seconds from now_s (0 = not). */
 double dynres_up_blocked_s(const DynresController *c, int level, double now_s);
 
+
+/* ---- Render-thread mode ([video] render_thread on) -------------------------
+ * With the render thread the guest's frame no longer pays for GL, so the
+ * emulation thread's wall time says nothing about whether the resolution
+ * fits. This controller is fed what the render thread measured instead
+ * (docs/RENDER_THREAD.md, "Dynamic resolution"):
+ *
+ * COST. Per replayed guest frame, max(GPU time, render-thread CPU time): GPU
+ * time from a GL_TIMESTAMP pair (first record of the frame .. after its
+ * present), CPU time the render thread spent replaying the frame minus its
+ * idle waits for records and its block in the swap (the display's vsync).
+ * load = mean cost / the guest's nominal interval (one display refresh at
+ * 60 Hz); the budget is 1 - margin (15 %).
+ *
+ * BOUND. The render thread is the limit when the emulation thread blocked on
+ * the queue bound (backpressure) or the cost is over budget. When the guest
+ * runs below its nominal rate, never waits on the queue and the render
+ * thread had slack in the actual interval, the guest is the limit: no down
+ * step (resolution cannot help). Backpressure for bp_strong of a window is a
+ * strong signal: one window suffices.
+ *
+ * RULES (DynrtParams; dynrt_default_params):
+ *  - down: ONE level, after down_windows consecutive over-budget windows (one
+ *    if strong). Never below the floor.
+ *  - judge: the window after a step settles (the cost lags the queue and the
+ *    GPU readback); the next one judges it. A down step that removed less
+ *    than verify_fraction of the predicted cost (and did not end the
+ *    backpressure) is a strike: the window it was decided on may have mixed
+ *    lighter frames in. A second such step in a row (within strike_s) means
+ *    the cost is not the pixels: both are undone and down steps are blocked
+ *    for verify_block_s, doubling per failure up to verify_block_max_s.
+ *  - up: one level, after up_after_s of clean windows (no backpressure, the
+ *    next level predicted at <= up_load), up_cooldown_s after the last step,
+ *    and the level not blocked. The prediction is load * ((1-f) + f*(S'/S)^2)
+ *    with f, the share of the cost that scales with pixels, learned from each
+ *    judged step. down_load > up_load is the hysteresis.
+ *  - relapse: a level reached by an up step and left by a down step within
+ *    relapse_s is blocked for up steps for relapse_block_s, doubling up to
+ *    relapse_block_max_s; holding it relapse_forget_s resets that.
+ *  - holds and gaps discard the window in progress, as in the controller
+ *    above; so does a window in which fewer than min_coverage of the guest
+ *    frames have a measured cost (frames the emulation thread drew itself
+ *    at a sync point). */
+typedef struct DynrtParams {
+    double window_s;
+    double margin;                   /* budget = 1 - margin of the interval */
+    int    down_windows;             /* consecutive over-budget windows */
+    double strong_load;              /* load at or above: one window suffices */
+    double bp_strong;                /* backpressure share of wall: strong */
+    double bp_weak;                  /* below: no backpressure */
+    double guest_slow;               /* interval > period * this: guest slow */
+    double guest_slack;              /* cost < interval * this: render slack */
+    double up_load;
+    double up_after_s;
+    double up_cooldown_s;
+    double verify_fraction;
+    double verify_block_s, verify_block_max_s, verify_forget_s;
+    double strike_s;                 /* a first failed judgement lapses after */
+    double relapse_s;
+    double relapse_block_s, relapse_block_max_s, relapse_forget_s;
+    double prior_scaled;
+    double learn_rate;
+    double gap_factor, gap_hold_s;
+    double min_coverage;
+} DynrtParams;
+
+void dynrt_default_params(DynrtParams *p);
+
+typedef struct DynrtSample {
+    double period_s;   /* the guest's nominal interval */
+    double wall_s;     /* this guest interval's wall time */
+    int    frames;     /* render-thread frames whose cost arrived since the last sample */
+    double cost_s;     /* their summed cost (see COST) */
+    double bp_s;       /* emulation thread blocked on the queue bound */
+    int    held;       /* the host holds: not a sample, the window restarts */
+} DynrtSample;
+
+typedef struct DynrtController {
+    DynrtParams p;
+    int    floor, ceiling, level, forced;
+    double f;
+    /* the window in progress */
+    double win_period, win_wall, win_cost, win_bp;
+    int    win_n, win_frames;
+    /* the last closed window */
+    double last_load, last_bp_share, last_hz;
+    int    last_valid, last_guest_bound, last_over;
+    int    over_streak;
+    double hold_until;
+    double up_streak_s;
+    double last_step_t, last_down_t;
+    double up_reached_t[DYNRES_MAX_LEVEL + 1];
+    double up_block_until[DYNRES_MAX_LEVEL + 1];
+    double relapse_dur[DYNRES_MAX_LEVEL + 1];
+    double down_block_until, verify_dur, verify_last_fail;
+    int    post_active, post_from, post_to, post_windows, post_down;
+    double post_load_before, post_pred, post_bp_before;
+    int    verify_strikes, strike_from;
+    double strike_t;
+    /* telemetry */
+    unsigned long long downs, ups, undos, relapses, windows, held_windows,
+                       guest_bound_windows, thin_windows;
+    const char *last_reason;
+    double last_decision_t;
+} DynrtController;
+
+void dynrt_init(DynrtController *c, const DynrtParams *p, int floor_level,
+                int ceiling, int level);
+void dynrt_hold(DynrtController *c, double now_s, double tail_s);
+/* One guest interval ending at now_s; returns the level to render at. */
+int  dynrt_sample(DynrtController *c, double now_s, const DynrtSample *s);
+int  dynrt_force(DynrtController *c, int level);
+double dynrt_predict(const DynrtController *c, double load, int from, int to);
+double dynrt_up_blocked_s(const DynrtController *c, int level, double now_s);
+
 #ifdef __cplusplus
 }
 #endif

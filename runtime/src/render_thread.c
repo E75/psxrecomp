@@ -126,6 +126,7 @@ static __thread int t_render;
 int rt_running(void)          { return atomic_load(&R.running); }
 int rt_on_render_thread(void) { return t_render; }
 int rt_held(void)             { return R.held; }
+uint64_t rt_render_idle_ns(void) { return atomic_load(&R.idle_ns); }
 
 static inline uint64_t align_up(uint64_t n) {
     return (n + (RT_ALIGN - 1)) & ~(uint64_t)(RT_ALIGN - 1);

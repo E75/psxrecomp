@@ -12,6 +12,7 @@
 #include "window_size.h"     /* default game-window size */
 #include "internal_resolution.h" /* Settings -> Display -> Internal resolution */
 #include "dynamic_resolution.h"  /* [video] dynamic_resolution: the step controller */
+#include "render_thread.h"        /* rt_get_stats: queue backpressure (dynres) */
 #include "psx_scheduler.h"   /* psx_scheduler_run — deterministic TCB scheduler */
 #include "parity_trace.h"    /* general two-process control-flow parity ring */
 #include "device_trace.h"    /* general two-process device-event cycle ring */
@@ -1319,6 +1320,17 @@ struct DynresHost {
     bool step_measure_next = false;
     FILE *trace = nullptr;
     double t0_s = 0.0;
+    /* Render-thread mode (dynres_tick_rt): the render thread's per-frame
+     * costs and the queue's backpressure replace the wall-time model. */
+    bool rt_mode = false;
+    DynrtController rt{};
+    GlRthCosts last_costs{};
+    uint64_t last_bp_ns = 0;
+    unsigned long long rt_last_windows = 0;
+    bool rt_trace_header = false;
+    double rt_win_cpu_ms = 0.0, rt_win_gpu_ms = 0.0;   /* last window's means */
+    double rt_acc_cpu = 0.0, rt_acc_gpu = 0.0;
+    uint64_t rt_acc_frames = 0, rt_acc_gpu_frames = 0;
 };
 static DynresHost g_dynres;
 /* A savestate load re-stages VRAM and re-anchors pacing: hold for a while. */
@@ -9239,12 +9251,16 @@ static void dynres_setup(void) {
     DynresParams params;
     dynres_default_params(&params);
     dynres_init(&g_dynres.ctl, &params, floor_s, ceiling, ceiling);
+    DynrtParams rtp;
+    dynrt_default_params(&rtp);
+    dynrt_init(&g_dynres.rt, &rtp, floor_s, ceiling, ceiling);
     g_dynres.active = floor_s < ceiling;
     if (const char* e = std::getenv("PSX_DYNRES_FORCE")) {
         const int n = std::atoi(e);
         if (n > 0) {
             g_dynres.active = true;
             const int l = dynres_force(&g_dynres.ctl, n);
+            (void)dynrt_force(&g_dynres.rt, n);
             (void)gl_renderer_step_internal_scale_now(l);
         }
     }
@@ -9276,6 +9292,57 @@ static void dynres_apply_level(int level) {
         g_dynres.step_ms = sec * 1000.0;
         g_dynres.step_measure_next = true;
     }
+}
+
+/* Render-thread mode: one sample per guest VBlank from what the render
+ * thread measured since the last one (its frames' costs arrive a few frames
+ * late) and the time the emulation thread spent blocked on the queue. */
+static void dynres_tick_rt(double now_s, double wall, double period, int held,
+                           double tail, const char *why) {
+    DynrtController &c = g_dynres.rt;
+    if (tail > 0.0) dynrt_hold(&c, now_s, tail);
+    if (why) g_dynres.hold_reason = why;
+    else if (now_s >= c.hold_until) g_dynres.hold_reason = "";
+    GlRthCosts co;
+    gl_renderer_render_thread_costs(&co);
+    RtStats rs;
+    rt_get_stats(&rs);
+    const GlRthCosts &c0 = g_dynres.last_costs;
+    const int frames = (int)(co.frames - c0.frames);
+    const double cost = (double)(co.cost_ns - c0.cost_ns) * 1e-9;
+    const uint64_t bp_ns = rs.backpressure_ns + rs.ring_full_ns;
+    const double bp = (double)(bp_ns - g_dynres.last_bp_ns) * 1e-9;
+    g_dynres.rt_acc_cpu += (double)(co.cpu_ns - c0.cpu_ns) * 1e-6;
+    g_dynres.rt_acc_gpu += (double)(co.gpu_ns - c0.gpu_ns) * 1e-6;
+    g_dynres.rt_acc_frames += co.frames - c0.frames;
+    g_dynres.rt_acc_gpu_frames += co.gpu_frames - c0.gpu_frames;
+    g_dynres.last_costs = co;
+    g_dynres.last_bp_ns = bp_ns;
+    DynrtSample smp{ period, wall, frames, cost, bp, held };
+    const int level = dynrt_sample(&c, now_s, &smp);
+    if (c.windows != g_dynres.rt_last_windows) {
+        g_dynres.rt_last_windows = c.windows;
+        g_dynres.rt_win_cpu_ms = g_dynres.rt_acc_frames
+            ? g_dynres.rt_acc_cpu / (double)g_dynres.rt_acc_frames : 0.0;
+        g_dynres.rt_win_gpu_ms = g_dynres.rt_acc_gpu_frames
+            ? g_dynres.rt_acc_gpu / (double)g_dynres.rt_acc_gpu_frames : 0.0;
+        g_dynres.rt_acc_cpu = g_dynres.rt_acc_gpu = 0.0;
+        g_dynres.rt_acc_frames = g_dynres.rt_acc_gpu_frames = 0;
+        if (g_dynres.trace) {
+            if (!g_dynres.rt_trace_header) {
+                g_dynres.rt_trace_header = true;
+                std::fprintf(g_dynres.trace, "# render thread: t_s,level,load,bp_share,"
+                             "guest_hz,cpu_ms,gpu_ms,guest_bound,decision\n");
+            }
+            std::fprintf(g_dynres.trace, "%.3f,%d,%.3f,%.3f,%.2f,%.2f,%.2f,%d,%s\n",
+                         now_s - g_dynres.t0_s, c.level, c.last_load, c.last_bp_share,
+                         c.last_hz, g_dynres.rt_win_cpu_ms, g_dynres.rt_win_gpu_ms,
+                         c.last_guest_bound,
+                         c.last_decision_t == now_s ? c.last_reason : "");
+            std::fflush(g_dynres.trace);
+        }
+    }
+    dynres_apply_level(level);
 }
 
 /* One guest VBlank, after its present. */
@@ -9351,6 +9418,38 @@ static void dynres_tick(void) {
         why = "savestate load";
         g_dynres.hold_request_s = 0.0;
     }
+    /* The render thread on: its own model (dynres_tick_rt). The level carries
+     * over when the mode changes (the render thread starts at the first
+     * VBlank, after dynres_setup). */
+    const bool rt = gl_renderer_render_thread_active() != 0;
+    if (rt != g_dynres.rt_mode) {
+        g_dynres.rt_mode = rt;
+        gl_renderer_render_thread_measure(rt ? 1 : 0);
+        GlDynresStats st;
+        gl_renderer_dynres_stats(&st);
+        if (rt) {
+            const DynrtParams rp = g_dynres.rt.p;
+            const int forced = g_dynres.rt.forced;
+            dynrt_init(&g_dynres.rt, &rp, g_dynres.ctl.floor, g_dynres.ctl.ceiling, st.level);
+            if (forced) (void)dynrt_force(&g_dynres.rt, forced);
+            gl_renderer_render_thread_costs(&g_dynres.last_costs);
+            RtStats rs;
+            rt_get_stats(&rs);
+            g_dynres.last_bp_ns = rs.backpressure_ns + rs.ring_full_ns;
+        } else {
+            const DynresParams cp = g_dynres.ctl.p;
+            const int forced = g_dynres.ctl.forced;
+            const int fl = g_dynres.ctl.floor, ce = g_dynres.ctl.ceiling;
+            dynres_init(&g_dynres.ctl, &cp, fl, ce, st.level);
+            if (forced) (void)dynres_force(&g_dynres.ctl, forced);
+        }
+        if (tail < 1.0) tail = 1.0;
+        if (!why) why = rt ? "render thread started" : "render thread stopped";
+    }
+    if (rt) {
+        dynres_tick_rt(now_s, wall, period, held, tail, why);
+        return;
+    }
     if (tail > 0.0) dynres_hold(&g_dynres.ctl, now_s, tail);
     if (why) g_dynres.hold_reason = why;
     else if (now_s >= g_dynres.ctl.hold_until) g_dynres.hold_reason = "";
@@ -9380,7 +9479,8 @@ extern "C" void psx_dynres_summary(int *enabled, int *level, int *floor_s, int *
 
 extern "C" int psx_dynres_force(int scale) {
     if (!g_dynres.active) return -1;
-    const int l = dynres_force(&g_dynres.ctl, scale);
+    const int l = g_dynres.rt_mode ? dynrt_force(&g_dynres.rt, scale)
+                                   : dynres_force(&g_dynres.ctl, scale);
     dynres_apply_level(l);
     return l;
 }
@@ -9388,6 +9488,45 @@ extern "C" int psx_dynres_force(int scale) {
 extern "C" int psx_dynres_status_json(char *out, int cap) {
     GlDynresStats st;
     gl_renderer_dynres_stats(&st);
+    if (g_dynres.rt_mode) {   /* render-thread mode (dynres_tick_rt) */
+        const DynrtController &r = g_dynres.rt;
+        const double now_s = (double)SDL_GetPerformanceCounter() /
+                             (double)SDL_GetPerformanceFrequency();
+        char blocked[256];
+        int bp = 0;
+        blocked[0] = 0;
+        for (int l = r.floor; g_dynres.active && l <= r.ceiling && bp < (int)sizeof blocked - 24; l++) {
+            double b = dynrt_up_blocked_s(&r, l, now_s);
+            if (b > 0.0)
+                bp += std::snprintf(blocked + bp, sizeof blocked - (size_t)bp, "%s\"%d\":%.1f",
+                                    bp ? "," : "", l, b);
+        }
+        GlRthCosts co;
+        gl_renderer_render_thread_costs(&co);
+        const double hold = r.hold_until - now_s;
+        return std::snprintf(out, (size_t)cap,
+            "\"mode\":\"render_thread\",\"enabled\":%d,\"requested\":%d,\"ceiling\":%d,"
+            "\"floor\":%d,\"level\":%d,\"internal_lines\":%d,\"forced\":%d,\"load\":%.3f,"
+            "\"budget\":%.3f,\"bp_share\":%.3f,\"guest_hz\":%.2f,\"cpu_ms\":%.3f,"
+            "\"gpu_ms\":%.3f,\"guest_bound\":%d,\"over\":%d,\"scaled_share\":%.3f,"
+            "\"hold\":\"%s\",\"hold_s\":%.2f,\"last_reason\":\"%s\",\"downs\":%llu,"
+            "\"ups\":%llu,\"undos\":%llu,\"relapses\":%llu,\"windows\":%llu,"
+            "\"held_windows\":%llu,\"guest_bound_windows\":%llu,\"thin_windows\":%llu,"
+            "\"steps\":%llu,\"last_from\":%d,\"last_to\":%d,\"last_ms\":%.3f,"
+            "\"frames_measured\":%llu,\"gpu_frames\":%llu,\"frames_dropped\":%llu,"
+            "\"down_blocked_s\":%.1f,\"up_blocked\":{%s}",
+            g_dynres.active ? 1 : 0, dynres_requested(), st.ceiling,
+            g_dynres.active ? r.floor : 0, st.level, st.level * g_video_ref_lines, r.forced,
+            r.last_load, 1.0 - r.p.margin, r.last_bp_share, r.last_hz, g_dynres.rt_win_cpu_ms,
+            g_dynres.rt_win_gpu_ms, r.last_guest_bound, r.last_over, r.f,
+            g_dynres.hold_reason ? g_dynres.hold_reason : "", hold > 0.0 ? hold : 0.0,
+            r.last_reason ? r.last_reason : "", r.downs, r.ups, r.undos, r.relapses,
+            r.windows, r.held_windows, r.guest_bound_windows, r.thin_windows,
+            (unsigned long long)st.steps, st.last_from, st.last_to, st.last_ms,
+            (unsigned long long)co.frames, (unsigned long long)co.gpu_frames,
+            (unsigned long long)co.dropped,
+            r.down_block_until > now_s ? r.down_block_until - now_s : 0.0, blocked);
+    }
     const DynresController &c = g_dynres.ctl;
     const double now_s = (double)SDL_GetPerformanceCounter() /
                          (double)SDL_GetPerformanceFrequency();

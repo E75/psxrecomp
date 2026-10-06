@@ -108,6 +108,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 #include "png_write.h"   /* png_write_rgb — present_shot readback */
 
 #ifndef GL_BGRA
@@ -407,9 +408,13 @@ enum {
     RTH_OFFSET, RTH_WIDE_CONFIGURE, RTH_WIDE_VIEW, RTH_WIDE_TARGET,
     RTH_WIDE_DISABLE, RTH_WIDE_CLEAR, RTH_WIDE_CLEAR_MARGINS, RTH_PROJ_TRI,
     RTH_WIDE_RECOVERY, RTH_INTERP_SUSPENDED, RTH_PRESENT_VRAM,
-    RTH_PRESENT_WIDE, RTH_STATE, RTH_PEEK, RTH_RING_CAPTURE
+    RTH_PRESENT_WIDE, RTH_STATE, RTH_PEEK, RTH_RING_CAPTURE, RTH_DYN_STEP,
+    RTH_FRAME
 };
 static int  rth_record_mode(void);
+/* Render-thread frame cost (dynamic resolution; defined with GL_RT_BACKEND). */
+static uint64_t s_rthf_swap_ns = 0;        /* render thread: time in the swap */
+static uint64_t host_now_ns_rthf(void);
 static int  rth_rec_ints(uint16_t op, uint16_t flags, int n, const int32_t *v);
 static uint16_t rth_prim_flags(void);
 static int  rth_record_present(uint16_t op, int n, const int32_t *v);
@@ -8184,7 +8189,9 @@ static void gl_swap_with_osd(void) {
     /* Dynamic resolution's ledger: time blocked in the swap is the driver's
      * vsync wait unless the frame was late (main.cpp). Keep one owned swap. */
     uint64_t t0 = s_dyn_on ? SDL_GetPerformanceCounter() : 0;
+    const uint64_t rthf_t0 = rth_replaying() ? host_now_ns_rthf() : 0;
     SDL_GL_SwapWindow(s_win);
+    if (rthf_t0) s_rthf_swap_ns += host_now_ns_rthf() - rthf_t0;
     if (s_dyn_on) {
         s_dyn_last_swap_ticks = SDL_GetPerformanceCounter() - t0;
         s_dyn_ledger.swap_ticks += s_dyn_last_swap_ticks;
@@ -8803,6 +8810,7 @@ static void dyn_context_ready(void) {
 }
 
 void gl_renderer_set_dynamic_resolution(int on) {
+    if (s_ctx) GL_RT_SYNC("set_dynamic_resolution");
     s_dyn_on = on ? 1 : 0;
     if (!s_ctx || !s_raster_ok) return;   /* dyn_context_ready decides */
     if (s_dyn_on) {
@@ -8895,6 +8903,15 @@ static void dyn_rescale_in_place(GLuint fbo, int surf_w, const int (*cols)[2], i
     p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, 0);
 }
 
+/* Render thread: the displayed rect a recorded step keeps at full detail,
+ * captured when the step was recorded (gpu.c's display state is the
+ * emulation thread's). */
+static int s_dyn_rth_disp_valid = 0, s_dyn_rth_disp[5];
+static atomic_flag s_dyn_stats_lock = ATOMIC_FLAG_INIT;   /* s_dyn_stats: render thread writes */
+static void dyn_stats_lock(void) { while (atomic_flag_test_and_set_explicit(&s_dyn_stats_lock, memory_order_acquire)) {} }
+static void dyn_stats_unlock(void) { atomic_flag_clear_explicit(&s_dyn_stats_lock, memory_order_release); }
+static int s_rthm_scale = 1;                /* emulation-side level (recording) */
+
 static int dyn_apply(int snew) {
     /* Never in the windowed high-resolution mode (s_hiw): dyn_eligible keeps
      * s_alloc_scale 0 there; refuse here too rather than step its tiles. */
@@ -8932,7 +8949,14 @@ static int dyn_apply(int snew) {
     int qn = 0, qr[2][4];
     {
         GpuDisplayInfo di;
-        gpu_get_display_info(&di);
+        if (rth_replaying()) {
+            memset(&di, 0, sizeof di);
+            di.disabled = !s_dyn_rth_disp_valid || s_dyn_rth_disp[0];
+            di.display_x = (uint32_t)s_dyn_rth_disp[1]; di.display_y = (uint32_t)s_dyn_rth_disp[2];
+            di.width = (uint32_t)s_dyn_rth_disp[3];     di.height = (uint32_t)s_dyn_rth_disp[4];
+        } else {
+            gpu_get_display_info(&di);
+        }
         if (!di.disabled && di.width > 0 && di.height > 0) {
             qr[qn][0] = (int)di.display_x; qr[qn][1] = (int)di.display_y;
             qr[qn][2] = (int)di.width;     qr[qn][3] = (int)di.height;
@@ -9034,6 +9058,7 @@ static int dyn_apply(int snew) {
     pass_gens_invalidate();
     for (int r = 0; r < PRES_ROWS; r++) s_present_dirty[r] = ~0ull;
     const uint64_t t6 = SDL_GetPerformanceCounter();
+    dyn_stats_lock();
     s_dyn_stats.steps++;
     s_dyn_stats.last_from = sold;
     s_dyn_stats.last_to = snew;
@@ -9043,6 +9068,7 @@ static int dyn_apply(int snew) {
     s_dyn_stats.last_rects_ms = dyn_ms(t3, t4);
     s_dyn_stats.last_wide_ms = dyn_ms(t4, t5);
     s_dyn_stats.last_rects = qn;
+    dyn_stats_unlock();
     if (s_dyn_timing)
         fprintf(stdout, "psxrecomp: dynamic resolution %dx -> %dx in %.2f ms (drain %.2f, "
                 "1x+rects %.2f, reseed %.2f, rects back %.2f, wide %.2f)\n", sold, snew,
@@ -9052,16 +9078,37 @@ static int dyn_apply(int snew) {
 }
 
 static void dyn_after_present(void) {
+    /* Recording: the present was queued, not run; the step it would follow
+     * is recorded after it (gl_renderer_step_internal_scale_now). */
+    if (s_rth_on && !rt_on_render_thread() && !rt_held()) return;
     if (!s_dyn_pending) return;
     int s = s_dyn_pending;
     s_dyn_pending = 0;
     (void)dyn_apply(s);   /* inside a pass: re-queued */
 }
 
+/* Render thread: record the step in stream order (after the frame just
+ * closed, before the next one's first draw); the emulation side's level
+ * moves at once (s_rthm_scale), the backend's when the step is replayed.
+ * s_alloc_scale only changes under a sync point. 1 when recorded. */
+static int dyn_record_step(int scale) {
+    if (!(s_rth_on && !rt_on_render_thread() && !rt_held())) return 0;
+    if (gpu_display_is_depth24()) { gl_rth_acquire("depth24"); return 0; }
+    if (scale == s_rthm_scale) return 1;
+    GpuDisplayInfo di;
+    gpu_get_display_info(&di);
+    int32_t a[6] = { scale, di.disabled ? 1 : 0, (int32_t)di.display_x,
+                     (int32_t)di.display_y, (int32_t)di.width, (int32_t)di.height };
+    if (!rth_rec_ints(RTH_DYN_STEP, 0, 6, a)) { gl_rth_acquire("dyn_step"); return 0; }
+    s_rthm_scale = scale;
+    return 1;
+}
+
 int gl_renderer_request_internal_scale(int scale) {
     if (!s_alloc_scale || !s_raster_ok) return 0;
     if (scale < 1) scale = 1;
     if (scale > s_alloc_scale) scale = s_alloc_scale;
+    if (dyn_record_step(scale)) return 1;
     s_dyn_pending = scale == s_hr_scale ? 0 : scale;
     return 1;
 }
@@ -9070,16 +9117,21 @@ int gl_renderer_step_internal_scale_now(int scale) {
     if (!s_alloc_scale || !s_raster_ok) return 0;
     if (scale > s_alloc_scale) scale = s_alloc_scale;
     if (scale < 1) scale = 1;
+    if (dyn_record_step(scale)) return 1;
     s_dyn_pending = 0;
     return dyn_apply(scale) && s_hr_scale == scale;
 }
 
 void gl_renderer_dynres_stats(GlDynresStats *out) {
     if (!out) return;
+    dyn_stats_lock();
     *out = s_dyn_stats;
-    out->level = s_raster_ok ? s_hr_scale : 0;
+    dyn_stats_unlock();
+    /* While recording, the level the emulation thread has asked for. */
+    const int rec = s_rth_on && !rt_on_render_thread() && !rt_held();
+    out->level = !s_raster_ok ? 0 : rec ? s_rthm_scale : s_hr_scale;
     out->ceiling = gl_renderer_dynamic_resolution_ceiling();
-    out->pending = s_dyn_pending;
+    out->pending = rec ? 0 : s_dyn_pending;
 }
 
 void gl_renderer_host_ledger(GlHostLedger *out) {
@@ -9147,6 +9199,7 @@ static uint64_t s_rth_presents = 0, s_rth_presents_stale = 0;
 #define RTHF_BD_SHIFT  2          /* bits 2-3: psx_ws_prim_in_backdrop() 0..3 */
 
 static void rth_mirror_resync(void) {
+    s_rthm_scale = s_out_scale;
     s_rthm_wide_w = g_wide_w;
     s_rthm_wide_off = g_wide_off;
     s_rthm_cur = g_wide_cur != 0;
@@ -9163,8 +9216,8 @@ static int rth_mirror_wide_for(int base_x) {
     for (int i = 0; i < WIDE_MAX_SURF; i++)
         if (s_rthm_base[i] == base_x) return 1;
     if (s_gl_max_dim > 0 &&
-        ((int64_t)s_rthm_wide_w * s_out_scale > s_gl_max_dim ||
-         (int64_t)VRAM_H * s_out_scale > s_gl_max_dim))
+        ((int64_t)s_rthm_wide_w * alloc_scale_for(s_rthm_scale) > s_gl_max_dim ||
+         (int64_t)VRAM_H * alloc_scale_for(s_rthm_scale) > s_gl_max_dim))
         return 0;
     for (int i = 0; i < WIDE_MAX_SURF; i++)
         if (s_rthm_base[i] < 0) { s_rthm_base[i] = base_x; return 1; }
@@ -9324,6 +9377,114 @@ static void rth_replay_present(const RtCmd *c, const uint8_t *p) {
     s_rth_ov.valid = 0;
 }
 
+
+/* ---- render-thread frame cost (dynamic resolution) -------------------------
+ * docs/RENDER_THREAD.md, "Dynamic resolution". Measured on the render thread
+ * per replayed guest frame, between its first record and its RTH_FRAME
+ * marker (recorded at the frame boundary): CPU = wall time replaying it minus
+ * the render thread's idle waits for records and its time in the swap (the
+ * display's vsync); GPU = a GL_TIMESTAMP pair around the same span, read back
+ * when available (never waited on). cost = max(CPU, GPU). A frame during
+ * which the context went to the emulation thread (a sync point) is dropped:
+ * its span holds the emulation thread's own drawing. Published as running
+ * totals for the emulation thread (gl_renderer_render_thread_costs). */
+#define RTHF_Q 8
+static _Atomic int s_rthf_want = 0;          /* host: measure (dynres active) */
+static int      s_rthf_qok = -1;             /* render thread: queries usable */
+static GLuint   s_rthf_q[RTHF_Q][2];
+static uint64_t s_rthf_slot_cpu[RTHF_Q];
+static unsigned s_rthf_head = 0, s_rthf_tail = 0;
+static int      s_rthf_open = 0, s_rthf_taint = 0, s_rthf_has_q = 0;
+static uint64_t s_rthf_t0 = 0, s_rthf_idle0 = 0, s_rthf_swap0 = 0;
+static _Atomic uint64_t s_rthf_frames, s_rthf_cost_ns, s_rthf_cpu_ns, s_rthf_gpu_ns,
+                        s_rthf_gpu_frames, s_rthf_dropped;
+
+static uint64_t host_now_ns_rthf(void) {
+    return (uint64_t)((double)SDL_GetPerformanceCounter() * 1.0e9 /
+                      (double)SDL_GetPerformanceFrequency());
+}
+
+static void rthf_publish(uint64_t cpu, uint64_t gpu, int has_gpu) {
+    uint64_t cost = has_gpu && gpu > cpu ? gpu : cpu;
+    atomic_fetch_add(&s_rthf_cpu_ns, cpu);
+    if (has_gpu) {
+        atomic_fetch_add(&s_rthf_gpu_ns, gpu);
+        atomic_fetch_add(&s_rthf_gpu_frames, 1);
+    }
+    atomic_fetch_add(&s_rthf_cost_ns, cost);
+    atomic_fetch_add(&s_rthf_frames, 1);   /* last: the totals above are in */
+}
+
+/* Read every finished query pair, oldest first, without waiting. */
+static void rthf_poll(void) {
+    while (s_rthf_tail != s_rthf_head) {
+        const unsigned i = s_rthf_tail % RTHF_Q;
+        GLuint64 avail = 0, a = 0, b = 0;
+        p_glGetQueryObjectui64v(s_rthf_q[i][1], GL_QUERY_RESULT_AVAILABLE, &avail);
+        if (!avail) break;
+        p_glGetQueryObjectui64v(s_rthf_q[i][0], GL_QUERY_RESULT, &a);
+        p_glGetQueryObjectui64v(s_rthf_q[i][1], GL_QUERY_RESULT, &b);
+        rthf_publish(s_rthf_slot_cpu[i], b > a ? (uint64_t)(b - a) : 0, 1);
+        s_rthf_tail++;
+    }
+}
+
+static void rthf_begin(void) {
+    if (s_rthf_qok < 0) {
+        s_rthf_qok = (p_glGenQueries && p_glQueryCounter && p_glGetQueryObjectui64v &&
+                      !(getenv("PSX_DYNRES_GPU_TIMER") && getenv("PSX_DYNRES_GPU_TIMER")[0] == '0')) ? 1 : 0;
+        if (s_rthf_qok) p_glGenQueries(RTHF_Q * 2, &s_rthf_q[0][0]);
+    }
+    s_rthf_open = 1;
+    s_rthf_taint = 0;
+    s_rthf_t0 = host_now_ns_rthf();
+    s_rthf_idle0 = rt_render_idle_ns();
+    s_rthf_swap0 = s_rthf_swap_ns;
+    s_rthf_has_q = s_rthf_qok && s_rthf_head - s_rthf_tail < RTHF_Q;
+    if (s_rthf_has_q) p_glQueryCounter(s_rthf_q[s_rthf_head % RTHF_Q][0], GL_TIMESTAMP);
+}
+
+static void rthf_end(void) {
+    if (!s_rthf_open) return;
+    s_rthf_open = 0;
+    if (s_rthf_taint) {
+        /* The query pair is still issued so the ring stays in order; the
+         * frame is not published. */
+        if (s_rthf_has_q) {
+            p_glQueryCounter(s_rthf_q[s_rthf_head % RTHF_Q][1], GL_TIMESTAMP);
+            s_rthf_tail = ++s_rthf_head;   /* drop it and anything older */
+        }
+        atomic_fetch_add(&s_rthf_dropped, 1);
+        return;
+    }
+    const uint64_t now = host_now_ns_rthf();
+    const uint64_t idle = rt_render_idle_ns() - s_rthf_idle0;
+    const uint64_t swap = s_rthf_swap_ns - s_rthf_swap0;
+    const uint64_t span = now - s_rthf_t0;
+    const uint64_t cpu = span > idle + swap ? span - idle - swap : 0;
+    if (s_rthf_has_q) {
+        const unsigned i = s_rthf_head % RTHF_Q;
+        p_glQueryCounter(s_rthf_q[i][1], GL_TIMESTAMP);
+        s_rthf_slot_cpu[i] = cpu;
+        s_rthf_head++;
+    } else {
+        rthf_publish(cpu, 0, 0);
+    }
+    if (s_rthf_qok > 0) rthf_poll();
+}
+
+void gl_renderer_render_thread_measure(int on) { atomic_store(&s_rthf_want, on ? 1 : 0); }
+
+void gl_renderer_render_thread_costs(GlRthCosts *out) {
+    if (!out) return;
+    out->frames = atomic_load(&s_rthf_frames);
+    out->cost_ns = atomic_load(&s_rthf_cost_ns);
+    out->cpu_ns = atomic_load(&s_rthf_cpu_ns);
+    out->gpu_ns = atomic_load(&s_rthf_gpu_ns);
+    out->gpu_frames = atomic_load(&s_rthf_gpu_frames);
+    out->dropped = atomic_load(&s_rthf_dropped);
+}
+
 /* ---- the recording vtable ------------------------------------------------ */
 #define RTH_DIRECT_OR(rec) do { if (rth_record_mode()) { rec; return; } } while (0)
 static void rtb_init(uint16_t *vram) {
@@ -9333,7 +9494,11 @@ static void rtb_init(uint16_t *vram) {
     if (s_rth_on && !rt_held()) sw_renderer_rebind_vram(s_rth_vram_priv);
 }
 static void rtb_set_scale(int sc) { GL_RT_SYNC("set_scale"); glb_set_scale(sc); }
-static int  rtb_scale(void) { return s_out_scale; }  /* changes only under a sync point */
+/* The scale changes under a sync point, or by a recorded dynamic-resolution
+ * step: while recording, the level as of the recording position. */
+static int  rtb_scale(void) {
+    return (s_rth_on && !rt_on_render_thread() && !rt_held()) ? s_rthm_scale : s_out_scale;
+}
 static void rtb_set_texture_filter(int b) { GL_RT_SYNC("texture_filter"); glb_set_texture_filter(b); }
 static int  rtb_texture_filter(void) { return s_tex_filter; }
 static void rtb_set_semi_transparency(int e, int m) {
@@ -9543,6 +9708,8 @@ static void gl_rth_exec(void *user, const RtCmd *c, const void *payload) {
     s_rthx_prim = (c->flags & RTHF_PRIM) != 0;
     s_rthx_tagged = (c->flags & RTHF_TAGGED) != 0;
     s_rthx_backdrop = (c->flags >> RTHF_BD_SHIFT) & 3;
+    if (c->op == RTH_FRAME) { rthf_end(); return; }
+    if (!s_rthf_open && atomic_load_explicit(&s_rthf_want, memory_order_relaxed)) rthf_begin();
     switch (c->op) {
     case RTH_SEMI:      glb_set_semi_transparency(v[0], v[1]); break;
     case RTH_MASK:      glb_set_mask_bits(v[0], v[1]); break;
@@ -9613,6 +9780,12 @@ static void gl_rth_exec(void *user, const RtCmd *c, const void *payload) {
         break;
 #ifndef PSX_NO_DEBUG_TOOLS
     case RTH_RING_CAPTURE: rth_ring_capture_now(v); break;
+    case RTH_DYN_STEP:
+        s_dyn_rth_disp_valid = 1;
+        memcpy(s_dyn_rth_disp, v + 1, sizeof s_dyn_rth_disp);
+        (void)dyn_apply(v[0]);
+        s_dyn_rth_disp_valid = 0;
+        break;
 #endif
     case RTH_PEEK: {
         uint64_t ptr = (uint64_t)(uint32_t)v[4] | ((uint64_t)(uint32_t)v[5] << 32);
@@ -9631,6 +9804,7 @@ static void gl_rth_ctx(void *user, int current) {
     } else {
         glFlush();
         SDL_GL_MakeCurrent(s_win, NULL);
+        if (rt_on_render_thread() && s_rthf_open) s_rthf_taint = 1;
     }
 }
 
@@ -9697,6 +9871,9 @@ void gl_renderer_render_thread_frame_boundary(void) {
     } else if (!gl_rth_eligible()) {
         gl_rth_acquire("ineligible");
     }
+    /* The render thread's per-frame cost (dynamic resolution) ends here. */
+    if (!rt_held() && atomic_load_explicit(&s_rthf_want, memory_order_relaxed))
+        RTH_REC(RTH_FRAME, 0, 0);
     rt_frame_end();
 }
 
