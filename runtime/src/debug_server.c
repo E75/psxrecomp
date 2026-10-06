@@ -61,6 +61,7 @@
 #include "guest_tty.h"
 #include "frame_fingerprint.h"
 #include "psx_segment_miss.h"
+#include "psx_rewind.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -7912,6 +7913,19 @@ extern int sio_get_pad_analog(int slot);
 extern void sio_get_pad_sticks(int slot, uint8_t out[4]);
 extern void sio_get_pad_negcon(int slot, uint8_t out[3]);
 extern int sio_get_pad_mode_locked(int slot);
+/* Local Rewind: enabled, panel open, title block (psx_mod_set_rewind_blocked)
+ * and the snapshots held, so scripted runs can check capture and opening. */
+static void handle_rewind_status(int id, const char *json)
+{
+    (void)json;
+    send_fmt("{\"id\":%d,\"ok\":true,\"enabled\":%s,\"open\":%s,"
+             "\"title_blocked\":%s,\"snaps\":%u}\n",
+             id, psx_rewind_enabled() ? "true" : "false",
+             psx_rewind_is_open() ? "true" : "false",
+             psx_rewind_title_blocked() ? "true" : "false",
+             (unsigned)psx_rewind_snap_count());
+}
+
 static void handle_pad_status(int id, const char *json)
 {
     (void)json;
@@ -15144,6 +15158,7 @@ static const CmdEntry s_commands[] = {
     { "set_input",         handle_set_input },
     { "press",             handle_press },
     { "pad_status",        handle_pad_status },
+    { "rewind_status",     handle_rewind_status },
     { "clear_input",       handle_clear_input },
     { "input_route_clear", handle_input_route_clear },
     { "input_route_append",handle_input_route_append },

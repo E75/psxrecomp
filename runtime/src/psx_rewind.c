@@ -112,6 +112,7 @@ int psx_rewind_title_blocked(void)
 #if !defined(PSX_HAS_RBENGINE_SNAP)
 
 void psx_rewind_set_title_blocked(int blocked) { s_title_blocked = blocked ? 1 : 0; }
+uint32_t psx_rewind_snap_count(void) { return 0; }
 void psx_rewind_set_depth(uint32_t depth) { (void)depth; }
 void psx_rewind_set_interval(uint32_t interval) { (void)interval; }
 void psx_rewind_set_enabled(int enabled) { (void)enabled; }
@@ -470,6 +471,11 @@ int psx_rewind_enabled(void)
 int psx_rewind_is_open(void)
 {
     return s_open;
+}
+
+uint32_t psx_rewind_snap_count(void)
+{
+    return s_count;
 }
 
 int psx_rewind_needs_present(void)
