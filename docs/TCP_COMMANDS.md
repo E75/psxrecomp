@@ -434,9 +434,9 @@ The TCP server is the canonical instrumentation surface. Rule 3 in `CLAUDE.md` i
 
 ## Complete command index (generated)
 
-**348 commands registered** — 335 on the native server (`runtime/src/debug_server.c`), 61 on the Beetle server (`runtime/src/beetle_debug_server.c`).
+**349 commands registered** — 336 on the native server (`runtime/src/debug_server.c`), 61 on the Beetle server (`runtime/src/beetle_debug_server.c`).
 
-68 of 348 have prose above; **280 are index-only**. An index-only command still works — it just has no description here yet. Send it `{"cmd":"<name>"}` and read the reply, or find its `handle_*` function in the server source.
+68 of 349 have prose above; **281 are index-only**. An index-only command still works — it just has no description here yet. Send it `{"cmd":"<name>"}` and read the reply, or find its `handle_*` function in the server source.
 
 Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this block has drifted from the code.
 
@@ -675,6 +675,7 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `render_pass_dump` | ✓ |  | ✓ |
 | `render_pass_refuse` | ✓ |  | ✓ |
 | `render_pass_stats` | ✓ |  | ✓ |
+| `resident_events` | ✓ |  |  |
 | `resident_status` | ✓ |  |  |
 | `restore_trace` | ✓ |  |  |
 | `restore_trace_clear` | ✓ |  |  |

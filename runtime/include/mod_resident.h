@@ -18,7 +18,12 @@
  *
  * Call psx_resident_prepare() from an activation callback (it reads the disc
  * through psx_mod_read_disc_file). Accessors are emulation-thread only.
- * TCP: {"cmd":"resident_status"} lists every prepared pack.
+ * A cache that cannot be written (no cache directory, read-only or full disk)
+ * does not fail preparation: the pack is kept in memory for this launch, so
+ * the outcome depends only on the effective disc and the plan (two netplay
+ * peers with the same plan always take the same loader path).
+ * TCP: {"cmd":"resident_status"} lists every prepared pack;
+ * {"cmd":"resident_events"} returns the always-on service ring.
  */
 #include <stdint.h>
 
@@ -108,6 +113,22 @@ int psx_resident_guest_ranges_match(const PSXResidentRange* ranges,
 
 /* Debug server: JSON array describing every prepared pack. */
 int psx_resident_status_json(char* out, uint32_t capacity);
+
+/* Always-on service ring (observability, not logging). Adapters record every
+ * loader request they complete from memory (served = 1) or hand to the
+ * original loader (served = 0), so a load window is measured afterwards from
+ * the ring instead of by arming a trace. `op` must be a string literal of the
+ * form "<adapter>.<request>"; file is the pack index or UINT32_MAX. Each
+ * entry carries the guest frame (as the CD-ROM rings) and the guest cycle.
+ * Emulation-thread only; the oldest entries are evicted. */
+void psx_resident_record(const char* op, uint32_t file, uint32_t lba,
+                         uint32_t bytes, int served);
+/* Debug server: entries with frame_lo <= frame <= frame_hi (inclusive; pass
+ * 0 and UINT64_MAX for all), at most `max` of the newest, oldest first:
+ * {"total":n,"capacity":c,"entries":[{seq,frame,cycle,op,file,lba,bytes,
+ * served}]}. Returns 0 when `capacity` is too small. */
+int psx_resident_events_json(char* out, uint32_t capacity, uint64_t frame_lo,
+                             uint64_t frame_hi, uint32_t max);
 
 #ifdef __cplusplus
 }

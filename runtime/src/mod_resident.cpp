@@ -405,29 +405,53 @@ extern "C" const PSXResidentPack* psx_resident_prepare(const PSXResidentSpec* sp
         const Digest key = cache_key(spec, fingerprint);
         /* Without a committed plan there is no disc identity to key on: build
          * in memory and never reuse or publish. */
-        const bool cacheable = !fingerprint.empty();
+        bool cacheable = !fingerprint.empty();
+        std::string memory_only;  /* why a planned cache is not used */
         std::filesystem::path path;
         std::unique_ptr<PSXResidentPack> pack;
         if (cacheable) {
-            path = cache_dir(spec->title) / (std::string(spec->format) + "-" + hex(key.data(), 16) + ".pack");
-            rec.path = path.string();
+            try {
+                path = cache_dir(spec->title) / (std::string(spec->format) + "-" + hex(key.data(), 16) + ".pack");
+                rec.path = path.string();
+            } catch (const std::exception& e) {
+                cacheable = false;
+                memory_only = e.what();
+            }
+        }
+        if (cacheable) {
+            std::error_code ec;
             pack = load(path, key, spec->file_count);
             if (pack && !extents_match(*pack, spec)) pack.reset();
-            if (!pack && std::filesystem::exists(path)) psx_mod_counter_add("resident.cache_rejected", 1);
+            if (!pack && std::filesystem::exists(path, ec)) psx_mod_counter_add("resident.cache_rejected", 1);
         }
         if (pack) {
             rec.state = "verified";
             std::error_code ec;
             std::filesystem::last_write_time(path, std::filesystem::file_time_type::clock::now(), ec);
+            prune(path, spec->format, spec->keep_packs ? spec->keep_packs : 3);
             psx_mod_counter_add("resident.verified", 1);
         } else {
             pack = build(spec, rec.error);
             if (!pack) throw std::runtime_error(rec.error);
-            if (cacheable) publish(path, *pack, key);
-            rec.state = cacheable ? "prepared" : "prepared (uncached: no mod plan)";
+            /* The cache only shortens the next launch. Whether a pack exists
+             * depends on the effective disc and the plan alone, never on the
+             * host file system, so netplay peers with one plan take one path. */
+            if (cacheable) {
+                try {
+                    publish(path, *pack, key);
+                    prune(path, spec->format, spec->keep_packs ? spec->keep_packs : 3);
+                } catch (const std::exception& e) {
+                    memory_only = e.what();
+                }
+            }
+            if (!memory_only.empty()) {
+                rec.state = "prepared (memory only: " + memory_only + ")";
+                psx_mod_counter_add("resident.cache_write_failed", 1);
+            } else {
+                rec.state = cacheable ? "prepared" : "prepared (uncached: no mod plan)";
+            }
             psx_mod_counter_add("resident.prepared", 1);
         }
-        if (cacheable) prune(path, spec->format, spec->keep_packs ? spec->keep_packs : 3);
         rec.pack = std::move(pack);
     } catch (const std::exception& e) {
         rec.pack.reset();
@@ -534,6 +558,65 @@ extern "C" int psx_resident_status_json(char* out, uint32_t capacity) {
         s += b;
     }
     s += ']';
+    if (!out || capacity <= s.size()) return 0;
+    std::memcpy(out, s.c_str(), s.size() + 1);
+    return 1;
+}
+
+/* Always-on service ring (mod_resident.h). Frames come from the debug
+ * server's guest frame counter, the clock of the CD-ROM rings, so a load
+ * window can be compared with cdrom_bursts / cdrom_sector_history. */
+extern "C" uint64_t s_frame_count;
+extern "C" uint64_t psx_get_cycle_count(void);
+
+namespace {
+struct Event {
+    uint64_t seq, frame, cycle;
+    const char* op;
+    uint32_t file, lba, bytes, served;
+};
+constexpr uint32_t kEventCapacity = 8192;
+Event g_events[kEventCapacity];
+uint64_t g_event_total = 0;
+}  // namespace
+
+extern "C" void psx_resident_record(const char* op, uint32_t file, uint32_t lba,
+                                    uint32_t bytes, int served) {
+    Event& e = g_events[g_event_total % kEventCapacity];
+    e.seq = g_event_total++;
+    e.frame = s_frame_count;
+    e.cycle = psx_get_cycle_count();
+    e.op = op && *op ? op : "?";
+    e.file = file;
+    e.lba = lba;
+    e.bytes = bytes;
+    e.served = served ? 1u : 0u;
+}
+
+extern "C" int psx_resident_events_json(char* out, uint32_t capacity, uint64_t frame_lo,
+                                        uint64_t frame_hi, uint32_t max) {
+    const uint64_t held = std::min<uint64_t>(g_event_total, kEventCapacity);
+    std::vector<const Event*> picked;
+    for (uint64_t i = 0; i < held && picked.size() < max; i++) {
+        const Event& e = g_events[(g_event_total - 1 - i) % kEventCapacity];
+        if (e.frame >= frame_lo && e.frame <= frame_hi) picked.push_back(&e);
+    }
+    std::string s;
+    char b[96];
+    std::snprintf(b, sizeof b, "{\"total\":%llu,\"capacity\":%u,\"entries\":[",
+                  (unsigned long long)g_event_total, kEventCapacity);
+    s += b;
+    for (size_t i = picked.size(); i-- > 0;) {
+        const Event& e = *picked[i];
+        s += "{\"seq\":" + std::to_string(e.seq) + ",\"frame\":" + std::to_string(e.frame) +
+             ",\"cycle\":" + std::to_string(e.cycle) + ",\"op\":";
+        json_string(s, e.op);
+        std::snprintf(b, sizeof b, ",\"file\":%d,\"lba\":%u,\"bytes\":%u,\"served\":%u}%s",
+                      e.file == UINT32_MAX ? -1 : int(e.file), e.lba, e.bytes, e.served,
+                      i ? "," : "");
+        s += b;
+    }
+    s += "]}";
     if (!out || capacity <= s.size()) return 0;
     std::memcpy(out, s.c_str(), s.size() + 1);
     return 1;
