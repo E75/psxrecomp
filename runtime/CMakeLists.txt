@@ -211,6 +211,19 @@ if(BUILD_TESTING)
                 --output "${CMAKE_CURRENT_BINARY_DIR}/gl-scale-results")
         set_tests_properties(gl_scale_invariance_test PROPERTIES
             LABELS "gpu;opengl;hardware" TIMEOUT 300 SKIP_RETURN_CODE 77)
+        # Render thread ([video] render_thread) on vs off: the values the
+        # guest reads back, native VRAM, the frame at S and the native-wide
+        # surface are identical for a scripted stream with readbacks, mask
+        # bits, uploads, ring wraps and per-primitive widescreen tags.
+        add_test(NAME gl_render_thread_test
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_gl_render_thread.py"
+                --fixture "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gl_render_thread.c"
+                --cc "${CMAKE_C_COMPILER}"
+                --sdl-include "${_gl_scale_sdl_inc}"
+                --sdl-library "$<TARGET_FILE:SDL3::SDL3>"
+                --output "${CMAKE_CURRENT_BINARY_DIR}/gl-render-thread-results")
+        set_tests_properties(gl_render_thread_test PROPERTIES LABELS "gpu;opengl;hardware" TIMEOUT 300)
         unset(_gl_scale_sdl_inc)
     else()
         message(STATUS "gl_scale_invariance_test: not registered (needs macOS, Linux or MinGW, Python 3 and SDL3)")
