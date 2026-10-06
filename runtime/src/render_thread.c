@@ -25,6 +25,10 @@ static void mtx_lock(rt_mutex *m) { AcquireSRWLockExclusive(m); }
 static void mtx_unlock(rt_mutex *m) { ReleaseSRWLockExclusive(m); }
 static void cnd_init(rt_cond *c) { InitializeConditionVariable(c); }
 static void cnd_wait(rt_cond *c, rt_mutex *m) { SleepConditionVariableSRW(c, m, INFINITE, 0); }
+static void cnd_wait_ns(rt_cond *c, rt_mutex *m, uint64_t ns) {
+    DWORD ms = (DWORD)((ns + 999999u) / 1000000u);
+    SleepConditionVariableSRW(c, m, ms ? ms : 1, 0);
+}
 static void cnd_bcast(rt_cond *c) { WakeAllConditionVariable(c); }
 static uint64_t now_ns(void) {
     LARGE_INTEGER f, t;
@@ -47,6 +51,19 @@ static void mtx_lock(rt_mutex *m) { pthread_mutex_lock(m); }
 static void mtx_unlock(rt_mutex *m) { pthread_mutex_unlock(m); }
 static void cnd_init(rt_cond *c) { pthread_cond_init(c, NULL); }
 static void cnd_wait(rt_cond *c, rt_mutex *m) { pthread_cond_wait(c, m); }
+static void cnd_wait_ns(rt_cond *c, rt_mutex *m, uint64_t ns) {
+#  if defined(__APPLE__)
+    struct timespec rel = { (time_t)(ns / 1000000000u), (long)(ns % 1000000000u) };
+    pthread_cond_timedwait_relative_np(c, m, &rel);
+#  else
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    uint64_t t = (uint64_t)ts.tv_nsec + ns % 1000000000u;
+    ts.tv_sec += (time_t)(ns / 1000000000u + t / 1000000000u);
+    ts.tv_nsec = (long)(t % 1000000000u);
+    pthread_cond_timedwait(c, m, &ts);
+#  endif
+}
 static void cnd_bcast(rt_cond *c) { pthread_cond_broadcast(c); }
 static uint64_t now_ns(void) {
     struct timespec ts;
@@ -81,6 +98,8 @@ static struct {
     RtExecFn exec;
     RtCtxFn  ctx;
     void    *user;
+    RtTickFn tick;
+    uint64_t tick_at;          /* consumer: next tick deadline (0 = none) */
 
     /* shared positions / counters */
     _Atomic uint64_t wpos, rpos;
@@ -107,6 +126,7 @@ static struct {
     uint64_t records, bytes, acquires, releases, oversize;
     uint64_t bp_waits, full_waits, bp_ns, full_ns, acq_ns, high_water;
     _Atomic uint64_t busy_ns, idle_ns;   /* consumer */
+    _Atomic uint64_t bp_events;          /* producer writes, any thread reads */
     RtAcquireEvent acq_ring[ACQ_RING];
     uint64_t acq_n;
 
@@ -127,6 +147,23 @@ int rt_running(void)          { return atomic_load(&R.running); }
 int rt_on_render_thread(void) { return t_render; }
 int rt_held(void)             { return R.held; }
 uint64_t rt_render_idle_ns(void) { return atomic_load(&R.idle_ns); }
+uint64_t rt_now_ns(void) { return now_ns(); }
+uint64_t rt_backpressure_events(void) { return atomic_load(&R.bp_events); }
+void rt_tick_at(uint64_t deadline_ns) {
+    if (!t_render || !deadline_ns) return;
+    if (!R.tick_at || deadline_ns < R.tick_at) R.tick_at = deadline_ns;
+}
+
+/* Consumer: run tick when its deadline has passed. */
+static void run_tick(void) {
+    if (!R.tick || !R.tick_at) return;
+    uint64_t now = now_ns();
+    if (now < R.tick_at) return;
+    R.tick_at = 0;
+    uint64_t next = R.tick(R.user, now);
+    if (next && (!R.tick_at || next < R.tick_at)) R.tick_at = next;
+    atomic_fetch_add(&R.busy_ns, now_ns() - now);
+}
 
 static inline uint64_t align_up(uint64_t n) {
     return (n + (RT_ALIGN - 1)) & ~(uint64_t)(RT_ALIGN - 1);
@@ -171,6 +208,7 @@ static void *render_main(void *arg)
     uint64_t r = atomic_load(&R.rpos);
     int have_ctx = 1;
     for (;;) {
+        run_tick();
         uint64_t w = atomic_load_explicit(&R.wpos, memory_order_acquire);
         if (r == w) {
             int spun = 0;
@@ -183,8 +221,15 @@ static void *render_main(void *arg)
             uint64_t t0 = now_ns();
             mtx_lock(&R.mtx);
             atomic_store(&R.render_sleeping, 1);
-            while (atomic_load(&R.wpos) == r && !R.stop && !R.release_req)
-                cnd_wait(&R.cv_work, &R.mtx);
+            while (atomic_load(&R.wpos) == r && !R.stop && !R.release_req) {
+                if (R.tick_at) {   /* timed work due: sleep no later than it */
+                    uint64_t now = now_ns();
+                    if (now >= R.tick_at) break;
+                    cnd_wait_ns(&R.cv_work, &R.mtx, R.tick_at - now);
+                } else {
+                    cnd_wait(&R.cv_work, &R.mtx);
+                }
+            }
             atomic_store(&R.render_sleeping, 0);
             if (R.release_req && atomic_load(&R.wpos) == r) {
                 serve_release_locked();
@@ -264,6 +309,7 @@ void *rt_cmd_begin(uint16_t op, uint16_t flags, uint32_t payload_bytes) {
         R.full_waits++;
         emu_wait(pred_space, w + pad + size);
         R.full_ns += now_ns() - t0;
+        atomic_fetch_add(&R.bp_events, 1);
     }
     if (pad) {
         RtCmd *p = (RtCmd *)(R.ring + off);
@@ -324,6 +370,7 @@ void rt_frame_end(void) {
         R.bp_waits++;
         emu_wait(pred_frames, (uint64_t)R.max_frames);
         R.bp_ns += now_ns() - t0;
+        atomic_fetch_add(&R.bp_events, 1);
     }
 }
 
@@ -386,6 +433,8 @@ int rt_start(const RtConfig *cfg) {
     R.exec = cfg->exec;
     R.ctx = cfg->ctx;
     R.user = cfg->user;
+    R.tick = cfg->tick;
+    R.tick_at = 0;
     mtx_init(&R.mtx);
     cnd_init(&R.cv_work);
     cnd_init(&R.cv_emu);

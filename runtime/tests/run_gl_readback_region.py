@@ -73,6 +73,8 @@ def main():
                ("xr", framework / "runtime/src/psx_openxr.c")]
     if (framework / "runtime/src/render_thread.c").exists():
         sources.append(("rth", framework / "runtime/src/render_thread.c"))
+    if (framework / "runtime/src/frame_gen.c").exists():
+        sources.append(("fg", framework / "runtime/src/frame_gen.c"))
     for name, source in sources:
         if run([compiler / "gcc.exe", "-std=c11", "-O2", "-flto", "-DPSX_SDL3=1",
                 "-DPSX_NO_DEBUG_TOOLS=1", *includes, "-c", source,

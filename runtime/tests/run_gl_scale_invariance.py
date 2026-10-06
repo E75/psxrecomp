@@ -136,6 +136,8 @@ def main():
         sources.append(("xr", framework / "runtime/src/psx_openxr.c"))
     if (framework / "runtime/src/render_thread.c").exists():
         sources.append(("rth", framework / "runtime/src/render_thread.c"))
+    if (framework / "runtime/src/frame_gen.c").exists():
+        sources.append(("fg", framework / "runtime/src/frame_gen.c"))
     # Unused renderer functions reference the rest of the runtime; the linker
     # drops them (-dead_strip, or per-function sections with --gc-sections).
     # MinGW's PE linker reports undefined references from sections it later

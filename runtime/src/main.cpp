@@ -1457,6 +1457,8 @@ static int           g_low_latency_input = 1;
  * GL call are done; s_render_thread_tried keeps it to one attempt. */
 static int           g_render_thread = 0;
 static int           g_render_thread_frames = 2;
+/* [video] frame_generation (docs/FRAME_GENERATION.md), with the render thread. */
+static int           g_frame_generation = 0;
 static int           s_render_thread_tried = 0;
 static int           g_video_vsync        = 1;
 static int           g_frame_interpolation = 0;
@@ -9319,7 +9321,13 @@ static void dynres_tick_rt(double now_s, double wall, double period, int held,
     g_dynres.last_costs = co;
     g_dynres.last_bp_ns = bp_ns;
     DynrtSample smp{ period, wall, frames, cost, bp, held };
+    const int prev_level = c.level;
     const int level = dynrt_sample(&c, now_s, &smp);
+    /* Frame generation only spends surplus: not while the real frames are
+     * over budget or the level is stepping down. */
+    if (level < prev_level || c.over_streak > 0)
+        gl_renderer_frame_gen_hold(level < prev_level ? "dynres stepped down"
+                                                      : "dynres over budget");
     if (c.windows != g_dynres.rt_last_windows) {
         g_dynres.rt_last_windows = c.windows;
         g_dynres.rt_win_cpu_ms = g_dynres.rt_acc_frames
@@ -9580,13 +9588,24 @@ static void render_thread_vblank(void) {
             gl_renderer_render_thread_start(g_render_thread_frames)) {
             std::fprintf(stdout, "psxrecomp: render thread on (OpenGL, %d frame(s) in flight)\n",
                          g_render_thread_frames);
+            if (g_frame_generation) {
+                gl_renderer_set_frame_generation(1);
+                std::fprintf(stdout, "psxrecomp: frame generation on (render thread, "
+                             "from surplus only)\n");
+            }
         } else {
             std::fprintf(stdout, "psxrecomp: render thread requested but not started "
                          "(needs the OpenGL backend without netplay, frame "
                          "interpolation or a 24-bit display)\n");
+            if (g_frame_generation)
+                std::fprintf(stdout, "psxrecomp: frame generation needs the render thread; off\n");
         }
         std::fflush(stdout);
     }
+    if (g_frame_generation)
+        gl_renderer_frame_gen_configure(g_host_refresh_hz,
+                                        g_guest_frame_period_ms > 0.0
+                                            ? 1000.0 / g_guest_frame_period_ms : 0.0);
     gl_renderer_render_thread_frame_boundary();
 #endif
 }
@@ -15697,6 +15716,7 @@ int main(int argc, char** argv) {
             gl_renderer_set_texture_window_batching(
                 gc.runtime.video_texture_window_batching ? 1 : 0);
             g_render_thread = gc.runtime.video_render_thread ? 1 : 0;
+            g_frame_generation = gc.runtime.video_frame_generation ? 1 : 0;
             g_video_vsync       = gc.runtime.video_vsync;
             g_frame_interpolation = gc.runtime.video_frame_interpolation ? 1 : 0;
             g_frame_interpolation_fps = gc.runtime.video_frame_interpolation_fps;
@@ -18003,6 +18023,8 @@ session_reboot:
      * flight (default 2). */
     if (const char* e = std::getenv("PSX_RENDER_THREAD"))
         g_render_thread = (*e && *e != '0') ? 1 : 0;
+    if (const char* e = std::getenv("PSX_FRAME_GEN"))
+        g_frame_generation = (*e && *e != '0') ? 1 : 0;
     if (const char* e = std::getenv("PSX_RENDER_THREAD_FRAMES"))
         g_render_thread_frames = std::atoi(e) > 0 ? std::atoi(e) : 2;
     /* Scanlines: env override wins over config, same as the corrections above,

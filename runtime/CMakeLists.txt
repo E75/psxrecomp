@@ -227,6 +227,20 @@ if(BUILD_TESTING)
                 --output "${CMAKE_CURRENT_BINARY_DIR}/gl-render-thread-results")
         set_tests_properties(gl_render_thread_test PROPERTIES
             LABELS "gpu;opengl;hardware" TIMEOUT 300 SKIP_RETURN_CODE 77)
+        # Frame generation ([video] frame_generation): the real presented
+        # images are identical with it off and on (VRAM and native-wide
+        # presents), generated frames are presented, and an in-between frame
+        # at phase 1 / 0 equals the newer / older real frame.
+        add_test(NAME gl_frame_gen_test
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_gl_frame_gen.py"
+                --fixture "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gl_frame_gen.c"
+                --cc "${CMAKE_C_COMPILER}"
+                --sdl-include "${_gl_scale_sdl_inc}"
+                --sdl-library "$<TARGET_FILE:SDL3::SDL3>"
+                --output "${CMAKE_CURRENT_BINARY_DIR}/gl-frame-gen-results")
+        set_tests_properties(gl_frame_gen_test PROPERTIES
+            LABELS "gpu;opengl;hardware" TIMEOUT 300 SKIP_RETURN_CODE 77)
         unset(_gl_scale_sdl_inc)
     else()
         message(STATUS "gl_scale_invariance_test: not registered (needs macOS, Linux or MinGW, Python 3 and SDL3)")
@@ -1211,6 +1225,13 @@ if(BUILD_TESTING)
         target_link_libraries(dynamic_resolution_rt_test PRIVATE m)
     endif()
     add_test(NAME dynamic_resolution_rt_test COMMAND dynamic_resolution_rt_test)
+    # Frame generation's matching, interpolation, plan and breaker.
+    add_executable(frame_gen_test tests/test_frame_gen.c src/frame_gen.c)
+    target_include_directories(frame_gen_test PRIVATE include)
+    if(NOT MSVC)
+        target_link_libraries(frame_gen_test PRIVATE m)
+    endif()
+    add_test(NAME frame_gen_test COMMAND frame_gen_test)
 
     # Render-pass time freeze against mock devices (psx_cycles.c only).
     add_executable(render_pass_freeze_test
