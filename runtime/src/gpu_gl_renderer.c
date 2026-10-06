@@ -587,10 +587,10 @@ static uint64_t s_idle_total = 0;      /* monotonic idle-wait ticks */
 static uint32_t s_since_tight = 0;
 static uint32_t s_passes_this_interval = 0;
 static uint64_t s_pass_behind = 0;     /* plans refused: no slack lately */
-/* The driver's first stencil blit in a process builds its pipeline (about
- * 5 ms on macOS); a presenter set up for leftover-planned render passes
- * (HOLD, FLIP) does one tiny blit at its first VBlank, long before a race,
- * so no pass pays it. */
+/* The driver builds a pipeline at the first use of the pass copy and
+ * stencil programs (a few ms on macOS); a presenter set up for
+ * leftover-planned render passes (HOLD, FLIP) makes one tiny pass_copy with
+ * stencil at its first VBlank, long before a race, so no pass pays it. */
 static int      s_pass_pipeline_warm = 0;
 static void pass_warm_pipeline(void);
 /* How much of the current pass's backup copy was made (1 = all of it): a
@@ -599,6 +599,9 @@ static double   s_pass_backup_done = 1.0;
 static int pass_gpu_caught_up(void);
 static void pass_note_interval_end(uint64_t resume, double frame_end);
 static void pass_note_vblank_late(double late, double vblank_ticks);
+static void pass_copy(GLuint src_tex, GLuint dst_fbo, int dst_w, int dst_h,
+                      int sx, int sy, int dx, int dy, int w, int h,
+                      int integer, int stencil);
 static int stereo_present(int w, int h);
 static void stereo_resources_release(void);
 static void stereo_invalidate(void);
@@ -682,6 +685,7 @@ static GLint  s_uBhSrcOff = -1, s_uBhShift = -1, s_uBhXoff = -1, s_uBhXhalf = -1
 static float  s_shift_hr = 0.0f, s_shift_hi = 0.0f;
 static GLint  s_geo_uShift = -1, s_tex_uShift = -1;
 static GLuint s_pack_prog = 0, s_stencil_prog = 0, s_empty_vao = 0;
+static GLuint s_pcopy_prog = 0, s_pcopyu_prog = 0;   /* render-pass copies */
 
 /* Sub-pixel vertex override + perspective UV weights for the next triangle
  * ([video] geometry_correction / perspective_texturing; see gpu_render.h).
@@ -745,6 +749,7 @@ static GLint s_uBlitSrcDiv = -1, s_uBlitSrcOff = -1;
 /* PACK program uniforms. */
 static GLint s_uPackHr = -1, s_uPackScale = -1;
 static GLint s_uStencilSrc = -1, s_uStencilOff = -1;
+static GLint s_uPcopySrc = -1, s_uPcopyOff = -1, s_uPcopyuSrc = -1, s_uPcopyuOff = -1;
 
 static uint32_t     *s_conv = NULL;        /* RGBA8 staging for uploads      */
 static int           s_gpu_dirty = 0;      /* CPU VRAM array may be stale    */
@@ -1669,6 +1674,17 @@ static const char *STENCIL_FS =
     "uniform ivec2 u_off;  /* tile origin in the target; (0,0) for a full copy */\n"
     "void main(){ vec4 c=texelFetch(u_src,ivec2(gl_FragCoord.xy)-u_off,0);\n"
     "  if(c.a<0.5) discard; frag=vec4(0.0); }\n";
+
+/* Render-pass copies (pass_copy): a texel-for-texel copy as a draw, RGBA8
+ * and R16UI. Destination pixel p takes source texel p + u_off. */
+static const char *PCOPY_FS =
+    "#version 330\n"
+    "uniform sampler2D u_src; uniform ivec2 u_off; out vec4 frag;\n"
+    "void main(){ frag=texelFetch(u_src,ivec2(gl_FragCoord.xy)+u_off,0); }\n";
+static const char *PCOPYU_FS =
+    "#version 330\n"
+    "uniform usampler2D u_src; uniform ivec2 u_off; out uint o_pix;\n"
+    "void main(){ o_pix=texelFetch(u_src,ivec2(gl_FragCoord.xy)+u_off,0).r; }\n";
 
 static GLuint compile_shader(GLenum type, const char *src) {
     GLuint s = p_glCreateShader(type);
@@ -3740,14 +3756,20 @@ static void gpu_copy_rect(int sx,int sy,int dx,int dy,int w,int h) {
      * high-resolution window stages its S-scaled source in a scratch of its
      * own (hiw_mirror_copy), so this one never grows past the hr surface. */
     if (!scratch_ensure(w * S, h * S)) return;
-    p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, s_hr_fbo);
-    p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, s_scratch_fbo);
-    glDisable(GL_SCISSOR_TEST);
-    p_glBlitFramebuffer(sx*S, sy*S, (sx+w)*S, (sy+h)*S,
-                        0, 0, w*S, h*S,
-                        GL_COLOR_BUFFER_BIT, GL_NEAREST);
-    p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, 0);
-    p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, 0);
+    if (s_pass_active) {
+        /* Inside a render pass, as a draw: see pass_copy. */
+        pass_copy(s_hr_tex, s_scratch_fbo, s_scratch_w, s_scratch_h, sx * S,
+                  sy * S, 0, 0, w * S, h * S, 0, 0);
+    } else {
+        p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, s_hr_fbo);
+        p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, s_scratch_fbo);
+        glDisable(GL_SCISSOR_TEST);
+        p_glBlitFramebuffer(sx*S, sy*S, (sx+w)*S, (sy+h)*S,
+                            0, 0, w*S, h*S,
+                            GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, 0);
+        p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, 0);
+    }
 
     hr_begin(0);   /* copies ignore the draw area */
     glScissor(dx*S, dy*S, w*S, h*S);
@@ -4447,6 +4469,9 @@ static int init_gpu_raster(void) {
     s_blit_hi_prog = build_program(BLIT_VS_HI, BLIT_FS);
     s_pack_prog = build_program(PACK_VS, PACK_FS);
     s_stencil_prog = build_program(PACK_VS, STENCIL_FS);
+    /* Render-pass copies; without them the backend declines passes. */
+    s_pcopy_prog  = build_program(PACK_VS, PCOPY_FS);
+    s_pcopyu_prog = build_program(PACK_VS, PCOPYU_FS);
     if (!s_geo_prog || !s_tex_prog || !s_blit_prog || !s_pack_prog || !s_stencil_prog ||
         !s_blit_hi_prog) return 0;
 
@@ -4517,6 +4542,14 @@ static int init_gpu_raster(void) {
     s_uPackScale = p_glGetUniformLocation(s_pack_prog, "u_scale");
     s_uStencilSrc = p_glGetUniformLocation(s_stencil_prog, "u_src");
     s_uStencilOff = p_glGetUniformLocation(s_stencil_prog, "u_off");
+    if (s_pcopy_prog) {
+        s_uPcopySrc = p_glGetUniformLocation(s_pcopy_prog, "u_src");
+        s_uPcopyOff = p_glGetUniformLocation(s_pcopy_prog, "u_off");
+    }
+    if (s_pcopyu_prog) {
+        s_uPcopyuSrc = p_glGetUniformLocation(s_pcopyu_prog, "u_src");
+        s_uPcopyuOff = p_glGetUniformLocation(s_pcopyu_prog, "u_off");
+    }
     s_uBhSrc     = p_glGetUniformLocation(s_blit_hi_prog, "u_src");
     s_uBhPass    = p_glGetUniformLocation(s_blit_hi_prog, "u_stp_pass");
     s_uBhMaskset = p_glGetUniformLocation(s_blit_hi_prog, "u_maskset");
@@ -6264,11 +6297,11 @@ static uint64_t s_pgen_promotions = 0, s_pgen_presents = 0, s_pgen_blends = 0;
 static uint64_t s_pgen_expired = 0, s_pgen_unmatched = 0, s_pgen_early = 0;
 static uint64_t s_pgen_late = 0;     /* presents past the frame's planned end */
 
-static GLuint   s_pb_hr_tex = 0, s_pb_hr_rb = 0, s_pb_hr_fbo = 0;
+static GLuint   s_pb_hr_tex = 0, s_pb_hr_fbo = 0;
 static int      s_pb_hr_w = 0, s_pb_hr_h = 0;
 static GLuint   s_pb_raw_tex = 0, s_pb_raw_fbo = 0;
 static int      s_pb_raw_w = 0, s_pb_raw_h = 0;
-static GLuint   s_pb_wide_tex = 0, s_pb_wide_rb = 0, s_pb_wide_fbo = 0;
+static GLuint   s_pb_wide_tex = 0, s_pb_wide_fbo = 0;
 static int      s_pb_wide_w = 0, s_pb_wide_h = 0;
 static GLuint   s_pb_wide_src = 0;
 /* The backup above still equals VRAM (the last pass restored it): rect and
@@ -6424,14 +6457,15 @@ static uint32_t pass_pace_cap(double vblank_ticks) {
 
 static int      s_pass_verify = -1;
 /* PSX_RENDER_PASS_VERIFY readbacks of the pass rect before and after the
- * pass: hr colour, raw mirror, the hr mask stencil, the native-wide band and
- * its stencil. The backup copies colour and stencil, so all of them must
- * come back exactly. */
+ * pass: hr colour, raw mirror, the native-wide band, and the hr and wide
+ * mask stencils whenever they were current at the pass's start (the restore
+ * re-derives them from alpha, see pass_copy). All must come back exactly. */
 typedef struct PassVerifySnap {
     uint8_t *buf[5];      /* hr, raw, hr stencil, wide, wide stencil */
     size_t   cap[5], len[5];
 } PassVerifySnap;
 static PassVerifySnap s_pv_before, s_pv_after;
+static int      s_pv_stencil = 0;     /* stencils current at the pass's start */
 static int      s_pv_ok = 1;
 
 uint64_t gl_renderer_perf_ticks(void) { return SDL_GetPerformanceCounter(); }
@@ -6484,8 +6518,9 @@ uint32_t gl_renderer_pass_unavailable(void) {
     if (!s_ctx || !s_raster_ok || !s_interp_enabled || s_interp_suspended ||
         s_interp_source != 1 || !(s_interp_source_hz > 0.0))
         return PSX_MOD_RENDER_PASS_NO_PRESENTER;
-    /* Dual raster (netplay CPU-authoritative VRAM) or a debug refusal. */
-    if (s_cpu_auth_dual || s_pass_force_refuse)
+    /* Dual raster (netplay CPU-authoritative VRAM), a debug refusal, or no
+     * copy programs (pass_copy). */
+    if (s_cpu_auth_dual || s_pass_force_refuse || !s_pcopy_prog || !s_pcopyu_prog)
         return PSX_MOD_RENDER_PASS_BACKEND;
     /* Windowed high-resolution mode: the presented surfaces are the window
      * tiles at s_out_scale, which a pass (backing up s_hr_fbo at
@@ -6899,6 +6934,75 @@ static GLuint pass_wide_fbo_for(int base_x) {
         if (s_wide_fbo[i] && s_wide_base[i] == base_x) return s_wide_fbo[i];
     return 0;
 }
+static GLuint pass_wide_tex_for(GLuint fbo) {
+    for (int i = 0; fbo && i < WIDE_MAX_SURF; i++)
+        if (s_wide_fbo[i] == fbo) return s_wide_tex[i];
+    return 0;
+}
+
+/* ---- render-pass copies --------------------------------------------------
+ * Every copy a pass makes -- the rect backup and restore, the out-of-rect
+ * journal, the image capture, a game VRAM copy's staging -- is a draw, never
+ * glBlitFramebuffer or glCopyTexSubImage2D. Apple's OpenGL (Metal
+ * underneath) ends and submits its command buffer on every blit, and the
+ * submission waits for the GPU to drain what was queued before it, all of
+ * it on the emulation thread: about 1 ms per pass at native, 35 ms at 4K
+ * (R4, M4). A draw is queued like any other.
+ * Colour is copied texel for texel (texelFetch: no filtering, no format
+ * change). The mask stencil is not copied: a restore re-derives it from the
+ * restored alpha, as rebuild_mask_stencils does. That is the same stencil:
+ * while mask checking is on, every draw keeps stencil and alpha equal, and it
+ * can lag the alpha only while checking is off (s_stencil_valid 0), when
+ * nothing reads it and switching checking on rebuilds it from the alpha
+ * (PSX_RENDER_PASS_VERIFY compares it whenever it was current at the pass's
+ * start). */
+static GLuint s_pcap_fbo = 0;          /* capture target: a slot texture attached */
+
+/* Copy texels [sx, sx+w) x [sy, sy+h) of src_tex to (dx, dy) of dst_fbo
+ * (dst_w x dst_h), all in that surface's pixels. integer: R16UI source and
+ * destination. stencil: also set the destination's mask stencil from the
+ * copied alpha (0 where alpha < 0.5, 1 elsewhere). */
+static void pass_copy(GLuint src_tex, GLuint dst_fbo, int dst_w, int dst_h,
+                      int sx, int sy, int dx, int dy, int w, int h,
+                      int integer, int stencil) {
+    if (!src_tex || !dst_fbo || w <= 0 || h <= 0) return;
+    p_glBindFramebuffer(PSXGL_FRAMEBUFFER, dst_fbo);
+    glViewport(0, 0, dst_w, dst_h);
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(dx, dy, w, h);
+    glDisable(GL_BLEND);
+    p_glActiveTexture(PSXGL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, src_tex);
+    p_glBindVertexArray(s_empty_vao);
+    if (integer) {
+        glDisable(GL_STENCIL_TEST);
+        p_glUseProgram(s_pcopyu_prog);
+        p_glUniform1i(s_uPcopyuSrc, 0);
+        p_glUniform2i(s_uPcopyuOff, sx - dx, sy - dy);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+    } else {
+        if (stencil) plain_stencil(0); else glDisable(GL_STENCIL_TEST);
+        p_glUseProgram(s_pcopy_prog);
+        p_glUniform1i(s_uPcopySrc, 0);
+        p_glUniform2i(s_uPcopyOff, sx - dx, sy - dy);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        if (stencil) {
+            glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+            plain_stencil(1);
+            p_glUseProgram(s_stencil_prog);
+            p_glUniform1i(s_uStencilSrc, 0);
+            p_glUniform2i(s_uStencilOff, dx - sx, dy - sy);   /* fetches p - u_off */
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            p_glUniform2i(s_uStencilOff, 0, 0);
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        }
+    }
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    p_glBindVertexArray(0);
+    p_glUseProgram(0);
+    p_glBindFramebuffer(PSXGL_FRAMEBUFFER, 0);
+}
 
 static int pass_make_color_fbo(GLuint *tex, GLuint *rb, GLuint *fbo,
                                int *cur_w, int *cur_h, int w, int h,
@@ -6969,46 +7073,35 @@ static int pass_gen_reserve(int gi, uint32_t need, int w, int h) {
     return 1;
 }
 
-/* Copy the rect as the presenter would see it into `tex`. Native-wide first
- * refreshes the band's canonical centre, as the wide present does. */
+/* Copy the rect as the presenter would see it into `tex` (pass_copy): the
+ * native-wide band with, as the wide present composes it (wide_blit_center),
+ * the canonical 4:3 centre over it; else the hr rect. Neither surface is
+ * written. */
 static void pass_capture_into(GLuint tex, const PassGen *g) {
     int S = s_hr_scale;
+    if (!s_pcap_fbo) p_glGenFramebuffers(1, &s_pcap_fbo);
+    p_glBindFramebuffer(PSXGL_FRAMEBUFFER, s_pcap_fbo);
+    p_glFramebufferTexture2D(PSXGL_FRAMEBUFFER, PSXGL_COLOR_ATTACHMENT0,
+                             GL_TEXTURE_2D, tex, 0);
     if (g->source_path == GL_PRES_WIDE) {
-        GLuint wf = pass_wide_fbo_for(g->x);
+        GLuint wt = pass_wide_tex_for(pass_wide_fbo_for(g->x));
         int native_w = g_wide_w - 2 * g_wide_off;
-        if (!wf) return;
-        if (s_wide_fast && native_w > 0) {
-            p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, s_hr_fbo);
-            p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, wf);
-            glDisable(GL_SCISSOR_TEST);
-            p_glBlitFramebuffer(g->x * S, g->y * S, (g->x + native_w) * S,
-                                (g->y + g->h) * S, g_wide_off * S, g->y * S,
-                                (g_wide_off + native_w) * S, (g->y + g->h) * S,
-                                GL_COLOR_BUFFER_BIT, GL_NEAREST);
-            p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, 0);
+        if (wt) {
+            pass_copy(wt, s_pcap_fbo, g->tex_w, g->tex_h, 0, g->y * S, 0, 0,
+                      g_wide_w * S, g->h * S, 0, 0);
+            if (s_wide_fast && native_w > 0)
+                pass_copy(s_hr_tex, s_pcap_fbo, g->tex_w, g->tex_h, g->x * S,
+                          g->y * S, g_wide_off * S, 0, native_w * S, g->h * S,
+                          0, 0);
         }
-        p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, wf);
-        glBindTexture(GL_TEXTURE_2D, tex);
-        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, g->y * S,
-                            g_wide_w * S, g->h * S);
     } else {
-        p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, s_hr_fbo);
-        glBindTexture(GL_TEXTURE_2D, tex);
-        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, g->x * S, g->y * S,
-                            g->w * S, g->h * S);
+        pass_copy(s_hr_tex, s_pcap_fbo, g->tex_w, g->tex_h, g->x * S, g->y * S,
+                  0, 0, g->w * S, g->h * S, 0, 0);
     }
-    p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, 0);
-}
-
-static void pass_blit(GLuint src, GLuint dst, int sx, int sy, int dx, int dy,
-                      int w, int h, GLbitfield mask) {
-    p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, src);
-    p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, dst);
-    glDisable(GL_SCISSOR_TEST);
-    p_glBlitFramebuffer(sx, sy, sx + w, sy + h, dx, dy, dx + w, dy + h, mask,
-                        GL_NEAREST);
-    p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, 0);
-    p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, 0);
+    p_glBindFramebuffer(PSXGL_FRAMEBUFFER, s_pcap_fbo);
+    p_glFramebufferTexture2D(PSXGL_FRAMEBUFFER, PSXGL_COLOR_ATTACHMENT0,
+                             GL_TEXTURE_2D, 0, 0);
+    p_glBindFramebuffer(PSXGL_FRAMEBUFFER, 0);
 }
 
 static void pass_verify_part(PassVerifySnap *v, int i, GLuint fbo, int x, int y,
@@ -7044,12 +7137,13 @@ static void pass_verify_read(PassVerifySnap *v) {
                      s_pass_h * S, GL_RGBA, GL_UNSIGNED_BYTE, 4);
     pass_verify_part(v, 1, s_raw_fbo, s_pass_x, s_pass_y, s_pass_w, s_pass_h,
                      PSXGL_RED_INTEGER, GL_UNSIGNED_SHORT, 2);
-    pass_verify_part(v, 2, s_hr_fbo, s_pass_x * S, s_pass_y * S, s_pass_w * S,
+    pass_verify_part(v, 2, s_pv_stencil ? s_hr_fbo : 0, s_pass_x * S,
+                     s_pass_y * S, s_pass_w * S,
                      s_pass_h * S, PSXGL_DEPTH_STENCIL, PSXGL_UNSIGNED_INT_24_8, 4);
     pass_verify_part(v, 3, wf, 0, s_pass_y * S, g_wide_w * S, s_pass_h * S,
                      GL_RGBA, GL_UNSIGNED_BYTE, 4);
-    pass_verify_part(v, 4, wf, 0, s_pass_y * S, g_wide_w * S, s_pass_h * S,
-                     PSXGL_DEPTH_STENCIL, PSXGL_UNSIGNED_INT_24_8, 4);
+    pass_verify_part(v, 4, s_pv_stencil ? wf : 0, 0, s_pass_y * S,
+                     g_wide_w * S, s_pass_h * S, PSXGL_DEPTH_STENCIL, PSXGL_UNSIGNED_INT_24_8, 4);
 }
 
 static int pass_verify_same(const PassVerifySnap *a, const PassVerifySnap *b) {
@@ -7068,36 +7162,11 @@ static int pass_verify_same(const PassVerifySnap *a, const PassVerifySnap *b) {
 /* VRAM journal for out-of-rect writes during a pass (see pass_refuse_write). */
 #define PASS_JOURNAL_MAX RENDER_PASS_JOURNAL_MAX
 typedef struct PassJournal {
-    GLuint hr_tex, hr_rb, hr_fbo, raw_tex, raw_fbo;
+    GLuint hr_tex, hr_fbo, raw_tex, raw_fbo;
     int hr_w, hr_h, raw_w, raw_h;
 } PassJournal;
 static PassJournal s_pj[PASS_JOURNAL_MAX];
 static uint64_t s_pj_total = 0;
-
-/* A backup copy at the start of a leftover-planned pass, in
- * PASS_BACKUP_STRIPS row bands. Nothing has been drawn yet, so a pass that
- * runs out of time here is simply abandoned (no restore). A band is started
- * only while the deadline leaves at least the time the previous band took,
- * so the copy, which a driver can make slow (stencil, first use, a large
- * internal resolution), does not run past it. Returns the fraction copied
- * (1 = done). */
-#define PASS_BACKUP_STRIPS 8
-static double pass_backup_blit(GLuint src, GLuint dst, int sx, int sy,
-                               int w, int h, GLbitfield mask) {
-    int band = (h + PASS_BACKUP_STRIPS - 1) / PASS_BACKUP_STRIPS, y0;
-    double last = 0.0;
-    if (band < 1) band = 1;
-    for (y0 = 0; y0 < h; y0 += band) {
-        int bh = h - y0 < band ? h - y0 : band;
-        uint64_t t0;
-        if (y0 > 0 && gl_renderer_pass_time_left() < last)
-            return (double)y0 / (double)h;
-        t0 = SDL_GetPerformanceCounter();
-        pass_blit(src, dst, sx, sy + y0, 0, y0, w, bh, mask);
-        last = (double)(SDL_GetPerformanceCounter() - t0) * 1.25;
-    }
-    return 1.0;
-}
 
 static void pass_free_color_fbo(GLuint *tex, GLuint *rb, GLuint *fbo,
                                 int *w, int *h) {
@@ -7120,8 +7189,7 @@ static void pass_warm_pipeline(void) {
     if (!s_hr_fbo || !p_glBlitFramebuffer) return;
     if (pass_make_color_fbo(&tex, &rb, &fbo, &w, &h, 4, 4, GL_RGBA8, GL_RGBA,
                             GL_UNSIGNED_BYTE))
-        pass_blit(s_hr_fbo, fbo, 0, 0, 0, 0, 4, 4,
-                  GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        pass_copy(s_hr_tex, fbo, w, h, 0, 0, 0, 0, 4, 4, 0, 1);
     pass_free_color_fbo(&tex, &rb, &fbo, &w, &h);
 }
 
@@ -7136,15 +7204,17 @@ static void pass_resources_release(void) {
     pass_gen_release(0);
     pass_gen_release(1);
     pass_gens_invalidate();
-    pass_free_color_fbo(&s_pb_hr_tex, &s_pb_hr_rb, &s_pb_hr_fbo,
+    pass_free_color_fbo(&s_pb_hr_tex, NULL, &s_pb_hr_fbo,
                         &s_pb_hr_w, &s_pb_hr_h);
     pass_free_color_fbo(&s_pb_raw_tex, NULL, &s_pb_raw_fbo,
                         &s_pb_raw_w, &s_pb_raw_h);
-    pass_free_color_fbo(&s_pb_wide_tex, &s_pb_wide_rb, &s_pb_wide_fbo,
+    pass_free_color_fbo(&s_pb_wide_tex, NULL, &s_pb_wide_fbo,
                         &s_pb_wide_w, &s_pb_wide_h);
+    if (s_ctx && s_pcap_fbo) p_glDeleteFramebuffers(1, &s_pcap_fbo);
+    s_pcap_fbo = 0;
     for (int i = 0; i < PASS_JOURNAL_MAX; i++) {
         PassJournal *e = &s_pj[i];
-        pass_free_color_fbo(&e->hr_tex, &e->hr_rb, &e->hr_fbo, &e->hr_w, &e->hr_h);
+        pass_free_color_fbo(&e->hr_tex, NULL, &e->hr_fbo, &e->hr_w, &e->hr_h);
         pass_free_color_fbo(&e->raw_tex, NULL, &e->raw_fbo, &e->raw_w, &e->raw_h);
     }
     render_pass_journal_free(&s_pj_cpu);
@@ -7159,7 +7229,7 @@ static int pass_journal_protect(int x, int y, int w, int h) {
     PassJournal *j;
     if (i >= PASS_JOURNAL_MAX) return 0;
     j = &s_pj[i];
-    if (!pass_make_color_fbo(&j->hr_tex, &j->hr_rb, &j->hr_fbo, &j->hr_w,
+    if (!pass_make_color_fbo(&j->hr_tex, NULL, &j->hr_fbo, &j->hr_w,
                              &j->hr_h, w * S, h * S, GL_RGBA8, GL_RGBA,
                              GL_UNSIGNED_BYTE) ||
         !pass_make_color_fbo(&j->raw_tex, NULL, &j->raw_fbo, &j->raw_w,
@@ -7171,9 +7241,9 @@ static int pass_journal_protect(int x, int y, int w, int h) {
     flush_cpu_upload();
     if (render_pass_journal_add(&s_pj_cpu, s_vram, VRAM_W, x, y, w, h) != i)
         return 0;
-    pass_blit(s_hr_fbo, j->hr_fbo, x * S, y * S, 0, 0, w * S, h * S,
-              GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-    pass_blit(s_raw_fbo, j->raw_fbo, x, y, 0, 0, w, h, GL_COLOR_BUFFER_BIT);
+    pass_copy(s_hr_tex, j->hr_fbo, j->hr_w, j->hr_h, x * S, y * S, 0, 0,
+              w * S, h * S, 0, 0);
+    pass_copy(s_raw_tex, j->raw_fbo, j->raw_w, j->raw_h, x, y, 0, 0, w, h, 1, 0);
     s_pj_total++;
     return 1;
 }
@@ -7184,16 +7254,16 @@ static void pass_journal_rollback(void) {
         PassJournal *j = &s_pj[i];
         int x = s_pj_cpu.x[i], y = s_pj_cpu.y[i];
         int w = s_pj_cpu.w[i], h = s_pj_cpu.h[i];
-        pass_blit(j->hr_fbo, s_hr_fbo, 0, 0, x * S, y * S, w * S, h * S,
-                  GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-        pass_blit(j->raw_fbo, s_raw_fbo, 0, 0, x, y, w, h, GL_COLOR_BUFFER_BIT);
+        pass_copy(j->hr_tex, s_hr_fbo, VRAM_W * S, VRAM_H * S, 0, 0, x * S,
+                  y * S, w * S, h * S, 0, 1);
+        pass_copy(j->raw_tex, s_raw_fbo, VRAM_W, VRAM_H, 0, 0, x, y, w, h, 1, 0);
     }
     render_pass_journal_rollback(&s_pj_cpu, s_vram, VRAM_W);
 }
 
 static int transaction_begin(int x, int y, int w, int h, int open_gen,
                               uint32_t period_vblanks, int reuse_backup, int stereo) {
-    int S = s_hr_scale, gi, wide, tw, th, banded;
+    int S = s_hr_scale, gi, wide, tw, th;
     PassGen *g;
     memset(&s_pass_begin_diag, 0, sizeof s_pass_begin_diag);
     s_pass_begin_diag.status = stereo ? gl_renderer_stereo_unavailable()
@@ -7267,7 +7337,7 @@ static int transaction_begin(int x, int y, int w, int h, int open_gen,
     s_pb_valid = 0;
     /* Back up the rect: hr color + stencil, raw mirror, wide band, CPU rows. */
     s_pass_begin_diag.resource = "backup_hr";
-    if (!pass_make_color_fbo(&s_pb_hr_tex, &s_pb_hr_rb, &s_pb_hr_fbo,
+    if (!pass_make_color_fbo(&s_pb_hr_tex, NULL, &s_pb_hr_fbo,
                              &s_pb_hr_w, &s_pb_hr_h, w * S, h * S,
                              GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE))
         return pass_begin_refuse("backup_hr");
@@ -7276,42 +7346,21 @@ static int transaction_begin(int x, int y, int w, int h, int open_gen,
                              &s_pb_raw_w, &s_pb_raw_h, w, h, PSXGL_R16UI,
                              PSXGL_RED_INTEGER, GL_UNSIGNED_SHORT))
         return pass_begin_refuse("backup_raw");
-    banded = !stereo && s_pass_leftover;
-    if (!banded) {
-        pass_blit(s_hr_fbo, s_pb_hr_fbo, x * S, y * S, 0, 0, w * S, h * S,
-                  GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-    } else {
-        /* A leftover-planned pass has a deadline: copy in bands, abandon
-         * when out of time (pass_backup_blit). Returns -1: not a refusal. */
-        s_pass_backup_done = pass_backup_blit(s_hr_fbo, s_pb_hr_fbo, x * S,
-                                              y * S, w * S, h * S,
-                                              GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-        if (s_pass_backup_done < 1.0) {
-            s_pass_backup_done *= 0.5;   /* of the hr and the wide copy */
-            return -1;
-        }
-    }
-    pass_blit(s_raw_fbo, s_pb_raw_fbo, x, y, 0, 0, w, h, GL_COLOR_BUFFER_BIT);
+    /* Draws (pass_copy): queued, so the copy costs the emulation thread next
+     * to nothing at any internal resolution and needs no deadline checks. */
+    pass_copy(s_hr_tex, s_pb_hr_fbo, s_pb_hr_w, s_pb_hr_h, x * S, y * S, 0, 0,
+              w * S, h * S, 0, 0);
+    pass_copy(s_raw_tex, s_pb_raw_fbo, s_pb_raw_w, s_pb_raw_h, x, y, 0, 0, w, h,
+              1, 0);
     s_pb_wide_src = g_wide_w > 0 ? pass_wide_fbo_for(x) : 0;
     if (s_pb_wide_src) {
         s_pass_begin_diag.resource = "backup_wide";
-        if (!pass_make_color_fbo(&s_pb_wide_tex, &s_pb_wide_rb, &s_pb_wide_fbo,
+        if (!pass_make_color_fbo(&s_pb_wide_tex, NULL, &s_pb_wide_fbo,
                                  &s_pb_wide_w, &s_pb_wide_h, g_wide_w * S,
                                  h * S, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE))
             return pass_begin_refuse("backup_wide");
-        if (!banded) {
-            pass_blit(s_pb_wide_src, s_pb_wide_fbo, 0, y * S, 0, 0,
-                      g_wide_w * S, h * S,
-                      GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-        } else {
-            s_pass_backup_done = pass_backup_blit(s_pb_wide_src, s_pb_wide_fbo,
-                                                  0, y * S, g_wide_w * S, h * S,
-                                                  GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-            if (s_pass_backup_done < 1.0) {
-                s_pass_backup_done = 0.5 + 0.5 * s_pass_backup_done;
-                return -1;
-            }
-        }
+        pass_copy(pass_wide_tex_for(s_pb_wide_src), s_pb_wide_fbo, s_pb_wide_w,
+                  s_pb_wide_h, 0, y * S, 0, 0, g_wide_w * S, h * S, 0, 0);
     }
     s_pass_backup_done = 1.0;
     if (s_pb_cpu_cap < (size_t)w * (size_t)h) {
@@ -7342,7 +7391,10 @@ backed_up:
         const char *e = getenv("PSX_RENDER_PASS_VERIFY");
         s_pass_verify = (e && e[0] && e[0] != '0') ? 1 : 0;
     }
-    if (s_pass_verify) pass_verify_read(&s_pv_before);
+    if (s_pass_verify) {
+        s_pv_stencil = s_stencil_valid;
+        pass_verify_read(&s_pv_before);
+    }
     s_pj_cpu.n = 0;
     s_pass_active = 1;
     return 1;
@@ -7373,15 +7425,13 @@ static void transaction_restore(void) {
     if (!s_pass_active) return;
     /* Roll the journal, then the rect back. */
     pass_journal_rollback();
-    pass_blit(s_pb_hr_fbo, s_hr_fbo, 0, 0, s_pass_x * S, s_pass_y * S,
-              s_pass_w * S, s_pass_h * S,
-              GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-    pass_blit(s_pb_raw_fbo, s_raw_fbo, 0, 0, s_pass_x, s_pass_y, s_pass_w,
-              s_pass_h, GL_COLOR_BUFFER_BIT);
+    pass_copy(s_pb_hr_tex, s_hr_fbo, VRAM_W * S, VRAM_H * S, 0, 0,
+              s_pass_x * S, s_pass_y * S, s_pass_w * S, s_pass_h * S, 0, 1);
+    pass_copy(s_pb_raw_tex, s_raw_fbo, VRAM_W, VRAM_H, 0, 0, s_pass_x, s_pass_y,
+              s_pass_w, s_pass_h, 1, 0);
     if (s_pb_wide_src && s_pb_wide_src == pass_wide_fbo_for(s_pass_x))
-        pass_blit(s_pb_wide_fbo, s_pb_wide_src, 0, 0, 0, s_pass_y * S,
-                  g_wide_w * S, s_pass_h * S,
-                  GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        pass_copy(s_pb_wide_tex, s_pb_wide_src, g_wide_w * S, VRAM_H * S, 0, 0,
+                  0, s_pass_y * S, g_wide_w * S, s_pass_h * S, 0, 1);
     for (int row = 0; row < s_pass_h; row++)
         memcpy(s_vram + (size_t)(s_pass_y + row) * VRAM_W + s_pass_x,
                s_pb_cpu + (size_t)row * s_pass_w,

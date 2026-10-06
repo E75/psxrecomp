@@ -191,13 +191,20 @@ assert "psx_cycle_freeze_set_poll(deadline_near, deadline_overrun);" in rpt and 
     "capture and restore still take")
 assert "note_fault" not in definition(rp, "deadline_overrun"), (
     "a pass stopped at its deadline is not a fault")
-# A leftover-planned pass copies its rect out in bands with the deadline
-# checked between them (slow in some drivers: stencil, first use, large
-# scales); stereo and the idle-time planner copy in one blit.
+# Every copy a pass makes is a draw (pass_copy): a blit or
+# glCopyTexSubImage2D submits Apple GL's command buffer and waits for the GPU
+# on the emulation thread. Stencils are re-derived from alpha on restore.
 tb = gl[gl.index("static int transaction_begin("):]
 tb = tb[:tb.index("\nbacked_up:")]
-assert tb.count("pass_backup_blit(") == 2 and "banded = !stereo && s_pass_leftover;" in tb, (
-    "leftover-planned backups must be banded copies with deadline checks")
+for name, fn in (("transaction_begin", tb),
+                   ("transaction_restore", definition(gl, "transaction_restore")),
+                   ("pass_capture_into", definition(gl, "pass_capture_into")),
+                   ("pass_journal_protect", definition(gl, "pass_journal_protect")),
+                   ("pass_journal_rollback", definition(gl, "pass_journal_rollback"))):
+    assert "pass_copy(" in fn and "BlitFramebuffer" not in fn and \
+        "glCopyTexSubImage2D" not in fn, f"{name} must copy with draws"
+assert "pass_copy(s_pb_hr_tex, s_hr_fbo, VRAM_W * S, VRAM_H * S, 0, 0,\n              s_pass_x * S, s_pass_y * S, s_pass_w * S, s_pass_h * S, 0, 1);" in \
+    definition(gl, "transaction_restore"), "the restore re-derives the hr mask stencil"
 assert "if (begun < 0) {" in rpt, "a copy that ran out of time is a cut, not a refusal"
 assert "volatile int ran = 0;" in rpt and "gl_renderer_pass_abandon();" in rpt, (
     "a pass whose guest code never ran has nothing to restore")

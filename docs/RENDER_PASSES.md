@@ -310,16 +310,19 @@ use only time the game leaves free, so they never delay its frame:
   sets `last_failure` or `last_abort_detail`). A pass stopped before its
   guest code ran is closed without a restore. Stereo eye pairs have no
   deadline.
-- **Bounded copy.** A pass's first step copies the rect (with stencil) out
-  of the GPU's surfaces, which some drivers make slow (on macOS GL the first
-  stencil blit of a process builds its pipeline, about 5 ms; at 4K the
-  copies took 15-20 ms). The hr and native-wide copies are made in 8 row
-  bands, a band started only while the deadline leaves 1.25x the time the
-  previous one took; out of time, the pass is abandoned (nothing drawn,
-  nothing restored), counted as cut, and its cost bounded by the whole copy
-  extrapolated from the part made. A presenter set up for passes (HOLD,
-  FLIP) makes one 4x4 stencil blit at its first VBlank, so no pass pays the
-  pipeline build.
+- **Copies as draws.** Every copy a pass makes -- the rect backup and
+  restore (hr, raw mirror, native-wide band), the out-of-rect journal, the
+  image capture, a game VRAM copy's staging -- is a texel-for-texel draw
+  (`pass_copy`), never `glBlitFramebuffer` or `glCopyTexSubImage2D`: on
+  macOS GL every blit ends and submits the command buffer and waits for the
+  GPU on the emulation thread (R4 on an M4: a pass's backup took 1 ms at
+  native and 35 ms at 4K as blits, 0.2 ms as draws at both). The mask
+  stencil is not copied; the restore re-derives it from the restored alpha,
+  as `rebuild_mask_stencils` does, which is the same stencil wherever it is
+  current (`PSX_RENDER_PASS_VERIFY` compares it whenever it was current at
+  the pass's start). A presenter set up for passes (HOLD, FLIP) makes one
+  4x4 copy with stencil at its first VBlank, so no pass pays the driver's
+  pipeline build for the copy programs.
 - **Cost.** Learnt only from passes that fit: the first completed pass sets
   the average and later ones move it; plans use the average plus twice its
   smoothed deviation. A cut pass is a lower bound. A pass of unknown cost is
@@ -388,8 +391,9 @@ internal resolutions; a size change frees the old set.
   (the game's own frame, then each pass in phase order).
 - `PSX_RENDER_PASS_VERIFY=1`: hash CPU, RAM, scratchpad, I-cache, interrupt,
   timer, DMA and GPU state and read back the VRAM rect before and after every
-  pass -- hr colour, the raw mirror, the hr mask stencil, and the
-  native-wide band with its stencil (stderr names the surface that differs)
+  pass -- hr colour, the raw mirror, the native-wide band, and the hr and
+  wide mask stencils when they were current at the pass's start (stderr
+  names the surface that differs)
   -- and check that a pass that returned normally left the host nesting
   balanced; `verify_mismatch` must stay 0. A pass closed before its guest
   code ran is checked too (the rect must be untouched).
