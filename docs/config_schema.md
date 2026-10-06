@@ -638,6 +638,21 @@ Settings surface. A game migrating Skip FMVs into its built-in mod catalog sets
 it to false. The runtime then hides the Settings row, ignores stale persisted
 values, and leaves activation to the selected trusted plugin.
 
+### Render thread (`render_thread`, OpenGL)
+
+```toml
+[video]
+render_thread = true   # default false; PSX_RENDER_THREAD=0/1 overrides
+```
+
+Runs the OpenGL backend on its own thread: the emulation thread records each
+frame's draw work and the render thread replays and presents it, so GL driver
+stalls leave the guest's frame. Everything the guest can read back is
+identical; a readback, savestate, depth24 (FMV) display, render pass or
+setting change makes that frame synchronous. Netplay, frame interpolation,
+Vulkan and software keep the synchronous path. `PSX_RENDER_THREAD_FRAMES`
+(default 2) bounds the frames in flight. See `docs/RENDER_THREAD.md`.
+
 ### Texture-window batching (`texture_window_batching`, OpenGL)
 
 ```toml

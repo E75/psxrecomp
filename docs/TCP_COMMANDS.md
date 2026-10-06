@@ -194,6 +194,20 @@ re-dispatches the guest's true target. Counters in
 
 ---
 
+## `render_thread` — OpenGL render thread state (native only)
+
+`{"cmd":"render_thread"}` reports the `[video] render_thread` pipeline
+(docs/RENDER_THREAD.md): `active`, `held` (the emulation thread holds the GL
+context for the rest of this frame), `max_frames`, `records`, `bytes`,
+`frames_produced` / `frames_consumed`, `presents` recorded and
+`presents_stale` skipped, `acquires` (sync points) with `recent_acquires`
+(`frame`, `wait_us`, `reason` — the GL entry point that needed the context),
+`backpressure_waits` / `backpressure_ms` (the emulation thread waited on the
+in-flight bound), `ring_full_waits`, `acquire_ms`, `render_busy_ms` /
+`render_idle_ms` and `ring_high_water`. With the thread off every counter is
+0 and `active` is 0. Reading it is not a sync point; a steady game frame
+should add no `acquires`.
+
 ## `frame_fingerprint` — per-frame guest-write fingerprint (native only)
 
 Cumulative write hashes, snapshotted at every VBlank into a 32768-frame ring
@@ -465,9 +479,9 @@ between Play and TCP availability.
 
 ## Complete command index (generated)
 
-**352 commands registered** — 339 on the native server (`runtime/src/debug_server.c`), 61 on the Beetle server (`runtime/src/beetle_debug_server.c`).
+**358 commands registered** — 345 on the native server (`runtime/src/debug_server.c`), 61 on the Beetle server (`runtime/src/beetle_debug_server.c`).
 
-69 of 352 have prose above; **283 are index-only**. An index-only command still works — it just has no description here yet. Send it `{"cmd":"<name>"}` and read the reply, or find its `handle_*` function in the server source.
+72 of 358 have prose above; **286 are index-only**. An index-only command still works — it just has no description here yet. Send it `{"cmd":"<name>"}` and read the reply, or find its `handle_*` function in the server source.
 
 Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this block has drifted from the code.
 
@@ -558,6 +572,9 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `dma_trace_dump` | ✓ |  |  |
 | `dump_buffer` | ✓ |  |  |
 | `dump_ram` | ✓ | ✓ | ✓ |
+| `dynres` | ✓ |  |  |
+| `dynres_check` | ✓ |  |  |
+| `dynres_force` | ✓ |  |  |
 | `evcb_snapshot` | ✓ |  |  |
 | `evcb_walk_dump` | ✓ |  |  |
 | `evcb_walk_stats` | ✓ |  |  |
@@ -615,6 +632,7 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `gte_ring_dump` | ✓ |  |  |
 | `gte_state` | ✓ |  |  |
 | `guest_tty_dump` | ✓ |  |  |
+| `hd_textures` | ✓ |  | ✓ |
 | `history` | ✓ | ✓ | ✓ |
 | `hle_dump` | ✓ |  | ✓ |
 | `host_launch_timings` | ✓ |  | ✓ |
@@ -709,6 +727,7 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `render_pass_dump` | ✓ |  | ✓ |
 | `render_pass_refuse` | ✓ |  | ✓ |
 | `render_pass_stats` | ✓ |  | ✓ |
+| `render_thread` | ✓ |  | ✓ |
 | `resident_events` | ✓ |  |  |
 | `resident_status` | ✓ |  |  |
 | `restore_trace` | ✓ |  |  |

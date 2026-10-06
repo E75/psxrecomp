@@ -1,0 +1,211 @@
+# Render thread (`[video] render_thread`)
+
+Opt-in, OpenGL only, off by default. With it off nothing in this document
+runs: `gl_backend_get()` returns the existing table and the GL renderer is
+the synchronous path every title already uses.
+
+```toml
+[video]
+render_thread = true   # game.toml; PSX_RENDER_THREAD=0/1 overrides
+```
+
+`PSX_RENDER_THREAD_FRAMES=N` (default 2) bounds the closed frames in flight.
+
+## Why
+
+Before this change one thread ran the recompiled guest, turned every GP0
+command into GL calls (`gpu_gl_renderer.c`), presented, and paid every
+Apple GL-on-Metal stall: command-buffer waits, uploads, readbacks, the
+swap. A frame cost `emu + GL`. With the render thread a frame costs
+`max(emu, GL)`, and the guest waits for rendering only at the sync points
+below.
+
+## Model
+
+```
+emulation thread                         render thread (owns the GL context)
+----------------                         -----------------------------------
+guest + gpu.c (GP0/GP1, VRAM array,      replays records in order through the
+status, timing)                          unchanged glb_* functions; presents
+  gr_* -> GL_RT_BACKEND (record) ---->   ring (32 MiB, SPSC) ---->  exec()
+  present  (record + overlay copy)
+  vblank: frame boundary --------------> frame marker; <= N closed frames
+  sync point: drain, take context <----  release context, park
+  ... direct GL calls for the rest of the frame ...
+  frame boundary: hand context back ---> make current, continue
+```
+
+Pieces, with file:line on `feat/render-thread`:
+
+- **Core** — `runtime/src/render_thread.c`, `runtime/include/render_thread.h`.
+  Single-producer/single-consumer byte ring with monotonic 64-bit positions.
+  A record never splits across the ring end (a pad record fills the tail);
+  payloads are copied, and space is freed only after `exec()` returns. No
+  lock is held while a record executes; a mutex and two condition variables
+  guard sleeping only (each side raises its `*_sleeping` flag under the lock
+  before re-checking, the waker publishes its position before reading the
+  flag). The consumer spins briefly before sleeping; the producer wakes a
+  sleeping consumer every 128 KiB / 256 records and always at a frame end,
+  drain or sync point.
+- **Frame bound** — `rt_frame_end()` blocks while more than N closed frames
+  are unconsumed (backpressure). `rt_frames_ahead()` tells the replaying
+  thread how many complete frames are queued behind the current one.
+- **Sync point** — `rt_acquire()`: drain, have the render thread release the
+  context (`glFlush`, `SDL_GL_MakeCurrent(win, NULL)`), make it current on
+  the emulation thread. The emulation thread then *holds* the context and
+  calls the backend directly, exactly as with no render thread, until the
+  next frame boundary hands it back (`rt_release()`). So a sync point costs
+  at most one hand-off per frame, and code that is not converted to
+  recording stays correct.
+- **Recording table** — `GL_RT_BACKEND` (`gpu_gl_renderer.c:8463`), selected
+  by `gl_backend_get()` while the thread runs (`gr_refresh_backend()` in
+  `gpu_render.c`). Every state call, primitive, fill, copy, CPU->VRAM upload,
+  single-pixel write and native-wide call is recorded by value; queries are
+  answered from emulation-side mirrors or are sync points (table below).
+- **Hand-off rules** — `gl_renderer_render_thread_frame_boundary()`
+  (`:8644`), called from `sdl_vblank_present()` after the present and before
+  wall-clock pacing (`main.cpp:8636`). It releases a held context when the
+  frame may run asynchronously (`gl_rth_eligible`, `:8167`), takes it when
+  it may not, then closes the frame.
+
+### Guest-visible VRAM stays on the emulation thread
+
+The GL backend is GPU-authoritative: `s_hr_fbo` holds VRAM, gpu.c's array is
+refreshed only by readbacks (`ensure_cpu`, `:2394`), and pending uploads
+stage from that same array (`flush_cpu_upload`, `:837`). gpu.c writes the
+array directly while a GP0(A0) payload streams in (`gpu.c:6912`) and hands
+the facade a copy at commit (`gpu.c:3156`). If the render thread staged from
+the live array it would upload pixels of a later transfer (and its
+`sw_vram_transfer_in` would write stale payloads back over the guest's
+array).
+
+So the backend's `s_vram` is gpu.c's array whenever the emulation thread
+runs GL, and a private copy while the render thread does
+(`gl_rth_acquire`/`gl_rth_release`, `:8175`/`:8182`; the SW rasterizer's
+pointer moves with it, `sw_renderer_rebind_vram`). The private copy gets
+each upload payload in command order; a release first copies gpu.c's array
+into it, so it matches the guest at every hand-off. Every readback runs on
+the emulation thread under a sync point and writes gpu.c's array, as before.
+
+### Guest state the backend reads while drawing
+
+| State | Read by | Under the render thread |
+|---|---|---|
+| per-prim widescreen tags (`psx_ws_prim_in_backdrop`, `psx_ws_prim_is_tagged`) | `bd_prim_gate` `:2527` | captured per primitive in the record flags (`rth_prim_flags`) when native-wide and the backdrop stretch are on; replay reads them via `ctx_prim_*` (`:379`) |
+| native-wide fast-path latch (`gpu_ws_background_requires_full_composite`, `gpu_ws_netplay_local_viewport_width`), flat backdrop | `wide_fast_center_valid` `:2563` (also at batch flush and present) | sent as an `RTH_STATE` record before the first call that would see a change |
+| depth24 display (`gpu_display_is_depth24`) | `depth24_upload_policy` `:3834` and the depth24 helpers | a depth24 display is a sync point (`rth_record_mode`, `:8196`); the render thread only replays 15-bit frames, so `ctx_depth24()` is 0 there |
+| host overlays (OSD, volume, rewind strip, savestate menu) | `gl_swap_with_osd` `:7537` | rasterized and copied at record time (`rth_record_present`, `:8210`); `host_osd_present_done` runs at record time |
+| present-shot request | `gl_swap_with_osd` | already mutex-guarded (`main.cpp` `present_shot_take`) |
+
+Emulation-side answers without a sync point: `gl_renderer_projective_supported`
+(`:3848`) and `gl_renderer_present_wide_fbo`'s return value (`:7975`) from a
+mirror of the wide-surface bookkeeping (`rth_mirror_wide_for`, `:8115`, the
+same lookup, limit check and slot allocation `wide_fbo_for` does), and
+`gr_get_draw_area` from the recorded draw area. `gr_scale`,
+`gr_texture_filter` and `gl_renderer_fit_wide_aspect` read values that only
+change while the emulation thread holds the context. The mirrors are re-read
+from the backend at every release.
+
+## Sync points found in the code
+
+Guest-visible:
+
+| Where | Why |
+|---|---|
+| GPUREAD `gpu_read_gpuread` (`gpu.c:3743`) -> `gr_vram_read` | VRAM->CPU transfer reads the FBO (`glb_vram_read` -> `ensure_cpu`) |
+| GP0(A0) with mask check (`gpu.c:6912`) | per-pixel mask test reads VRAM |
+| `gpu_vram_peek` (`gpu.c:6889`) | debug/mod VRAM reads |
+| savestate / rewind save (`boot_state.c:148,159,189,356`) | `gr_vram_transfer_out` of all VRAM |
+| savestate load (`gl_renderer_restage_vram_after_savestate`, `:5106`) | full restage from gpu.c's array |
+| depth24 (FMV) display | the CPU mirror is presented; the emulation thread draws those frames |
+
+Not guest-visible but GL-owned (each is `GL_RT_SYNC` at the top of the entry
+point): `gr_render_display*`, `gr_render_wide_display`, `gr_wide_dump_full`
+(screenshots, CPU present fallback), every `gl_renderer_pass_*`/`stereo_*`
+(render passes), `psx_mod_openxr_*`, texture-bank selection, settings
+(scanlines, aspect, gamma, bezel, swap interval, interpolation), the CPU
+present / blank / hold-last presents (pause, rewind, netplay hold), and the
+debug-server diagnostics (`gl_*` rings, `frame_perf`, `gl_fbo_peek`,
+`gl_vram_diff`). The display ring's per-frame readback is queued instead
+(`gl_renderer_fbo_peek_deferred`, `:5200`); its readers and the present-image
+ring readers sync first (`gl_renderer_render_thread_sync`).
+
+What is *not* a sync point: a frame of primitives, fills, copies, uploads,
+native-wide draws and the 15-bit present (`gl_renderer_present_vram` /
+`present_wide_fbo`). A Ridge Racer Type 4 race loaded from a savestate takes
+one sync point (the load) and then none.
+
+## Frames, backpressure, stale presents
+
+At most N closed frames wait in the ring; past that the emulation thread
+blocks in `rt_frame_end`. The render thread must replay every frame's
+drawing: later frames sample what earlier frames rendered, so drawing cannot
+be skipped. Only the present can. When two newer frames are already recorded
+(the emulation thread is at the bound, waiting), the present of the frame
+being replayed is skipped (`rth_replay_present`, `:8244`), never twice in a
+row, so a saturated render thread still shows at least every other frame.
+
+Consequence: the render thread takes the GL cost off the guest's frame, but
+if GL alone exceeds the frame budget the guest is still held back by the
+bound. Choosing an internal resolution that fits is the job of the
+resolution controller (roadmap Phase 1.2), not of this layer.
+
+## Interoperation
+
+| Feature | Behaviour |
+|---|---|
+| savestates / rewind | load and save are sync points; the frame stays synchronous, the next frame boundary releases |
+| netplay / rollback resimulation | `psx_netplay_active()` or dual-raster makes every frame ineligible: the emulation thread holds the context (synchronous path). Not started when netplay is configured at boot |
+| render passes | first `gl_renderer_pass_*` call in a frame is a sync point; the rest of that frame is synchronous. Recommended: leave `render_thread` off with the frame-rate mod |
+| frame interpolation | ineligible (held) while enabled; not started when it is on at boot |
+| OpenXR | ineligible while a session is active |
+| native-wide / widescreen | recorded; tags, latch and wide-surface mirror as above |
+| internal resolution changes | `gr_set_scale` and every resolution entry point are sync points |
+| screenshots / debug captures | `screenshot*` sync; `present_shot` is fulfilled on the render thread |
+| headless | `--headless` (software) never starts it; `--headless-opengl` runs it on the hidden context |
+| Vulkan / software | never started (log line says why) |
+
+## Out of scope
+
+- Vulkan (the same split would apply; its backend has its own readbacks).
+- Converting the remaining sync points to recorded commands (texture banks,
+  render passes, CPU/hold presents). Each is correct as a sync point.
+- Making replay cheaper (batching across records, fewer GL state changes).
+- Windows: `render_thread.c` has a Win32 path (SRW lock, condition variable,
+  `CreateThread`) that is compile-untested; the unit test is POSIX-only.
+- Diagnostic rings written by both threads (`latency_ring`, `gpu_timeline`)
+  can interleave entries; they are diagnostics only.
+
+## Tests
+
+- `render_thread_test` (`runtime/tests/test_render_thread.c`): the core
+  against a fake executor and context token — ordering and payload integrity
+  over 400 frames of random-size records through ring wraps, oversize
+  refusal, the in-flight bound under a slow consumer (and that the one- and
+  two-frames-behind cases both occur), 300 randomized acquire/release rounds
+  with the context never current on two threads, stop while held. Clean
+  under ThreadSanitizer.
+- `gl_render_thread_test` (`runtime/tests/run_gl_render_thread.py`,
+  `test_gl_render_thread.c`, label `gpu;opengl;hardware`): a real hidden GL
+  context, a scripted stream through the facade, render thread off vs on at
+  1x and 4x; the values the guest read back, native VRAM, the frame at S and
+  the native-wide surface must be identical. The stream has mask set/check,
+  a mask-checked upload (per-pixel readback sync point), back-to-back
+  uploads of one rect with a catch-up between gpu.c's writes and its commit,
+  more than the ring's size recorded, readback frames, presents with a slow
+  render-thread present, and widescreen tags that change per primitive and
+  are poisoned after each call. It fails for each of these deliberate
+  mistakes: replay reading the tags live, staging uploads from the guest
+  array, dropping the stream state.
+- `video_enhancement_settings_test`: the key defaults off and parses.
+- In game (R4, see the PR): `tools/fp_identity.py` guest identity render
+  thread off vs on under `--headless-opengl`, and A/B frame rates from a race
+  savestate at Native, 4K and Match display, 4:3 and widescreen.
+
+## Debug server
+
+`{"cmd":"render_thread"}` — active, held, max_frames, records, bytes,
+frames produced/consumed, presents and `presents_stale` (skipped), acquires
+(sync points) with the 16 most recent reasons and wait times,
+backpressure / ring-full waits and time, render busy/idle time, ring high
+water. Reading it is not a sync point.
