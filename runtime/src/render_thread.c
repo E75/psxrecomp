@@ -323,8 +323,10 @@ void rt_frame_end(void) {
     }
 }
 
-int rt_newer_frame_queued(void) {
-    return atomic_load(&R.frames_produced) >= atomic_load(&R.frames_consumed) + 2;
+int rt_frames_ahead(void) {
+    int64_t d = (int64_t)(atomic_load(&R.frames_produced) -
+                          atomic_load(&R.frames_consumed)) - 1;
+    return d < 0 ? 0 : (int)d;
 }
 
 void rt_drain(void) {
