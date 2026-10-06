@@ -780,6 +780,139 @@ int main(void) {
         pgxp_set_projection_tracking(0);
     }
 
+    /* --- scalar tier: GTE-as-multiplier edge midpoint (Ape Escape terrain
+     *     subdivision, 0x8001DB74): CTC2 two tracked X halves into a light-
+     *     matrix row, MVMVA by the vertex depths, MFC2 MAC1, ADDU the rounding
+     *     bias, DIV by the depth sum, MFLO, SH into the vertex table. --- */
+    {
+        pgxp_set_cpu_mode(1);
+        pgxp_set_tolerance(1.0f);
+        const uint32_t TBL = 0x1F800280u;
+        /* v0 (100.9, 50.5) z 200, v1 (121.9, 60.25) z 300 */
+        const uint32_t w0 = (50u << 16) | 100u, w1 = (60u << 16) | 121u;
+        pgxp_gte_push_sxy((100 << 16) | 0xE666, (50 << 16) | 0x8000, 200, w0);
+        psx_pgxp_cop2(nullptr, SWC2(14), w0, TBL + 0);
+        pgxp_gte_push_sxy((121 << 16) | 0xE666, (60 << 16) | 0x4000, 300, w1);
+        psx_pgxp_cop2(nullptr, SWC2(14), w1, TBL + 8);
+
+        /* lh t0,0(s1); lh v0,8(s1); andi v1,t0,0xffff; sll a0,v0,16;
+         * or v1,v1,a0; ctc2 v1,$8 */
+        psx_pgxp_load(nullptr, LH(17, 8), TBL + 0, 100u);
+        psx_pgxp_load(nullptr, LH(17, 2), TBL + 8, 121u);
+        psx_pgxp_alu(nullptr, ANDI(8, 3, 0xFFFF), 100u, 100u, 0xFFFFu);
+        psx_pgxp_alu(nullptr, SLL(2, 4, 16), 121u << 16, 121u, 16u);
+        psx_pgxp_alu(nullptr, OR(3, 4, 3), (121u << 16) | 100u, 100u, 121u << 16);
+        psx_pgxp_cop2(nullptr, enc_cop2(0x06, 3, 8), (121u << 16) | 100u, 0);
+        /* mtc2 t9(200),IR1; mtc2 t8(300),IR2; mtc2 zero,IR3 (exact) */
+        psx_pgxp_alu(nullptr, ADDIU(0, 25, 200), 200u, 0u, 200u);
+        psx_pgxp_alu(nullptr, ADDIU(0, 24, 300), 300u, 0u, 300u);
+        psx_pgxp_cop2(nullptr, MTC2(25, 9), 200u, 0);
+        psx_pgxp_cop2(nullptr, MTC2(24, 10), 300u, 0);
+        psx_pgxp_cop2(nullptr, MTC2(0, 11), 0u, 0);
+
+        /* MVMVA sf=0 mx=LLM v=IR cv=none: MAC1 = 100*200 + 121*300 = 56300 */
+        PGXPMvmva op;
+        std::memset(&op, 0, sizeof op);
+        op.mx = 1; op.vv = 3; op.tv = 3; op.shift = 0;
+        op.m[0][0] = 100; op.m[0][1] = 121;
+        op.v[0] = 200; op.v[1] = 300; op.v[2] = 0;
+        op.mac[0] = 56300; op.ir[0] = 0x7FFF;
+        op.flag = 1u << 24;                       /* IR1 saturated          */
+        pgxp_gte_mvmva(&op);
+        pgxp_gte_op_end(0x12);
+
+        /* mfc2 a1,MAC1; addu a1,a1,a3(0); addu v0,t9,t8; div a1,v0; mflo a1 */
+        psx_pgxp_cop2(nullptr, MFC2(5, 25), 56300u, 0);
+        psx_pgxp_alu(nullptr, ADDIU(0, 7, 0), 0u, 0u, 0u);
+        psx_pgxp_alu(nullptr, ADDU(5, 7, 5), 56300u, 56300u, 0u);
+        psx_pgxp_alu(nullptr, ADDU(25, 24, 2), 500u, 200u, 300u);
+        psx_pgxp_muldiv(nullptr, enc_r(5, 2, 0, 0, 0x1A), 56300u % 500u,
+                        56300u / 500u, 56300u, 500u);
+        psx_pgxp_alu(nullptr, enc_r(0, 0, 5, 0, 0x12), 112u, 112u, 0u);
+        /* sh a1,0x48(s1) */
+        psx_pgxp_store(nullptr, SH(17, 5), TBL + 0x48, 112u);
+
+        /* precise midpoint: (100.9*200 + 121.9*300) / 500 = 113.5 */
+        uint32_t live = 0, value = 0, flags = 0; int32_t sx = 0, sy = 0; uint16_t sz = 0;
+        int lv = 0;
+        CHECK(pgxp_debug_shadow(0, TBL + 0x48, &lv, &value, &flags, &sx, &sy, &sz));
+        (void)live;
+        CHECK(lv == 1 && (flags & 1u) != 0);
+        CHECK(std::fabs(sx / 65536.0 - 113.5) < 1e-3);
+        CHECK((flags & 0x10u) != 0);              /* derived: floor 113 != 112 */
+
+        /* y half from a non-derived value; then the whole word reaches a
+         * packet and the GPU believes it inside the derived window. */
+        psx_pgxp_load(nullptr, LH(17, 6), TBL + 2, 50u);
+        psx_pgxp_store(nullptr, SH(17, 6), TBL + 0x4A, 50u);
+        const uint32_t mid = (50u << 16) | 112u;
+        psx_pgxp_cop2(nullptr, LWC2(12), mid, TBL + 0x48);
+        psx_pgxp_cop2(nullptr, SWC2(12), mid, ADDR_A);
+        int32_t x, y; uint16_t z;
+        CHECK(lookup(ADDR_A, mid, 112, 50, &x, &y, &z) == PGXP_SRC_DATAFLOW);
+        CHECK(std::fabs(x / 65536.0 - 113.5) < 1e-3 && y == ((50 << 16) | 0x8000));
+
+        /* tolerance clamps movement beyond the guest rounding pixel */
+        pgxp_set_tolerance(0.25f);
+        CHECK(lookup(ADDR_A, mid, 112, 50, &x, &y, &z) == PGXP_SRC_NATIVE);
+        pgxp_set_tolerance(1.0f);
+
+        /* a scalar does not survive a write that does not produce one: the
+         * register reloaded from memory stores imprecise */
+        psx_pgxp_load(nullptr, LW(17, 5), TBL + 0x100, 112u);
+        psx_pgxp_store(nullptr, SH(17, 5), TBL + 0x58, 112u);
+        CHECK(pgxp_debug_shadow(0, TBL + 0x58, &lv, &value, &flags, &sx, &sy, &sz));
+        CHECK((flags & 1u) == 0);
+
+        /* the lwl/lwr + swl/swr word-copy idiom on an aligned address moves
+         * whole words, so it carries the vertex (Ape Escape's terrain grid
+         * copies its projected corners this way, 0x80044B00) */
+        {
+            const uint32_t LWL = enc_i(0x22, 17, 11, 0), LWR = enc_i(0x26, 17, 11, 0);
+            const uint32_t SWL = enc_i(0x2A, 17, 11, 0), SWR = enc_i(0x2E, 17, 11, 0);
+            psx_pgxp_load(nullptr, LWL, TBL + 3, w0);
+            psx_pgxp_load(nullptr, LWR, TBL + 0, w0);
+            psx_pgxp_store(nullptr, SWL, TBL + 0x103, w0);
+            psx_pgxp_store(nullptr, SWR, TBL + 0x100, w0);
+            int32_t cx, cy; uint16_t cz;
+            CHECK(lookup(TBL + 0x100, w0, 100, 50, &cx, &cy, &cz) == PGXP_SRC_DATAFLOW);
+            CHECK(cx == ((100 << 16) | 0xE666) && cy == ((50 << 16) | 0x8000));
+            /* a genuinely unaligned piece still drops the word */
+            psx_pgxp_store(nullptr, enc_i(0x2A, 17, 11, 0), TBL + 0x101, w0);
+            CHECK(lookup(TBL + 0x100, w0, 100, 50, &cx, &cy, &cz) != PGXP_SRC_DATAFLOW);
+        }
+
+        /* a MAC1 that overflowed (FLAG bit 27, negative) carries nothing;
+         * MAC2's flags (bits 29/26) leave MAC1 alone */
+        {
+            PGXPMvmva o2 = op;
+            o2.flag = 1u << 27;
+            pgxp_gte_mvmva(&o2);
+            psx_pgxp_cop2(nullptr, MFC2(5, 25), 56300u, 0);
+            psx_pgxp_muldiv(nullptr, enc_r(5, 2, 0, 0, 0x1A), 300u, 112u, 56300u, 500u);
+            psx_pgxp_alu(nullptr, enc_r(0, 0, 5, 0, 0x12), 112u, 112u, 0u);
+            psx_pgxp_store(nullptr, SH(17, 5), TBL + 0x68, 112u);
+            CHECK(pgxp_debug_shadow(0, TBL + 0x68, &lv, &value, &flags, &sx, &sy, &sz));
+            CHECK((flags & 1u) == 0);
+            o2.flag = (1u << 29) | (1u << 26);
+            pgxp_gte_mvmva(&o2);
+            psx_pgxp_cop2(nullptr, MFC2(5, 25), 56300u, 0);
+            psx_pgxp_muldiv(nullptr, enc_r(5, 2, 0, 0, 0x1A), 300u, 112u, 56300u, 500u);
+            psx_pgxp_alu(nullptr, enc_r(0, 0, 5, 0, 0x12), 112u, 112u, 0u);
+            psx_pgxp_store(nullptr, SH(17, 5), TBL + 0x70, 112u);
+            CHECK(pgxp_debug_shadow(0, TBL + 0x70, &lv, &value, &flags, &sx, &sy, &sz));
+            CHECK((flags & 1u) != 0);
+        }
+
+        /* the scalar tier is cpu-mode only */
+        pgxp_set_cpu_mode(0);
+        psx_pgxp_cop2(nullptr, MFC2(5, 25), 56300u, 0);
+        psx_pgxp_store(nullptr, SH(17, 5), TBL + 0x60, 112u);
+        CHECK(pgxp_debug_shadow(0, TBL + 0x60, &lv, &value, &flags, &sx, &sy, &sz));
+        CHECK((flags & 1u) == 0);
+        pgxp_set_tolerance(-1.0f);
+    }
+
     /* --- stats sanity: dataflow hits were counted --- */
     {
         PGXPStats st;

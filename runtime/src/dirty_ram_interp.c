@@ -2344,6 +2344,7 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
             psx_gte_stall(cpu);
 #endif
             gte_write_ctrl(cpu, (uint8_t)rd, cpu->gpr[rt]);
+            psx_pgxp_cop2(cpu, insn, cpu->gpr[rt], 0);
             return 0;
         }
         if (cop_op & 0x10) {

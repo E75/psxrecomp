@@ -312,6 +312,77 @@ typedef struct PGXPWordMiss {
 /* Returns the total number of misses ever recorded. */
 uint64_t pgxp_word_miss_ring(const PGXPWordMiss **ring, uint32_t *cap);
 
+/* MVMVA as a multiplier (scalar tier, cpu-mode). gte.cpp reports every
+ * MVMVA with the operands exactly as it used them and the results it wrote;
+ * the engine recomputes the rows from the precise matrix elements (CTC2'd
+ * tracked halves), vector (IR scalars or tracked V halves) and translation,
+ * and leaves the results as scalars on MAC1..3 / IR1..3 for MFC2. */
+typedef struct PGXPMvmva {
+    uint32_t mx, vv, tv;     /* matrix / vector / translation selectors       */
+    int      shift;          /* 12 when sf = 1, else 0                        */
+    int16_t  m[3][3];        /* matrix elements as used                       */
+    int16_t  v[3];           /* vector as used                                */
+    int64_t  t[3];           /* translation as used (already << 12)           */
+    int32_t  mac[3];         /* MAC1..3 written                               */
+    int32_t  ir[3];          /* IR1..3 written                                */
+    uint32_t flag;           /* FLAG after the op                             */
+} PGXPMvmva;
+void pgxp_gte_mvmva(const PGXPMvmva *op);
+/* Called after every GTE command (its function code): the IR / MAC scalars it
+ * overwrote end there. */
+void pgxp_gte_op_end(uint32_t func);
+
+/* Geometry-corrected triangles, newest at (seq - 1) % cap (TCP pgxp_tri_ring).
+ * Always-on: every triangle prepare_precise_triangle resolves, with each
+ * vertex's packet integers, the position handed to the rasterizer and where
+ * that position came from. Two triangles that share a packet vertex (same
+ * integers, same frame) but were handed different positions are a crack:
+ * the ring is what localizes a seam to the producer of its vertices. */
+#define PGXP_TRI_RING_CAP 65536u
+typedef struct PGXPTriRecord {
+    uint64_t seq;
+    uint32_t frame;         /* s_frame_count when the triangle was drawn      */
+    uint32_t src_addr;      /* GP0 packet base address (0xFFFFFFFF = none)    */
+    uint8_t  op;            /* GP0 opcode                                     */
+    uint8_t  pass;          /* drawn inside a render-pass checkpoint (frame   */
+                            /* smoothing redraws); set by the engine          */
+    uint8_t  src[3];        /* PGXP_SRC_* per vertex                          */
+    uint8_t  vidx[3];       /* packet word index of each vertex               */
+    int16_t  raw_x[3];      /* parsed 11-bit packet integers (pre-offset)     */
+    int16_t  raw_y[3];
+    uint32_t word[3];       /* the packet words                               */
+    int32_t  x16[3];        /* position handed to the rasterizer (16.16,     */
+    int32_t  y16[3];        /* draw offset and widescreen already applied)   */
+} PGXPTriRecord;
+void pgxp_note_triangle_detail(const PGXPTriRecord *rec);
+/* Returns the total number of triangles ever recorded. */
+uint64_t pgxp_tri_ring(const PGXPTriRecord **ring, uint32_t *cap);
+
+/* Shadowed memory writes, newest at (seq - 1) % cap (TCP pgxp_store_ring).
+ * Always-on while the engine is armed: every hooked SW / SH / SB / SWC2 into
+ * RAM or scratchpad, with the storing PC, the source register's shadow state
+ * and the shadow the destination word holds afterwards. Walking a packet
+ * word's provenance backwards (store PC -> source register -> the load that
+ * filled it) is how a precision loss is pinned to one instruction. */
+#define PGXP_STORE_RING_CAP 262144u
+typedef struct PGXPStoreRecord {
+    uint64_t seq;
+    uint32_t frame;
+    uint32_t pc;            /* g_debug_last_store_pc of the store           */
+    uint32_t addr;          /* guest address written                        */
+    uint32_t value;         /* the value stored (half / byte for SH / SB)   */
+    uint8_t  op;            /* primary opcode (0x2B SW, 0x29 SH, 0x3A SWC2) */
+    uint8_t  reg;           /* source GPR (or GTE data register for SWC2)   */
+    uint8_t  src_live;      /* source shadow belongs to this generation     */
+    uint8_t  pad;
+    uint16_t src_flags;     /* source shadow flags (1 X, 2 Y, 4 Z)          */
+    uint16_t dst_flags;     /* destination word shadow flags afterwards     */
+    int32_t  dst_x16, dst_y16;
+} PGXPStoreRecord;
+uint64_t pgxp_store_ring(const PGXPStoreRecord **ring, uint32_t *cap);
+/* The host's store-PC breadcrumb and frame counter, for the rings above. */
+void pgxp_set_trace_sources(const uint32_t *store_pc, const uint64_t *frame);
+
 /* Debug read of one shadow slot (TCP pgxp_shadow). `space`: 0 = guest
  * address (RAM / scratchpad), 1 = GPR index (32 = HI, 33 = LO), 2 = GTE data
  * register. Returns 0 when the slot does not exist; *live says whether it

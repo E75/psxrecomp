@@ -4365,6 +4365,8 @@ static void prepare_precise_triangle(int i0, int i1, int i2,
     const int idx[3] = { i0, i1, i2 };
     int32_t fx[3], fy[3];
     int any_precise = 0, n_precise = 0;
+    PGXPTriRecord rec;
+    memset(&rec, 0, sizeof rec);
     for (int i = 0; i < 3; i++) {
         uint32_t word = gp0_cmd_buf[idx[i]];
         int32_t raw_x, raw_y;
@@ -4374,10 +4376,12 @@ static void prepare_precise_triangle(int i0, int i1, int i2,
                             : gp0_cmd_source_addr + (uint32_t)idx[i] * 4u;
         int32_t px, py;
         uint16_t sz;
+        int src = PGXP_SRC_NATIVE;
         px = raw_x * 65536;
         py = raw_y * 65536;
-        if (geometry && pgxp_get_precise_vertex(addr, word, raw_x, raw_y,
-                                    &px, &py, &sz) != PGXP_SRC_NATIVE) {
+        if (geometry)
+            src = pgxp_get_precise_vertex(addr, word, raw_x, raw_y, &px, &py, &sz);
+        if (src != PGXP_SRC_NATIVE) {
             any_precise = 1;
             n_precise++;
         }
@@ -4386,9 +4390,21 @@ static void prepare_precise_triangle(int i0, int i1, int i2,
             any_precise = 1;
         fx[i] = (int32_t)((int64_t)px + (int64_t)(vx[i] - raw_x) * 65536);
         fy[i] = (int32_t)((int64_t)py + (int64_t)(vy[i] - raw_y) * 65536);
+        rec.src[i] = (uint8_t)src;
+        rec.vidx[i] = (uint8_t)idx[i];
+        rec.raw_x[i] = (int16_t)raw_x;
+        rec.raw_y[i] = (int16_t)raw_y;
+        rec.word[i] = word;
+        rec.x16[i] = fx[i];
+        rec.y16[i] = fy[i];
     }
-    if (geometry)
+    if (geometry) {
         pgxp_note_triangle(n_precise);   /* G1.1 crack exposure: mixed share */
+        rec.frame = (uint32_t)s_frame_count;
+        rec.src_addr = gp0_cmd_source_addr;
+        rec.op = (uint8_t)(gp0_cmd_buf[0] >> 24);
+        pgxp_note_triangle_detail(&rec);
+    }
     if (!any_precise) {
         gr_set_precise_triangle(0, 0,0, 0,0, 0,0);
         return;

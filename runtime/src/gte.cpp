@@ -1686,6 +1686,21 @@ void gte_mvmva(GTEState* gte, uint32_t instr) {
     }
 
     gte->set_error_flag();
+
+    /* PGXP scalar tier: MVMVA used as a multiplier on tracked vertex halves
+     * (CTC2'd matrix rows) - hand the engine the operands as used and the
+     * results, so MFC2 of MAC / IR can carry the precise weighted sum. */
+    if (!s_gte_replay_sandbox) {
+        PGXPMvmva op;
+        op.mx = mx; op.vv = vv; op.tv = tv; op.shift = shift;
+        std::memcpy(op.m, M, sizeof op.m);
+        std::memcpy(op.v, V, sizeof op.v);
+        std::memcpy(op.t, T, sizeof op.t);
+        op.mac[0] = gte->MAC1; op.mac[1] = gte->MAC2; op.mac[2] = gte->MAC3;
+        op.ir[0] = gte->IR1;   op.ir[1] = gte->IR2;   op.ir[2] = gte->IR3;
+        op.flag = gte->FLAG;
+        pgxp_gte_mvmva(&op);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2239,6 +2254,7 @@ extern "C" void gte_execute(CPUState* cpu, uint32_t cmd) {
     }
 #endif
     gte_run_command(&gte, cmd);
+    pgxp_gte_op_end(func);               /* IR / MAC scalars the op overwrote */
 
 #ifndef PSX_NO_DEBUG_TOOLS
     if (func == 0x01 || func == 0x30) gte_rtp_record(&gte, cmd);

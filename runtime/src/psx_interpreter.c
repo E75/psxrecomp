@@ -426,6 +426,7 @@ static void exec_one(CPUState* cpu) {
             break;
         case 0x06: /* CTC2 */
             gte_write_ctrl(cpu, RD(insn), rt_val);
+            psx_pgxp_cop2(cpu, insn, rt_val, 0);
             break;
         default:
             if (cop_op & 0x10) {

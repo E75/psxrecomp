@@ -124,8 +124,12 @@ void append_pgxp_hooks(uint32_t instr, std::string& code) {
                            code, instr, reg_name(rt));
         return;
     case 0x12: {                               /* COP2 register transfers     */
+        /* Control transfers too: engines pack tracked vertex halves into a
+         * matrix row with CTC2 and use MVMVA as a weighted-sum multiplier
+         * (the scalar tier in pgxp.cpp follows the result back out). */
         const uint32_t cop_op = (instr >> 21) & 0x1F;
-        if ((cop_op == 0x00 && rt != 0) || cop_op == 0x04)  /* MFC2 / MTC2   */
+        if (((cop_op == 0x00 || cop_op == 0x02) && rt != 0) ||  /* MFC2 / CFC2 */
+            cop_op == 0x04 || cop_op == 0x06)                    /* MTC2 / CTC2 */
             code = fmt::format("{}\n    PGXP_COP2(0x{:08X}u, {}, 0u);",
                                code, instr, reg_name(rt));
         return;

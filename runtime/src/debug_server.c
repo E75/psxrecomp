@@ -5467,6 +5467,124 @@ static void handle_pgxp_miss_ring(int id, const char *json)
     free(buf);
 }
 
+/* pgxp_tri_ring — the always-on ring of geometry-corrected triangles:
+ * {"cmd":"pgxp_tri_ring","frame":F,"pass":0|1,"x0":..,"y0":..,"x1":..,
+ * "y1":..,"count":N}. Every filter is optional: frame keeps one guest frame,
+ * pass keeps game (0) or render-pass (1) triangles, the box keeps triangles
+ * with any packet vertex inside [x0,x1]x[y0,y1] (packet integers). Returns
+ * the newest N matches (default 4096) oldest first. Per triangle: packet
+ * address, opcode, and per vertex the packet word, its integers, the 16.16
+ * position handed to the rasterizer and its source (0 native, 1 dataflow,
+ * 2 fallback). Join vertices by word across triangles to find cracks. */
+static void handle_pgxp_tri_ring(int id, const char *json)
+{
+    const PGXPTriRecord *ring; uint32_t cap;
+    const uint64_t total = pgxp_tri_ring(&ring, &cap);
+    const uint64_t avail = total < cap ? total : cap;
+    const int frame = json_get_int(json, "frame", -1);
+    const int pass = json_get_int(json, "pass", -1);
+    const int has_box = strstr(json, "\"x0\"") != NULL;
+    const int x0 = json_get_int(json, "x0", -2048), y0 = json_get_int(json, "y0", -2048);
+    const int x1 = json_get_int(json, "x1", 2047),  y1 = json_get_int(json, "y1", 2047);
+    int count = json_get_int(json, "count", 4096);
+    if (count < 1) count = 1;
+    if (count > 16384) count = 16384;
+    /* Walk newest -> oldest collecting matches, then emit oldest first. */
+    uint64_t *hits = (uint64_t *)malloc((size_t)count * sizeof(uint64_t));
+    if (!hits) { send_err(id, "oom"); return; }
+    int n = 0;
+    for (uint64_t k = 0; k < avail && n < count; k++) {
+        const uint64_t seq = total - 1 - k;
+        const PGXPTriRecord *r = &ring[seq % cap];
+        if (frame >= 0 && r->frame != (uint32_t)frame) continue;
+        if (pass >= 0 && r->pass != (uint8_t)pass) continue;
+        if (has_box) {
+            int in = 0;
+            for (int i = 0; i < 3; i++)
+                if (r->raw_x[i] >= x0 && r->raw_x[i] <= x1 &&
+                    r->raw_y[i] >= y0 && r->raw_y[i] <= y1) in = 1;
+            if (!in) continue;
+        }
+        hits[n++] = seq;
+    }
+    const size_t sz = (size_t)n * 400u + 256u;
+    char *buf = (char *)malloc(sz);
+    if (!buf) { free(hits); send_err(id, "oom"); return; }
+    size_t p = (size_t)snprintf(buf, sz, "{\"id\":%d,\"ok\":true,\"total\":%llu,\"count\":%d,\"tris\":[",
+                                id, (unsigned long long)total, n);
+    for (int j = n - 1; j >= 0; j--) {
+        const PGXPTriRecord *r = &ring[hits[j] % cap];
+        p += (size_t)snprintf(buf + p, sz - p,
+            "%s{\"seq\":%llu,\"f\":%u,\"a\":\"0x%08X\",\"op\":\"0x%02X\",\"pass\":%u,\"v\":[",
+            j == n - 1 ? "" : ",", (unsigned long long)r->seq, r->frame, r->src_addr,
+            r->op, r->pass);
+        for (int i = 0; i < 3; i++)
+            p += (size_t)snprintf(buf + p, sz - p,
+                "%s[%u,\"0x%08X\",%d,%d,%d,%d,%u]", i ? "," : "", r->vidx[i], r->word[i],
+                r->raw_x[i], r->raw_y[i], r->x16[i], r->y16[i], r->src[i]);
+        p += (size_t)snprintf(buf + p, sz - p, "]}");
+    }
+    snprintf(buf + p, sz - p, "]}");
+    debug_server_send_line(buf);
+    free(buf);
+    free(hits);
+}
+
+/* pgxp_store_ring — the always-on ring of shadowed memory writes:
+ * {"cmd":"pgxp_store_ring","addr_lo":"0x..","addr_hi":"0x..","pc":"0x..",
+ * "frame":F,"count":N}. addr range is [lo, hi); pc keeps one storing
+ * instruction; frame keeps one guest frame.
+ * Returns the newest N matches oldest first: store PC, address, value,
+ * opcode, source register and its shadow (live, flags) and the destination
+ * shadow afterwards (flags, 16.16 halves). */
+static void handle_pgxp_store_ring(int id, const char *json)
+{
+    const PGXPStoreRecord *ring; uint32_t cap;
+    const uint64_t total = pgxp_store_ring(&ring, &cap);
+    if (!cap) { send_err(id, "pgxp store ring not allocated (engine never armed)"); return; }
+    const uint64_t avail = total < cap ? total : cap;
+    char s[32];
+    uint32_t lo = 0, hi = 0xFFFFFFFFu, pc = 0;
+    int has_pc = 0;
+    if (json_get_str(json, "addr_lo", s, sizeof s)) lo = hex_to_u32(s);
+    if (json_get_str(json, "addr_hi", s, sizeof s)) hi = hex_to_u32(s);
+    if (json_get_str(json, "pc", s, sizeof s)) { pc = hex_to_u32(s); has_pc = 1; }
+    const int frame = json_get_int(json, "frame", -1);
+    int count = json_get_int(json, "count", 1024);
+    if (count < 1) count = 1;
+    if (count > 65536) count = 65536;
+    uint64_t *hits = (uint64_t *)malloc((size_t)count * sizeof(uint64_t));
+    if (!hits) { send_err(id, "oom"); return; }
+    int n = 0;
+    for (uint64_t k = 0; k < avail && n < count; k++) {
+        const uint64_t seq = total - 1 - k;
+        const PGXPStoreRecord *r = &ring[seq % cap];
+        if (frame >= 0 && r->frame != (uint32_t)frame) continue;
+        if (r->addr < lo || r->addr >= hi) continue;
+        if (has_pc && r->pc != pc) continue;
+        hits[n++] = seq;
+    }
+    const size_t sz = (size_t)n * 200u + 256u;
+    char *buf = (char *)malloc(sz);
+    if (!buf) { free(hits); send_err(id, "oom"); return; }
+    size_t p = (size_t)snprintf(buf, sz, "{\"id\":%d,\"ok\":true,\"total\":%llu,\"count\":%d,\"stores\":[",
+                                id, (unsigned long long)total, n);
+    for (int j = n - 1; j >= 0; j--) {
+        const PGXPStoreRecord *r = &ring[hits[j] % cap];
+        p += (size_t)snprintf(buf + p, sz - p,
+            "%s{\"seq\":%llu,\"f\":%u,\"pc\":\"0x%08X\",\"a\":\"0x%08X\",\"v\":\"0x%08X\","
+            "\"op\":\"0x%02X\",\"reg\":%u,\"src_live\":%u,\"src_flags\":%u,"
+            "\"dst_flags\":%u,\"x16\":%d,\"y16\":%d}",
+            j == n - 1 ? "" : ",", (unsigned long long)r->seq, r->frame, r->pc, r->addr,
+            r->value, r->op, r->reg, r->src_live, r->src_flags, r->dst_flags,
+            r->dst_x16, r->dst_y16);
+    }
+    snprintf(buf + p, sz - p, "]}");
+    debug_server_send_line(buf);
+    free(buf);
+    free(hits);
+}
+
 /* pgxp — live-tune the value-propagation engine for one-toggle isolation runs
  * without a rebuild: {"cmd":"pgxp","cpu_mode":0|1,"tolerance":F,
  * "position_fallback":0|1,"preserve_projection":0|1,"culling":0|1}. Fields
@@ -15045,6 +15163,8 @@ static const CmdEntry s_commands[] = {
     { "gpu_state",         handle_gpu_state },
     { "geom_correction",   handle_geom_correction },
     { "pgxp",              handle_pgxp },
+    { "pgxp_tri_ring",     handle_pgxp_tri_ring },
+    { "pgxp_store_ring",   handle_pgxp_store_ring },
     { "pgxp_shadow",       handle_pgxp_shadow },
     { "pgxp_miss_ring",    handle_pgxp_miss_ring },
     { "ws_aspect_cone_site", handle_ws_aspect_cone_site },
@@ -15675,6 +15795,9 @@ void debug_server_init(int port)
                                                 sizeof(CallFocusEntry));
     }
     s_call_focus_seq = 0;
+
+    /* PGXP rings stamp each record with the store PC and frame. */
+    pgxp_set_trace_sources(&g_debug_last_store_pc, &s_frame_count);
 
     /* EvCB walk ring (~240 KB). */
     if (!s_evcb_ring) s_evcb_ring = (EvCBSnapshot *)calloc(EVCB_RING_CAP, sizeof(EvCBSnapshot));
