@@ -9283,15 +9283,20 @@ static int rth_record_present(uint16_t op, int n, const int32_t *v) {
 static void rth_replay_present(const RtCmd *c, const uint8_t *p) {
     RthOvHdr hd;
     memcpy(&hd, p, sizeof hd);
-    if (rt_frames_ahead() >= 2) {
+    static int skipped_last = 0;
+    if (rt_frames_ahead() >= 2 && !skipped_last) {
         /* Two later frames are already recorded, so the emulation thread is
          * at (or near) the in-flight bound waiting on us. Showing this frame
          * would only delay those; skip its present (its drawing has been
          * replayed and stays). One frame behind is the normal pipelined
-         * state and still presents every frame. */
+         * state and still presents every frame, and never two presents in a
+         * row are skipped, so a saturated render thread keeps showing at
+         * least every other frame. */
         s_rth_presents_stale++;
+        skipped_last = 1;
         return;
     }
+    skipped_last = 0;
     const uint8_t *q = p + sizeof hd;
     memset(&s_rth_ov, 0, sizeof s_rth_ov);
     s_rth_ov.valid = 1;
