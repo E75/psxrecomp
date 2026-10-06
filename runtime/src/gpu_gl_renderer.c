@@ -4265,6 +4265,7 @@ void gl_renderer_draw_projected_triangle(const PSXProjectedVertex vertices[3],
             rt_cmd_commit();
             return;
         }
+        gl_rth_acquire("projected_oversize");
     }
     PSXProjectedVertex polygon[12];
     const double left=fmin(s_area_x1, -wide_dx())-1.0;
@@ -9420,12 +9421,12 @@ static void rtb_vram_write(int x, int y, uint16_t px) {
     RTH_DIRECT_OR(RTH_REC(RTH_VRAM_WRITE, 0, x, y, px)); glb_vram_write(x, y, px); }
 static uint16_t rtb_vram_read(int x, int y) { GL_RT_SYNC("vram_read"); return glb_vram_read(x, y); }
 static void rtb_vram_transfer_in(int x, int y, int w, int h, const uint16_t *d) {
-    if (rth_record_mode() && w > 0 && h > 0) {
-        size_t n = (size_t)w * (size_t)h;
+    if (rth_record_mode()) {
+        size_t n = (w > 0 && h > 0) ? (size_t)w * (size_t)h : 0;
         int32_t *p = (int32_t *)rt_cmd_begin(RTH_XFER_IN, 0, (uint32_t)(16u + n * 2u));
         if (p) {
             p[0] = x; p[1] = y; p[2] = w; p[3] = h;
-            memcpy(p + 4, d, n * 2u);
+            if (n) memcpy(p + 4, d, n * 2u);
             rt_cmd_commit();
             return;
         }
