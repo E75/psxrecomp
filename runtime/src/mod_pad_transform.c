@@ -80,7 +80,7 @@ static int output_valid(uint32_t allowed, const PSXModPadOutput *o) {
 }
 
 int mod_pad_transform_run(uint32_t player, const PSXModPadFrame *frame,
-                          PSXModPadOutput *out) {
+                          const PSXModPadOutput *stock, PSXModPadOutput *out) {
     if (!frame || !out || player >= PSX_MAX_PLAYERS) return 0;
     if (s_release[player] && !s_active[player]) {
         s_release[player] = 0;
@@ -88,10 +88,12 @@ int mod_pad_transform_run(uint32_t player, const PSXModPadFrame *frame,
         return 1;
     }
     if (!s_active[player]) return 0;
-    PSXModPadOutput o;
-    pass_through(frame, &o);
+    PSXModPadOutput o, base;
+    if (stock) base = *stock;
+    else pass_through(frame, &base);
+    o = base;
     if (!s_xf[player].transform(frame, &o)) {
-        pass_through(frame, out);
+        *out = base;
         return 1;
     }
     if (!output_valid(s_xf[player].allowed_types, &o)) {

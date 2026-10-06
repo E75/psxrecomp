@@ -7,8 +7,10 @@
  *         buttons = source & physical; sticks/type from the source, through
  *         the controller presentation policy (hook)
  *   (2b) title pad transform (psx_mod_set_pad_transform), if any: sees the
- *         pad of (1)/(2) plus the host extras; may rewrite buttons, sticks
- *         and the presented type (NeGcon packed as PsxNetPad documents)
+ *         pad of (1)/(2) plus the host extras (a digital pad with no source
+ *         as its host pad: real sticks, no stick->D-pad fold); may rewrite
+ *         buttons, sticks and the presented type (NeGcon packed as PsxNetPad
+ *         documents). Declining delivers the stock pad of (1)/(2).
  *   (3) local mouse policy (psx_mod_set_local_mouse_policy), P1 only: may
  *         override ONLY the right analog axes of whatever (1)-(2b) produced;
  *         a NeGcon result has no right stick, so it resets the mouse.
@@ -57,9 +59,14 @@ typedef struct PadExtHooks {
     void (*host_extras)(void *ctx, int s, uint32_t *flags, uint32_t *lt,
                         uint32_t *rt);
     /* (2b) Title transform: mod_pad_transform_run semantics (0 = none,
-     * 1 = deliver *out). NULL = no transform stage. */
+     * 1 = deliver *out; `stock` is the pass-through). NULL = no stage. */
     int (*pad_transform)(void *ctx, int s, const PSXModPadFrame *frame,
-                         PSXModPadOutput *out);
+                         const PSXModPadOutput *stock, PSXModPadOutput *out);
+    /* (1) Host pad of port `s` before presentation: buttons without the
+     * digital stick->D-pad fold and the real sticks, whatever the configured
+     * mode. Queried only for the transform frame of a digital stage-1 pad
+     * with no source; 0 = unavailable (the frame keeps the stock pad). */
+    int (*host_pad)(void *ctx, int s, uint16_t *buttons, uint8_t st[4]);
 } PadExtHooks;
 
 /* Resolve one port. Returns 1 = deliver *out, 0 = no device/source here. */

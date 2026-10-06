@@ -47,7 +47,7 @@ int main(void) {
     t.transform = xf;
 
     /* Nothing registered: no stage, nothing owed. */
-    CHECK(mod_pad_transform_run(0, &f, &o) == 0);
+    CHECK(mod_pad_transform_run(0, &f, NULL, &o) == 0);
     CHECK(mod_pad_transform_initial_type(0) == -1);
 
     /* Registration validation. */
@@ -57,13 +57,13 @@ int main(void) {
     { PSXModPadTransform b = t; b.allowed_types = 0; CHECK(!psx_mod_set_pad_transform(0, &b)); }
     { PSXModPadTransform b = t; b.allowed_types |= 1u << 4; CHECK(!psx_mod_set_pad_transform(0, &b)); }
     { PSXModPadTransform b = t; b.initial_type = PSX_MOD_PAD_JOGCON; CHECK(!psx_mod_set_pad_transform(0, &b)); }
-    CHECK(mod_pad_transform_run(0, &f, &o) == 0);
+    CHECK(mod_pad_transform_run(0, &f, NULL, &o) == 0);
     CHECK(psx_mod_set_pad_transform(0, &t));
     CHECK(mod_pad_transform_initial_type(0) == PSX_MOD_PAD_DUALSHOCK);
     CHECK(mod_pad_transform_initial_type(1) == -1);
 
     /* Applied output; the frame carries pad + host extras. */
-    CHECK(mod_pad_transform_run(0, &f, &o) == 1);
+    CHECK(mod_pad_transform_run(0, &f, NULL, &o) == 1);
     CHECK(seen.player == 0 && seen.host_rt == 200 && seen.type == PSX_MOD_PAD_DUALSHOCK);
     CHECK(o.type == PSX_MOD_PAD_NEGCON && o.buttons == 0xffffu &&
           o.negcon_i == 200 && o.negcon_ii == 30 && o.negcon_l == 0);
@@ -71,14 +71,30 @@ int main(void) {
 
     /* Decline -> exact pass-through. */
     mode = 1;
-    CHECK(mod_pad_transform_run(0, &f, &o) == 1);
+    CHECK(mod_pad_transform_run(0, &f, NULL, &o) == 1);
     CHECK(o.type == PSX_MOD_PAD_DUALSHOCK && o.buttons == 0xfbffu &&
           o.lx == 0x40 && o.ry == 0x70 && o.negcon_i == 0);
+
+    /* Decline with a stock pad -> that stock pad, not the frame (a digital
+     * player's frame is its host pad; the stock pad keeps the fold). */
+    {
+        PSXModPadOutput stock;
+        memset(&stock, 0, sizeof stock);
+        stock.struct_size = sizeof stock;
+        stock.buttons = 0xff7fu; stock.type = PSX_MOD_PAD_DIGITAL;
+        stock.lx = stock.ly = stock.rx = stock.ry = 0x80;
+        CHECK(mod_pad_transform_run(0, &f, &stock, &o) == 1);
+        CHECK(memcmp(&o, &stock, sizeof o) == 0);
+        mode = 0;   /* applied: pre-filled from the stock pad */
+        CHECK(mod_pad_transform_run(0, &f, &stock, &o) == 1);
+        CHECK(o.type == PSX_MOD_PAD_NEGCON && o.lx == 0x80 && o.negcon_i == 200);
+        mode = 1;
+    }
 
     /* Invalid output (range, disallowed type, struct size) -> neutral of the
      * frame's type. */
     for (mode = 2; mode <= 4; mode++) {
-        CHECK(mod_pad_transform_run(0, &f, &o) == 1);
+        CHECK(mod_pad_transform_run(0, &f, NULL, &o) == 1);
         CHECK(o.type == PSX_MOD_PAD_DUALSHOCK && o.buttons == 0xffffu &&
               o.lx == 0x80 && o.ry == 0x80 && o.negcon_i == 0);
     }
@@ -88,21 +104,21 @@ int main(void) {
     mode = 0;
     CHECK(psx_mod_set_pad_transform(0, NULL));
     calls = 0;
-    CHECK(mod_pad_transform_run(0, &f, &o) == 1);
+    CHECK(mod_pad_transform_run(0, &f, NULL, &o) == 1);
     CHECK(calls == 0 && o.buttons == 0xffffu && o.type == PSX_MOD_PAD_DUALSHOCK &&
           o.lx == 0x80);
-    CHECK(mod_pad_transform_run(0, &f, &o) == 0);
+    CHECK(mod_pad_transform_run(0, &f, NULL, &o) == 0);
     CHECK(mod_pad_transform_initial_type(0) == -1);
 
     /* Session reset: same release for every registered player. */
     CHECK(psx_mod_set_pad_transform(0, &t) && psx_mod_set_pad_transform(1, &t));
     mod_pad_transform_reset();
-    CHECK(mod_pad_transform_run(0, &f, &o) == 1 && o.buttons == 0xffffu);
-    CHECK(mod_pad_transform_run(1, &f, &o) == 1 && o.buttons == 0xffffu);
-    CHECK(mod_pad_transform_run(0, &f, &o) == 0 && mod_pad_transform_run(1, &f, &o) == 0);
+    CHECK(mod_pad_transform_run(0, &f, NULL, &o) == 1 && o.buttons == 0xffffu);
+    CHECK(mod_pad_transform_run(1, &f, NULL, &o) == 1 && o.buttons == 0xffffu);
+    CHECK(mod_pad_transform_run(0, &f, NULL, &o) == 0 && mod_pad_transform_run(1, &f, NULL, &o) == 0);
     /* A reset with nothing registered owes nothing. */
     mod_pad_transform_reset();
-    CHECK(mod_pad_transform_run(0, &f, &o) == 0);
+    CHECK(mod_pad_transform_run(0, &f, NULL, &o) == 0);
     fprintf(stderr, "mod_pad_transform: passed\n");
     return 0;
 }

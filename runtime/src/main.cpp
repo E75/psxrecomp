@@ -5757,7 +5757,11 @@ static void apply_input_override_to_sio(int override_word) {
  * disconnected. `guarded` (savestate input guard) delivers neutral buttons and
  * sticks but still resolves presence/type. No mouse or source side effects:
  * those are layered on top by pad_ext_resolve(). */
-static int capture_pad_slot(int s, PsxNetPad* out, bool guarded) {
+/* host_view: the port's host pad before presentation, for a title pad
+ * transform (PadExtHooks.host_pad): real sticks and buttons without the
+ * digital stick->D-pad fold, whatever the configured mode; type unchanged. */
+static int capture_pad_slot_view(int s, PsxNetPad* out, bool guarded,
+                                 bool host_view) {
     if (!out) return 0;
     out->buttons = 0xFFFFu;
     out->lx = out->ly = out->rx = out->ry = 0x80u;
@@ -5785,7 +5789,7 @@ static int capture_pad_slot(int s, PsxNetPad* out, bool guarded) {
     const int mode = effective_player_mode_for_sio(p, s);
     uint8_t st[4] = { 0x80, 0x80, 0x80, 0x80 };
     if (mode == PSXRecompV4::PAD_MODE_ANALOG || p.steering_wheel ||
-        g_mod_controller_policy[s].callback) {
+        g_mod_controller_policy[s].callback || host_view) {
         pad_sticks_for(p, player, st);
     }
     const uint16_t policy_buttons =
@@ -5818,7 +5822,8 @@ static int capture_pad_slot(int s, PsxNetPad* out, bool guarded) {
      * exactly as on a real DualShock. This is what stops a dual-analog game's
      * D-pad control (Ape Escape's camera rotate) from being spun by stick
      * movement or centre drift. Digital mode keeps the stick->D-pad fold. */
-    const bool suppress_stick = (eff_analog != 0) || p.steering_wheel;
+    const bool suppress_stick = (eff_analog != 0) || p.steering_wheel ||
+                                host_view;
     uint16_t btn = src.device ? pad_buttons_for(p, player, suppress_stick)
                               : (uint16_t)0xFFFF;
     /* kind==1 already consumed the binds inside pad_buttons_for — ANDing the
@@ -5836,7 +5841,7 @@ static int capture_pad_slot(int s, PsxNetPad* out, bool guarded) {
      * may press a button may also steer. kind==1 already folded its binds
      * inside pad_sticks_for; psx_keybinds_sticks only widens a deflection, so
      * applying it twice is idempotent. */
-    if (eff_analog) {
+    if (eff_analog || host_view) {
         if (src.keybinds) {
             const Uint8* keys = SDL_GetKeyboardState(NULL);
             psx_keybinds_sticks(keys, player, st);
@@ -5844,7 +5849,7 @@ static int capture_pad_slot(int s, PsxNetPad* out, bool guarded) {
         if (src.all_pads)
             dev_any_controller_sticks(st);
     }
-    if (!eff_analog && !p.steering_wheel) {
+    if (!eff_analog && !p.steering_wheel && !host_view) {
         st[0] = st[1] = st[2] = st[3] = 0x80;
     }
 
@@ -5853,6 +5858,10 @@ static int capture_pad_slot(int s, PsxNetPad* out, bool guarded) {
     out->analog = (uint8_t)frame_type;
     out->connected = 1;
     return 1;
+}
+
+static int capture_pad_slot(int s, PsxNetPad* out, bool guarded) {
+    return capture_pad_slot_view(s, out, guarded, false);
 }
 
 /* Netplay-only capture: assigned PlayerInput for this slot only. Never merges
@@ -6453,9 +6462,19 @@ static void pad_ext_host_extras(void*, int s, uint32_t* flags, uint32_t* lt,
             SDL_GameControllerGetAxis(handle, SDL_CONTROLLER_AXIS_TRIGGERRIGHT));
     }
 }
+/* (1) Host pad of port s before presentation, for the transform frame. */
+static int pad_ext_host_pad(void*, int s, uint16_t* buttons, uint8_t st[4]) {
+    PsxNetPad pad;
+    if (s < 0 || s >= PSX_MAX_PLAYERS) return 0;
+    if (!capture_pad_slot_view(s, &pad, false, true)) return 0;
+    *buttons = pad.buttons;
+    st[0] = pad.lx; st[1] = pad.ly; st[2] = pad.rx; st[3] = pad.ry;
+    return 1;
+}
 static int pad_ext_pad_transform(void*, int s, const PSXModPadFrame* frame,
+                                 const PSXModPadOutput* stock,
                                  PSXModPadOutput* out) {
-    return mod_pad_transform_run((uint32_t)s, frame, out);
+    return mod_pad_transform_run((uint32_t)s, frame, stock, out);
 }
 static void pad_ext_mouse_fold(void*, int connected, int analog, uint16_t buttons,
                                uint8_t* rx, uint8_t* ry) {
@@ -6472,6 +6491,7 @@ static PadExtHooks pad_ext_main_hooks(void) {
     h.mouse_fold = pad_ext_mouse_fold;
     h.host_extras = pad_ext_host_extras;
     h.pad_transform = pad_ext_pad_transform;
+    h.host_pad = pad_ext_host_pad;
     return h;
 }
 

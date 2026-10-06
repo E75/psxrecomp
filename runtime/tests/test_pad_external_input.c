@@ -17,6 +17,8 @@ static struct {
     int fold_slot_calls[2];
     int src_analog_out;
     int xf_ret; PSXModPadOutput xf_out; PSXModPadFrame xf_seen; int xf_calls;
+    PSXModPadOutput xf_stock; int xf_echo_stock;
+    int host_pad_ok, host_pad_calls; uint16_t host_buttons; uint8_t host_st[4];
     uint32_t ex_flags, ex_lt, ex_rt;
 } T;
 
@@ -56,10 +58,16 @@ static void h_mfold(void *c, int con, int an, uint16_t b, uint8_t *rx, uint8_t *
 static void h_extras(void *c, int s, uint32_t *f, uint32_t *lt, uint32_t *rt) {
     (void)c; (void)s; L('e'); *f = T.ex_flags; *lt = T.ex_lt; *rt = T.ex_rt;
 }
-static int h_xf(void *c, int s, const PSXModPadFrame *f, PSXModPadOutput *o) {
-    (void)c; (void)s; L('t'); T.xf_calls++; T.xf_seen = *f;
+static int h_xf(void *c, int s, const PSXModPadFrame *f,
+                const PSXModPadOutput *stock, PSXModPadOutput *o) {
+    (void)c; (void)s; L('t'); T.xf_calls++; T.xf_seen = *f; T.xf_stock = *stock;
     if (!T.xf_ret) return 0;
-    *o = T.xf_out; return 1;
+    *o = T.xf_echo_stock ? *stock : T.xf_out; return 1;
+}
+static int h_host_pad(void *c, int s, uint16_t *b, uint8_t st[4]) {
+    (void)c; (void)s; L('h'); T.host_pad_calls++;
+    if (!T.host_pad_ok) return 0;
+    *b = T.host_buttons; memcpy(st, T.host_st, 4); return 1;
 }
 
 static PadExtHooks hooks(void) {
@@ -208,6 +216,57 @@ int main(void) {
         CHECK(T.xf_seen.host_flags == 7 && T.xf_seen.host_lt == 0 && T.xf_seen.host_rt == 0);
         CHECK(o.analog == PSX_MOD_PAD_NEGCON && o.buttons == 0xffff &&
               o.lx == 0x80 && o.rx == 0 && o.ry == 0 && o.ly == 0);
+
+        /* Digital-presented player: the frame is the host pad (real sticks,
+         * buttons without the stick->D-pad fold, type still digital); the
+         * stock output, delivered on decline, is the folded digital pad. */
+        hx.host_pad = h_host_pad;
+        {
+            const uint16_t folded = 0xff7e;   /* SELECT + LEFT from the stick */
+            reset();
+            T.local.analog = 0; T.local.buttons = folded;
+            T.local.lx = T.local.ly = T.local.rx = T.local.ry = 0x80;
+            T.host_pad_ok = 1; T.host_buttons = 0xfffe;
+            T.host_st[0] = 0x10; T.host_st[1] = 0x80; T.host_st[2] = 0x81; T.host_st[3] = 0x7f;
+            CHECK(pad_ext_resolve(&hx, 0, &o) == 1);
+            CHECK(T.host_pad_calls == 1 && T.xf_seen.type == PSX_MOD_PAD_DIGITAL &&
+                  T.xf_seen.lx == 0x10 && T.xf_seen.rx == 0x81 &&
+                  T.xf_seen.buttons == 0xfffe);
+            CHECK(T.xf_stock.buttons == folded && T.xf_stock.lx == 0x80 &&
+                  T.xf_stock.type == PSX_MOD_PAD_DIGITAL);
+            CHECK(o.buttons == folded && o.analog == 0 && o.lx == 0x80 &&
+                  o.ly == 0x80 && o.rx == 0x80 && o.ry == 0x80 && o.connected == 1);
+            /* Declined through mod_pad_transform_run (stock echoed back):
+             * still the stock digital bytes. */
+            reset();
+            T.local.analog = 0; T.local.buttons = folded;
+            T.local.lx = T.local.ly = T.local.rx = T.local.ry = 0x80;
+            T.host_pad_ok = 1; T.host_buttons = 0xfffe; T.host_st[0] = 0x10;
+            T.xf_ret = 1; T.xf_echo_stock = 1;
+            CHECK(pad_ext_resolve(&hx, 0, &o) == 1);
+            CHECK(o.buttons == folded && o.analog == 0 && o.lx == 0x80 &&
+                  o.ly == 0x80 && o.rx == 0x80 && o.ry == 0x80);
+            /* A NeGcon from the real stick. */
+            T.xf_echo_stock = 0; T.xf_out.struct_size = sizeof T.xf_out;
+            T.xf_out.type = PSX_MOD_PAD_NEGCON; T.xf_out.buttons = 0xffff;
+            T.xf_out.lx = 0x10;
+            CHECK(pad_ext_resolve(&hx, 0, &o) == 1 && o.analog == PSX_MOD_PAD_NEGCON &&
+                  o.lx == 0x10);
+            /* Analog pads, guarded frames and source-driven ports keep the
+             * resolved pad as the frame; no host-pad query. */
+            reset(); T.host_pad_ok = 1; T.host_st[0] = 0x10;
+            CHECK(pad_ext_resolve(&hx, 0, &o) == 1 && T.host_pad_calls == 0 &&
+                  T.xf_seen.lx == 10);
+            reset(); T.local.analog = 0; T.guard = 1; T.host_pad_ok = 1;
+            CHECK(pad_ext_resolve(&hx, 0, &o) == 1 && T.host_pad_calls == 0);
+            reset(); T.have_source = 1; T.src_analog_out = 0; T.host_pad_ok = 1;
+            CHECK(pad_ext_resolve(&hx, 0, &o) == 1 && T.host_pad_calls == 0);
+            /* Unavailable host pad: the frame stays the stock pad. */
+            reset(); T.local.analog = 0; T.local.buttons = folded;
+            T.local.lx = 0x80;
+            CHECK(pad_ext_resolve(&hx, 0, &o) == 1 && T.host_pad_calls == 1 &&
+                  T.xf_seen.buttons == folded && T.xf_seen.lx == 0x80);
+        }
 
         /* No device and no source: the transform is not consulted. */
         reset(); T.have_device = 0; T.xf_ret = 1;

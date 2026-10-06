@@ -810,13 +810,18 @@ int psx_mod_set_controller_source(uint32_t player, PSXModControllerSource source
  * (low-latency resample), so keep it a function of its input plus game state.
  *
  * The frame is the resolved pad: active-low buttons, sticks (0x80 centred),
- * type (PSX_MOD_PAD_*), and host extras of the port: host_flags bit 0 = a
+ * type (PSX_MOD_PAD_*), and host extras of the port. A player presented as
+ * digital (and not driven by a controller source) is given as its host pad
+ * instead: the real sticks, and buttons without the stick->D-pad fold, with
+ * type still DIGITAL; the transform decides what the guest sees.
+ * host_flags bit 0 = a
  * gamepad is assigned, bit 1 / bit 2 = it has a left / right trigger axis;
  * host_lt / host_rt are those triggers, 0 released .. 255 fully pressed
  * (0 when absent or while the savestate input guard is armed).
  *
- * The output arrives pre-filled with the frame (pass-through, pressures 0).
- * Return non-zero to apply it, 0 to pass the frame through unchanged. The
+ * The output arrives pre-filled with the stock pad (what the player gets
+ * without a transform, so a digital pad keeps its fold and centred sticks;
+ * pressures 0). Return non-zero to apply it, 0 to deliver the stock pad. The
  * type must be one of allowed_types (bit per PSX_MOD_PAD_*); bytes are
  * 0..255 and buttons 0..0xFFFF; anything else delivers a neutral frame.
  * NeGcon uses lx as twist (0x80 centre) and negcon_i / negcon_ii / negcon_l
