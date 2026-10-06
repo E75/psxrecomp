@@ -12,21 +12,6 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Standalone: provide normalize used by pad↔frame (mirrors psx_netplay). */
-void psx_netplay_normalize_pad(PsxNetPad *pad)
-{
-    const int dead = 24;
-    if (!pad) return;
-    if (pad->lx > (uint8_t)(0x80 - dead) && pad->lx < (uint8_t)(0x80 + dead))
-        pad->lx = 0x80;
-    if (pad->ly > (uint8_t)(0x80 - dead) && pad->ly < (uint8_t)(0x80 + dead))
-        pad->ly = 0x80;
-    if (pad->rx > (uint8_t)(0x80 - dead) && pad->rx < (uint8_t)(0x80 + dead))
-        pad->rx = 0x80;
-    if (pad->ry > (uint8_t)(0x80 - dead) && pad->ry < (uint8_t)(0x80 + dead))
-        pad->ry = 0x80;
-}
-
 static int failures;
 #define CHECK(cond, msg) do { \
     if (!(cond)) { printf("FAIL: %s\n", msg); failures++; } \
@@ -78,6 +63,22 @@ int main(void)
     CHECK(pad2.analog == SIO_PAD_JOGCON && pad2.lx == 0xFF,
           "JogCon type/steering roundtrip");
     pad = pad2;
+
+    /* NeGcon: the rollback row's stick view carries twist (lx) and L (ly);
+     * L is a pressure, so no centre deadzone may touch it. */
+    {
+        PsxNetPad neg = pad;
+        neg.analog = SIO_PAD_NEGCON;
+        neg.lx = 0x90;  /* twist inside the centre deadzone -> 0x80 */
+        neg.ly = 0x70;  /* L pressure near 0x80 must survive exactly */
+        neg.rx = 0xC0;
+        neg.ry = 0x10;
+        netplay_ih_pad_to_frame(&neg, 14, 0, &f);
+        CHECK(f.analog == SIO_PAD_NEGCON, "NeGcon type from pad");
+        netplay_ih_frame_to_pad(&f, &pad2);
+        CHECK(pad2.analog == SIO_PAD_NEGCON && pad2.lx == 0x80 &&
+              pad2.ly == 0x70, "NeGcon twist/L roundtrip");
+    }
 
     /* Digital MotK path must not become DualShock through hist. */
     {

@@ -2900,7 +2900,7 @@ static int host_promote_from_session(int slot, uint32_t tick, RNetRbFrame *out)
     pad.ly = sample.bytes[3];
     pad.rx = sample.bytes[4];
     pad.ry = sample.bytes[5];
-    pad.analog = sample.bytes[6] <= 2u ? sample.bytes[6] : 0u;
+    pad.analog = sample.bytes[6] <= PSX_NETPAD_TYPE_MAX ? sample.bytes[6] : 0u;
     pad.connected = 1;
     netplay_ih_pad_to_frame(&pad, tick, 0, &frame);
     if (!netplay_ih_promote(g_b.ih, slot, &frame))

@@ -55,7 +55,7 @@ void netplay_ih_frame_to_pad(const RNetRbFrame *frame, PsxNetPad *pad)
     pad->buttons = frame->buttons;
     pad->lx = i8_to_u8_stick(frame->stick_x);
     pad->ly = i8_to_u8_stick(frame->stick_y);
-    pad->analog = frame->analog <= 2u ? frame->analog : 0u;
+    pad->analog = frame->analog <= PSX_NETPAD_TYPE_MAX ? frame->analog : 0u;
     psx_netplay_normalize_pad(pad);
 }
 

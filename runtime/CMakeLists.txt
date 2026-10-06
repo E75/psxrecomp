@@ -420,6 +420,14 @@ if(BUILD_TESTING)
         PSX_MAX_PLAYERS=5)
     add_test(NAME sio_negcon_protocol_multitap_test
              COMMAND sio_negcon_protocol_multitap_test)
+    # The shared PsxNetPad -> SIO apply and normalization, over the real SIO.
+    add_executable(psx_pad_apply_test
+        tests/test_psx_pad_apply.c
+        src/psx_pad_apply.c
+        src/psx_net_pad.c
+        src/sio.c)
+    target_include_directories(psx_pad_apply_test PRIVATE include)
+    add_test(NAME psx_pad_apply_test COMMAND psx_pad_apply_test)
 
     add_executable(controller_type_test tests/test_controller_type.cpp)
     target_include_directories(controller_type_test PRIVATE include)
@@ -1149,7 +1157,8 @@ if(BUILD_TESTING)
 
         add_executable(netplay_input_hist_test
             tests/test_netplay_input_hist.c
-            src/netplay_input_hist.c)
+            src/netplay_input_hist.c
+            src/psx_net_pad.c)
         target_include_directories(netplay_input_hist_test PRIVATE
             include
             ${_RNET_ROOT}/include)

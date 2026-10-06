@@ -30,8 +30,13 @@ extern "C" {
  * Pad blob (8 bytes):
  *   [0..1] buttons LE u16 (PSX active-low)
  *   [2] lx  [3] ly  [4] rx  [5] ry
- *   [6] controller type (0 digital, 1 DualShock, 2 JogCon)
+ *   [6] controller type (0 digital, 1 DualShock, 2 JogCon, 3 NeGcon)
  *   [7] connected (always 1)
+ *
+ * Packed per type. DualShock: lx/ly/rx/ry are the sticks. JogCon: lx is the
+ * wheel position (0x80 centre). NeGcon: lx = twist (0x80 centre), rx = analog
+ * I, ry = analog II, ly = analog L (0 released .. 0xFF pressed). The rollback
+ * row carries only lx/ly (stick view), i.e. NeGcon twist and L.
  */
 
 #define PSX_NETPLAY_PAD_BYTES 8
@@ -43,6 +48,16 @@ typedef struct PsxNetPad {
     uint8_t  connected;
 } PsxNetPad;
 
+/* Highest controller type a PsxNetPad may carry (SIO_PAD_NEGCON). Larger
+ * values decode as digital. */
+#define PSX_NETPAD_TYPE_MAX 3u
+
+/* The one way a resolved pad reaches SIO, shared by offline sampling, netplay
+ * (delay and rollback apply) and selfcheck replay: buttons, the type's axes
+ * (NeGcon unpacked to twist + I/II/L), and a deferred type request. A
+ * multitap seat without the analog-on-tap hack is made config-inert, as SIO
+ * then forces it digital. Callers own connection and other policy. */
+void psx_pad_apply_to_sio(int port, const PsxNetPad *pad);
 typedef struct PsxNetplayConfig {
     int         enabled;
     int         local_slot;    /* 0 .. slot_count-1 */
@@ -272,7 +287,9 @@ void psx_netplay_wait_recv(int timeout_ms);
 void psx_netplay_admit_wait_info(char *stall_out, size_t stall_cap,
                                  uint32_t *sim_tick_out, int *lead_out);
 
-/* Normalize sticks (deadzone → center) for stabler cross-device blobs. */
+/* Normalize for stabler cross-device blobs: unknown types become digital;
+ * centred axes (sticks, wheel, twist) snap to 0x80 inside a deadzone; NeGcon
+ * pressure bytes (ly/rx/ry) are kept exactly; digital centres everything. */
 void psx_netplay_normalize_pad(PsxNetPad *pad);
 
 void psx_netplay_release_pads(void);

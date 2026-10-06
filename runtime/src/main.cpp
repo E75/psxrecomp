@@ -5892,11 +5892,7 @@ static int capture_pad_slot_exclusive(int s, PsxNetPad* out, int present_sio_slo
 }
 
 static void apply_pad_slot_to_sio(int s, const PsxNetPad& pad) {
-    if (sio_pad_on_multitap(s) && !sio_get_multitap_analog())
-        sio_set_pad_config_capable(s, 0);
-    sio_set_pad_state_slot(s, pad.buttons);
-    sio_set_pad_sticks(s, pad.lx, pad.ly, pad.rx, pad.ry);
-    sio_request_pad_type(s, pad.analog);
+    psx_pad_apply_to_sio(s, &pad);
     /* Solo resim self-check records exactly what was applied this boundary. */
     psx_selfcheck_note_pad(s, pad.buttons, pad.lx, pad.ly, pad.rx, pad.ry,
                            pad.analog);
