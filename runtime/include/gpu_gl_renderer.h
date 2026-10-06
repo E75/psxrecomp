@@ -8,6 +8,7 @@
  * same struct tag) so this header needs no SDL include. */
 
 #include <stdint.h>
+#include <stddef.h>
 #include "gpu_projective_clip.h"
 
 struct SDL_Window;
@@ -463,6 +464,24 @@ void gl_renderer_batch_diag(uint64_t out[8]);
  * call before GL context creation. */
 void gl_renderer_set_texture_window_batching(int on);
 int  gl_renderer_get_texture_window_batching(void);
+
+/* Render thread ([video] render_thread, docs/RENDER_THREAD.md). Opt-in, off
+ * by default; with it off nothing below runs and the backend is unchanged.
+ * start: after gl_renderer_init_context, on the thread holding the context;
+ * moves the context to a new render thread and records backend calls from
+ * here on (1 = running). max_frames bounds closed frames in flight. stop:
+ * drain and take the context back (gl_renderer_shutdown also stops it).
+ * frame_boundary: once per vblank after the present; hands the context to or
+ * from the render thread and applies the in-flight bound. sync: an explicit
+ * sync point for readers of renderer-written host state outside the GL entry
+ * points. json: stats object body for the render_thread debug command. */
+int  gl_renderer_render_thread_start(int max_frames);
+void gl_renderer_render_thread_stop(void);
+int  gl_renderer_render_thread_active(void);
+void gl_renderer_render_thread_frame_boundary(void);
+void gl_renderer_render_thread_sync(const char *reason);
+int  gl_renderer_render_thread_json(char *out, size_t cap);
+int  gl_renderer_fbo_peek_deferred(int x, int y, int w, int h, uint16_t *out);
 
 #ifdef __cplusplus
 }
