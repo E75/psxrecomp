@@ -1111,6 +1111,17 @@ if(BUILD_TESTING)
     add_executable(frame_pacing_test tests/test_frame_pacing.c)
     target_include_directories(frame_pacing_test PRIVATE include)
     add_test(NAME frame_pacing_test COMMAND frame_pacing_test)
+    # Render thread core ([video] render_thread, docs/RENDER_THREAD.md):
+    # ordering across ring wraps, the frame bound, stale-frame detection and
+    # the drain + context hand-off sync point, against a fake executor.
+    # The fixture itself uses POSIX threads and nanosleep.
+    if(NOT WIN32)
+        add_executable(render_thread_test tests/test_render_thread.c src/render_thread.c)
+        target_include_directories(render_thread_test PRIVATE include)
+        find_package(Threads REQUIRED)
+        target_link_libraries(render_thread_test PRIVATE Threads::Threads)
+        add_test(NAME render_thread_test COMMAND render_thread_test)
+    endif()
 
     # Same family of bug as frame_pacing: the starvation watchdog's staleness
     # gap must not wrap when the (cross-thread) heartbeat is newer than the
