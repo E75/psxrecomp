@@ -9413,8 +9413,11 @@ static void dynres_tick(void) {
         }
     }
 #endif
+    /* Tails that only cover the wall-time model's settling (a savestate
+     * load re-anchors pacing, the game's first seconds). */
+    bool soft_tail = !held && tail > 0.0 && why && std::strcmp(why, "game entry") == 0;
     if (g_dynres.hold_request_s > 0.0) {
-        if (g_dynres.hold_request_s > tail) tail = g_dynres.hold_request_s;
+        if (g_dynres.hold_request_s > tail) { tail = g_dynres.hold_request_s; soft_tail = !held; }
         why = "savestate load";
         g_dynres.hold_request_s = 0.0;
     }
@@ -9447,6 +9450,11 @@ static void dynres_tick(void) {
         if (!why) why = rt ? "render thread started" : "render thread stopped";
     }
     if (rt) {
+        /* The render thread's per-frame cost and the queue need no settling
+         * beyond the frames in flight: a soft tail is cut to half a second,
+         * so a scene that is too heavy right after a load is not left
+         * running slow for seconds. */
+        if (soft_tail && tail > 0.5) tail = 0.5;
         dynres_tick_rt(now_s, wall, period, held, tail, why);
         return;
     }
