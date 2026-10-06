@@ -36,6 +36,7 @@ int      psx_in_device_service;
 int      g_event_step_conservative;
 int      g_ls_replay_active;
 int      g_psx_render_pass_active;
+int      g_psx_guest_time_frozen;
 uint32_t g_psx_cyc_batch;
 uint32_t g_psx_cyc_batch_limit;
 

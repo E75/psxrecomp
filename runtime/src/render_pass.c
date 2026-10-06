@@ -349,7 +349,7 @@ static uint32_t transaction_status(int stereo) {
     if (psx_presentation_fast_forward()) return PSX_MOD_RENDER_PASS_FAST_FORWARD;
     gl = stereo ? gl_renderer_stereo_unavailable() : gl_renderer_pass_unavailable();
     if (gl != PSX_MOD_RENDER_PASS_READY) return gl;
-    if (s_nesting || g_psx_render_pass_active || psx_get_in_exception() ||
+    if (s_nesting || g_psx_guest_time_frozen || psx_get_in_exception() ||
         dma_gpu_linked_list_active())
         return PSX_MOD_RENDER_PASS_BUSY;
     return PSX_MOD_RENDER_PASS_READY;

@@ -6,6 +6,7 @@
 #include "dma.h"
 #include "gpu.h"
 #include "interrupts.h"
+#include "psx_cycle_freeze.h"
 #include "psx_memory.h"
 #include "spu.h"
 #include <string.h>
@@ -29,6 +30,52 @@ uint32_t psx_mod_call_guest(struct CPUState* cpu, uint32_t function,
     cpu->hi = hi;
     cpu->lo = lo;
     psx_snapshot_host_call_end();
+    return result;
+}
+
+/* The caller's in-flight timing state: deadlines are absolute guest cycles
+ * and the load pipeline describes the instructions around the call, so an
+ * uncharged callee must leave them as they were. */
+typedef struct CallerTiming {
+    uint64_t muldiv_ts_done, gte_ts_done;
+    uint8_t  read_absorb[33];
+    uint8_t  read_absorb_which, read_fudge, ld_which_t;
+    uint32_t ld_absorb;
+} CallerTiming;
+
+static void timing_save(CallerTiming* t, const struct CPUState* cpu) {
+    t->muldiv_ts_done = cpu->muldiv_ts_done;
+    t->gte_ts_done = cpu->gte_ts_done;
+    memcpy(t->read_absorb, cpu->read_absorb, sizeof t->read_absorb);
+    t->read_absorb_which = cpu->read_absorb_which;
+    t->read_fudge = cpu->read_fudge;
+    t->ld_which_t = cpu->ld_which_t;
+    t->ld_absorb = cpu->ld_absorb;
+}
+
+static void timing_restore(struct CPUState* cpu, const CallerTiming* t) {
+    cpu->muldiv_ts_done = t->muldiv_ts_done;
+    cpu->gte_ts_done = t->gte_ts_done;
+    memcpy(cpu->read_absorb, t->read_absorb, sizeof t->read_absorb);
+    cpu->read_absorb_which = t->read_absorb_which;
+    cpu->read_fudge = t->read_fudge;
+    cpu->ld_which_t = t->ld_which_t;
+    cpu->ld_absorb = t->ld_absorb;
+}
+
+uint32_t psx_mod_call_guest_uncharged(struct CPUState* cpu, uint32_t function,
+                                      uint32_t return_address, uint32_t a0,
+                                      uint32_t a1, uint32_t a2, uint32_t a3,
+                                      uint32_t budget_cycles, int* charged) {
+    PsxCycleFreeze save;
+    CallerTiming timing;
+    timing_save(&timing, cpu);
+    const int frozen = psx_cycle_uncharged_begin(&save, budget_cycles);
+    const uint32_t result =
+        psx_mod_call_guest(cpu, function, return_address, a0, a1, a2, a3);
+    const int uncharged = frozen ? psx_cycle_uncharged_end(&save) : 1;
+    if (frozen && uncharged) timing_restore(cpu, &timing);
+    if (charged) *charged = !uncharged;
     return result;
 }
 
