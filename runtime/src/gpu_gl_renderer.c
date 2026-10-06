@@ -134,6 +134,8 @@
 #define PSXGL_DEPTH24_STENCIL8      0x88F0
 #define PSXGL_R16UI                 0x8234
 #define PSXGL_RED_INTEGER           0x8D94
+#define PSXGL_DEPTH_STENCIL         0x84F9
+#define PSXGL_UNSIGNED_INT_24_8     0x84FA
 #define PSXGL_FUNC_ADD              0x8006
 #define PSXGL_FUNC_REVERSE_SUBTRACT 0x800B
 #define PSXGL_CONSTANT_ALPHA        0x8003
@@ -6344,8 +6346,15 @@ static uint32_t pass_pace_cap(double vblank_ticks) {
 }
 
 static int      s_pass_verify = -1;
-static uint8_t *s_pv_hr = NULL, *s_pv_raw = NULL;
-static size_t   s_pv_hr_cap = 0, s_pv_raw_cap = 0;
+/* PSX_RENDER_PASS_VERIFY readbacks of the pass rect before and after the
+ * pass: hr colour, raw mirror, the hr mask stencil, the native-wide band and
+ * its stencil. The backup copies colour and stencil, so all of them must
+ * come back exactly. */
+typedef struct PassVerifySnap {
+    uint8_t *buf[5];      /* hr, raw, hr stencil, wide, wide stencil */
+    size_t   cap[5], len[5];
+} PassVerifySnap;
+static PassVerifySnap s_pv_before, s_pv_after;
 static int      s_pv_ok = 1;
 
 uint64_t gl_renderer_perf_ticks(void) { return SDL_GetPerformanceCounter(); }
@@ -6426,6 +6435,22 @@ static uint32_t pass_slot_cap(int tex_w, int tex_h) {
     return cap;
 }
 
+/* PSX_RENDER_PASS_FORCE_MEASURE=1 (diagnostic, leftover planning only): one
+ * pass per plan with a 200 ms deadline, past every hold, so the copy cost
+ * and PSX_RENDER_PASS_VERIFY can be checked at an internal resolution where
+ * the planner admits none. It slows the game on purpose. */
+static int pass_force_measure(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("PSX_RENDER_PASS_FORCE_MEASURE");
+        on = e && e[0] == '1' ? 1 : 0;
+        if (on)
+            fprintf(stderr, "psxrecomp: render passes forced for measurement "
+                    "(PSX_RENDER_PASS_FORCE_MEASURE, debug: slows the game)\n");
+    }
+    return on;
+}
+
 /* Leftover-time plan (PSX_MOD_RENDER_PASS_LEFTOVER): only into the host time
  * left before the frame is first presented, after the work the emulation
  * thread still has to do for it; every pass is held to that deadline
@@ -6437,7 +6462,7 @@ static uint32_t pass_plan_leftover(uint32_t period_vblanks,
     RenderPassPlanInput in;
     double freq, sp, now, margin, leftover;
     uint32_t cap, want = 0, n, pace_cap;
-    int live, same_size;
+    int live, same_size, force;
 
     if (wanted) *wanted = 0;
     s_idle_ticks_accum = s_pass_ticks_accum = s_present_ticks_accum = 0;
@@ -6497,6 +6522,12 @@ static uint32_t pass_plan_leftover(uint32_t period_vblanks,
                                              s_hr_scale);
     }
     in.max = max < cap - 1u ? max : cap - 1u;
+    force = pass_force_measure();
+    if (force) {
+        in.max = 1;
+        in.budget = -1.0;
+        in.probe_min = 1.0;
+    }
     n = render_pass_plan_phases(&in, alpha_q16, &want);
     if (n == 0 && want && in.pass_cost > 0.0 && in.budget >= in.probe_min &&
         render_pass_leftover_cost_probe_due(&s_pass_lcost)) {
@@ -6507,7 +6538,7 @@ static uint32_t pass_plan_leftover(uint32_t period_vblanks,
         if (n) { s_pass_plan_probe = 1; s_pass_probes++; }
         else s_pass_lcost.probing = 0;
     }
-    if (n > pace_cap) {
+    if (!force && n > pace_cap) {
         /* The previous game frame could not catch up (pass_pace_cap). Keep
          * the evenly spaced subset of passes that its measured pace permits. */
         in.max = pace_cap;
@@ -6517,7 +6548,7 @@ static uint32_t pass_plan_leftover(uint32_t period_vblanks,
             s_pass_lcost.probing = 0;
         }
     }
-    if (n && s_since_tight < PASS_TIGHT_HOLDOFF) {
+    if (!force && n && s_since_tight < PASS_TIGHT_HOLDOFF) {
         /* A VBlank without passes left no idle time lately: the game is at
          * its limit or catching up. Whatever the schedule says, no passes. */
         s_pass_behind++;
@@ -6527,7 +6558,7 @@ static uint32_t pass_plan_leftover(uint32_t period_vblanks,
         }
         n = 0;
     }
-    if (n && !pass_gpu_caught_up()) {
+    if (!force && n && !pass_gpu_caught_up()) {
         /* The GPU is still on work queued before this frame (the game's
          * own frame, its presents): a pass would first wait for it, in time
          * the game may need. Not now. */
@@ -6546,7 +6577,8 @@ static uint32_t pass_plan_leftover(uint32_t period_vblanks,
     s_plan_idle_mark = s_idle_total;
     s_plan_pending = 1;
     s_plan_passes_run = 0;
-    s_pass_deadline = in.frame_start - s_pass_reserve - margin;
+    s_pass_deadline = force ? now + 0.2 * freq
+                            : in.frame_start - s_pass_reserve - margin;
     s_pass_probe_min = in.probe_min;
     if (want) {
         s_plan_budget_ms_sum += in.budget * 1000.0 / freq;
@@ -6884,21 +6916,58 @@ static void pass_blit(GLuint src, GLuint dst, int sx, int sy, int dx, int dy,
     p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, 0);
 }
 
-static void pass_verify_read(uint8_t **hr, size_t *hr_cap, uint8_t **raw,
-                             size_t *raw_cap) {
-    int S = s_hr_scale;
-    size_t hn = (size_t)s_pass_w * S * (size_t)s_pass_h * S * 4u;
-    size_t rn = (size_t)s_pass_w * (size_t)s_pass_h * 2u;
-    if (*hr_cap < hn) { free(*hr); *hr = (uint8_t *)malloc(hn); *hr_cap = *hr ? hn : 0; }
-    if (*raw_cap < rn) { free(*raw); *raw = (uint8_t *)malloc(rn); *raw_cap = *raw ? rn : 0; }
-    if (!*hr || !*raw) return;
-    p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, s_hr_fbo);
-    glReadPixels(s_pass_x * S, s_pass_y * S, s_pass_w * S, s_pass_h * S,
-                 GL_RGBA, GL_UNSIGNED_BYTE, *hr);
-    p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, s_raw_fbo);
-    glReadPixels(s_pass_x, s_pass_y, s_pass_w, s_pass_h, PSXGL_RED_INTEGER,
-                 GL_UNSIGNED_SHORT, *raw);
+static void pass_verify_part(PassVerifySnap *v, int i, GLuint fbo, int x, int y,
+                             int w, int h, GLenum fmt, GLenum type, size_t px) {
+    size_t n = (size_t)w * (size_t)h * px;
+    v->len[i] = 0;
+    if (!fbo || w <= 0 || h <= 0) return;
+    if (v->cap[i] < n) {
+        free(v->buf[i]);
+        v->buf[i] = (uint8_t *)malloc(n);
+        v->cap[i] = v->buf[i] ? n : 0;
+        if (!v->buf[i]) return;
+    }
+    p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, fbo);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(x, y, w, h, fmt, type, v->buf[i]);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
     p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, 0);
+    if (fmt == PSXGL_DEPTH_STENCIL)          /* keep only the mask bit */
+        for (size_t k = 0; k < n; k += 4) {
+            uint32_t d;
+            memcpy(&d, v->buf[i] + k, 4);
+            d &= 1u;
+            memcpy(v->buf[i] + k, &d, 4);
+        }
+    v->len[i] = n;
+}
+
+static void pass_verify_read(PassVerifySnap *v) {
+    int S = s_hr_scale;
+    GLuint wf = g_wide_w > 0 ? pass_wide_fbo_for(s_pass_x) : 0;
+    pass_verify_part(v, 0, s_hr_fbo, s_pass_x * S, s_pass_y * S, s_pass_w * S,
+                     s_pass_h * S, GL_RGBA, GL_UNSIGNED_BYTE, 4);
+    pass_verify_part(v, 1, s_raw_fbo, s_pass_x, s_pass_y, s_pass_w, s_pass_h,
+                     PSXGL_RED_INTEGER, GL_UNSIGNED_SHORT, 2);
+    pass_verify_part(v, 2, s_hr_fbo, s_pass_x * S, s_pass_y * S, s_pass_w * S,
+                     s_pass_h * S, PSXGL_DEPTH_STENCIL, PSXGL_UNSIGNED_INT_24_8, 4);
+    pass_verify_part(v, 3, wf, 0, s_pass_y * S, g_wide_w * S, s_pass_h * S,
+                     GL_RGBA, GL_UNSIGNED_BYTE, 4);
+    pass_verify_part(v, 4, wf, 0, s_pass_y * S, g_wide_w * S, s_pass_h * S,
+                     PSXGL_DEPTH_STENCIL, PSXGL_UNSIGNED_INT_24_8, 4);
+}
+
+static int pass_verify_same(const PassVerifySnap *a, const PassVerifySnap *b) {
+    static const char *what[5] = { "hr colour", "raw mirror", "hr stencil",
+                                   "wide band", "wide stencil" };
+    for (int i = 0; i < 5; i++) {
+        if (a->len[i] != b->len[i] ||
+            (a->len[i] && memcmp(a->buf[i], b->buf[i], a->len[i]) != 0)) {
+            fprintf(stderr, "psxrecomp: RENDER PASS VERIFY: %s differs\n", what[i]);
+            return 0;
+        }
+    }
+    return 1;
 }
 
 /* VRAM journal for out-of-rect writes during a pass (see pass_refuse_write). */
@@ -7178,7 +7247,7 @@ backed_up:
         const char *e = getenv("PSX_RENDER_PASS_VERIFY");
         s_pass_verify = (e && e[0] && e[0] != '0') ? 1 : 0;
     }
-    if (s_pass_verify) pass_verify_read(&s_pv_hr, &s_pv_hr_cap, &s_pv_raw, &s_pv_raw_cap);
+    if (s_pass_verify) pass_verify_read(&s_pv_before);
     s_pj_cpu.n = 0;
     s_pass_active = 1;
     return 1;
@@ -7193,6 +7262,10 @@ void gl_renderer_pass_abandon(void) {
     s_pass_active = 0;
     s_pj_cpu.n = 0;
     s_pb_valid = 1;
+    if (s_pass_verify) {   /* nothing ran: the rect must be untouched */
+        pass_verify_read(&s_pv_after);
+        s_pv_ok = pass_verify_same(&s_pv_before, &s_pv_after);
+    }
 }
 
 /* Fraction of the last pass's backup copy that was made before it ran out of
@@ -7233,14 +7306,8 @@ static void transaction_restore(void) {
     s_pb_valid = 1;
 
     if (s_pass_verify) {
-        static uint8_t *after_hr = NULL, *after_raw = NULL;
-        static size_t after_hr_cap = 0, after_raw_cap = 0;
-        size_t hn = (size_t)s_pass_w * S * (size_t)s_pass_h * S * 4u;
-        size_t rn = (size_t)s_pass_w * (size_t)s_pass_h * 2u;
-        pass_verify_read(&after_hr, &after_hr_cap, &after_raw, &after_raw_cap);
-        s_pv_ok = s_pv_hr && after_hr && s_pv_raw && after_raw &&
-                  memcmp(s_pv_hr, after_hr, hn) == 0 &&
-                  memcmp(s_pv_raw, after_raw, rn) == 0;
+        pass_verify_read(&s_pv_after);
+        s_pv_ok = pass_verify_same(&s_pv_before, &s_pv_after);
     }
 }
 

@@ -367,8 +367,17 @@ internal resolutions; a size change frees the old set.
   (the game's own frame, then each pass in phase order).
 - `PSX_RENDER_PASS_VERIFY=1`: hash CPU, RAM, scratchpad, I-cache, interrupt,
   timer, DMA and GPU state and read back the VRAM rect before and after every
-  pass, and check that a pass that returned normally left the host nesting
-  balanced; `verify_mismatch` must stay 0.
+  pass -- hr colour, the raw mirror, the hr mask stencil, and the
+  native-wide band with its stencil (stderr names the surface that differs)
+  -- and check that a pass that returned normally left the host nesting
+  balanced; `verify_mismatch` must stay 0. A pass closed before its guest
+  code ran is checked too (the rect must be untouched).
+- `PSX_RENDER_PASS_FORCE_MEASURE=1` (leftover planning only): one pass per
+  eligible plan with a 200 ms deadline, past the pace guard and the GPU and
+  slack holds, even where it cannot fit in spare time. It slows the game on
+  purpose and must stay off for player runs: it is for measuring the pass
+  and copy cost and checking `verify_mismatch` at an internal resolution
+  where the planner correctly admits no passes.
 - `PSX_RENDER_PASS_WATCHDOG=<guest cycles>`: lower the watchdog (default
   8 M) below a title's pass size to drive real passes through the rollback
   path; with fingerprints (below) the run must still match one without

@@ -160,19 +160,26 @@ assert "gl_renderer_pass_set_leftover(0);" in body(rp, "void render_pass_reset_s
 lp = gl[gl.index("static uint32_t pass_plan_leftover("):]
 lp = lp[:lp.index("\n}\n")]
 assert "render_pass_leftover(now, in.frame_start, s_pass_reserve, margin)" in lp \
-    and "s_pass_deadline = in.frame_start - s_pass_reserve - margin;" in lp, (
+    and ": in.frame_start - s_pass_reserve - margin;" in lp, (
     "leftover plans must budget only the time before the frame's start")
 assert "in.probe_min = render_pass_probe_min(" in lp, (
     "an unmeasured pass is tried only with the frame's own cost to spare")
-assert "if (n && !pass_gpu_caught_up()) {" in lp, (
+assert "if (!force && n && !pass_gpu_caught_up()) {" in lp, (
     "passes wait for the GPU to finish the game's frame")
-assert "if (n && s_since_tight < PASS_TIGHT_HOLDOFF) {" in lp, (
+assert "if (!force && n && s_since_tight < PASS_TIGHT_HOLDOFF) {" in lp, (
     "no passes while the game itself has no slack")
-assert "if (n > pace_cap) {" in lp and "pace_cap = pass_pace_cap(sp);" in lp, (
+assert "if (!force && n > pace_cap) {" in lp and "pace_cap = pass_pace_cap(sp);" in lp, (
     "the pace guard limits passes after a frame that slipped")
 assert re.search(r"render_pass_leftover_cost_probe_due\(&s_pass_lcost\)\) \{", lp) and \
     "in.budget >= in.probe_min" in lp, (
     "a stale estimate is probed only in leftover time, with one pass")
+# PSX_RENDER_PASS_VERIFY compares the hr colour, raw mirror, both mask
+# stencils and the native-wide band, before and after every pass.
+pvr = definition(gl, "pass_verify_read")
+assert pvr.count("PSXGL_DEPTH_STENCIL") == 2 and "wf, 0, s_pass_y * S" in pvr, (
+    "verify must cover the stencils and the native-wide band")
+assert "pass_verify_same(&s_pv_before, &s_pv_after)" in definition(gl, "transaction_restore"), (
+    "the restore is checked against the readback taken at begin")
 # Each pass is held to the deadline: not started when it would end after it,
 # stopped (not a fault) when it runs into it (render_pass_sandbox_test).
 rpt = rp[rp.index("static int render_transaction("):]
