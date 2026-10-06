@@ -6139,6 +6139,13 @@ static double   s_pf_buf_cw[GLPERF_NBUF][5];
 static GlPerfSample s_pf_ring[GLPERF_RING];
 static uint64_t     s_pf_ring_seq = 0;
 
+/* Dynamic resolution's render-thread frame cost owns the TIME_ELAPSED target
+ * while it measures (rthf_begin): frame_perf stands aside. */
+static int rthf_owns_timer(void);
+static void gl_perf_yield(void) {
+    if (s_pf_scene_active) { p_glEndQuery(GL_TIME_ELAPSED); s_pf_scene_active = 0; }
+}
+
 static void gl_perf_init(void) {
 #ifdef PSX_NO_DEBUG_TOOLS
     return;
@@ -6172,7 +6179,7 @@ static void gl_perf_init(void) {
 /* Bracket ONE native-wide mirror pass (called from the wide-mirror draw sites).
  * Timestamp pairs, not TIME_ELAPSED — see the pool comment above. */
 static void gl_perf_mirror_begin(void) {
-    if (!s_pf_on || !s_mq_ok) return;
+    if (!s_pf_on || !s_mq_ok || rthf_owns_timer()) return;
     int b = s_pf_b;
     if (s_mq_n[b] >= GLPERF_MIRQ) { s_mq_over[b]++; return; }
     p_glQueryCounter(s_mq_q[b][s_mq_n[b] * 2], GL_TIMESTAMP);
@@ -6199,7 +6206,7 @@ static void gl_perf_present_enter(void) {
     s_bdg_applied = 0; s_bdg_prims = 0; s_bdg_clearx = -999999;
     /* Replay: taken on the emulation thread when the present was recorded. */
     { extern void psx_ws_dbg_gate_frame_snapshot(void); if (!rth_replaying()) psx_ws_dbg_gate_frame_snapshot(); }
-    if (!s_pf_on) return;
+    if (!s_pf_on || rthf_owns_timer()) return;
     uint64_t now = SDL_GetPerformanceCounter();
     s_pf_enter = now;
     s_pf_total_pending = s_pf_last_enter
@@ -6220,7 +6227,7 @@ static void gl_perf_present_enter(void) {
 
 /* End of present (after SwapWindow). wide = native-wide path. */
 static void gl_perf_present_exit(int wide) {
-    if (!s_pf_on) return;
+    if (!s_pf_on || rthf_owns_timer()) return;
     uint64_t now = SDL_GetPerformanceCounter();
     p_glEndQuery(GL_TIME_ELAPSED);   /* end present_q[b] */
     s_pf_buf_total[s_pf_b] = s_pf_total_pending;
@@ -9385,15 +9392,17 @@ static void rth_replay_present(const RtCmd *c, const uint8_t *p) {
  * per replayed guest frame, between its first record and its RTH_FRAME
  * marker (recorded at the frame boundary): CPU = wall time replaying it minus
  * the render thread's idle waits for records and its time in the swap (the
- * display's vsync); GPU = a GL_TIMESTAMP pair around the same span, read back
- * when available (never waited on). cost = max(CPU, GPU). A frame during
+ * display's vsync); GPU = a GL_TIME_ELAPSED query around the same span, read
+ * back when available (never waited on). cost = max(CPU, GPU). (GL_TIMESTAMP
+ * counters read 0 on macOS.) Queries of one target cannot nest, so while this
+ * measures, frame_perf's own TIME_ELAPSED brackets stand aside. A frame during
  * which the context went to the emulation thread (a sync point) is dropped:
  * its span holds the emulation thread's own drawing. Published as running
  * totals for the emulation thread (gl_renderer_render_thread_costs). */
 #define RTHF_Q 8
 static _Atomic int s_rthf_want = 0;          /* host: measure (dynres active) */
 static int      s_rthf_qok = -1;             /* render thread: queries usable */
-static GLuint   s_rthf_q[RTHF_Q][2];
+static GLuint   s_rthf_q[RTHF_Q];
 static uint64_t s_rthf_slot_cpu[RTHF_Q];
 static unsigned s_rthf_head = 0, s_rthf_tail = 0;
 static int      s_rthf_open = 0, s_rthf_taint = 0, s_rthf_has_q = 0;
@@ -9421,21 +9430,21 @@ static void rthf_publish(uint64_t cpu, uint64_t gpu, int has_gpu) {
 static void rthf_poll(void) {
     while (s_rthf_tail != s_rthf_head) {
         const unsigned i = s_rthf_tail % RTHF_Q;
-        GLuint64 avail = 0, a = 0, b = 0;
-        p_glGetQueryObjectui64v(s_rthf_q[i][1], GL_QUERY_RESULT_AVAILABLE, &avail);
+        GLuint64 avail = 0, ns = 0;
+        p_glGetQueryObjectui64v(s_rthf_q[i], GL_QUERY_RESULT_AVAILABLE, &avail);
         if (!avail) break;
-        p_glGetQueryObjectui64v(s_rthf_q[i][0], GL_QUERY_RESULT, &a);
-        p_glGetQueryObjectui64v(s_rthf_q[i][1], GL_QUERY_RESULT, &b);
-        rthf_publish(s_rthf_slot_cpu[i], b > a ? (uint64_t)(b - a) : 0, 1);
+        p_glGetQueryObjectui64v(s_rthf_q[i], GL_QUERY_RESULT, &ns);
+        rthf_publish(s_rthf_slot_cpu[i], (uint64_t)ns, 1);
         s_rthf_tail++;
     }
 }
 
 static void rthf_begin(void) {
     if (s_rthf_qok < 0) {
-        s_rthf_qok = (p_glGenQueries && p_glQueryCounter && p_glGetQueryObjectui64v &&
+        s_rthf_qok = (p_glGenQueries && p_glBeginQuery && p_glEndQuery &&
+                      p_glGetQueryObjectui64v &&
                       !(getenv("PSX_DYNRES_GPU_TIMER") && getenv("PSX_DYNRES_GPU_TIMER")[0] == '0')) ? 1 : 0;
-        if (s_rthf_qok) p_glGenQueries(RTHF_Q * 2, &s_rthf_q[0][0]);
+        if (s_rthf_qok) p_glGenQueries(RTHF_Q, s_rthf_q);
     }
     s_rthf_open = 1;
     s_rthf_taint = 0;
@@ -9443,7 +9452,10 @@ static void rthf_begin(void) {
     s_rthf_idle0 = rt_render_idle_ns();
     s_rthf_swap0 = s_rthf_swap_ns;
     s_rthf_has_q = s_rthf_qok && s_rthf_head - s_rthf_tail < RTHF_Q;
-    if (s_rthf_has_q) p_glQueryCounter(s_rthf_q[s_rthf_head % RTHF_Q][0], GL_TIMESTAMP);
+    if (s_rthf_has_q) {
+        gl_perf_yield();   /* close frame_perf's open bracket, if any */
+        p_glBeginQuery(GL_TIME_ELAPSED, s_rthf_q[s_rthf_head % RTHF_Q]);
+    }
 }
 
 static void rthf_end(void) {
@@ -9453,7 +9465,7 @@ static void rthf_end(void) {
         /* The query pair is still issued so the ring stays in order; the
          * frame is not published. */
         if (s_rthf_has_q) {
-            p_glQueryCounter(s_rthf_q[s_rthf_head % RTHF_Q][1], GL_TIMESTAMP);
+            p_glEndQuery(GL_TIME_ELAPSED);
             s_rthf_tail = ++s_rthf_head;   /* drop it and anything older */
         }
         atomic_fetch_add(&s_rthf_dropped, 1);
@@ -9466,7 +9478,7 @@ static void rthf_end(void) {
     const uint64_t cpu = span > idle + swap ? span - idle - swap : 0;
     if (s_rthf_has_q) {
         const unsigned i = s_rthf_head % RTHF_Q;
-        p_glQueryCounter(s_rthf_q[i][1], GL_TIMESTAMP);
+        p_glEndQuery(GL_TIME_ELAPSED);
         s_rthf_slot_cpu[i] = cpu;
         s_rthf_head++;
     } else {
@@ -9476,6 +9488,9 @@ static void rthf_end(void) {
 }
 
 void gl_renderer_render_thread_measure(int on) { atomic_store(&s_rthf_want, on ? 1 : 0); }
+static int rthf_owns_timer(void) {
+    return s_rth_on && atomic_load_explicit(&s_rthf_want, memory_order_relaxed) && s_rthf_qok > 0;
+}
 
 void gl_renderer_render_thread_costs(GlRthCosts *out) {
     if (!out) return;
