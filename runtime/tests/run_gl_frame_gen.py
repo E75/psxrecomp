@@ -77,7 +77,7 @@ def main():
     # facade (gpu_render.c) and render thread (render_thread.c).
     sources = [("probe", fixture), ("sw", src / "gpu_sw_renderer.c"),
                ("fi", src / "frame_interpolation.c"), ("rp", src / "render_pass_plan.c"),
-               ("xr", src / "psx_openxr.c"), ("rth", src / "render_thread.c"),
+               ("xr", src / "psx_openxr.c"), ("rth", src / "render_thread.c"), ("pth", src / "present_thread.c"),
                ("facade", src / "gpu_render.c"), ("fg", src / "frame_gen.c")]
     sections = [] if platform.system() == "Darwin" else ["-ffunction-sections", "-fdata-sections"]
     # MinGW's PE linker reports undefined references from sections it later
@@ -139,6 +139,54 @@ def main():
                 print(f"FAIL scale {s} {path} {timing}: generated frames off={runs[0]['generated']} "
                       f"on={runs[1]['generated']}")
                 ok = False
+            # Present thread ([video] present_thread): the fixture checks the
+            # window shows every composed image bit for bit, in order. The real
+            # images match the direct-swap run: bit for bit, except that
+            # rasterizing into a texture instead of the window's drawable may
+            # round a filtered present pixel differently (seen on Apple's
+            # GL-on-Metal: 1 LSB, a pixel or two per frame); allowed up to 1 LSB
+            # on at most 0.05 % of the pixels, and reported.
+            for fg in (0, 1):
+                dirs = {}
+                for mode in ("direct", "pt"):
+                    sub = dest / f"pt-{s}-{path}-{timing}-{fg}-{mode}"
+                    sub.mkdir(exist_ok=True)
+                    cmd = [str(c) for c in (probe, s, fg, path, args.frames, timing)]
+                    if mode == "pt":
+                        cmd.append("pt")
+                    env = dict(os.environ, FG_DUMP="1")
+                    r = subprocess.run(cmd, cwd=sub, capture_output=True, text=True,
+                                       encoding="utf-8", errors="replace", env=env)
+                    p = parse(r.stdout)
+                    if r.returncode or p["failures"] != 0:
+                        print(f"FAIL scale {s} {path} {timing} fg={fg} {mode}: exit={r.returncode}",
+                              r.stdout.strip().splitlines()[-4:], r.stderr.strip()[-800:])
+                        ok = False
+                    dirs[mode] = sub
+                files = sorted(f.name for f in dirs["direct"].glob("real*.rgba"))
+                other = sorted(f.name for f in dirs["pt"].glob("real*.rgba"))
+                if files != other or not files:
+                    print(f"FAIL scale {s} {path} {timing} fg={fg}: present thread real frames "
+                          f"{len(other)} vs {len(files)}")
+                    ok = False
+                    continue
+                exact, worst, worst_px = 0, 0, 0.0
+                for name in files:
+                    a = (dirs["direct"] / name).read_bytes()
+                    b = (dirs["pt"] / name).read_bytes()
+                    if a == b:
+                        exact += 1
+                        continue
+                    d = [abs(x - y) for x, y in zip(a, b) if x != y]
+                    px = len({i // 4 for i, (x, y) in enumerate(zip(a, b)) if x != y})
+                    worst = max(worst, max(d) if d else 0)
+                    worst_px = max(worst_px, px / (len(a) / 4))
+                print(f"scale {s} {path} {timing} frame_generation={fg} present_thread=1: "
+                      f"{exact}/{len(files)} real frames bit-identical, max diff {worst} LSB "
+                      f"on {worst_px * 100:.3f} % of pixels")
+                if worst > 1 or worst_px > 0.0005:
+                    print(f"FAIL scale {s} {path} {timing} fg={fg}: present thread changed real frames")
+                    ok = False
     print("PASS" if ok else "FAIL")
     return 0 if ok else 1
 

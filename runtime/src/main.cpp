@@ -1459,6 +1459,9 @@ static int           g_render_thread = 0;
 static int           g_render_thread_frames = 2;
 /* [video] frame_generation (docs/FRAME_GENERATION.md), with the render thread. */
 static int           g_frame_generation = 0;
+/* [video] present_thread (docs/RENDER_THREAD.md), with the render thread. */
+static int           g_present_thread = 0;
+static int           g_present_thread_slots = 3;
 static int           s_render_thread_tried = 0;
 static int           g_video_vsync        = 1;
 static int           g_frame_interpolation = 0;
@@ -9212,6 +9215,40 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
     return ep;
 }
 
+/* Render thread: start once, then close every frame (after its present,
+ * before pacing, so the render thread draws while the guest waits). */
+static void render_thread_vblank(void) {
+#ifndef PSX_SDL_NO_RENDER
+    if (!g_render_thread) return;
+    if (!s_render_thread_tried) {
+        s_render_thread_tried = 1;
+        gl_renderer_set_present_thread(g_present_thread, g_present_thread_slots);
+        if (g_gl_active && gr_backend() == GR_BACKEND_OPENGL &&
+            gl_renderer_render_thread_start(g_render_thread_frames)) {
+            std::fprintf(stdout, "psxrecomp: render thread on (OpenGL, %d frame(s) in flight)\n",
+                         g_render_thread_frames);
+            if (g_frame_generation) {
+                gl_renderer_set_frame_generation(1);
+                std::fprintf(stdout, "psxrecomp: frame generation on (render thread, "
+                             "from surplus only)\n");
+            }
+        } else {
+            std::fprintf(stdout, "psxrecomp: render thread requested but not started "
+                         "(needs the OpenGL backend without netplay, frame "
+                         "interpolation or a 24-bit display)\n");
+            if (g_frame_generation)
+                std::fprintf(stdout, "psxrecomp: frame generation needs the render thread; off\n");
+        }
+        std::fflush(stdout);
+    }
+    if (g_frame_generation)
+        gl_renderer_frame_gen_configure(g_host_refresh_hz,
+                                        g_guest_frame_period_ms > 0.0
+                                            ? 1000.0 / g_guest_frame_period_ms : 0.0);
+    gl_renderer_render_thread_frame_boundary();
+#endif
+}
+
 /* ---- Dynamic internal resolution: the host side ---------------------------
  * [video] dynamic_resolution (docs/ENHANCEMENTS.md, IR3). The controller
  * (dynamic_resolution.c) decides; this feeds it one sample per guest VBlank,
@@ -9577,38 +9614,6 @@ extern "C" int psx_dynres_status_json(char *out, int cap) {
         c.down_block_until > now_s ? c.down_block_until - now_s : 0.0, blocked);
 }
 
-/* Render thread: start once, then close every frame (after its present,
- * before pacing, so the render thread draws while the guest waits). */
-static void render_thread_vblank(void) {
-#ifndef PSX_SDL_NO_RENDER
-    if (!g_render_thread) return;
-    if (!s_render_thread_tried) {
-        s_render_thread_tried = 1;
-        if (g_gl_active && gr_backend() == GR_BACKEND_OPENGL &&
-            gl_renderer_render_thread_start(g_render_thread_frames)) {
-            std::fprintf(stdout, "psxrecomp: render thread on (OpenGL, %d frame(s) in flight)\n",
-                         g_render_thread_frames);
-            if (g_frame_generation) {
-                gl_renderer_set_frame_generation(1);
-                std::fprintf(stdout, "psxrecomp: frame generation on (render thread, "
-                             "from surplus only)\n");
-            }
-        } else {
-            std::fprintf(stdout, "psxrecomp: render thread requested but not started "
-                         "(needs the OpenGL backend without netplay, frame "
-                         "interpolation or a 24-bit display)\n");
-            if (g_frame_generation)
-                std::fprintf(stdout, "psxrecomp: frame generation needs the render thread; off\n");
-        }
-        std::fflush(stdout);
-    }
-    if (g_frame_generation)
-        gl_renderer_frame_gen_configure(g_host_refresh_hz,
-                                        g_guest_frame_period_ms > 0.0
-                                            ? 1000.0 / g_guest_frame_period_ms : 0.0);
-    gl_renderer_render_thread_frame_boundary();
-#endif
-}
 
 static void sdl_vblank_present(void) {
     sync_guest_cadence_to_video_standard();
@@ -15717,6 +15722,7 @@ int main(int argc, char** argv) {
                 gc.runtime.video_texture_window_batching ? 1 : 0);
             g_render_thread = gc.runtime.video_render_thread ? 1 : 0;
             g_frame_generation = gc.runtime.video_frame_generation ? 1 : 0;
+            g_present_thread = gc.runtime.video_present_thread ? 1 : 0;
             g_video_vsync       = gc.runtime.video_vsync;
             g_frame_interpolation = gc.runtime.video_frame_interpolation ? 1 : 0;
             g_frame_interpolation_fps = gc.runtime.video_frame_interpolation_fps;
@@ -18023,6 +18029,10 @@ session_reboot:
      * flight (default 2). */
     if (const char* e = std::getenv("PSX_RENDER_THREAD"))
         g_render_thread = (*e && *e != '0') ? 1 : 0;
+    if (const char* e = std::getenv("PSX_PRESENT_THREAD"))
+        g_present_thread = (*e && *e != '0') ? 1 : 0;
+    if (const char* e = std::getenv("PSX_PRESENT_THREAD_SLOTS"))
+        g_present_thread_slots = std::atoi(e) > 0 ? std::atoi(e) : 3;
     if (const char* e = std::getenv("PSX_FRAME_GEN"))
         g_frame_generation = (*e && *e != '0') ? 1 : 0;
     if (const char* e = std::getenv("PSX_RENDER_THREAD_FRAMES"))
