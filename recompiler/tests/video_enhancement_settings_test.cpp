@@ -320,6 +320,21 @@ static void test_texture_window_batching() {
     fs::remove(q);
 }
 
+/* [video] render_thread (docs/RENDER_THREAD.md): opt-in, off by default so
+ * every title keeps the synchronous OpenGL path unless it asks. */
+static void test_render_thread() {
+    fs::path p = write_game_toml("psxrecomp_rth_default.toml", "");
+    auto gc = PSXRecompV4::load_game_config(p);
+    check(!gc.runtime.video_render_thread, "render_thread defaults OFF");
+    fs::remove(p);
+    fs::path q = write_game_toml("psxrecomp_rth_on.toml",
+        "[video]\n"
+        "render_thread = true\n");
+    auto gq = PSXRecompV4::load_game_config(q);
+    check(gq.runtime.video_render_thread, "[video] render_thread = true is honoured");
+    fs::remove(q);
+}
+
 /* docs/ENHANCEMENTS.md G1.11: the PGXP title keys. Defaults keep the
  * historical behaviour (tolerance 0.5, position cache consulted, IR-path
  * shadows); a title built with the hooks sets all three. */
@@ -384,6 +399,7 @@ int main() {
     test_user_settings_round_trip();
     test_user_settings_fov_scale();
     test_texture_window_batching();
+    test_render_thread();
     test_pgxp_title_keys();
 
     if (failures) {

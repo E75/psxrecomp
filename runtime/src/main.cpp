@@ -1440,6 +1440,12 @@ static int           g_fmv_skip_no_xa_hold  = 4;
  * = 30 Hz / 0.50x with the CPU idle. ~60 Hz panels may use vsync as the clock;
  * otherwise the pacer holds 59.94 Hz and present must not wait on the swap. */
 static int           g_low_latency_input = 1;
+/* [video] render_thread (docs/RENDER_THREAD.md): the GL backend runs on its
+ * own thread. Started at the first vblank once the context and every startup
+ * GL call are done; s_render_thread_tried keeps it to one attempt. */
+static int           g_render_thread = 0;
+static int           g_render_thread_frames = 2;
+static int           s_render_thread_tried = 0;
 static int           g_video_vsync        = 1;
 static int           g_frame_interpolation = 0;
 static int           g_frame_interpolation_fps = 0;
@@ -9402,9 +9408,32 @@ extern "C" int psx_dynres_status_json(char *out, int cap) {
         c.down_block_until > now_s ? c.down_block_until - now_s : 0.0, blocked);
 }
 
+/* Render thread: start once, then close every frame (after its present,
+ * before pacing, so the render thread draws while the guest waits). */
+static void render_thread_vblank(void) {
+#ifndef PSX_SDL_NO_RENDER
+    if (!g_render_thread) return;
+    if (!s_render_thread_tried) {
+        s_render_thread_tried = 1;
+        if (g_gl_active && gr_backend() == GR_BACKEND_OPENGL &&
+            gl_renderer_render_thread_start(g_render_thread_frames)) {
+            std::fprintf(stdout, "psxrecomp: render thread on (OpenGL, %d frame(s) in flight)\n",
+                         g_render_thread_frames);
+        } else {
+            std::fprintf(stdout, "psxrecomp: render thread requested but not started "
+                         "(needs the OpenGL backend without netplay, frame "
+                         "interpolation or a 24-bit display)\n");
+        }
+        std::fflush(stdout);
+    }
+    gl_renderer_render_thread_frame_boundary();
+#endif
+}
+
 static void sdl_vblank_present(void) {
     sync_guest_cadence_to_video_standard();
     NetplayVblankEpilogue ep = sdl_vblank_present_body();
+    render_thread_vblank();
     /* Selfcheck span-end rewind: after present-body C++ RAII, before any
      * further guest progress. Longjmps on success — keeps every resim load
      * on the same VBlank boundary (BB fast-poll tails forked #2 vs #3). */
@@ -15506,6 +15535,7 @@ int main(int argc, char** argv) {
             g_low_latency_input = gc.runtime.video_low_latency_input ? 1 : 0;
             gl_renderer_set_texture_window_batching(
                 gc.runtime.video_texture_window_batching ? 1 : 0);
+            g_render_thread = gc.runtime.video_render_thread ? 1 : 0;
             g_video_vsync       = gc.runtime.video_vsync;
             g_frame_interpolation = gc.runtime.video_frame_interpolation ? 1 : 0;
             g_frame_interpolation_fps = gc.runtime.video_frame_interpolation_fps;
@@ -17808,6 +17838,12 @@ session_reboot:
     /* [video] texture_window_batching A/B (same image, fewer GL draws). */
     if (const char* e = std::getenv("PSX_GL_TEXWIN_BATCH"))
         gl_renderer_set_texture_window_batching((*e && *e != '0') ? 1 : 0);
+    /* [video] render_thread A/B; PSX_RENDER_THREAD_FRAMES bounds frames in
+     * flight (default 2). */
+    if (const char* e = std::getenv("PSX_RENDER_THREAD"))
+        g_render_thread = (*e && *e != '0') ? 1 : 0;
+    if (const char* e = std::getenv("PSX_RENDER_THREAD_FRAMES"))
+        g_render_thread_frames = std::atoi(e) > 0 ? std::atoi(e) : 2;
     /* Scanlines: env override wins over config, same as the corrections above,
      * so a headless/free-run boot can be captured with the effect armed from the
      * first present. PSX_SCANLINES=0/1; PSX_SCANLINE_STRENGTH=0..1. Pushed to the
