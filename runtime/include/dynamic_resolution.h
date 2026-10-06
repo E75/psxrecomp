@@ -169,6 +169,22 @@ double dynres_up_blocked_s(const DynresController *c, int level, double now_s);
  *    and the level not blocked. The prediction is load * ((1-f) + f*(S'/S)^2)
  *    with f, the share of the cost that scales with pixels, learned from each
  *    judged step. down_load > up_load is the hysteresis.
+ *  - fast descent: armed at init (session start, render-thread start, a
+ *    resolution change) and by dynrt_arm_descent (savestate load, game
+ *    entry, window resize); it runs for descent_s from the first window
+ *    judged after arming. While armed, a down step taken on a window whose
+ *    load is at or over strong_load, or after down_windows consecutive
+ *    over-budget windows, goes straight to the highest level the
+ *    pure-area prediction (load * (S'/S)^2) puts at or below descent_load,
+ *    several levels at once. A fixed part of the cost only makes the target
+ *    dearer than predicted, so a jump never lands below the level that fits;
+ *    it is judged like any step, and a judged window still over budget jumps
+ *    again from the new measurement.
+ *    A window that fits after a down step, an up step or a failed judgement
+ *    disarms it (light windows before the heavy part do not), after
+ *    which single steps fine-tune. descent_load < budget, and the level
+ *    above the target is predicted over descent_load > up_load, so the jump
+ *    is not followed by an up step back (no oscillation).
  *  - relapse: a level reached by an up step and left by a down step within
  *    relapse_s is blocked for up steps for relapse_block_s, doubling up to
  *    relapse_block_max_s; holding it relapse_forget_s resets that.
@@ -197,6 +213,8 @@ typedef struct DynrtParams {
     double learn_rate;
     double gap_factor, gap_hold_s;
     double min_coverage;
+    double descent_s;                /* fast descent lasts this long once judging */
+    double descent_load;             /* fast descent target (predicted load) */
 } DynrtParams;
 
 void dynrt_default_params(DynrtParams *p);
@@ -232,9 +250,12 @@ typedef struct DynrtController {
     double post_load_before, post_pred, post_bp_before;
     int    verify_strikes, strike_from;
     double strike_t;
+    /* fast descent: armed; deadline (0 = starts at the next judged window) */
+    int    descent_armed, descent_stepped;
+    double descent_until;
     /* telemetry */
     unsigned long long downs, ups, undos, relapses, windows, held_windows,
-                       guest_bound_windows, thin_windows;
+                       guest_bound_windows, thin_windows, fast_downs;
     const char *last_reason;
     double last_decision_t;
 } DynrtController;
@@ -245,6 +266,12 @@ void dynrt_hold(DynrtController *c, double now_s, double tail_s);
 /* One guest interval ending at now_s; returns the level to render at. */
 int  dynrt_sample(DynrtController *c, double now_s, const DynrtSample *s);
 int  dynrt_force(DynrtController *c, int level);
+/* Arm fast descent (see RULES): a savestate load, game entry, a resize. */
+void dynrt_arm_descent(DynrtController *c);
+/* Fast-descent target from `level` at `load`: the highest level in
+ * [floor, level - 1] whose pure-area prediction is at or below
+ * descent_load (floor if none). */
+int  dynrt_descent_target(const DynrtController *c, double load, int level);
 double dynrt_predict(const DynrtController *c, double load, int from, int to);
 double dynrt_up_blocked_s(const DynrtController *c, int level, double now_s);
 

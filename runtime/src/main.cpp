@@ -9500,6 +9500,13 @@ static void dynres_tick(void) {
          * so a scene that is too heavy right after a load is not left
          * running slow for seconds. */
         if (soft_tail && tail > 0.5) tail = 0.5;
+        /* A new scene: let the first sustained overrun jump several levels
+         * (fast descent, dynamic_resolution.h). Render-thread start and a
+         * new resolution re-initialize, which arms too. */
+        if (why && (std::strcmp(why, "savestate load") == 0 ||
+                    std::strcmp(why, "game entry") == 0 ||
+                    std::strcmp(why, "window resize") == 0))
+            dynrt_arm_descent(&g_dynres.rt);
         dynres_tick_rt(now_s, wall, period, held, tail, why);
         return;
     }
@@ -9567,7 +9574,8 @@ extern "C" int psx_dynres_status_json(char *out, int cap) {
             "\"held_windows\":%llu,\"guest_bound_windows\":%llu,\"thin_windows\":%llu,"
             "\"steps\":%llu,\"last_from\":%d,\"last_to\":%d,\"last_ms\":%.3f,"
             "\"frames_measured\":%llu,\"gpu_frames\":%llu,\"frames_dropped\":%llu,"
-            "\"down_blocked_s\":%.1f,\"up_blocked\":{%s}",
+            "\"down_blocked_s\":%.1f,\"up_blocked\":{%s},\"fast_downs\":%llu,"
+            "\"descent_armed\":%d",
             g_dynres.active ? 1 : 0, dynres_requested(), st.ceiling,
             g_dynres.active ? r.floor : 0, st.level, st.level * g_video_ref_lines, r.forced,
             r.last_load, 1.0 - r.p.margin, r.last_bp_share, r.last_hz, g_dynres.rt_win_cpu_ms,
@@ -9578,7 +9586,8 @@ extern "C" int psx_dynres_status_json(char *out, int cap) {
             (unsigned long long)st.steps, st.last_from, st.last_to, st.last_ms,
             (unsigned long long)co.frames, (unsigned long long)co.gpu_frames,
             (unsigned long long)co.dropped,
-            r.down_block_until > now_s ? r.down_block_until - now_s : 0.0, blocked);
+            r.down_block_until > now_s ? r.down_block_until - now_s : 0.0, blocked,
+            r.fast_downs, r.descent_armed);
     }
     const DynresController &c = g_dynres.ctl;
     const double now_s = (double)SDL_GetPerformanceCounter() /

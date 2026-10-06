@@ -8,7 +8,10 @@
  * Checks: overrun -> down one level at a time, headroom -> up only after the
  * window, hysteresis (no oscillation), guest-bound -> no step, a down step
  * that does not lower the cost -> undone and backed off, queue full ->
- * fast down, floor and ceiling, holds.
+ * fast down, floor and ceiling, holds; fast descent (armed at start and by
+ * dynrt_arm_descent): a sustained overrun jumps to the predicted level in
+ * one or two steps, then fine-tunes without oscillating, and a cost that
+ * does not scale still ends in the undo.
  * Build/run: ctest -R dynamic_resolution_rt_test */
 #include <math.h>
 #include <stdio.h>
@@ -96,6 +99,13 @@ static void ctl(DynrtController *c, int floor_l, int ceil_l, int level) {
     dynrt_default_params(&p);
     dynrt_init(c, &p, floor_l, ceil_l, level);
 }
+/* Fast descent off: the one-level rules alone. */
+static void ctl_single(DynrtController *c, int floor_l, int ceil_l, int level) {
+    DynrtParams p;
+    dynrt_default_params(&p);
+    p.descent_s = 0.0;
+    dynrt_init(c, &p, floor_l, ceil_l, level);
+}
 
 /* Highest level whose cost fits the 15 % margin. */
 static int fit_level(const Scene *sc, int floor_l, int ceil_l) {
@@ -105,12 +115,12 @@ static int fit_level(const Scene *sc, int floor_l, int ceil_l) {
     return best;
 }
 
-/* 1. Overrun at the ceiling: down one level at a time to the highest level
- *    that fits, fast, then no oscillation. */
+/* 1. Overrun at the ceiling, fast descent off: down one level at a time to
+ *    the highest level that fits, then no oscillation. */
 static void test_overrun_steps_down_and_settles(void) {
     DynrtController c; Run r;
     Scene sc = { .a = 0.003, .b = 0.00030 };   /* 9x: 27.3 ms, 6x: 13.8 ms, 7x: 17.7 ms */
-    ctl(&c, 3, 9, 9);
+    ctl_single(&c, 3, 9, 9);
     run_init(&r, 9);
     drive(&c, &r, &sc, 20.0, 0.0);
     int want = fit_level(&sc, 3, 9);
@@ -181,7 +191,7 @@ static void test_guest_bound_no_step(void) {
 static void test_undo_and_backoff(void) {
     DynrtController c; Run r;
     Scene sc = { .flat = 0.0175 };   /* 1.05 of the period at every level */
-    ctl(&c, 3, 9, 9);
+    ctl_single(&c, 3, 9, 9);
     run_init(&r, 9);
     drive(&c, &r, &sc, 3.0, 0.0);
     CHECK(c.undos == 1 && r.level == 9, "undo: undos %llu, level %d after 3 s", c.undos, r.level);
@@ -285,7 +295,126 @@ static void test_force(void) {
     CHECK(r.level == fit_level(&sc, 3, 9), "force: released to %d", r.level);
 }
 
+/* 12. Fast descent from a 10x ceiling (R4 2P VS shape: a fixed part plus a
+ *     part that scales with area; 5x fits): the first step jumps several
+ *     levels, the fit level is reached far sooner than one level per judged
+ *     window, never more than one level below it, and nothing moves after. */
+static void test_fast_descent_from_ceiling(void) {
+    Scene sc = { .a = 0.0025, .b = 0.000420 };   /* 10x: 44.5 ms, 5x: 13.0 ms, 6x: 17.6 ms */
+    const int want = fit_level(&sc, 2, 10);
+    DynrtController s; Run rs;
+    ctl_single(&s, 2, 10, 10);
+    run_init(&rs, 10);
+    double t_single = -1.0;
+    while (rs.t < 20.0 && t_single < 0.0) {
+        drive(&s, &rs, &sc, 0.05, 0.0);
+        if (rs.level == want) t_single = rs.t;
+    }
+    DynrtController c; Run r;
+    ctl(&c, 2, 10, 10);
+    run_init(&r, 10);
+    double t_fast = -1.0;
+    int first_jump = 0;
+    while (r.t < 20.0) {
+        const int before = r.level;
+        drive(&c, &r, &sc, 0.05, 0.0);
+        if (!first_jump && r.level < before) first_jump = before - r.level;
+        if (t_fast < 0.0 && r.level <= want + 0 && r.level >= want - 1) t_fast = r.t;
+    }
+    printf("fast descent: 10x -> %dx in %.2f s, %d down step(s), first %d level(s); "
+           "one level at a time: %.2f s\n", want, t_fast, r.downs, first_jump, t_single);
+    CHECK(want == 5, "fast descent: scene fits at %d, want 5", want);
+    CHECK(first_jump >= 3, "fast descent: first step %d level(s)", first_jump);
+    CHECK(t_fast > 0.0 && t_fast < 1.6, "fast descent: near the fit level at %.2f s", t_fast);
+    CHECK(t_single > 2.5 && t_fast < t_single / 2.0,
+          "fast descent: %.2f s vs %.2f s one level at a time", t_fast, t_single);
+    CHECK(r.level == want, "fast descent: settled at %d, want %d", r.level, want);
+    CHECK(r.min_level >= want - 1, "fast descent: overshot to %d", r.min_level);
+    CHECK(r.downs <= 3, "fast descent: %d down steps", r.downs);
+    CHECK(c.fast_downs >= 1 && !c.descent_armed, "fast descent: %llu jumps, armed %d",
+          c.fast_downs, c.descent_armed);
+    const int steps = r.steps;
+    drive(&c, &r, &sc, 120.0, 0.0);
+    CHECK(r.steps == steps, "fast descent: %d steps after settling (oscillation)",
+          r.steps - steps);
+}
+
+/* 13. Re-armed (a savestate load into a heavier scene): jumps again. Not
+ *     armed (the window expired, nothing re-armed): one level at a time. */
+static void test_fast_descent_rearm(void) {
+    Scene light = { .a = 0.002, .b = 0.00012 };   /* 9x fits */
+    Scene heavy = { .a = 0.003, .b = 0.00030 };   /* 6x fits */
+    for (int arm = 0; arm < 2; arm++) {
+        DynrtController c; Run r;
+        ctl(&c, 3, 9, 9);
+        run_init(&r, 9);
+        drive(&c, &r, &light, 10.0, 0.0);
+        CHECK(r.steps == 0 && !c.descent_armed, "rearm: light start steps %d armed %d",
+              r.steps, c.descent_armed);
+        /* the load: a hold, then the heavy scene */
+        dynrt_hold(&c, r.t, 0.5);
+        if (arm) dynrt_arm_descent(&c);
+        const double t0 = r.t;
+        drive(&c, &r, &heavy, 20.0, 0.0);
+        const int want = fit_level(&heavy, 3, 9);
+        CHECK(r.level == want, "rearm %d: settled at %d, want %d", arm, r.level, want);
+        if (arm)
+            CHECK(c.fast_downs >= 1 && r.downs <= 2,
+                  "rearm: %llu jumps, %d downs", c.fast_downs, r.downs);
+        else
+            CHECK(c.fast_downs == 0 && r.downs == 9 - want,
+                  "not armed: %llu jumps, %d downs", c.fast_downs, r.downs);
+        (void)t0;
+    }
+}
+
+/* 14. Light windows first (game entry: menus, loading) do not use up the
+ *     arming; the heavy part then jumps. */
+static void test_fast_descent_light_first(void) {
+    Scene sc = { .a = 0.003, .b = 0.00030, .heavy_from = 0.0, .heavy_to = 0.0 };
+    Scene light = { .a = 0.002 };
+    DynrtController c; Run r;
+    ctl(&c, 3, 9, 9);
+    run_init(&r, 9);
+    drive(&c, &r, &light, 2.0, 0.0);
+    CHECK(c.descent_armed, "light first: disarmed by light windows");
+    drive(&c, &r, &sc, 10.0, 0.0);
+    CHECK(c.fast_downs >= 1 && r.level == fit_level(&sc, 3, 9),
+          "light first: %llu jumps, level %d", c.fast_downs, r.level);
+}
+
+/* 15. A cost that does not scale, fast descent on: the jump is judged, the
+ *     model is dropped (disarmed) and the two-strike undo still happens. */
+static void test_fast_descent_flat_cost(void) {
+    DynrtController c; Run r;
+    Scene sc = { .flat = 0.0175 };
+    ctl(&c, 3, 9, 9);
+    run_init(&r, 9);
+    drive(&c, &r, &sc, 4.0, 0.0);
+    CHECK(c.undos == 1 && r.level == 9 && !c.descent_armed,
+          "flat: undos %llu level %d armed %d", c.undos, r.level, c.descent_armed);
+    drive(&c, &r, &sc, 116.0, 0.0);
+    CHECK(r.time_at[9] > 105.0, "flat: %.1f s at the ceiling", r.time_at[9]);
+}
+
+/* 16. dynrt_descent_target: the highest level whose pure-area prediction is
+ *     at or below descent_load; the floor when none is. */
+static void test_descent_target(void) {
+    DynrtController c;
+    ctl(&c, 2, 10, 10);
+    c.f = 0.3;   /* the learned share does not matter: pure area */
+    /* load 2.0 at 10x: L^2/100 * 2 <= 0.78 -> L <= 6.24 */
+    CHECK(dynrt_descent_target(&c, 2.0, 10) == 6, "target: %d", dynrt_descent_target(&c, 2.0, 10));
+    CHECK(dynrt_descent_target(&c, 50.0, 10) == 2, "target floor");
+    CHECK(dynrt_descent_target(&c, 0.80, 10) == 9, "target one level");
+}
+
 int main(void) {
+    test_fast_descent_from_ceiling();
+    test_fast_descent_rearm();
+    test_fast_descent_light_first();
+    test_fast_descent_flat_cost();
+    test_descent_target();
     test_overrun_steps_down_and_settles();
     test_headroom_steps_up_after_window();
     test_hysteresis();
