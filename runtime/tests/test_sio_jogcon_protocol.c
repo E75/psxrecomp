@@ -221,10 +221,14 @@ int main(void) {
     (void)xchg(0, 0x00);
 
     const uint32_t snapshot_len = sio_snapshot_bytes();
+    /* JogCon steering[0] sits before steering[1..], the motor bytes and the
+     * trailing pad-mode section (lock + device per pad). */
+    const uint32_t steering_at = snapshot_len - 2u * PSX_MAX_PLAYERS -
+                                 2u * PSX_MAX_PLAYERS;
     uint8_t *snapshot = (uint8_t *)malloc(snapshot_len);
     if (!snapshot) return 1;
     sio_snapshot_write(snapshot);
-    EXPECT("snapshot.steering.field", 0x80, snapshot[snapshot_len - 4]);
+    EXPECT("snapshot.steering.field", 0x80, snapshot[steering_at]);
 
     sio_set_pad_sticks(0, 0xFF, 0x80, 0x80, 0x80);
     EXPECT("right.prefix", 0xFF, xchg(0, 0x01));
@@ -251,8 +255,8 @@ int main(void) {
         uint8_t *roundtrip = (uint8_t *)malloc(snapshot_len);
         if (roundtrip) {
             sio_snapshot_write(roundtrip);
-            EXPECT("rollback.steering.field", snapshot[snapshot_len - 4],
-                   roundtrip[snapshot_len - 4]);
+            EXPECT("rollback.steering.field", snapshot[steering_at],
+                   roundtrip[steering_at]);
             free(roundtrip);
         }
     }

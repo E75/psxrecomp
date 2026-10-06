@@ -7880,26 +7880,34 @@ extern uint16_t sio_get_pad_buttons_slot(int slot);
 extern int sio_get_pad_connected(int slot);
 extern int sio_get_pad_analog(int slot);
 extern void sio_get_pad_sticks(int slot, uint8_t out[4]);
+extern void sio_get_pad_negcon(int slot, uint8_t out[3]);
+extern int sio_get_pad_mode_locked(int slot);
 static void handle_pad_status(int id, const char *json)
 {
     (void)json;
     uint16_t pad0 = sio_get_pad_buttons_slot(0);
     uint16_t pad1 = sio_get_pad_buttons_slot(1);
-    uint8_t sticks0[4], sticks1[4];
+    uint8_t sticks0[4], sticks1[4], neg0[3], neg1[3];
     sio_get_pad_sticks(0, sticks0);
     sio_get_pad_sticks(1, sticks1);
+    sio_get_pad_negcon(0, neg0);
+    sio_get_pad_negcon(1, neg1);
     send_fmt("{\"id\":%d,\"ok\":true,\"pad\":\"0x%04X\","
-             "\"slot0\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s,\"type\":%d,\"sticks\":[%u,%u,%u,%u]},"
-             "\"slot1\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s,\"type\":%d,\"sticks\":[%u,%u,%u,%u]},"
+             "\"slot0\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s,\"type\":%d,\"sticks\":[%u,%u,%u,%u],"
+             "\"negcon\":[%u,%u,%u],\"mode_locked\":%s},"
+             "\"slot1\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s,\"type\":%d,\"sticks\":[%u,%u,%u,%u],"
+             "\"negcon\":[%u,%u,%u],\"mode_locked\":%s},"
              "\"override\":%d,\"override_frames\":%d,\"override_pad_type\":%d,"
              "\"override_axes\":[%u,%u,%u,%u],\"override_axes_valid\":%s}\n",
              id, pad0,
              pad0, sio_get_pad_connected(0) ? "true" : "false", sio_get_pad_analog(0) ? "true" : "false",
              sio_get_pad_analog(0),
              sticks0[0], sticks0[1], sticks0[2], sticks0[3],
+             neg0[0], neg0[1], neg0[2], sio_get_pad_mode_locked(0) ? "true" : "false",
              pad1, sio_get_pad_connected(1) ? "true" : "false", sio_get_pad_analog(1) ? "true" : "false",
              sio_get_pad_analog(1),
              sticks1[0], sticks1[1], sticks1[2], sticks1[3],
+             neg1[0], neg1[1], neg1[2], sio_get_pad_mode_locked(1) ? "true" : "false",
              s_input_override, s_input_frames, s_pad_type_override,
              s_axis_st[0], s_axis_st[1], s_axis_st[2], s_axis_st[3],
              s_axis_override ? "true" : "false");

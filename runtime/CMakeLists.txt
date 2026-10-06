@@ -407,6 +407,19 @@ if(BUILD_TESTING)
         src/sio.c)
     target_include_directories(sio_jogcon_protocol_test PRIVATE include)
     add_test(NAME sio_jogcon_protocol_test COMMAND sio_jogcon_protocol_test)
+    add_executable(sio_negcon_protocol_test
+        tests/test_sio_negcon_protocol.c
+        src/sio.c)
+    target_include_directories(sio_negcon_protocol_test PRIVATE include)
+    add_test(NAME sio_negcon_protocol_test COMMAND sio_negcon_protocol_test)
+    add_executable(sio_negcon_protocol_multitap_test
+        tests/test_sio_negcon_protocol.c
+        src/sio.c)
+    target_include_directories(sio_negcon_protocol_multitap_test PRIVATE include)
+    target_compile_definitions(sio_negcon_protocol_multitap_test PRIVATE
+        PSX_MAX_PLAYERS=5)
+    add_test(NAME sio_negcon_protocol_multitap_test
+             COMMAND sio_negcon_protocol_multitap_test)
 
     add_executable(controller_type_test tests/test_controller_type.cpp)
     target_include_directories(controller_type_test PRIVATE include)
