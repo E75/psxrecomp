@@ -404,6 +404,11 @@ static void          dyn_after_present(void);   /* a step's post-present point *
 static int           s_dyn_on = 0;              /* gl_renderer_set_dynamic_resolution */
 static GlHostLedger  s_dyn_ledger;              /* host time totals (s_dyn_on only) */
 static uint64_t      s_dyn_last_swap_ticks = 0;
+/* After a step, pass-cost probes and re-measures wait until this host tick:
+ * the step's tail (first touches, the stencil rebuild) is not the size's
+ * cost. 0 = no hold. */
+static uint64_t      s_dyn_probe_hold_until = 0;
+#define DYN_PROBE_HOLD_S 1.0
 /* Netplay: SW@1× + GPU@s_out_scale dual write; CPU VRAM always authoritative. */
 static int           s_cpu_auth_dual = 0;
 static int           s_req_scale = 1;      /* requested before context init */
@@ -6281,8 +6286,8 @@ static int      s_pb_last_dx = 0, s_pb_last_dy = 0, s_pb_last_dw = 0, s_pb_last_
 
 /* Per-pass host cost (render_pass_plan.h RenderPassCost), and the presented
  * image size it was measured at. Another size (an aspect or internal-
- * resolution change) starts it over: pass cost does not scale with pixels
- * alone, and while it is unknown a plan asks for one pass. */
+ * resolution change) has its own (pass_cost_select): pass cost does not
+ * scale with pixels alone, and while it is unknown a plan asks for one pass. */
 static RenderPassCost s_pass_cost;
 static int      s_pass_cost_w = 0, s_pass_cost_h = 0;
 static uint64_t s_pass_cost_rewarms = 0;   /* stale estimates re-measured */
@@ -6309,6 +6314,35 @@ static uint64_t s_plan_idle_mark = 0;      /* s_idle_total then */
 static int      s_plan_pending = 0;        /* reserve sample due at its start */
 static uint32_t s_plan_passes_run = 0;     /* passes started for it */
 static double   s_pass_reserve = 0.0;      /* ticks of work due after passes */
+
+/* Costs of the other image sizes seen (render_pass_cost_cache_switch): a
+ * dynamic-resolution step or a Fit-to-Window aspect change switches size,
+ * and a size seen before keeps what was learnt there. */
+static RenderPassCostCache s_pass_cost_cache;
+static void pass_cost_select(void) {
+    if (s_interp_w <= 0 || s_interp_h <= 0) return;
+    (void)render_pass_cost_cache_switch(&s_pass_cost_cache, &s_pass_cost_w,
+                                        &s_pass_cost_h, &s_pass_cost, &s_pass_lcost,
+                                        s_interp_w, s_interp_h);
+}
+
+/* Whether the GPU is the limit, for the leftover planner's admission share
+ * and probe minimum (render_pass_admission_pct_for). With dynamic resolution
+ * the scale moves, and a threshold on it would be a second resolution
+ * controller: what the fence and the pace guard measured decides. Otherwise
+ * the internal scale, as before (above 3x). */
+static RenderPassGpuPressure s_gpu_pressure;
+static int pass_gpu_heavy(void) {
+    if (s_dyn_on && s_alloc_scale)
+        return render_pass_gpu_pressure_heavy(&s_gpu_pressure);
+    return s_hr_scale > 3;
+}
+
+/* Pass-cost probes wait out a dynamic-resolution step's tail. */
+static int pass_probes_held(void) {
+    return s_dyn_probe_hold_until &&
+           SDL_GetPerformanceCounter() < s_dyn_probe_hold_until;
+}
 /* Diagnostics (render_pass_stats). */
 static uint64_t s_pass_skipped_time = 0;   /* passes not started: too late */
 static uint64_t s_pass_cuts = 0;           /* passes stopped at the deadline */
@@ -6350,10 +6384,14 @@ static uint64_t s_pace_cuts = 0;                 /* plans that found the guest s
 static uint64_t s_pace_vblanks = 0, s_pace_late = 0;   /* VBlanks; late ones */
 static double   s_late_min = 0.0;                /* earliest VBlank since the plan */
 static int      s_late_seen = 0;
+/* VBlanks not judged: a dynamic-resolution step stalls the thread once, which
+ * says nothing about what passes cost. */
+static int      s_pace_skip_vblanks = 0;
 
 /* A guest VBlank arrived `late` host ticks after its interval's end
  * (negative: early). */
 static void pass_note_vblank_late(double late, double vblank_ticks) {
+    if (s_pace_skip_vblanks > 0) { s_pace_skip_vblanks--; return; }
     if (!s_late_seen || late < s_late_min) s_late_min = late;
     s_late_seen = 1;
     s_pace_vblanks++;
@@ -6501,7 +6539,9 @@ static uint32_t pass_plan_leftover(uint32_t period_vblanks,
     RenderPassPlanInput in;
     double freq, sp, now, margin, leftover;
     uint32_t cap, want = 0, n, pace_cap;
-    int live, same_size, force;
+    int live, same_size, force, heavy, gpu_event = 0;
+    uint64_t pace_cuts_before;
+    double est;
 
     if (wanted) *wanted = 0;
     s_idle_ticks_accum = s_pass_ticks_accum = s_present_ticks_accum = 0;
@@ -6520,9 +6560,13 @@ static uint32_t pass_plan_leftover(uint32_t period_vblanks,
     }
     freq = (double)SDL_GetPerformanceFrequency();
     sp = freq / s_interp_source_hz;
+    pace_cuts_before = s_pace_cuts;
     pace_cap = pass_pace_cap(sp);
+    if (s_pace_cuts != pace_cuts_before) gpu_event = 1;
+    heavy = pass_gpu_heavy();
     cap = pass_slot_cap(s_interp_w, s_interp_h);
     if (cap < 2) return 0;
+    pass_cost_select();
     now = (double)SDL_GetPerformanceCounter();
     memset(&in, 0, sizeof in);
     in.next_deadline = s_interp_schedule.next_present_deadline;
@@ -6533,19 +6577,19 @@ static uint32_t pass_plan_leftover(uint32_t period_vblanks,
     same_size = s_pass_cost_w == s_interp_w && s_pass_cost_h == s_interp_h;
     in.pass_cost = same_size ? render_pass_leftover_cost_estimate(&s_pass_lcost)
                              : 0.0;
+    est = in.pass_cost;
     /* Until the first frame has measured it, assume the work still due
      * before the frame's start takes half a VBlank. */
     if (!(s_pass_reserve > 0.0)) s_pass_reserve = 0.5 * sp;
     margin = freq * 0.001;
     if (margin < sp / 32.0) margin = sp / 32.0;
     leftover = render_pass_leftover(now, in.frame_start, s_pass_reserve, margin);
-    /* A share of it (render_pass_admission_pct): full-resolution VRAM copies
-     * can exhaust the GPU between guest frames even when the CPU reports
-     * spare time. Re-evaluated at every plan, so it follows a change of the
-     * internal resolution. */
+    /* A share of it (render_pass_admission_pct_for): full-resolution VRAM
+     * copies can exhaust the GPU between guest frames even when the CPU
+     * reports spare time. Re-evaluated at every plan (pass_gpu_heavy). */
     in.budget = leftover > 0.0 ? leftover *
-                (double)render_pass_admission_pct(s_hr_scale,
-                                                   s_pass_budget_pct) / 100.0
+                (double)render_pass_admission_pct_for(heavy,
+                                                      s_pass_budget_pct) / 100.0
                                : 0.0;
     {
         /* A pass whose cost is not known (the first at this image size, or a
@@ -6557,8 +6601,8 @@ static uint32_t pass_plan_leftover(uint32_t period_vblanks,
         double busy = s_interval_resume && now > (double)s_interval_resume
                       ? now - (double)s_interval_resume : sp;
         if (busy > sp) busy = sp;
-        in.probe_min = render_pass_probe_min(busy, s_pass_reserve, sp,
-                                             s_hr_scale);
+        in.probe_min = render_pass_probe_min_for(busy, s_pass_reserve, sp,
+                                                 heavy);
     }
     in.max = max < cap - 1u ? max : cap - 1u;
     force = pass_force_measure();
@@ -6569,6 +6613,7 @@ static uint32_t pass_plan_leftover(uint32_t period_vblanks,
     }
     n = render_pass_plan_phases(&in, alpha_q16, &want);
     if (n == 0 && want && in.pass_cost > 0.0 && in.budget >= in.probe_min &&
+        !pass_probes_held() &&
         render_pass_leftover_cost_probe_due(&s_pass_lcost)) {
         /* The estimate prices every plan out: try one pass in this leftover
          * time. Like any pass it is stopped at the deadline. */
@@ -6602,12 +6647,17 @@ static uint32_t pass_plan_leftover(uint32_t period_vblanks,
          * own frame, its presents): a pass would first wait for it, in time
          * the game may need. Not now. */
         s_pass_gpu_busy++;
+        gpu_event = 1;
         if (s_pass_plan_probe) {
             s_pass_plan_probe = 0;
             s_pass_lcost.probing = 0;
         }
         n = 0;
     }
+    render_pass_gpu_pressure_note(&s_gpu_pressure, gpu_event);
+    /* Dynamic resolution learns what the passes wanted but did not get. */
+    if (s_dyn_on && !force && want > n && est > 0.0)
+        s_dyn_ledger.pass_shed_ticks += (uint64_t)((double)(want - n) * est);
     if (wanted) *wanted = want;
     /* Measure the work due after this plan's passes at its frame's start. */
     s_plan_frame_start = in.frame_start;
@@ -6649,6 +6699,10 @@ int gl_renderer_pass_may_start(void) {
     if (s_pass_plan_probe || !(need > 0.0)) need = s_pass_probe_min;
     if (now + need > s_pass_deadline) {
         s_pass_skipped_time++;
+        if (s_dyn_on && s_pass_cost_w == s_interp_w && s_pass_cost_h == s_interp_h) {
+            double est = render_pass_leftover_cost_estimate(&s_pass_lcost);
+            if (est > 0.0) s_dyn_ledger.pass_shed_ticks += (uint64_t)est;
+        }
         return 0;
     }
     s_plan_passes_run++;
@@ -6707,6 +6761,7 @@ uint32_t gl_renderer_pass_plan(uint32_t period_vblanks,
     sp = freq / s_interp_source_hz;
     cap = pass_slot_cap(s_interp_w, s_interp_h);
     if (cap < 2) return 0;
+    pass_cost_select();
     memset(&in, 0, sizeof in);
     in.next_deadline = s_interp_schedule.next_present_deadline;
     in.target_period = s_interp_schedule.target_period;
@@ -6727,28 +6782,28 @@ uint32_t gl_renderer_pass_plan(uint32_t period_vblanks,
     }
     in.max = max < cap - 1u ? max : cap - 1u;
     {
+        const double est = in.pass_cost;
         uint32_t want = 0, n = render_pass_plan_phases(&in, alpha_q16, &want);
         if (wanted) *wanted = want;
         /* An estimate no pass has confirmed for a while is measured again
-         * (render_pass_cost_note_plan): its plans then ask for one pass. */
+         * (render_pass_cost_note_plan): its plans then ask for one pass. Not
+         * in a dynamic-resolution step's tail. */
         if (want && s_pass_cost_w == s_interp_w && s_pass_cost_h == s_interp_h &&
-            render_pass_cost_note_plan(&s_pass_cost)) {
+            !pass_probes_held() && render_pass_cost_note_plan(&s_pass_cost)) {
             s_pass_cost_rewarms++;
             in.pass_cost = 0.0;
             n = render_pass_plan_phases(&in, alpha_q16, NULL);
         }
+        /* Dynamic resolution learns what the passes wanted but did not get. */
+        if (s_dyn_on && want > n && est > 0.0)
+            s_dyn_ledger.pass_shed_ticks += (uint64_t)((double)(want - n) * est);
         return n;
     }
 }
 
 void gl_renderer_pass_note_cost(uint64_t ticks, int cut) {
     int allocated = s_pass_allocs != s_pass_allocs_begin;
-    if (s_pass_cost_w != s_interp_w || s_pass_cost_h != s_interp_h) {
-        memset(&s_pass_cost, 0, sizeof s_pass_cost);
-        memset(&s_pass_lcost, 0, sizeof s_pass_lcost);
-        s_pass_cost_w = s_interp_w;
-        s_pass_cost_h = s_interp_h;
-    }
+    pass_cost_select();
     s_pass_ticks_accum += ticks;
     if (s_dyn_on) s_dyn_ledger.pass_ticks += ticks;
     if (!s_pass_leftover) {
@@ -8982,6 +9037,21 @@ static int dyn_apply(int snew) {
     if (s_mask_check) rebuild_mask_stencils();
     s_pb_valid = 0;
     pass_gens_invalidate();
+    /* What the presenter and the passes hold from the old scale, reset the
+     * way a history reset does (interp_reset_history_unlocked) without
+     * re-anchoring the schedule: the present-time guard starts over (a
+     * generation dropped above must not make the next image look older than
+     * the screen and be refused), the picture on screen is unknown, the open
+     * plan's reserve sample spans the step and is not taken, the pace guard
+     * does not judge the stalled VBlanks, and cost probes wait out the
+     * step's tail (the new size's costs come from the cost cache, or one pass
+     * a plan measures them). */
+    frame_interpolation_present_time_reset(&s_present_time);
+    s_last_choice.kind = 0;
+    s_plan_pending = 0;
+    s_pace_skip_vblanks = 2;
+    s_dyn_probe_hold_until = SDL_GetPerformanceCounter() +
+        (uint64_t)(DYN_PROBE_HOLD_S * (double)SDL_GetPerformanceFrequency());
     for (int r = 0; r < PRES_ROWS; r++) s_present_dirty[r] = ~0ull;
     const uint64_t t6 = SDL_GetPerformanceCounter();
     s_dyn_stats.steps++;
@@ -9033,7 +9103,9 @@ void gl_renderer_dynres_stats(GlDynresStats *out) {
 }
 
 void gl_renderer_host_ledger(GlHostLedger *out) {
-    if (out) *out = s_dyn_ledger;
+    if (!out) return;
+    *out = s_dyn_ledger;
+    out->pace_cuts = s_pace_cuts;
 }
 
 void gl_renderer_present_vram(int disp_x, int disp_y, int w, int h, int linear,

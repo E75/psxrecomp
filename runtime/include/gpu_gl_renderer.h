@@ -342,10 +342,15 @@ void gl_renderer_dynres_stats(GlDynresStats *out);
  * ticks (only kept while dynamic resolution is on): waits for the frame
  * blend's next present, render passes, blend presents' own work, and time
  * blocked in the swap. The dynamic-resolution controller differences them per
- * guest interval. */
+ * guest interval. pass_shed_ticks: the estimated cost of the render passes
+ * plans wanted but shed (for time, the pace guard, the GPU fence) or that
+ * were not started before their deadline -- what the passes would still
+ * need. pace_cuts: plans whose pace guard found the guest slipping behind
+ * its schedule (the swap's block was then the GPU, not vsync). */
 typedef struct GlHostLedger {
     uint64_t idle_ticks, pass_ticks, interp_work_ticks, swap_ticks;
     uint64_t interp_presents, swaps;
+    uint64_t pass_shed_ticks, pace_cuts;
 } GlHostLedger;
 void gl_renderer_host_ledger(GlHostLedger *out);
 

@@ -295,7 +295,8 @@ use only time the game leaves free, so they never delay its frame:
   first presented (`frame_start`), less the work the emulation thread still
   has to do for it (the reserve) and a margin of max(1 ms, 1/32 VBlank),
   times `render_pass_admission_pct` (65% up to 3x internal scale, 50% above;
-  `PSX_RENDER_PASS_BUDGET` overrides it). The reserve is measured every
+  `PSX_RENDER_PASS_BUDGET` overrides it; with dynamic resolution, see
+  below). The reserve is measured every
   frame -- the busy time between the end of the frame's passes and its
   start -- and errs late: a larger sample is taken at once, a smaller one
   moves it down by 3% of the difference. A frame that resumed more than
@@ -324,7 +325,9 @@ use only time the game leaves free, so they never delay its frame:
   smoothed deviation. A cut pass is a lower bound. A pass of unknown cost is
   tried only when the budget is at least the thread's own work this
   interval plus the reserve (twice that above 3x), and at least a quarter
-  VBlank. An estimate that prices every plan out is probed with one pass
+  VBlank. Costs are kept per presented image size (up to 8 sizes, least
+  recently used replaced): returning to a size restores its estimate instead
+  of measuring from nothing. An estimate that prices every plan out is probed with one pass
   after 30 such plans that had that much leftover time; a probe that
   confirms it, or is cut, doubles the wait up to 960 (`probes`).
 - **Holds.** No passes while the GPU is still on work queued before the
@@ -335,6 +338,24 @@ use only time the game leaves free, so they never delay its frame:
   timing does not show it) halves the passes allowed per frame; plans that
   keep pace let it grow by one every 8 plans, a growth that fails soon
   doubles that wait (up to 1024).
+- **Dynamic resolution (one budget).** With `[video] dynamic_resolution`
+  on, the dynamic-resolution controller is the only thing that changes the
+  internal scale; passes are a per-frame consumer of the time it leaves.
+  The scale moves, so the two thresholds above that are keyed on it would
+  be a second resolution controller: instead the GPU counts as the limit
+  (50% share, twice the probe minimum) from the start and after any plan
+  the GPU fence refused or the pace guard cut, until 60 plans in a row saw
+  neither. Each plan reports the estimated cost of the passes it wanted but
+  shed (and of passes not started before their deadline) to the
+  controller, and the plans in which the pace guard cut passes (the swap's
+  block in that window is then counted as work, not vsync wait). With
+  `dynamic_resolution_priority = "frame_rate"` the controller steps down a
+  level after 2 s of shedding (never below `dynamic_resolution_min`) and
+  steps up only when the game's and the passes' whole demand fit at the next
+  level; the default `"resolution"` leaves passes what the resolution
+  leaves. A step resets the present-time guard and the pass generations,
+  skips the reserve sample and pace judgement it stalls, and holds cost
+  probes and re-measures for 1 s.
 
 `render_pass_stats` reports all of it under `leftover`: `skipped`, `cut`,
 `budget_ms_avg`, `reserve_ms`, `probes`, how late the emulation thread
