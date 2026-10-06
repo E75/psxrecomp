@@ -4,8 +4,10 @@
 A render pass runs guest draw code in frozen time and restores the machine
 afterwards. That only holds if every path that could let time pass, deliver an
 interrupt, touch a device the restore does not cover, or record the pass into
-the live timeline checks g_psx_render_pass_active first. These are the choke
-points; each guard below names the hole it closes.
+the live timeline checks g_psx_render_pass_active first. The time freeze
+itself is shared with uncharged guest calls and keys on g_psx_guest_time_frozen,
+which every pass sets. These are the choke points; each guard below names the
+hole it closes.
 """
 
 from pathlib import Path
@@ -23,21 +25,24 @@ def body(text, signature):
 
 
 cycles = (SRC / "psx_cycles.c").read_text(encoding="utf-8")
+b = body(cycles, "int psx_cycle_freeze_begin(PsxCycleFreeze *save, uint64_t watchdog_cycles,")
+assert "g_psx_render_pass_active = 1;" in b and "g_psx_guest_time_frozen = 1;" in b, (
+    "a pass must freeze guest time")
 b = body(cycles, "void psx_devices_service_to_now(void) {")
-assert re.search(r"if \(g_psx_render_pass_active\)[^\n]*return;", b), (
+assert re.search(r"if \(g_psx_guest_time_frozen\)[^\n]*return;", b), (
     "device servicing must stop during a pass (time would advance)")
 b = body(cycles, "void psx_devices_mmio_sync(void) {")
-assert "g_psx_render_pass_active" in b, (
+assert "g_psx_guest_time_frozen" in b, (
     "MMIO sync must not catch devices up during a pass")
 b = body(cycles, "void psx_advance_cycles_slow(uint32_t cycles) {")
-assert "g_psx_render_pass_active" in b, (
+assert "g_psx_guest_time_frozen" in b, (
     "the slow/conservative cycle path must not advance devices during a pass")
 
 irq = (SRC / "interrupts.c").read_text(encoding="utf-8")
 for sig in ("int psx_interrupt_delivery_needed(const CPUState* cpu) {",
             "void psx_check_interrupts(CPUState* cpu) {"):
     lines = body(irq, sig).splitlines()[:6]
-    assert any("g_psx_render_pass_active" in l and "return" in l for l in lines), (
+    assert any("g_psx_guest_time_frozen" in l and "return" in l for l in lines), (
         "no interrupt may be delivered inside a pass: " + sig)
 
 dma = (SRC / "dma.c").read_text(encoding="utf-8")

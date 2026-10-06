@@ -844,7 +844,7 @@ static uint64_t hold_host_ticks_per_sec(void) {
 }
 
 static void hold_cpu_for_gpu_linked_list(void) {
-    if (psx_in_device_service || g_ls_replay_active || g_psx_render_pass_active)
+    if (psx_in_device_service || g_ls_replay_active || g_psx_guest_time_frozen)
         return;
     const uint64_t cyc0 = psx_cycle_count;
     const uint64_t host0 = hold_host_ticks();

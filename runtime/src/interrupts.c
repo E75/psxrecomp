@@ -1087,8 +1087,9 @@ void psx_interrupt_check_path_diag(uint64_t *entry, uint64_t *fast_sr,
 }
 
 int psx_interrupt_delivery_needed(const CPUState* cpu) {
-    /* Render passes run in frozen guest time: nothing is delivered. */
-    if (g_psx_render_pass_active) return 0;
+    /* Render passes and uncharged calls run in frozen guest time: nothing
+     * is delivered. */
+    if (g_psx_guest_time_frozen) return 0;
     if (s_defer_switch_pending) { s_need_defer++; return 1; }
     if ((i_stat & i_mask) == 0) { s_skip_none++; return 0; }
 
@@ -1113,9 +1114,9 @@ int psx_interrupt_delivery_needed(const CPUState* cpu) {
 }
 
 void psx_check_interrupts(CPUState* cpu) {
-    /* Render passes run in frozen guest time (psx_cycles.h): no delivery, and
-     * no check-boundary bookkeeping that the stock timeline would not do. */
-    if (g_psx_render_pass_active) return;
+    /* Frozen guest time (psx_cycle_freeze.h): no delivery, and no
+     * check-boundary bookkeeping that the stock timeline would not do. */
+    if (g_psx_guest_time_frozen) return;
     psx_cyc_batch_flush();
     extern int g_ls_suppress_record;
     extern int psx_netplay_active(void);
