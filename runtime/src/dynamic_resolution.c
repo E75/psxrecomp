@@ -329,6 +329,8 @@ void dynrt_default_params(DynrtParams *p) {
     p->gap_factor = 4.0;
     p->gap_hold_s = 1.0;
     p->min_coverage = 0.5;
+    p->descent_s = 6.0;
+    p->descent_load = 0.78;
 }
 
 static int rt_clamp(const DynrtController *c, int l) {
@@ -356,7 +358,25 @@ void dynrt_init(DynrtController *c, const DynrtParams *p, int floor_level,
         c->up_reached_t[i] = -1e9;
         c->relapse_dur[i] = c->p.relapse_block_s;
     }
+    c->descent_armed = c->p.descent_s > 0.0;
     c->last_reason = "start";
+}
+
+void dynrt_arm_descent(DynrtController *c) {
+    if (c->p.descent_s <= 0.0) return;
+    c->descent_armed = 1;
+    c->descent_stepped = 0;
+    c->descent_until = 0.0;
+}
+
+/* Pure area (f = 1): the cost's fixed part only makes a level dearer than
+ * this predicts, so a jump never lands below the level that fits; a jump
+ * that lands too high is still over budget and jumps again from the new
+ * measurement. */
+int dynrt_descent_target(const DynrtController *c, double load, int level) {
+    for (int l = level - 1; l > c->floor; l--)
+        if (load * ((double)l * l) / ((double)level * level) <= c->p.descent_load) return l;
+    return c->floor < level ? c->floor : level;
 }
 
 double dynrt_predict(const DynrtController *c, double load, int from, int to) {
@@ -471,6 +491,10 @@ static int rt_close_window(DynrtController *c, double now) {
     c->last_bp_share = bp_share;
     c->last_hz = wall > 0.0 ? (double)n / wall : 0.0;
     c->last_valid = 1;
+    if (c->descent_armed) {
+        if (c->descent_until <= 0.0) c->descent_until = now + c->p.descent_s;
+        else if (now > c->descent_until) c->descent_armed = 0;
+    }
     const int strong_bp = bp_share >= c->p.bp_strong;
     const int no_bp = bp_share < c->p.bp_weak;
     /* The guest is the limit: slow, never held by the queue, and the render
@@ -488,6 +512,7 @@ static int rt_close_window(DynrtController *c, double now) {
         const int bp_cleared = c->post_bp_before >= c->p.bp_strong && no_bp;
         const int failed = c->post_down && want > 0.0 &&
                            fell < c->p.verify_fraction * want && !bp_cleared;
+        if (failed) c->descent_armed = 0;   /* the model is off: single steps */
         if (failed && !c->verify_strikes) {
             /* One strike: the window before the step may have mixed lighter
              * frames in (a scene getting heavier, the cost's lag), so it
@@ -540,16 +565,32 @@ static int rt_close_window(DynrtController *c, double now) {
         c->over_streak++;
         const int strong = strong_bp || load >= c->p.strong_load;
         if (c->level > c->floor && now >= c->down_block_until &&
-            (strong || c->over_streak >= c->p.down_windows))
-            rt_step(c, now, c->level - 1, 1, load, bp_share,
-                    strong_bp ? "queue full (render thread behind)"
+            (strong || c->over_streak >= c->p.down_windows)) {
+            int to = c->level - 1;
+            const char *why = strong_bp ? "queue full (render thread behind)"
                               : strong ? "render cost over the interval"
-                                       : "render cost over budget");
+                                       : "render cost over budget";
+            /* Armed, and over by the meter (a full interval, or budget for
+             * down_windows): jump to the predicted level. Backpressure alone
+             * (a meter that under-reads) predicts no jump: single steps. */
+            if (c->descent_armed &&
+                (load >= c->p.strong_load || c->over_streak >= c->p.down_windows)) {
+                const int t = dynrt_descent_target(c, load, c->level);
+                if (t < to) {
+                    to = t;
+                    why = "fast descent (predicted from area)";
+                    c->fast_downs++;
+                }
+            }
+            if (c->descent_armed) c->descent_stepped = 1;
+            rt_step(c, now, to, 1, load, bp_share, why);
+        }
         else if (c->level <= c->floor)
             c->last_reason = "over budget at the floor";
         return c->level;
     }
     c->over_streak = 0;
+    if (c->descent_stepped) c->descent_armed = 0;   /* it fits: fine-tune from here */
     if (guest_bound) c->last_reason = "guest-bound (no step)";
     if (c->level >= c->ceiling) { c->up_streak_s = 0.0; return c->level; }
     const int next = c->level + 1;
@@ -559,8 +600,10 @@ static int rt_close_window(DynrtController *c, double now) {
         c->up_streak_s = 0.0;
     if (c->up_streak_s >= c->p.up_after_s - 1e-9 &&
         now - c->last_step_t >= c->p.up_cooldown_s &&
-        now >= c->up_block_until[next])
+        now >= c->up_block_until[next]) {
+        c->descent_armed = 0;
         rt_step(c, now, next, 0, load, bp_share, "headroom");
+    }
     return c->level;
 }
 
