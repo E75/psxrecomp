@@ -60,6 +60,13 @@
 
 /* Session pad count mirrored for release_pads (available without recomp-net). */
 static int g_np_slot_count = 2;
+/* Every other occupied seat (bit i = seat i): who must answer an episode. */
+static uint32_t g_np_peer_seats;
+
+uint32_t psx_netplay_peer_seats(void)
+{
+    return g_np_peer_seats;
+}
 /* Session slots may exceed the pad count by one: with host_spectates the
  * host holds slot 0 silently and pads sit at slot - 1. Mirrored here (like
  * g_np_slot_count) for the pad helpers that sit above g_np's definition. */
@@ -4107,6 +4114,7 @@ int psx_netplay_start(const PsxNetplayConfig *cfg)
             peers &= ~(1u << rcfg.local_slot);
         netplay_hc_set_peer_mask(&g_np.hc,
                                  (peers & (peers - 1u)) ? peers : 0u);
+        g_np_peer_seats = peers;
     }
     if (g_np.host_spectates) {
         fprintf(stderr,

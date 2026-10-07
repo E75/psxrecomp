@@ -122,6 +122,9 @@ void psx_netplay_config_defaults(PsxNetplayConfig *cfg);
 void psx_netplay_apply_env(PsxNetplayConfig *cfg);
 
 int  psx_netplay_active(void);
+/* Every other occupied seat of the session (bit i = seat i): the peers that
+ * must all answer a rollback episode. 0 offline. */
+uint32_t psx_netplay_peer_seats(void);
 int  psx_netplay_is_running(void);
 /* "ice" | "lan" | "none" */
 const char *psx_netplay_transport_name(void);
