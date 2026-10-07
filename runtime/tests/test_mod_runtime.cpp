@@ -1,4 +1,5 @@
 #include "mod_runtime.h"
+#include "host_launch_timing.h"
 #include "mod_packages.h"
 #include "mod_plugins.h"
 #include "psx_sha256.h"
@@ -319,6 +320,47 @@ static std::string sha256_hex(const std::vector<uint8_t>& bytes) {
     return out;
 }
 
+static uint64_t launch_timing_total() {
+    uint64_t total = 0;
+    host_launch_timing_snapshot(nullptr, 0, &total, nullptr);
+    return total;
+}
+
+static void check_commit_timing(uint64_t before, bool ok, bool hashed) {
+    HostLaunchTimingEvent events[HOST_LAUNCH_TIMING_CAPACITY]{};
+    const auto n = host_launch_timing_snapshot(events, HOST_LAUNCH_TIMING_CAPACITY,
+                                              nullptr, nullptr);
+    const HostLaunchTimingEvent* commit = nullptr;
+    for (uint32_t i = 0; i < n; ++i)
+        if (events[i].seq > before && events[i].stage == HOST_LAUNCH_COMMIT)
+            commit = &events[i];
+    check(commit && commit->ok == unsigned(ok), "real commit outcome retained by C snapshot");
+    if (!commit) return;
+    uint32_t stages = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        const auto& e = events[i];
+        if (e.seq <= before || e.parent_id != commit->scope_id) continue;
+        stages |= 1u << e.stage;
+        check(e.start_us >= commit->start_us &&
+              e.start_us + e.duration_us <= commit->start_us + commit->duration_us,
+              "real commit child measurement nested inside total");
+    }
+    check(bool(stages & (1u << HOST_LAUNCH_DISC_HASH)) == hashed,
+          "disc hash timing follows actual digest reuse");
+    const uint32_t required = (1u << HOST_LAUNCH_PREPARE_RESOURCES) |
+        (1u << HOST_LAUNCH_RESOLVE);
+    check((stages & required) == required, "real preparation and resolution observed");
+    if (ok) {
+        const uint32_t final = (1u << HOST_LAUNCH_OVERLAY_VERIFY) |
+            (1u << HOST_LAUNCH_DERIVED_DISC) | (1u << HOST_LAUNCH_SAVE_STATE) |
+            (1u << HOST_LAUNCH_BUILD_DISC_INDEX);
+        check((stages & final) == final, "real successful commit final stages observed");
+    } else {
+        check(!(stages & (1u << HOST_LAUNCH_BUILD_DISC_INDEX)),
+              "rejected commit does not invent final-stage completion");
+    }
+}
+
 int main() {
     const fs::path root = fs::temp_directory_path() / "psxrecomp-mod-runtime-test";
     std::error_code ec;
@@ -556,8 +598,10 @@ int main() {
     check(PSXRecompV4::mod_runtime_initialize(
               root, "SLUS-RUNTIME", 0x80002000, {}, &error),
           error.c_str());
+    const auto first_commit_timing = launch_timing_total();
     check(PSXRecompV4::mod_runtime_commit(cue_path, &error),
           "CUE and its data-track BIN must have the same mod target identity");
+    check_commit_timing(first_commit_timing, true, true);
     /* Committed but not yet activated: no hook may run. */
     psx_mod_instruction(&entry_cpu, 0x80003004u, 0x90A30014u);
     check(instruction_hits == 0 && !g_psx_mod_instruction_hooks, "instruction hooks await activation");
@@ -1193,7 +1237,9 @@ int main() {
     check(PSXRecompV4::mod_runtime_initialize(loose_root, "READER", 0, {}, &error), "loose resource initialize");
     check(PSXRecompV4::mod_runtime_commit(iso_path, &error), "unverified file remains usable offline");
     check(PSXRecompV4::mod_runtime_plan_fingerprint_portable().empty(), "unverified resource has no online fingerprint");
+    const auto rejected_commit_timing = launch_timing_total();
     check(!PSXRecompV4::mod_runtime_commit(iso_path, &error, false), "online commit rejects unverified resource");
+    check_commit_timing(rejected_commit_timing, false, false);
     check(!PSXRecompV4::mod_runtime_commit_for_direct_netplay(iso_path, &error), "LAN also refuses unverified resources");
     test_match_caps = {};
     test_match_caps.valid = 1;
