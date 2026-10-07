@@ -291,6 +291,15 @@ void gl_renderer_draw_projected_triangle(const PSXProjectedVertex vertices[3],
 { (void)vertices; (void)texpage; (void)cx; (void)cy; (void)raw; (void)semi; (void)perspective; abort(); }
 void gl_renderer_note_wide_triangle_recovery(int enabled)
 { if (enabled) abort(); }
+/* Smooth motion vertex sources are an OpenGL path: never reached here. */
+int gl_renderer_frame_generation(void) { return 0; }
+void gl_renderer_fg_source(const uint32_t id[3], const int32_t pc[9], const int32_t h[3],
+    const int32_t x[3], const int32_t y[3])
+{ (void)id; (void)pc; (void)h; (void)x; (void)y; abort(); }
+void gte_fg_source_set(int enabled) { if (enabled) abort(); }
+int gte_fg_source_enabled(void) { return 0; }
+int gte_fg_source_lookup(uint32_t packed, GteFgSrc out[2])
+{ (void)packed; (void)out; abort(); }
 void pgxp_set_enabled(int enabled) { (void)enabled; }
 int pgxp_get_gte_sxy_checked(uint32_t slot, uint32_t packed, int require_valid,
                              int32_t *x16, int32_t *y16)
