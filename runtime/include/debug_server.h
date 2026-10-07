@@ -204,6 +204,11 @@ int debug_server_get_input_override(void);
  * 0 when the injection is buttons-only. */
 int debug_server_get_axis_override(unsigned char st[4]);
 
+/* Optional debug-only emulated controller identity set by set_input/press:
+ * -1 follows normal device selection; otherwise 0=digital, 1=DualShock,
+ * 2=JogCon. */
+int debug_server_get_pad_type_override(void);
+
 /* TCP-controlled turbo mode. When enabled the frontend skips presentation and
  * wall-clock pacing at vblank, matching the keyboard TAB turbo path. */
 int debug_server_turbo_enabled(void);

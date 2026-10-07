@@ -287,6 +287,9 @@ static int s_input_frames   = 0;
  * pad sampler alongside the button word. */
 static int     s_axis_override = 0;
 static uint8_t s_axis_st[4]    = { 0x80, 0x80, 0x80, 0x80 };
+/* Test-only controller identity override for set_input/press. -1 follows the
+ * selected host device/config; 0/1/2 force digital/DualShock/JogCon. */
+static int s_pad_type_override = -1;
 
 /*
  * Exact guest-VBlank input route. A client queues run-length encoded digital
@@ -7826,9 +7829,14 @@ static void handle_unwatch(int id, const char *json)
 static void handle_set_input(int id, const char *json)
 {
     char val_str[32];
+    const int pad_type = json_get_int(json, "pad_type", -1);
     if (!json_get_str(json, "buttons", val_str, sizeof(val_str))) {
         send_err(id, "missing buttons"); return;
     }
+    if (pad_type < -1 || pad_type > 2) {
+        send_err(id, "pad_type must be -1 (automatic), 0, 1, or 2"); return;
+    }
+    s_pad_type_override = pad_type;
     s_input_override = (int)hex_to_u32(val_str);
     s_input_frames = 0;
     /* Optional stick override: any of lx/ly/rx/ry (0..255) arms it; omitted
@@ -7847,7 +7855,12 @@ static void handle_press(int id, const char *json)
 {
     int buttons = json_get_int(json, "buttons", -1);
     int frames  = json_get_int(json, "frames", 2);
+    const int pad_type = json_get_int(json, "pad_type", -1);
     if (buttons < 0) { send_err(id, "missing buttons"); return; }
+    if (pad_type < -1 || pad_type > 2) {
+        send_err(id, "pad_type must be -1 (automatic), 0, 1, or 2"); return;
+    }
+    s_pad_type_override = pad_type;
     s_input_override = buttons;
     s_input_frames   = frames;
     int ax[4] = { json_get_int(json, "lx", -1), json_get_int(json, "ly", -1),
@@ -7867,25 +7880,35 @@ extern uint16_t sio_get_pad_buttons_slot(int slot);
 extern int sio_get_pad_connected(int slot);
 extern int sio_get_pad_analog(int slot);
 extern void sio_get_pad_sticks(int slot, uint8_t out[4]);
+extern void sio_get_pad_negcon(int slot, uint8_t out[3]);
+extern int sio_get_pad_mode_locked(int slot);
 static void handle_pad_status(int id, const char *json)
 {
     (void)json;
     uint16_t pad0 = sio_get_pad_buttons_slot(0);
     uint16_t pad1 = sio_get_pad_buttons_slot(1);
-    uint8_t sticks0[4], sticks1[4];
+    uint8_t sticks0[4], sticks1[4], neg0[3], neg1[3];
     sio_get_pad_sticks(0, sticks0);
     sio_get_pad_sticks(1, sticks1);
+    sio_get_pad_negcon(0, neg0);
+    sio_get_pad_negcon(1, neg1);
     send_fmt("{\"id\":%d,\"ok\":true,\"pad\":\"0x%04X\","
-             "\"slot0\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s,\"sticks\":[%u,%u,%u,%u]},"
-             "\"slot1\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s,\"sticks\":[%u,%u,%u,%u]},"
-             "\"override\":%d,\"override_frames\":%d,"
+             "\"slot0\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s,\"type\":%d,\"sticks\":[%u,%u,%u,%u],"
+             "\"negcon\":[%u,%u,%u],\"mode_locked\":%s},"
+             "\"slot1\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s,\"type\":%d,\"sticks\":[%u,%u,%u,%u],"
+             "\"negcon\":[%u,%u,%u],\"mode_locked\":%s},"
+             "\"override\":%d,\"override_frames\":%d,\"override_pad_type\":%d,"
              "\"override_axes\":[%u,%u,%u,%u],\"override_axes_valid\":%s}\n",
              id, pad0,
              pad0, sio_get_pad_connected(0) ? "true" : "false", sio_get_pad_analog(0) ? "true" : "false",
+             sio_get_pad_analog(0),
              sticks0[0], sticks0[1], sticks0[2], sticks0[3],
+             neg0[0], neg0[1], neg0[2], sio_get_pad_mode_locked(0) ? "true" : "false",
              pad1, sio_get_pad_connected(1) ? "true" : "false", sio_get_pad_analog(1) ? "true" : "false",
+             sio_get_pad_analog(1),
              sticks1[0], sticks1[1], sticks1[2], sticks1[3],
-             s_input_override, s_input_frames,
+             neg1[0], neg1[1], neg1[2], sio_get_pad_mode_locked(1) ? "true" : "false",
+             s_input_override, s_input_frames, s_pad_type_override,
              s_axis_st[0], s_axis_st[1], s_axis_st[2], s_axis_st[3],
              s_axis_override ? "true" : "false");
 }
@@ -7899,6 +7922,7 @@ static void handle_clear_input(int id, const char *json)
     s_input_override = -1;
     s_input_frames   = 0;
     s_axis_override  = 0;
+    s_pad_type_override = -1;
     s_axis_st[0] = s_axis_st[1] = s_axis_st[2] = s_axis_st[3] = 0x80;
     send_ok(id);
 }
@@ -7945,6 +7969,7 @@ static void handle_input_route_start(int id, const char *json)
     s_input_override = -1;
     s_input_frames = 0;
     s_axis_override = 0;
+    s_pad_type_override = -1;
     s_input_route_index = 0;
     s_input_route_remaining = s_input_route[0].frames;
     s_input_route_active = 1;
@@ -15319,6 +15344,31 @@ void debug_server_init(int port)
 {
     if (port > 0) s_port = port;
 
+    /* Deterministic cold-boot controller probe. Unlike a TCP set_input command,
+     * which can only arrive after the guest has already started polling, this
+     * debug-only override is active for the very first VBlank/input sample.
+     * It lets runtime tests reproduce a controller attached before power-on.
+     * Example: PSX_DEBUG_INITIAL_PAD_TYPE=2 selects a centered JogCon. */
+    {
+        const char *initial_type = getenv("PSX_DEBUG_INITIAL_PAD_TYPE");
+        if (initial_type && *initial_type) {
+            char *end = NULL;
+            long type = strtol(initial_type, &end, 0);
+            if (end != initial_type && *end == '\0' && type >= 0 && type <= 2) {
+                s_input_override = 0xFFFF;
+                s_input_frames = 0;
+                s_axis_override = 1;
+                s_axis_st[0] = s_axis_st[1] =
+                    s_axis_st[2] = s_axis_st[3] = 0x80;
+                s_pad_type_override = (int)type;
+                fprintf(stdout, "psxrecomp: debug cold-boot pad type=%ld\n", type);
+            } else {
+                fprintf(stderr, "psxrecomp: invalid PSX_DEBUG_INITIAL_PAD_TYPE='%s' (expected 0, 1, or 2)\n",
+                        initial_type);
+            }
+        }
+    }
+
     /* Race-free recorder arming: PSX_RECORD_FRAME=<N> arms the unified ordered
      * access recorder from boot (instruction 0), so it deterministically
      * captures guest frame N no matter when a probe connects — the same
@@ -16064,6 +16114,11 @@ int debug_server_get_axis_override(unsigned char st[4])
     st[0] = s_axis_st[0]; st[1] = s_axis_st[1];
     st[2] = s_axis_st[2]; st[3] = s_axis_st[3];
     return 1;
+}
+
+int debug_server_get_pad_type_override(void)
+{
+    return s_pad_type_override;
 }
 
 int debug_server_turbo_enabled(void)

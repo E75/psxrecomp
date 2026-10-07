@@ -402,22 +402,46 @@ if(BUILD_TESTING)
     target_link_libraries(hd_texture_pack_test PRIVATE Threads::Threads)
     add_test(NAME hd_texture_pack_test COMMAND hd_texture_pack_test)
 
-    # Registered since before this change, but it did NOT LINK on origin/master:
-    # sio.c had grown psx_read_word / psx_get_cycle_count / i_mask /
-    # g_debug_last_store_pc references that this test's stub block never gained,
-    # so `ctest` in a runtime tree could not even build. The stubs are added now
-    # (a registered test that cannot compile is worse than an unregistered one —
-    # it breaks the whole suite's build), which exposes a real disagreement:
-    # 27 checks fail, starting with enter.id expected=0x73 (DualShock analog ID)
-    # actual=0xFF (no device). Constant-clock and monotonic-clock stubs give
-    # byte-identical results, so the cycle stub is not the discriminator — this
-    # is the SIO/peripheral axis, not the harness. DISABLED until owned.
+    # Standalone serial-pad protocol tests use explicit SIO/device stubs; they
+    # cover both DualShock rumble and JogCon wire/state behavior.
     add_executable(sio_dualshock_rumble_test
         tests/test_sio_dualshock_rumble.c
         src/sio.c)
     target_include_directories(sio_dualshock_rumble_test PRIVATE include)
     add_test(NAME sio_dualshock_rumble_test COMMAND sio_dualshock_rumble_test)
-    set_tests_properties(sio_dualshock_rumble_test PROPERTIES DISABLED TRUE)
+    add_executable(sio_jogcon_protocol_test
+        tests/test_sio_jogcon_protocol.c
+        src/sio.c)
+    target_include_directories(sio_jogcon_protocol_test PRIVATE include)
+    add_test(NAME sio_jogcon_protocol_test COMMAND sio_jogcon_protocol_test)
+    add_executable(sio_negcon_protocol_test
+        tests/test_sio_negcon_protocol.c
+        src/sio.c)
+    target_include_directories(sio_negcon_protocol_test PRIVATE include)
+    add_test(NAME sio_negcon_protocol_test COMMAND sio_negcon_protocol_test)
+    add_executable(sio_negcon_protocol_multitap_test
+        tests/test_sio_negcon_protocol.c
+        src/sio.c)
+    target_include_directories(sio_negcon_protocol_multitap_test PRIVATE include)
+    target_compile_definitions(sio_negcon_protocol_multitap_test PRIVATE
+        PSX_MAX_PLAYERS=5)
+    add_test(NAME sio_negcon_protocol_multitap_test
+             COMMAND sio_negcon_protocol_multitap_test)
+    # The shared PsxNetPad -> SIO apply and normalization, over the real SIO.
+    add_executable(psx_pad_apply_test
+        tests/test_psx_pad_apply.c
+        src/psx_pad_apply.c
+        src/psx_net_pad.c
+        src/sio.c)
+    target_include_directories(psx_pad_apply_test PRIVATE include)
+    add_test(NAME psx_pad_apply_test COMMAND psx_pad_apply_test)
+
+    add_executable(controller_type_test tests/test_controller_type.cpp)
+    target_include_directories(controller_type_test PRIVATE include)
+    add_test(NAME controller_type_test COMMAND controller_type_test)
+    add_executable(psx_stick_test tests/test_psx_stick.cpp src/psx_stick.c)
+    target_include_directories(psx_stick_test PRIVATE include)
+    add_test(NAME psx_stick_test COMMAND psx_stick_test)
 
     add_executable(openxr_input_test tests/test_openxr_input.c src/psx_openxr.c)
     target_include_directories(openxr_input_test PRIVATE include)
@@ -443,6 +467,13 @@ if(BUILD_TESTING)
     target_include_directories(mod_controller_source_test PRIVATE include)
     add_test(NAME mod_controller_source_test COMMAND mod_controller_source_test)
 
+    add_executable(mod_pad_transform_test
+        tests/test_mod_pad_transform.c src/mod_pad_transform.c)
+    target_include_directories(mod_pad_transform_test PRIVATE include)
+    add_test(NAME mod_pad_transform_test COMMAND mod_pad_transform_test)
+    add_executable(psx_trigger_values_test tests/test_psx_trigger_values.c)
+    target_include_directories(psx_trigger_values_test PRIVATE include)
+    add_test(NAME psx_trigger_values_test COMMAND psx_trigger_values_test)
     add_executable(pad_external_input_test
         tests/test_pad_external_input.c src/pad_external_input.c)
     target_include_directories(pad_external_input_test PRIVATE include src)
@@ -1179,7 +1210,8 @@ if(BUILD_TESTING)
 
         add_executable(netplay_input_hist_test
             tests/test_netplay_input_hist.c
-            src/netplay_input_hist.c)
+            src/netplay_input_hist.c
+            src/psx_net_pad.c)
         target_include_directories(netplay_input_hist_test PRIVATE
             include
             ${_RNET_ROOT}/include)

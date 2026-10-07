@@ -197,20 +197,6 @@ void psx_netplay_apply_env(PsxNetplayConfig *cfg)
         cfg->host_spectates = (v[0] != '0') ? 1 : 0;
 }
 
-void psx_netplay_normalize_pad(PsxNetPad *pad)
-{
-    const int dead = 24; /* ~SDL-ish center deadzone in 0..255 space */
-    if (!pad) return;
-    pad->connected = 1;
-    if (pad->lx > (uint8_t)(0x80 - dead) && pad->lx < (uint8_t)(0x80 + dead)) pad->lx = 0x80;
-    if (pad->ly > (uint8_t)(0x80 - dead) && pad->ly < (uint8_t)(0x80 + dead)) pad->ly = 0x80;
-    if (pad->rx > (uint8_t)(0x80 - dead) && pad->rx < (uint8_t)(0x80 + dead)) pad->rx = 0x80;
-    if (pad->ry > (uint8_t)(0x80 - dead) && pad->ry < (uint8_t)(0x80 + dead)) pad->ry = 0x80;
-    if (!pad->analog) {
-        pad->lx = pad->ly = pad->rx = pad->ry = 0x80;
-    }
-}
-
 static void force_session_pads_connected(int slot_count)
 {
     int i;
@@ -1877,7 +1863,7 @@ static void np_prime_after_hard_resync(void)
     bytes[3] = pad.ly;
     bytes[4] = pad.rx;
     bytes[5] = pad.ry;
-    bytes[6] = pad.analog ? 1u : 0u;
+    bytes[6] = pad.analog;
     bytes[7] = 1u;
     rnet_session_prime_delay_inputs(g_np.session, bytes, (rnet_u16)PSX_NETPLAY_PAD_BYTES);
 
@@ -2063,7 +2049,7 @@ static void encode_pad(const PsxNetPad *pad, RNetInputSample *out, rnet_u32 tick
     out->bytes[3] = n.ly;
     out->bytes[4] = n.rx;
     out->bytes[5] = n.ry;
-    out->bytes[6] = n.analog ? 1u : 0u;
+    out->bytes[6] = n.analog;
     out->bytes[7] = 1u;
     out->valid = 1;
 }
@@ -2081,7 +2067,7 @@ static void decode_pad(const RNetInputSample *in, PsxNetPad *pad)
     pad->ly = in->bytes[3];
     pad->rx = in->bytes[4];
     pad->ry = in->bytes[5];
-    pad->analog = in->bytes[6] ? 1u : 0u;
+    pad->analog = in->bytes[6] <= PSX_NETPAD_TYPE_MAX ? in->bytes[6] : 0u;
     pad->connected = 1;
     psx_netplay_normalize_pad(pad);
 }
@@ -2441,12 +2427,14 @@ static void apply_pad_slot(int slot, const PsxNetPad *pad)
     const int force_dig = on_tap && !sio_get_multitap_analog();
     sio_set_pad_connected(port, 1);
     sio_set_pad_config_capable(port, force_dig ? 0 : 1);
-    sio_set_pad_state_slot(port, pad->buttons);
-    if (force_dig)
-        sio_set_pad_sticks(port, 0x80, 0x80, 0x80, 0x80);
-    else
-        sio_set_pad_sticks(port, pad->lx, pad->ly, pad->rx, pad->ry);
-    sio_request_pad_type(port, (!force_dig && pad->analog) ? 1 : 0);
+    if (force_dig) {
+        PsxNetPad digital = *pad;
+        digital.lx = digital.ly = digital.rx = digital.ry = 0x80;
+        digital.analog = 0;
+        psx_pad_apply_to_sio(port, &digital);
+    } else {
+        psx_pad_apply_to_sio(port, pad);
+    }
     if (psx_start_consumer_enabled()) {
         uint32_t sim = g_np.session ? rnet_session_sim_tick(g_np.session) : 0u;
         psx_start_consumer_note(slot, sim, pad->buttons);
@@ -2522,7 +2510,7 @@ static void np_rb_apply_frame_slot(int slot, uint32_t tick, uint16_t buttons,
     row.buttons = buttons;
     row.stick_x = sx;
     row.stick_y = sy;
-    row.analog = analog ? 1u : 0u;
+    row.analog = analog <= PSX_NETPAD_TYPE_MAX ? analog : 0u;
     row.is_valid = 1;
     netplay_ih_frame_to_pad(&row, &pad);
     force_session_pads_connected(g_np.slot_count);

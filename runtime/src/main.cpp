@@ -67,6 +67,9 @@ extern "C" void psx_event_step_conservative_env_init(void);
 #endif
 #include "psx_netplay.h"
 #include "psx_stick.h"       /* radial SDL-stick -> DualShock response transform */
+#include "psx_trigger.h"     /* continuous SDL trigger -> 0..255 magnitude */
+#include "mod_pad_transform.h"
+#include "psx_controller_type.h" /* mapped wheel-name classification */
 #include "psx_netplay_rb.h"
 #include "psx_selfcheck.h"
 #include "psx_lobby_client.h"
@@ -415,6 +418,7 @@ struct PlayerInput {
     uint8_t rumble_large = 0;
     bool    rumble_known = false;
     bool    rumble_warned = false;
+    bool    steering_wheel = false;
 };
 static PlayerInput g_players[PSX_MAX_PLAYERS];
 /* Offline SIO sample loop bound (from game.toml players; clamped). */
@@ -4933,6 +4937,7 @@ static void close_player(PlayerInput& p) {
     p.rumble_large = 0;
     p.rumble_known = false;
     p.rumble_warned = false;
+    p.steering_wheel = false;
 }
 
 static void close_controller(void) {
@@ -4983,8 +4988,13 @@ static void open_player(PlayerInput& p, int self_slot) {
             SDL_JoystickGetGUIDString(g, p.guid, (int)sizeof(p.guid));
         }
         const char* name = SDL_GameControllerName(p.handle);
+        p.steering_wheel = psx_controller_name_is_wheel(name);
         std::fprintf(stdout, "psxrecomp runtime: opened controller for slot: %s\n",
                      name ? name : "(unnamed)");
+        if (p.steering_wheel)
+            std::fprintf(stdout,
+                "psxrecomp runtime: steering wheel detected for slot %d; using JogCon SIO input\n",
+                self_slot + 1);
         p.rumble_known = false;
         p.rumble_warned = false;
     }
@@ -5049,6 +5059,18 @@ static int pad_mode_boot_analog(int mode) {
     return mode == PSXRecompV4::PAD_MODE_ANALOG ? 1 : 0;
 }
 
+static int pad_type_boot(const PlayerInput& p, int mode) {
+    return p.steering_wheel ? SIO_PAD_JOGCON
+         : (pad_mode_boot_analog(mode) ? SIO_PAD_DUALSHOCK : SIO_PAD_DIGITAL);
+}
+
+/* Boot/hotplug type for slot s: a registered title pad transform names the
+ * type it presents before its first frame; otherwise the device/mode type. */
+static int pad_type_boot_for_slot(int s, const PlayerInput& p, int mode) {
+    const int initial = mod_pad_transform_initial_type((uint32_t)s);
+    return initial >= 0 ? initial : pad_type_boot(p, mode);
+}
+
 /* Keyboard mappings can drive both DualShock sticks. Honor the configured
  * mode, including analog-only title locks; multitap policy belongs to the
  * SIO seat below and applies equally to keyboards and physical controllers. */
@@ -5082,7 +5104,8 @@ static int assert_sio_pad_profile(int s, bool dev_here) {
      * Multitap taps are always digital (see sio_pad_on_multitap). */
     sio_set_pad_config_capable(
         s, policy.callback ? policy.config_capable
-                           : mode != PSXRecompV4::PAD_MODE_DIGITAL);
+                           : (p.steering_wheel ||
+                              mode != PSXRecompV4::PAD_MODE_DIGITAL));
     return boot_mode;
 }
 
@@ -5095,12 +5118,28 @@ static void refresh_player_devices(void) {
     const int netplay = psx_netplay_active();
     for (int s = 0; s < PSX_MAX_PLAYERS; s++) {
         PlayerInput& p = g_players[s];
-        if (p.kind != 2) close_player(p);           /* keyboard/none: no handle */
-        else open_player(p, s);
+        char active_guid[40] = {0};
+        const bool attached = p.handle &&
+                              SDL_GameControllerGetAttached(p.handle);
+        if (p.handle) {
+            SDL_Joystick* joy = SDL_GameControllerGetJoystick(p.handle);
+            if (joy) SDL_JoystickGetGUIDString(SDL_JoystickGetGUID(joy),
+                                              active_guid,
+                                              (int)sizeof(active_guid));
+        }
+        /* The launcher may change GUID while the old handle remains attached;
+         * pure policy covers that and unplug paths with mockable inputs. */
+        if (psx_controller_handle_needs_close(
+                p.kind == 2, p.handle != nullptr, attached,
+                p.guid, active_guid))
+            close_player(p);
+        if (p.kind == 2) open_player(p, s);
         if (netplay) continue;
         const int boot_mode = assert_sio_pad_profile(s, false);
-        sio_set_pad_analog(s, pad_mode_boot_analog(boot_mode),
-                           0x80, 0x80, 0x80, 0x80);
+        const int boot_type = pad_type_boot_for_slot(s, p, boot_mode);
+        if (boot_type == SIO_PAD_DUALSHOCK || boot_type == SIO_PAD_JOGCON)
+            sio_set_pad_config_capable(s, 1);
+        sio_set_pad_type(s, boot_type, 0x80, 0x80, 0x80, 0x80);
     }
 }
 
@@ -5678,8 +5717,13 @@ static void apply_input_override_to_sio(int override_word) {
 
     const int effective_mode = controller_policy_resolve_override_mode(
         0, 1, mode, w, st, stick_live, dpad_live);
-    const int eff_analog =
+    int eff_analog =
         effective_mode == (int)PSXRecompV4::PAD_MODE_ANALOG ? 1 : 0;
+#ifndef PSX_NO_DEBUG_TOOLS
+    const int debug_type = debug_server_get_pad_type_override();
+    if (debug_type == SIO_PAD_DUALSHOCK || debug_type == SIO_PAD_JOGCON)
+        eff_analog = 1;
+#endif
     /* Injected input only (set_input / dev routing): fold the injected D-pad
      * word onto the left stick so stick-only menu/move paths respond to a
      * button-bit injection that has no physical stick behind it.
@@ -5699,9 +5743,16 @@ static void apply_input_override_to_sio(int override_word) {
     }
     if (!eff_analog) { st[0] = st[1] = st[2] = st[3] = 0x80; }
     sio_set_pad_sticks(0, st[0], st[1], st[2], st[3]);
-    sio_request_pad_type(0, eff_analog);
+    int injected_type = p.steering_wheel ? SIO_PAD_JOGCON
+                                         : (eff_analog ? SIO_PAD_DUALSHOCK
+                                                       : SIO_PAD_DIGITAL);
+#ifndef PSX_NO_DEBUG_TOOLS
+    if (debug_type >= SIO_PAD_DIGITAL && debug_type <= SIO_PAD_JOGCON)
+        injected_type = debug_type;
+#endif
+    sio_request_pad_type(0, injected_type);
     psx_selfcheck_note_pad(0, w, st[0], st[1], st[2], st[3],
-                           (uint8_t)(eff_analog ? 1 : 0));
+                           (uint8_t)injected_type);
 }
 
 /* Capture one SIO slot's PHYSICAL host pad into a netplay/local blob. Returns
@@ -5709,7 +5760,11 @@ static void apply_input_override_to_sio(int override_word) {
  * disconnected. `guarded` (savestate input guard) delivers neutral buttons and
  * sticks but still resolves presence/type. No mouse or source side effects:
  * those are layered on top by pad_ext_resolve(). */
-static int capture_pad_slot(int s, PsxNetPad* out, bool guarded) {
+/* host_view: the port's host pad before presentation, for a title pad
+ * transform (PadExtHooks.host_pad): real sticks and buttons without the
+ * digital stick->D-pad fold, whatever the configured mode; type unchanged. */
+static int capture_pad_slot_view(int s, PsxNetPad* out, bool guarded,
+                                 bool host_view) {
     if (!out) return 0;
     out->buttons = 0xFFFFu;
     out->lx = out->ly = out->rx = out->ry = 0x80u;
@@ -5736,8 +5791,8 @@ static int capture_pad_slot(int s, PsxNetPad* out, bool guarded) {
 
     const int mode = effective_player_mode_for_sio(p, s);
     uint8_t st[4] = { 0x80, 0x80, 0x80, 0x80 };
-    if (mode == PSXRecompV4::PAD_MODE_ANALOG ||
-        g_mod_controller_policy[s].callback) {
+    if (mode == PSXRecompV4::PAD_MODE_ANALOG || p.steering_wheel ||
+        g_mod_controller_policy[s].callback || host_view) {
         pad_sticks_for(p, player, st);
     }
     const uint16_t policy_buttons =
@@ -5746,10 +5801,17 @@ static int capture_pad_slot(int s, PsxNetPad* out, bool guarded) {
         s, player, mode, src, p, policy_buttons, st);
     const int eff_analog =
         effective_mode == PSXRecompV4::PAD_MODE_ANALOG ? 1 : 0;
+    int frame_type = p.steering_wheel ? SIO_PAD_JOGCON
+                   : (eff_analog ? SIO_PAD_DUALSHOCK : SIO_PAD_DIGITAL);
+#ifndef PSX_NO_DEBUG_TOOLS
+    const int debug_type = debug_server_get_pad_type_override();
+    if (debug_type >= SIO_PAD_DIGITAL && debug_type <= SIO_PAD_JOGCON)
+        frame_type = debug_type;
+#endif
     if (guarded) {
         out->buttons = 0xFFFFu;
         out->lx = out->ly = out->rx = out->ry = 0x80u;
-        out->analog = eff_analog ? 1u : 0u;
+        out->analog = (uint8_t)frame_type;
         out->connected = 1;
         return 1;
     }
@@ -5763,7 +5825,8 @@ static int capture_pad_slot(int s, PsxNetPad* out, bool guarded) {
      * exactly as on a real DualShock. This is what stops a dual-analog game's
      * D-pad control (Ape Escape's camera rotate) from being spun by stick
      * movement or centre drift. Digital mode keeps the stick->D-pad fold. */
-    const bool suppress_stick = (eff_analog != 0);
+    const bool suppress_stick = (eff_analog != 0) || p.steering_wheel ||
+                                host_view;
     uint16_t btn = src.device ? pad_buttons_for(p, player, suppress_stick)
                               : (uint16_t)0xFFFF;
     /* kind==1 already consumed the binds inside pad_buttons_for — ANDing the
@@ -5781,7 +5844,7 @@ static int capture_pad_slot(int s, PsxNetPad* out, bool guarded) {
      * may press a button may also steer. kind==1 already folded its binds
      * inside pad_sticks_for; psx_keybinds_sticks only widens a deflection, so
      * applying it twice is idempotent. */
-    if (eff_analog) {
+    if (eff_analog || host_view) {
         if (src.keybinds) {
             const Uint8* keys = SDL_GetKeyboardState(NULL);
             psx_keybinds_sticks(keys, player, st);
@@ -5789,15 +5852,19 @@ static int capture_pad_slot(int s, PsxNetPad* out, bool guarded) {
         if (src.all_pads)
             dev_any_controller_sticks(st);
     }
-    if (!eff_analog) {
+    if (!eff_analog && !p.steering_wheel && !host_view) {
         st[0] = st[1] = st[2] = st[3] = 0x80;
     }
 
     out->buttons = btn;
     out->lx = st[0]; out->ly = st[1]; out->rx = st[2]; out->ry = st[3];
-    out->analog = eff_analog ? 1u : 0u;
+    out->analog = (uint8_t)frame_type;
     out->connected = 1;
     return 1;
+}
+
+static int capture_pad_slot(int s, PsxNetPad* out, bool guarded) {
+    return capture_pad_slot_view(s, out, guarded, false);
 }
 
 /* Netplay-only capture: assigned PlayerInput for this slot only. Never merges
@@ -5822,7 +5889,7 @@ static int capture_pad_slot_exclusive(int s, PsxNetPad* out, int present_sio_slo
     const int sio_slot = (present_sio_slot >= 0) ? present_sio_slot : s;
     int mode = effective_player_mode_for_sio(p, sio_slot);
     uint8_t st[4] = { 0x80, 0x80, 0x80, 0x80 };
-    if (mode == PSXRecompV4::PAD_MODE_ANALOG ||
+    if (mode == PSXRecompV4::PAD_MODE_ANALOG || p.steering_wheel ||
         g_mod_controller_policy[s].callback) {
         pad_sticks_for(p, player, st);
     }
@@ -5831,27 +5898,25 @@ static int capture_pad_slot_exclusive(int s, PsxNetPad* out, int present_sio_slo
         s, player, mode, src, p, policy_buttons, st);
     const int eff_analog =
         effective_mode == PSXRecompV4::PAD_MODE_ANALOG ? 1 : 0;
+    const int frame_type = p.steering_wheel ? SIO_PAD_JOGCON
+                         : (eff_analog ? SIO_PAD_DUALSHOCK : SIO_PAD_DIGITAL);
 
-    const bool suppress_stick = (eff_analog != 0);
+    const bool suppress_stick = (eff_analog != 0) || p.steering_wheel;
     uint16_t btn = pad_buttons_for(p, player, suppress_stick);
 
-    if (!eff_analog) {
+    if (!eff_analog && !p.steering_wheel) {
         st[0] = st[1] = st[2] = st[3] = 0x80;
     }
 
     out->buttons = btn;
     out->lx = st[0]; out->ly = st[1]; out->rx = st[2]; out->ry = st[3];
-    out->analog = eff_analog ? 1u : 0u;
+    out->analog = (uint8_t)frame_type;
     out->connected = 1;
     return 1;
 }
 
 static void apply_pad_slot_to_sio(int s, const PsxNetPad& pad) {
-    if (sio_pad_on_multitap(s) && !sio_get_multitap_analog())
-        sio_set_pad_config_capable(s, 0);
-    sio_set_pad_state_slot(s, pad.buttons);
-    sio_set_pad_sticks(s, pad.lx, pad.ly, pad.rx, pad.ry);
-    sio_request_pad_type(s, pad.analog ? 1 : 0);
+    psx_pad_apply_to_sio(s, &pad);
     /* Solo resim self-check records exactly what was applied this boundary. */
     psx_selfcheck_note_pad(s, pad.buttons, pad.lx, pad.ly, pad.rx, pad.ry,
                            pad.analog);
@@ -5963,8 +6028,19 @@ static void capture_override_pad(int override_word, PsxNetPad* out) {
 
     const int effective_mode = controller_policy_resolve_override_mode(
         0, 1, mode, w, st, stick_live, dpad_live);
-    const int eff_analog =
+    int eff_analog =
         effective_mode == (int)PSXRecompV4::PAD_MODE_ANALOG ? 1 : 0;
+#ifndef PSX_NO_DEBUG_TOOLS
+    const int debug_type = debug_server_get_pad_type_override();
+    if (debug_type == SIO_PAD_DUALSHOCK || debug_type == SIO_PAD_JOGCON)
+        eff_analog = 1;
+#endif
+    int frame_type = p.steering_wheel ? SIO_PAD_JOGCON
+                   : (eff_analog ? SIO_PAD_DUALSHOCK : SIO_PAD_DIGITAL);
+#ifndef PSX_NO_DEBUG_TOOLS
+    if (debug_type >= SIO_PAD_DIGITAL && debug_type <= SIO_PAD_JOGCON)
+        frame_type = debug_type;
+#endif
     /* Injected input only; see the note on the sibling fold above. Not
      * hardware behaviour, retained solely so injection can steer stick-only
      * games. */
@@ -5979,7 +6055,7 @@ static void capture_override_pad(int override_word, PsxNetPad* out) {
 
     out->buttons = w;
     out->lx = st[0]; out->ly = st[1]; out->rx = st[2]; out->ry = st[3];
-    out->analog = eff_analog ? 1u : 0u;
+    out->analog = (uint8_t)frame_type;
     out->connected = 1;
 }
 
@@ -6392,6 +6468,40 @@ static void pad_ext_source_resolve(void*, int s, const PSXModControllerState* so
                            : mode != PSXRecompV4::PAD_MODE_DIGITAL);
 }
 static void pad_ext_mouse_reset(void*) { psx_local_mouse_reset(); }
+/* Host extras of port s for the title transform: the assigned gamepad and its
+ * analog triggers (SDL 0..32767 -> 0..255, unthresholded). */
+static void pad_ext_host_extras(void*, int s, uint32_t* flags, uint32_t* lt,
+                                uint32_t* rt) {
+    *flags = *lt = *rt = 0;
+    if (s < 0 || s >= PSX_MAX_PLAYERS) return;
+    SDL_GameController* handle = g_players[s].handle;
+    if (g_players[s].kind != 2 || !handle) return;
+    *flags = PSX_MOD_PAD_HOST_GAMEPAD;
+    if (SDL_GameControllerHasAxis(handle, SDL_CONTROLLER_AXIS_TRIGGERLEFT)) {
+        *flags |= PSX_MOD_PAD_HOST_LT;
+        *lt = psx_trigger_axis_to_u8(
+            SDL_GameControllerGetAxis(handle, SDL_CONTROLLER_AXIS_TRIGGERLEFT));
+    }
+    if (SDL_GameControllerHasAxis(handle, SDL_CONTROLLER_AXIS_TRIGGERRIGHT)) {
+        *flags |= PSX_MOD_PAD_HOST_RT;
+        *rt = psx_trigger_axis_to_u8(
+            SDL_GameControllerGetAxis(handle, SDL_CONTROLLER_AXIS_TRIGGERRIGHT));
+    }
+}
+/* (1) Host pad of port s before presentation, for the transform frame. */
+static int pad_ext_host_pad(void*, int s, uint16_t* buttons, uint8_t st[4]) {
+    PsxNetPad pad;
+    if (s < 0 || s >= PSX_MAX_PLAYERS) return 0;
+    if (!capture_pad_slot_view(s, &pad, false, true)) return 0;
+    *buttons = pad.buttons;
+    st[0] = pad.lx; st[1] = pad.ly; st[2] = pad.rx; st[3] = pad.ry;
+    return 1;
+}
+static int pad_ext_pad_transform(void*, int s, const PSXModPadFrame* frame,
+                                 const PSXModPadOutput* stock,
+                                 PSXModPadOutput* out) {
+    return mod_pad_transform_run((uint32_t)s, frame, stock, out);
+}
 static void pad_ext_mouse_fold(void*, int connected, int analog, uint16_t buttons,
                                uint8_t* rx, uint8_t* ry) {
     psx_local_mouse_pad(connected != 0, analog != 0, buttons, *rx, *ry);
@@ -6405,6 +6515,9 @@ static PadExtHooks pad_ext_main_hooks(void) {
     h.source_resolve = pad_ext_source_resolve;
     h.mouse_reset = pad_ext_mouse_reset;
     h.mouse_fold = pad_ext_mouse_fold;
+    h.host_extras = pad_ext_host_extras;
+    h.pad_transform = pad_ext_pad_transform;
+    h.host_pad = pad_ext_host_pad;
     return h;
 }
 
@@ -16177,6 +16290,7 @@ int main(int argc, char** argv) {
          * latched across a soft return. */
         g_mod_controller_mode_override.fill(-1);
         mod_controller_source_reset();
+        mod_pad_transform_reset();
         for (auto& policy : g_mod_controller_policy)
             policy = ModControllerPresentationPolicy{};
         g_mod_load_wall_multiplier = -1;
