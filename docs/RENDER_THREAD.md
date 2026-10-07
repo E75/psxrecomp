@@ -20,13 +20,13 @@ thread, Present thread, Smooth motion (frame generation); recomp-ui
 while Render thread is off). The pipeline starts once at boot, so a change
 from the in-game launcher is saved and applies at next launch.
 
-**HD texture safety.** Texture replacements and texture dumping use the
-synchronous renderer, not the render thread. An active HD session prevents
-thread startup. Enabling HD after startup drains and parks the render thread
-(also pausing Smooth motion); it resumes at a frame boundary after both
-replacements and dumping are disabled. Preferences are preserved, and this
-applies to every title. Dynamic resolution remains available on the synchronous
-path. The log explains the fallback.
+**HD textures.** Texture replacements and dumping run on the render thread.
+Residency notes (upload, invalidate, copy) are recorded in command order and
+applied against the render thread's VRAM copy. Under HD authority native VRAM
+is CPU-rasterized on that copy and published to gpu.c's array whenever the
+emulation thread takes the context and at stop. A GP0(A0) header takes the
+context and keeps it until the payload commits, so streamed words, mask
+checks and partial readbacks are exact. Smooth motion pauses while HD is on.
 
 ## Why
 
@@ -183,7 +183,7 @@ resolution (below), not of this layer.
 | netplay / rollback resimulation | `psx_netplay_active()` or dual-raster makes every frame ineligible: the emulation thread holds the context (synchronous path). Not started when netplay is configured at boot |
 | render passes | first `gl_renderer_pass_*` call in a frame is a sync point; the rest of that frame is synchronous. Recommended: leave `render_thread` off with the frame-rate mod |
 | frame interpolation | ineligible (held) while enabled; not started when it is on at boot |
-| HD texture replacements / texture dumping | ineligible (held) while either is active; not started when HD is active at boot. An existing thread resumes when both are disabled |
+| HD texture replacements / texture dumping | eligible; held only from a GP0(A0) header to its commit |
 | OpenXR | ineligible while a session is active |
 | Smooth motion (frame generation) | `[video] frame_generation`: in-between frames drawn by the render thread from recorded lists, docs/FRAME_GENERATION.md |
 | native-wide / widescreen | recorded; tags, latch and wide-surface mirror as above |

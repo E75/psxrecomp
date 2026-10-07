@@ -449,6 +449,11 @@ enum {
     RTH_PRESENT_WIDE, RTH_STATE, RTH_PEEK, RTH_RING_CAPTURE, RTH_DYN_STEP,
     RTH_FRAME, RTH_FG_SRC, RTH_HD_NOTE
 };
+/* GP0(A0) whose payload gpu.c is still streaming into its array under HD
+ * authority (set from the facade's residency notes on the emulation thread).
+ * The emulation thread holds the context from the header to the commit. */
+static int s_rthm_open_upload_set = 0;
+
 static int  rth_record_mode(void);
 /* Render-thread frame cost (dynamic resolution; defined with GL_RT_BACKEND). */
 static uint64_t s_rthf_swap_ns = 0;        /* render thread: time in the swap */
@@ -5716,9 +5721,10 @@ void gl_renderer_set_hd_texture_mode(int on) {
         }
     }
     s_hd_native_authority = on;
-    if (on && s_rth_on) {
-        fprintf(stdout, "psxrecomp: HD textures/dumping use synchronous rendering; "
-                        "render thread and Smooth motion paused until HD is off\n");
+    s_rthm_open_upload_set = 0;
+    s_fg_broken = 1;   /* Smooth motion restarts its lists after HD */
+    if (on && s_rth_on && s_fg_on) {
+        fprintf(stdout, "psxrecomp: HD textures/dumping: Smooth motion paused until HD is off\n");
         fflush(stdout);
     }
     s_gpu_dirty = 0; rect_clear(&s_cpu_dirty);
@@ -9779,34 +9785,21 @@ static uint16_t rth_prim_flags(void) {
 
 static int gl_rth_eligible(void) {
     extern int psx_netplay_active(void);
-    return s_raster_ok && s_ctx && !s_cpu_auth_dual && !s_hd_native_authority && !s_depth24_skip_up &&
+    return s_raster_ok && s_ctx && !s_cpu_auth_dual && !s_depth24_skip_up &&
+           !(s_hd_native_authority && s_rthm_open_upload_set) &&
            !gpu_display_is_depth24() && !s_interp_enabled && !s_pass_active &&
            !psx_netplay_active() && !psx_openxr_session_active() &&
            gr_backend() == GR_BACKEND_OPENGL;
 }
 
-/* GP0(A0) whose payload gpu.c is still streaming into its array (HD only;
- * set from the facade's residency notes on the emulation thread). */
-static int s_rthm_open_upload[4], s_rthm_open_upload_set = 0;
-
 /* HD texture authority keeps native VRAM on the CPU raster, which runs on
  * the render thread's private copy: hand its result to gpu.c's array, the
- * way ensure_cpu reads the FBO back otherwise. Words of an upload still
- * streaming are the guest's newer data and stay. */
+ * way ensure_cpu reads the FBO back otherwise. Called only with the render
+ * thread drained and not held, so the private copy is the whole native
+ * VRAM: no A0 payload can be streaming (its header takes the context). */
 static void rth_hd_publish_private(void) {
     if (!s_hd_native_authority) return;
-    const size_t row = (size_t)VRAM_W;
-    for (int y = 0; y < VRAM_H; ++y) {
-        uint16_t *dst = s_rth_vram_pub + (size_t)y * row;
-        const uint16_t *src = s_rth_vram_priv + (size_t)y * row;
-        const int *o = s_rthm_open_upload;
-        if (!s_rthm_open_upload_set || ((y - o[1]) & (VRAM_H - 1)) >= o[3]) {
-            memcpy(dst, src, row * sizeof(uint16_t));
-            continue;
-        }
-        for (int x = 0; x < VRAM_W; ++x)
-            if (((x - o[0]) & (VRAM_W - 1)) >= o[2]) dst[x] = src[x];
-    }
+    memcpy(s_rth_vram_pub, s_rth_vram_priv, (size_t)VRAM_W * VRAM_H * sizeof(uint16_t));
 }
 
 static void gl_rth_acquire(const char *reason) {
@@ -9884,7 +9877,8 @@ static void rth_replay_present(const RtCmd *c, const uint8_t *p) {
     static int skipped_last = 0;
     const int stale = rt_frames_ahead() >= 2 && !skipped_last;
     /* Frame generation schedules (or drops) presents itself. */
-    if (s_fg_on && fg_on_present(c->op, p, c->payload, stale)) { skipped_last = 0; return; }
+    /* HD authority keeps Smooth motion off (its lists are not HD-aware). */
+    if (s_fg_on && !s_hd_native_authority && fg_on_present(c->op, p, c->payload, stale)) { skipped_last = 0; return; }
     if (stale) {
         /* Two later frames are already recorded, so the emulation thread is
          * at (or near) the in-flight bound waiting on us. Showing this frame
@@ -11408,6 +11402,7 @@ int gl_renderer_frame_gen_json(char *out, int cap) {
 static void rtb_init(uint16_t *vram) {
     GL_RT_SYNC("init");
     if (s_rth_on) s_rth_vram_pub = vram;
+    s_rthm_open_upload_set = 0;   /* a reset abandons an incomplete A0 */
     glb_init(vram);
     if (s_rth_on && !rt_held()) rth_rebind_vram(s_rth_vram_priv);
 }
@@ -11526,9 +11521,12 @@ static void hd_note_exec(int op, int x, int y, int w, int h, int sx, int sy) {
 }
 /* After the upload/draw it follows, in command order, against s_vram. */
 static void rtb_hd_texture_note(int op, int x, int y, int w, int h, int sx, int sy) {
-    if (op == GR_HD_NOTE_BEGIN_UPLOAD) {
-        s_rthm_open_upload[0] = x & (VRAM_W - 1); s_rthm_open_upload[1] = y & (VRAM_H - 1);
-        s_rthm_open_upload[2] = w; s_rthm_open_upload[3] = h; s_rthm_open_upload_set = 1;
+    if (op == GR_HD_NOTE_BEGIN_UPLOAD && s_hd_native_authority) {
+        /* gpu.c streams the payload into its array and reads it back for
+         * mask-checked words: take the context so that array holds every
+         * earlier native draw, and keep it until the commit (eligibility). */
+        GL_RT_SYNC("hd_upload");
+        s_rthm_open_upload_set = 1;
     } else if (op == GR_HD_NOTE_TRACK_UPLOAD) {
         s_rthm_open_upload_set = 0;
     }
@@ -11801,8 +11799,11 @@ int gl_renderer_render_thread_start(int max_frames) {
 
 void gl_renderer_render_thread_stop(void) {
     if (!s_rth_on) return;
+    const int held = rt_held();
     rt_stop();                       /* drains; the context is current here again */
     pt_end();
+    /* Unheld, the private copy holds the final HD-authoritative draws. */
+    if (!held) rth_hd_publish_private();
     s_rth_on = 0;
     s_vram = s_rth_vram_pub;
     rth_rebind_vram(s_rth_vram_pub);

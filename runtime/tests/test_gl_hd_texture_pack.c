@@ -425,8 +425,99 @@ int main(int argc,char** argv) {
     gr_vram_transfer_out(96,96,1,1,&back[0]); gr_vram_transfer_out(104,96,1,1,&back[1]);
     check(back[0]==0x1234 && back[1]==0x0421 && vram[96*1024+96]==0x1234 && vram[96*1024+104]==0x0421,
           "render thread: guest readback sees native draws under HD authority");
+    /* Review reproduction (#568): a pending A0 keeps only received payload
+     * words, its mask check sees the prior native draw, and stop publishes
+     * the final HD-authoritative draws. */
+    gl_renderer_render_thread_frame_boundary();
+    state(); gr_fill_rect(128,96,4,1,0x2345);
+    gr_vram_upload_begin(128,96,4,1);
+    vram[96*1024+128]=0x7c00;
+    uint16_t partial_read=0;
+    gr_vram_transfer_out(129,96,1,1,&partial_read);
+    check(vram[96*1024+128]==0x7c00,"received A0 word survives");
+    check(partial_read==0x2345,"unwritten A0 word retains earlier draw");
+    uint16_t completed[4]={0x7c00,0x2345,0x2345,0x2345};
+    gr_vram_transfer_in(128,96,4,1,completed);
+    gl_renderer_render_thread_frame_boundary();
+    state(); gr_set_mask_bits(1,0); gr_draw_flat_rect(192,96,4,1,0x0421);
+    gr_set_mask_bits(0,1); gr_vram_upload_begin(192,96,4,1);
+    check(gr_vram_read(192,96)==0x8421,"A0 sees prior native mask");
+    uint16_t masked[4]={0x8421,0x8421,0x8421,0x8421};
+    gr_vram_transfer_in(192,96,4,1,masked);
+    gl_renderer_render_thread_frame_boundary();
+    state(); gr_fill_rect(160,96,4,1,0x4567);
+    gl_renderer_render_thread_frame_boundary();
     gl_renderer_render_thread_stop();
-    check(!gl_renderer_render_thread_active(),"render thread stopped");
+    check(vram[96*1024+160]==0x4567,"stop publishes final native draw");
+    /* #570's HD safety cases, with the render thread running instead of
+     * parked: live activation, partial upload across a frame boundary and a
+     * reload, reset after an incomplete upload, dump-only, disable/resume,
+     * and the final native draw at stop. */
+    gpu_hd_textures_shutdown();
+    check(gl_renderer_render_thread_start(2),"render thread starts with HD disabled");
+    gl_renderer_set_frame_generation(1);
+    gl_renderer_render_thread_frame_boundary();
+    state(); gr_fill_rect(96,96,4,1,0x1234);
+    gl_renderer_render_thread_frame_boundary();
+    check(gpu_hd_textures_configure(beetle_root,1,0,error,sizeof(error)),"HD opens while render thread is running");
+    check(vram[96*1024+96]==0x1234,"HD activation retains the queued native draw");
+    char fg_diag[4096]; gl_renderer_frame_gen_json(fg_diag,sizeof(fg_diag));
+    check(strstr(fg_diag,"\"active\":0")!=NULL,"Smooth motion is inactive under HD authority");
+    gl_renderer_render_thread_frame_boundary();
+    check(!rt_held(),"HD replacement mode runs on the render thread");
+    state(); gr_fill_rect(128,96,4,1,0x2345);
+    gr_vram_upload_begin(128,96,4,1);
+    vram[96*1024+128]=0x7c00; /* A partial GP0(A0) payload, as gpu.c writes it. */
+    gl_renderer_render_thread_frame_boundary();   /* the payload spans a vblank */
+    check(rt_held(),"an open A0 keeps the context across a frame boundary");
+    partial_read=0; gr_vram_transfer_out(129,96,1,1,&partial_read);
+    check(vram[96*1024+128]==0x7c00 && partial_read==0x2345,
+          "partial upload preserves payload and preceding native draws");
+    check(gpu_hd_textures_reload(error,sizeof(error)),"HD reload is safe during a partial upload");
+    check(vram[96*1024+128]==0x7c00 && vram[96*1024+129]==0x2345,
+          "HD reload retains partial-upload VRAM");
+    gr_init(vram); /* reset abandons the incomplete upload */
+    gl_renderer_render_thread_frame_boundary();
+    check(!rt_held(),"reset after an incomplete upload releases the context");
+    state(); gr_fill_rect(128,96,4,1,0x3456);
+    gr_vram_transfer_out(128,96,1,1,&partial_read);
+    check(partial_read==0x3456,"reset after an incomplete upload keeps native draws visible");
+    gl_renderer_render_thread_frame_boundary();
+    state(); gr_set_mask_bits(1,0); gr_draw_flat_rect(192,96,4,1,0x0421);
+    gr_set_mask_bits(0,1); gr_vram_upload_begin(192,96,4,1);
+    check(gr_vram_read(192,96)==0x8421,"A0 mask check sees the preceding masked native draw");
+    gr_vram_transfer_in(192,96,4,1,masked);
+    state();
+    gpu_hd_textures_shutdown();
+    gl_renderer_render_thread_frame_boundary();
+    check(!rt_held(),"render thread runs after HD replacements are disabled");
+    state(); gr_fill_rect(160,96,4,1,0x4567);
+    gl_renderer_render_thread_frame_boundary();
+    gr_vram_transfer_out(160,96,1,1,&partial_read);
+    check(partial_read==0x4567 && vram[96*1024+160]==0x4567,"resumed rendering retains native readbacks");
+    gl_renderer_render_thread_frame_boundary();
+    check(gpu_hd_textures_configure(argv[1],0,1,error,sizeof(error)),"dump-only session opens with render thread running");
+    gl_renderer_render_thread_frame_boundary();
+    check(!rt_held(),"dump-only mode runs on the render thread");
+    state(); gr_vram_upload_begin(512,0,4,4);
+    for(int i=0;i<16;++i) vram[i/4*1024+512+i%4]=source_words[i];
+    gr_vram_transfer_in(512,0,4,4,source_words);
+    gr_draw_textured_rect(8,8,4,4,0,0,0,0,texture_page);
+    gl_renderer_render_thread_frame_boundary();
+    gr_vram_transfer_out(8,8,1,1,&partial_read);
+    check(partial_read==source_words[0] && vram[8*1024+8]==source_words[0],"dump-only draw retains native VRAM");
+    gpu_hd_textures_set_dump_enabled(0);
+    gl_renderer_render_thread_frame_boundary();
+    check(!rt_held(),"render thread runs when dumping is disabled");
+    gpu_hd_textures_shutdown();
+    gl_renderer_set_frame_generation(0);
+    check(gpu_hd_textures_configure(beetle_root,1,0,error,sizeof(error)),"HD session restored for teardown checks");
+    gl_renderer_render_thread_frame_boundary();
+    state(); gr_fill_rect(224,96,4,1,0x5678);
+    gl_renderer_render_thread_frame_boundary();
+    gl_renderer_render_thread_stop();
+    check(!gl_renderer_render_thread_active(),"thread stops safely after HD transitions");
+    check(vram[96*1024+224]==0x5678,"stopping the thread preserves final HD native draws");
     memcpy(reference,vram,sizeof(vram));
     gl_renderer_set_cpu_auth_dual(1);
     gpu_hd_textures_shutdown();

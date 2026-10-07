@@ -49,10 +49,12 @@ the runtime scans them again. Disabling the mod restores the original artwork.
 The plugin does not write replacement pixels into native VRAM or change the
 save namespace.
 
-HD replacements and dumping use synchronous rendering for safety. While
-either is enabled, Render thread and Smooth motion do not run; their saved
-settings are preserved. Disable both and relaunch to use those features.
-Dynamic resolution is still available with HD textures.
+HD replacements and dumping run on the render thread when it is enabled:
+residency changes travel with the recorded commands, and native VRAM (CPU
+raster under HD authority) is published to the guest at every sync point.
+A GP0(A0) upload holds the context from its header to its commit, so its mask
+checks and partial readbacks see every earlier draw. Smooth motion does not
+generate frames while either is active. Dynamic resolution is available.
 
 Capture defaults follow the referenced DuckStation policy: track uploads,
 union their used rectangles per palette, skip direct-color C16 textures, ignore

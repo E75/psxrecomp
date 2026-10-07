@@ -107,10 +107,8 @@ has measured time to spare.
   as the raw mirror holds it when the in-between frame is drawn.
 - Single-buffered games never flip, so nothing is generated.
 - Windowed high-resolution mode and depth24 frames are not generated.
-- HD texture replacements or texture dumping hold the render thread on the
-  synchronous path, so Smooth motion does not generate frames while either
-  is active. Disabling both permits the thread to resume; saved preferences
-  are unchanged.
+- HD texture replacements or texture dumping: the render thread keeps
+  running, but Smooth motion does not generate frames while either is active.
 
 ## Debug
 
