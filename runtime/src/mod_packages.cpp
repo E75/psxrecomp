@@ -774,7 +774,7 @@ std::string canonical_resolution(const std::vector<const ModPackage*>& ordered,
             out << resource.format << ':' << resource.bytes->size() << ':'
                 << resource.sha256;
         else
-            out << resource.path.string();
+            out << resource.path.u8string();
         out << '\n';
     }
     return out.str();
@@ -870,7 +870,7 @@ fs::path effective_resource_path(const ModPackage& package,
     if (!selected) return {};
     const auto resource = selected->resources.find(id);
     return resource == selected->resources.end() ? fs::path{} :
-                                                   fs::path(resource->second);
+                                                   fs::u8path(resource->second);
 }
 
 bool prospective_feature_enabled(
@@ -3206,7 +3206,7 @@ bool ModPackageManager::set_feature_resource_path(
         return false;
     }
     if (!resource->shared_source.empty()) sources_[resource->shared_source] = path;
-    else selections_[package_id].features[feature_id].resources[resource_id] = path.string();
+    else selections_[package_id].features[feature_id].resources[resource_id] = path.u8string();
     return true;
 }
 
@@ -3458,7 +3458,7 @@ bool ModPackageManager::prepare_resources(const std::string& game_id,
                     const auto* resource = find_resource(*package, feature.id, name);
                     if (!resource || resource->input_only || resource->sha256.empty())
                         throw std::runtime_error("preparer returned an undeclared or unverified output");
-                    pending[id].features[feature.id].resources[name] = path.string();
+                    pending[id].features[feature.id].resources[name] = path.u8string();
                 }
                 for (const auto& r : package->resources)
                     if (r.feature_id == feature.id && !r.input_only && r.required && !outputs.count(r.id))

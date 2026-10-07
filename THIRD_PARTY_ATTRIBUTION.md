@@ -54,6 +54,7 @@ constrains this repository's own terms; the obligation is to carry the notice.
 | --- | --- | --- | --- |
 | [toml11](https://github.com/ToruNiina/toml11) by Toru Niina | MIT | recompiler **and** runtime | `recompiler/lib/toml11/LICENSE`, shipped as `runtime/licenses/toml11-NOTICES.txt` |
 | [stb_image](http://nothings.org/stb) by Sean Barrett | MIT **or** public domain (Unlicense), at your option | runtime | notice in `runtime/third_party/stb_image.h`, shipped as `runtime/licenses/stb_image-NOTICES.txt` |
+| [xxHash 0.8.3](https://github.com/Cyan4973/xxHash/tree/v0.8.3) by Yann Collet | BSD-2-Clause | runtime texture-pack interoperability | `runtime/third_party/xxhash.LICENSE`, shipped as `runtime/licenses/xxhash-NOTICES.txt` |
 | [rabbitizer](https://github.com/Decompollaborate/rabbitizer) by Decompollaborate | MIT | recompiler only | `recompiler/lib/rabbitizer/LICENSE` |
 | [ELFIO](https://github.com/serge1/ELFIO) by Serge Lamikhov-Center | MIT | recompiler only | `recompiler/lib/ELFIO/LICENSE.txt` |
 | [{fmt}](https://github.com/fmtlib/fmt) by Victor Zverovich | MIT | recompiler only | `recompiler/lib/fmt/LICENSE.rst` |
@@ -64,6 +65,15 @@ package as `licenses/` — that is the one place to add a notice when a new
 runtime dependency lands. The recompiler-only entries are developer tooling
 and are not in the shipped package; if that ever changes, their notices have
 to ship too.
+
+The unmodified xxHash header comes directly from upstream tag `v0.8.3`,
+`xxhash.h` (SHA-256
+`17973c0dc49d9854ca26caa191f0e12f7a424b68858d9a78de3860d959d85e4b`).
+Its BSD notice remains in the header and the separate notice files. The
+DuckStation-compatible filename parser, matching, PNG dumping and cache are
+independent psxrecomp implementations; no DuckStation implementation is
+included. Format observations and the upstream reference pin are recorded in
+[DUCKSTATION_TEXTURE_FORMAT.md](docs/DUCKSTATION_TEXTURE_FORMAT.md).
 
 ## TinyCC (TCC) — toolchain-free overlay compiler shipped to players
 

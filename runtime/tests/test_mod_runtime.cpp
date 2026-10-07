@@ -5,6 +5,7 @@
 #include "psx_lobby_client.h"
 
 #include "gpu.h"
+#include "gpu_hd_textures.h"
 #include "cpu_state.h"
 
 #include <array>
@@ -82,6 +83,36 @@ extern "C" uint32_t psx_mod_gpu_dma_memory_alloc(uint32_t, uint32_t) {
     return 0;
 }
 extern "C" void psx_ram_reset_size_request(void) {}
+static int hd_shutdown_calls, hd_configure_calls, hd_dump_value;
+static int hd_replacements_value, hd_reload_calls;
+static std::string hd_root;
+extern "C" void gpu_hd_textures_shutdown(void) { ++hd_shutdown_calls; hd_root.clear(); }
+extern "C" int gpu_hd_textures_configure(const char* root, int replacements, int dump,
+                                          char*, size_t) {
+    ++hd_configure_calls;
+    hd_root = root;
+    hd_replacements_value = replacements;
+    hd_dump_value = dump;
+    return 1;
+}
+extern "C" void gpu_hd_textures_set_dump_enabled(int enabled) {
+    hd_dump_value = enabled;
+}
+extern "C" int gpu_hd_textures_active(void) {
+    return !hd_root.empty() && (hd_replacements_value || hd_dump_value);
+}
+extern "C" void gpu_hd_textures_get_diag(GpuHdTextureDiag* out) {
+    *out = {};
+    out->root = hd_root.c_str();
+}
+extern "C" int gpu_hd_textures_reload(char*, size_t) { ++hd_reload_calls; return 1; }
+static void test_hd_activation(void) {
+    char replacements[16], dump[16];
+    if (!psx_mod_current_option_value("replacements", replacements, sizeof(replacements)) ||
+        !psx_mod_current_option_value("dump", dump, sizeof(dump))) { ++failures; return; }
+    if (!psx_mod_set_hd_texture_pack("pack", std::string(replacements) == "true",
+                                    std::string(dump) == "true")) ++failures;
+}
 extern "C" void psx_projection_reset_session(void) {}
 extern "C" void gpu_ws_set_native_scene_predicate(int (*)(void)) {}
 extern "C" int psx_ws_x_margin(void) { return 0; }
@@ -1324,6 +1355,71 @@ int main() {
                   PSXRecompV4::mod_runtime_commit(patched_iso, &error), "huge plan commit");
         check(psx_mod_read_disc_file("S0/LEVEL.NSF", nullptr, 0, &bytes) && bytes == 69400576u,
               "files grown past 64 MiB keep their effective size");
+    }
+    {
+        const fs::path hd_mods = root / "hd-mods";
+        write_text(hd_mods / "bundled" / "runtime.hd" / "1.0.0" / "manifest.toml",
+            "format_version = 5\nid = \"runtime.hd\"\nversion = \"1.0.0\"\n"
+            "name = \"HD\"\nresolver = \"declarative\"\nsave_compatibility = \"shared\"\n"
+            "[[target]]\ngame_id = \"SCUS-94236\"\n"
+            "[[feature]]\nid = \"textures\"\nname = \"HD\"\ndefault_enabled = false\n"
+            "[[resource]]\nfeature = \"textures\"\nid = \"pack\"\nlabel = \"Pack\"\n"
+            "format = \"directory\"\nrequired = true\n"
+            "[[option]]\nfeature = \"textures\"\nid = \"replacements\"\n"
+            "label = \"Load\"\ntype = \"boolean\"\ndefault = \"true\"\n"
+            "[[option]]\nfeature = \"textures\"\nid = \"dump\"\n"
+            "label = \"Dump\"\ntype = \"boolean\"\ndefault = \"false\"\n"
+            "[[plugin]]\nfeature = \"textures\"\nid = \"psx.hd-textures\"\n");
+        write_text(hd_mods / "state.toml",
+            "format_version = 2\n[[feature]]\npackage_id = \"runtime.hd\"\n"
+            "id = \"textures\"\nenabled = true\n[feature.values]\ndump = \"true\"\n");
+        check(psx_mod_register_activation_plugin("psx.hd-textures", test_hd_activation),
+              "HD activation plugin registers");
+        check(PSXRecompV4::mod_runtime_initialize(hd_mods, "SCUS-94236", 0, {}, &error),
+              "HD mods initialize");
+        const fs::path expected = fs::absolute(hd_mods / "texture-packs" / "SCUS-94236");
+        check(fs::is_directory(expected / "dumps") && fs::is_directory(expected / "replacements"),
+              "default HD directories exist before first launch, even without dumping");
+        check(PSXRecompV4::mod_runtime_commit(stock_path, &error),
+              "default pack resource commits without manual folder selection");
+        const int shutdown_before = hd_shutdown_calls;
+        mod_runtime_activate_plugins();
+        check(hd_shutdown_calls == shutdown_before + 1 && hd_configure_calls == 1 &&
+                  hd_root == expected.string() && hd_replacements_value == 1 && hd_dump_value == 1,
+              "HD activation clears previous session and reads owning committed options");
+        char value[16] = "old";
+        check(!psx_mod_current_option_value("dump", value, sizeof(value)) && value[0] == '\0',
+              "owning option context does not escape the trusted callback");
+        check(!psx_mod_set_hd_texture_pack("pack", 1, 1),
+              "pack configuration requires the trusted resource callback context");
+        hd_replacements_value = 0;
+        check(psx_mod_set_hd_texture_dump(0) && hd_dump_value == 0,
+              "live dump control forwards the requested switch");
+        check(!gpu_hd_textures_active() && psx_mod_set_hd_texture_dump(1) && hd_dump_value == 1,
+              "dump-only session can turn capture back on after turning it off");
+        check(psx_mod_reload_hd_texture_pack() && hd_reload_calls == 1,
+              "pack reload forwards to renderer");
+        check(PSXRecompV4::mod_runtime_clear_for_netplay(&error), "HD plan clears");
+        mod_runtime_activate_plugins();
+        check(hd_shutdown_calls == shutdown_before + 2 && hd_configure_calls == 1,
+              "disabled HD feature leaves no previous session pack active");
+        check(!psx_mod_set_hd_texture_dump(1), "live dump control refuses an unconfigured session");
+        const fs::path custom = hd_mods / fs::u8path(u8"chosen pack # % \u65e5\u672c");
+        fs::create_directories(custom);
+        write_text(hd_mods / "state.toml",
+            "format_version = 2\n[[feature]]\npackage_id = \"runtime.hd\"\n"
+            "id = \"textures\"\nenabled = true\n[feature.resources]\npack = \"" +
+            custom.generic_u8string() + "\"\n");
+        check(PSXRecompV4::mod_runtime_initialize(hd_mods, "SCUS-94236", 0, {}, &error) &&
+                  PSXRecompV4::mod_runtime_commit(stock_path, &error),
+              "chosen Unicode pack path resolves and persists through commit");
+        mod_runtime_activate_plugins();
+        check(hd_root == custom.generic_u8string(), "renderer receives the chosen folder as UTF-8");
+        check(PSXRecompV4::mod_runtime_initialize(hd_mods, "SCUS-94236", 0, {}, &error) &&
+                  PSXRecompV4::mod_runtime_commit(stock_path, &error),
+              "committed Unicode pack path reloads without corruption");
+        mod_runtime_activate_plugins();
+        check(hd_root == custom.generic_u8string(), "Unicode pack root survives the complete session cycle");
     }
     fs::remove_all(root, ec);
     if (failures) return 1;

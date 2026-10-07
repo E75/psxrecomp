@@ -6,6 +6,7 @@
 #include "mod_packages.h"
 #include "mod_plugins.h"
 #include "gpu.h"
+#include "gpu_hd_textures.h"
 #include "psx_memory.h"
 #include "render_pass_projection.h"
 #include "psx_sha256.h"
@@ -1021,7 +1022,7 @@ int provider_feature_resource_get(void*, const char* package_id,
         copy_text(out->label, sizeof(out->label), resource.label);
         copy_text(out->description, sizeof(out->description),
                   resource.description);
-        copy_text(out->path, sizeof(out->path), path.string());
+        copy_text(out->path, sizeof(out->path), path.u8string());
         copy_text(out->status, sizeof(out->status),
                   path.empty() ? "Not selected" :
                       (verified ? "Selected" : "Selected path is missing"));
@@ -1045,7 +1046,7 @@ int provider_feature_resource_set_path(void*, const char* package_id,
     return mutate([&](std::string& error) {
         return state().manager.set_feature_resource_path(
             package_id, feature_id, resource_id,
-            std::filesystem::path(path), &error);
+            std::filesystem::u8path(path), &error);
     });
 }
 
@@ -1287,6 +1288,43 @@ bool mod_runtime_initialize(const std::filesystem::path& root,
                      "psxrecomp: mod selection kept but inactive: %s is not "
                      "in this build's mod catalog\n",
                      dormant.c_str());
+    /* psx.hd-textures has a shared directory-resource contract, independent of
+     * the title package id. Keep owner files outside the build-owned bundled
+     * tree, and give the launcher a useful Open folder action on first use. */
+    std::string texture_game_id = game_id;
+    for (char& c : texture_game_id)
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_')
+            c = '_';
+    if (texture_game_id.empty()) texture_game_id = "game";
+    for (const auto& entry : s.manager.packages()) {
+        const ModPackage* package = s.manager.selected_package(entry.first);
+        if (!package || !std::any_of(package->targets.begin(), package->targets.end(),
+                [&](const ModTarget& target) {
+                    return target.game_id == game_id || target.game_id == "*";
+                })) continue;
+        for (const ModPlugin& plugin : package->plugins) {
+            if (plugin.id != "psx.hd-textures" ||
+                !s.manager.feature_resource_path(package->id, plugin.feature_id, "pack").empty())
+                continue;
+            const auto resource = std::find_if(package->resources.begin(), package->resources.end(),
+                [&](const ModResource& r) {
+                    return r.feature_id == plugin.feature_id && r.id == "pack" &&
+                        (r.format == "directory" || r.format == "folder");
+                });
+            if (resource == package->resources.end()) continue;
+            std::error_code ec;
+            const auto pack = std::filesystem::absolute(
+                root / "texture-packs" / texture_game_id, ec);
+            if (!ec) std::filesystem::create_directories(pack / "replacements", ec);
+            if (!ec) std::filesystem::create_directories(pack / "dumps", ec);
+            std::string directory_error;
+            if (ec || !s.manager.set_feature_resource_path(package->id,
+                    plugin.feature_id, "pack", pack, &directory_error)) {
+                std::fprintf(stderr, "psxrecomp: texture pack folder: %s\n",
+                    ec ? ec.message().c_str() : directory_error.c_str());
+            }
+        }
+    }
     if (!sha256_file(exe_path, s.exe_sha256, &s.error)) {
         /* Release installs commonly do not carry a loose PS-X EXE; game-id and
          * expected-byte guards remain available in that case. */
@@ -2129,6 +2167,7 @@ extern "C" void mod_runtime_activate_plugins(void) {
     psx_projection_reset_session();
     gpu_ws_set_native_scene_predicate(nullptr);
     psx_ram_reset_size_request();
+    gpu_hd_textures_shutdown();
     if (!s.initialized || !s.plan.ok) return;
     s.disc_extents.clear();
     s.audio_tracks.clear();
@@ -2194,12 +2233,55 @@ extern "C" int psx_mod_current_resource_path(const char* resource_id,
             resource.feature_id != s.current_plugin->feature_id ||
             resource.id != resource_id)
             continue;
-        const std::string text = resource.path.string();
+        const std::string text = resource.path.u8string();
         if (text.empty() || text.size() + 1 > (size_t)out_size) return 0;
         std::memcpy(out, text.c_str(), text.size() + 1);
         return 1;
     }
     return 0;
+}
+
+extern "C" int psx_mod_current_option_value(const char* option_id,
+                                             char* out, uint32_t out_size) {
+    using namespace PSXRecompV4;
+    if (out && out_size) out[0] = '\0';
+    const auto* plugin = state().current_plugin;
+    if (!plugin) return 0;
+    return psx_mod_option_value(plugin->package_id.c_str(), plugin->feature_id.c_str(),
+                               option_id, out, out_size);
+}
+
+extern "C" int psx_mod_set_hd_texture_pack(const char* resource_id,
+                                           int replacements_enabled, int dump_enabled) {
+    char root[4096] = "";
+    char error[512] = "";
+    if (!psx_mod_current_resource_path(resource_id, root, sizeof(root))) {
+        std::fprintf(stderr, "psxrecomp: HD textures require a selected pack folder\n");
+        return 0;
+    }
+    if (!gpu_hd_textures_configure(root, replacements_enabled, dump_enabled,
+                                  error, sizeof(error))) {
+        std::fprintf(stderr, "psxrecomp: HD textures: %s\n", error);
+        return 0;
+    }
+    std::fprintf(stdout, "psxrecomp: HD textures: %s (replacements %s, dumping %s)\n",
+                 root, replacements_enabled ? "on" : "off", dump_enabled ? "on" : "off");
+    return 1;
+}
+
+extern "C" int psx_mod_set_hd_texture_dump(int enabled) {
+    GpuHdTextureDiag info{};
+    gpu_hd_textures_get_diag(&info);
+    if (!info.root || !info.root[0]) return 0;
+    gpu_hd_textures_set_dump_enabled(enabled);
+    return 1;
+}
+
+extern "C" int psx_mod_reload_hd_texture_pack(void) {
+    char error[512] = "";
+    const int ok = gpu_hd_textures_reload(error, sizeof(error));
+    if (!ok) std::fprintf(stderr, "psxrecomp: HD textures: %s\n", error);
+    return ok;
 }
 
 extern "C" uint8_t psx_mod_read_byte(uint32_t address) {

@@ -25,6 +25,10 @@ int gl_renderer_select_texture_bank(uint16_t id);
 /* Retain texture indices while sampling current guest CLUTs (fades/animation). */
 int gl_renderer_select_texture_bank_live_clut(uint16_t id);
 int gl_renderer_texture_banks_supported(void);
+/* HD texture presentation uses an independent native SW VRAM authority.
+ * Both entry points drain pending draws before changing or deleting textures. */
+void gl_renderer_set_hd_texture_mode(int enabled);
+void gl_renderer_clear_hd_texture_cache(void);
 
 /* Set the GL swap interval / vsync mode (1=vsync, 0=immediate, -1=adaptive).
  * Safe before or after context creation; applies live when a context exists. */

@@ -5712,6 +5712,7 @@ static void gp0_exec_cpu_to_vram(void) {
     /* 0 means max dimension */
     vram_write_w = (w == 0) ? 0x400 : (uint16_t)w;
     vram_write_h = (h == 0) ? 0x200 : (uint16_t)h;
+    gr_vram_upload_begin(vram_write_x, vram_write_y, vram_write_w, vram_write_h);
 
     /* A full history retains old uploads; later transfers must not append
      * to the last slot and overflow its diagnostic word counter. */

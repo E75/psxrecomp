@@ -170,3 +170,4 @@ void gr_vram_transfer_in(int x, int y, int w, int h, const uint16_t *d) {
     (void)x; (void)y; memcpy(s_vram, d, (size_t)w * (size_t)h * 2u);
     g_stub_device_restores++;
 }
+void gr_vram_upload_begin(int x,int y,int w,int h) { (void)x; (void)y; (void)w; (void)h; }
