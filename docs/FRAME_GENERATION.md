@@ -55,7 +55,13 @@ has measured time to spare.
   frame's image and skips the clears before the first draw, and strips along
   a view's edges the picture moved away from are copied from that image, so
   what the in-between camera uncovers shows the newer frame instead of a
-  hole. Triangles crossing the camera plane are dropped. The raw texture
+  hole. Every placed vertex at one screen position moves alike (a weld: the same
+  corner reaches the GPU from several projections), and a vertex without a
+  projection lying on an edge between placed vertices moves as that point of
+  the edge (closes the T-junctions the game's polygon splits leave). A game
+  frame whose in-between camera would pass through geometry (a vertex behind
+  it: tunnel ceilings, overhead bridges) is not generated: without near-plane
+  clipping its image would be wrong. The raw texture
   mirror is not packed from the generated surfaces; all bookkeeping the draws
   touch is restored, so the real stream is unaffected.
 - **Schedule.** With `n` in-between frames per game frame, at the flip the
@@ -90,7 +96,9 @@ has measured time to spare.
 
 - Only GTE-projected triangles move; sprites, lines and fills are the
   redrawn frame's. Areas uncovered by the in-between camera show the newer
-  frame (thin slivers at depth discontinuities are possible).
+  frame. Vertices without a projection that are neither on a placed edge nor
+  shared take their triangle's mean motion (`guessed` counts those over a
+  1 px spread); near R4's tunnel walls this still opens thin cracks.
 - A texture the frame drew earlier into its own displayed buffer is sampled
   as the raw mirror holds it when the in-between frame is drawn.
 - Single-buffered games never flip, so nothing is generated.

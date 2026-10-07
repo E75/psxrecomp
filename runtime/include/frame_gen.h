@@ -97,6 +97,9 @@ typedef struct FgCamFit {
     int      ok;
     const char *why;
     uint32_t nviews, prims, camera, object, neighbour, unchanged;
+    uint32_t clamped;        /* fg_cam_place: vertices the in-between camera passes (frame rejected) */
+    uint32_t guessed;        /* fg_cam_place: vertices without a projection placed by a triangle
+                              * mean over a motion that varies by more than 1 px */
     FgView   v[FG_MAX_VIEWS];
 } FgCamFit;
 
@@ -115,13 +118,13 @@ int fg_cam_fit(const FgPrimList *older, const FgPrimList *newer, const FgCamPara
                FgCamFit *fit, FgVert *verts);
 
 /* Screen positions of every newer vertex at phase t (0 = the older frame's
- * camera, 1 = the newer frame exactly): x/y[newer->n * 3], NaN for a vertex
- * behind the in-between camera (its triangle is not drawn). margin (may be
+ * camera, 1 = the newer frame exactly): x/y[newer->n * 3]; a vertex the
+ * in-between camera is passing is projected at a clamped depth. margin (may be
  * NULL) receives, per view, how far the picture moved in from each edge of
  * its draw area (left, top, right, bottom, px): the newer frame drew nothing
  * beyond its edges, so that strip has no in-between picture and the caller
  * shows the newer frame there. */
-void fg_cam_place(const FgPrimList *newer, const FgCamFit *fit, const FgVert *verts,
+void fg_cam_place(const FgPrimList *newer, FgCamFit *fit, const FgVert *verts,
                   double t, float *x, float *y, float margin[][4]);
 
 /* How many in-between frames to draw per game frame.
