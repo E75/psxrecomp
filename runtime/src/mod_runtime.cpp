@@ -1873,14 +1873,21 @@ bool mod_runtime_prepare_for_launcher(const std::filesystem::path& disc_path, st
 
 bool mod_runtime_try_prepare_cached(const std::filesystem::path& disc_path) {
 #if defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
-    auto& s = state();
-    if (!s.initialized || s.main_applied || !session_plan_fp().empty()) return false;
-    auto probe = s.manager;
-    if (!probe.prepare_resources(s.game_id, disc_path, media_cache_root(), nullptr, true)) return false;
-    ScopedFlag flag(s.cached_prepare);
-    const bool ok = mod_runtime_commit(disc_path, nullptr, true);
-    if (ok && s.ticket_ready) psx_mod_counter_add("startup.preload_hit", 1);
-    return ok && s.ticket_ready;
+    try {
+        auto& s = state();
+        if (!s.initialized || s.main_applied || !session_plan_fp().empty()) return false;
+        auto probe = s.manager;
+        if (!probe.prepare_resources(s.game_id, disc_path, media_cache_root(), nullptr, true)) return false;
+        ScopedFlag flag(s.cached_prepare);
+        const bool ok = mod_runtime_commit(disc_path, nullptr, true);
+        if (ok && s.ticket_ready) psx_mod_counter_add("startup.preload_hit", 1);
+        return ok && s.ticket_ready;
+    } catch (...) {
+        // Preload is best effort before the launcher exists. The ordinary
+        // provider path reports full-preparation errors once UI is available.
+        state().ticket_ready = false;
+        return false;
+    }
 #else
     (void)disc_path;
     return false;

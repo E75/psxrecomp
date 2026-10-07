@@ -301,7 +301,19 @@ static uint64_t startup_counter(const char* requested) {
 }
 
 int main() {
+#if defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
+    const fs::path root = fs::temp_directory_path() / "psxrecomp-mod-runtime-cache-test";
+    const auto isolated_cache = root / "test-cache";
+#if defined(_WIN32)
+    check(SetEnvironmentVariableW(L"LOCALAPPDATA", isolated_cache.c_str()) != FALSE,
+          "isolate audited digest receipts from owner cache");
+#else
+    check(setenv("XDG_CACHE_HOME", isolated_cache.c_str(), 1) == 0,
+          "isolate audited digest receipts from owner cache");
+#endif
+#else
     const fs::path root = fs::temp_directory_path() / "psxrecomp-mod-runtime-test";
+#endif
     std::error_code ec;
     fs::remove_all(root, ec);
     const std::vector<uint8_t> stock(8 * 2352, 0);
@@ -1453,11 +1465,9 @@ int main() {
         // A throw inside resolve must restore cached-only/provider modes.
         check(PSXRecompV4::mod_runtime_initialize(cached_root, "READER", 0, {}, &error), "invalidate ticket for resolver exception fixture");
         throw_resolver = true;
-        bool threw = false;
-        try { PSXRecompV4::mod_runtime_try_prepare_cached(disc); }
-        catch (const std::runtime_error&) { threw = true; }
+        check(!PSXRecompV4::mod_runtime_try_prepare_cached(disc),
+              "best-effort preload contains resolver exceptions before launcher UI");
         throw_resolver = false;
-        check(threw, "resolver exception reaches caller for unwind fixture");
         fs::remove(output_path);
         const auto before_unwind = prepare_calls;
         check(PSXRecompV4::mod_runtime_prepare_for_launcher(disc, &error) && prepare_calls == before_unwind + 1,

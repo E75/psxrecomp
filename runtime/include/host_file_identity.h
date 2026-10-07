@@ -29,9 +29,24 @@ inline bool host_file_identity(const std::filesystem::path& path, std::string& i
     const bool is_remote = GetFileInformationByHandleEx(file, FileRemoteProtocolInfo,
         &remote, sizeof remote) != FALSE;
     const DWORD protocol_error = is_remote ? ERROR_SUCCESS : GetLastError();
+    bool local_handle = false;
+    if (!is_remote) {
+        // A failed protocol query proves nothing about locality. Resolve the
+        // handle itself: mapped drives become UNC paths here and cannot take
+        // the local fallback when a remote provider omits protocol metadata.
+        WCHAR final_path[32768]{};
+        const DWORD length = GetFinalPathNameByHandleW(file, final_path, 32768, FILE_NAME_NORMALIZED);
+        if (length >= 7 && length < 32768 && final_path[0] == L'\\' &&
+            final_path[1] == L'\\' && final_path[2] == L'?' && final_path[3] == L'\\' &&
+            final_path[5] == L':' && final_path[6] == L'\\') {
+            WCHAR drive_root[] = {final_path[4], L':', L'\\', L'\0'};
+            const UINT drive_type = GetDriveTypeW(drive_root);
+            local_handle = drive_type == DRIVE_FIXED || drive_type == DRIVE_REMOVABLE;
+        }
+    }
     const bool reliable_protocol = is_remote
         ? remote.Protocol == 0x00020000 && remote.ProtocolMajorVersion >= 3 // WNNC_NET_LANMAN
-        : protocol_error == ERROR_INVALID_PARAMETER || protocol_error == ERROR_NOT_SUPPORTED;
+        : local_handle && (protocol_error == ERROR_INVALID_PARAMETER || protocol_error == ERROR_NOT_SUPPORTED);
     const bool reliable_fs = reliable_protocol &&
         GetVolumeInformationByHandleW(file, nullptr, 0, nullptr, nullptr, nullptr,
                                      filesystem_name, 32) &&
