@@ -20,6 +20,10 @@ bool mod_runtime_initialize(const std::filesystem::path& root,
 bool mod_runtime_commit(const std::filesystem::path& disc_path = {},
                         std::string* error = nullptr,
                         bool save_selection = true);
+/* Prepare a preboot launcher selection; the audited runtime retains a ticket. */
+bool mod_runtime_prepare_for_launcher(const std::filesystem::path& disc_path,
+                                      std::string* error = nullptr);
+
 /* Audited preboot only: load and verify a plan using existing receipts.
  * A miss never invokes a media converter or computes a disc digest. */
 bool mod_runtime_try_prepare_cached(const std::filesystem::path& disc_path);
