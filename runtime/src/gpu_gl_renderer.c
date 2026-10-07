@@ -8455,7 +8455,9 @@ static void dyn_rescale_in_place(GLuint fbo, int surf_w, const int (*cols)[2], i
 }
 
 static int dyn_apply(int snew) {
-    if (!s_alloc_scale || !s_raster_ok || !s_ctx) { s_dyn_stats.refused++; return 0; }
+    /* Never in the windowed high-resolution mode (s_hiw): dyn_eligible keeps
+     * s_alloc_scale 0 there; refuse here too rather than step its tiles. */
+    if (!s_alloc_scale || !s_raster_ok || !s_ctx || s_hiw) { s_dyn_stats.refused++; return 0; }
     if (snew < 1) snew = 1;
     if (snew > s_alloc_scale) snew = s_alloc_scale;
     if (snew == s_hr_scale) return 1;
