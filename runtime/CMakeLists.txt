@@ -49,6 +49,13 @@ if(BUILD_TESTING)
         src/netplay_exit_reason.c)
     target_include_directories(netplay_exit_reason_test PRIVATE include)
     add_test(NAME netplay_exit_reason_test COMMAND netplay_exit_reason_test)
+    add_executable(netplay_sim_pad_cache_test tests/test_netplay_sim_pad_cache.c)
+    target_include_directories(netplay_sim_pad_cache_test PRIVATE include)
+    target_compile_definitions(netplay_sim_pad_cache_test PRIVATE PSX_MAX_PLAYERS=4)
+    add_test(NAME netplay_sim_pad_cache_test COMMAND netplay_sim_pad_cache_test)
+    add_executable(netplay_local_view_test tests/test_netplay_local_view.c)
+    target_include_directories(netplay_local_view_test PRIVATE include)
+    add_test(NAME netplay_local_view_test COMMAND netplay_local_view_test)
     add_executable(ws_scene_hold_test tests/test_ws_scene_hold.c)
     target_include_directories(ws_scene_hold_test PRIVATE include)
     add_test(NAME ws_scene_hold_test COMMAND ws_scene_hold_test)
@@ -154,6 +161,9 @@ if(BUILD_TESTING)
         add_test(NAME segment_miss_wiring_test COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_segment_miss_wiring.py")
         if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+            add_test(NAME ws_screen_tags_exec_test COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ws_screen_tags_exec.py"
+                --compiler "${CMAKE_C_COMPILER}")
             add_test(NAME ws_activation_bias_exec_test COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ws_activation_bias_exec.py" "${CMAKE_C_COMPILER}")
         endif()
@@ -179,12 +189,13 @@ if(BUILD_TESTING)
     else()
         message(STATUS "gl_readback_region_test: not registered (requires MinGW, SDL3 headers/static library in PSX_GL_READBACK_SDL_ROOT and gcc.exe/g++.exe in PSX_GL_READBACK_COMPILER_BIN)")
     endif()
-    # Real-GL internal-resolution invariance (macOS/Linux, hidden window): the
-    # guest-visible VRAM is identical at every scale, lines stay one native
-    # pixel thick, and an over-limit request clamps inside GL. Needs the SDL3
-    # this tree fetched and a GPU session; labelled hardware like the readback
-    # test above.
-    if(NOT WIN32 AND Python3_Interpreter_FOUND AND TARGET SDL3::SDL3)
+    # Real-GL internal-resolution invariance (macOS, Linux and Windows/MinGW,
+    # hidden window): the guest-visible VRAM is identical at every scale, lines
+    # stay one native pixel thick, and an over-limit request clamps inside GL.
+    # Needs the SDL3 this tree fetched and a GPU session; labelled hardware like
+    # the readback test above. A host with no window/GL 3.3 context (headless,
+    # or Windows over SSH) exits 77 and is reported as skipped.
+    if((NOT WIN32 OR MINGW) AND Python3_Interpreter_FOUND AND TARGET SDL3::SDL3)
         if(DEFINED sdl3_SOURCE_DIR)
             set(_gl_scale_sdl_inc "${sdl3_SOURCE_DIR}/include")
         else()
@@ -198,10 +209,11 @@ if(BUILD_TESTING)
                 --sdl-include "${_gl_scale_sdl_inc}"
                 --sdl-library "$<TARGET_FILE:SDL3::SDL3>"
                 --output "${CMAKE_CURRENT_BINARY_DIR}/gl-scale-results")
-        set_tests_properties(gl_scale_invariance_test PROPERTIES LABELS "gpu;opengl;hardware" TIMEOUT 300)
+        set_tests_properties(gl_scale_invariance_test PROPERTIES
+            LABELS "gpu;opengl;hardware" TIMEOUT 300 SKIP_RETURN_CODE 77)
         unset(_gl_scale_sdl_inc)
     else()
-        message(STATUS "gl_scale_invariance_test: not registered (needs a non-Windows host, Python 3 and SDL3)")
+        message(STATUS "gl_scale_invariance_test: not registered (needs macOS, Linux or MinGW, Python 3 and SDL3)")
     endif()
     if(Python3_Interpreter_FOUND AND TARGET SDL3::SDL3-static)
         add_test(NAME gl_texture_filter_test
@@ -239,6 +251,14 @@ if(BUILD_TESTING)
     target_include_directories(launcher_pad_mode_resolve_test PRIVATE include)
     add_test(NAME launcher_pad_mode_resolve_test
              COMMAND launcher_pad_mode_resolve_test)
+
+    # Presentation-only mod input must not be sourced from disconnected,
+    # peer-synchronized, or rollback-replayed pad state.
+    add_executable(mod_local_input_scope_test
+        tests/test_mod_local_input_scope.c)
+    target_include_directories(mod_local_input_scope_test PRIVATE src)
+    add_test(NAME mod_local_input_scope_test
+             COMMAND mod_local_input_scope_test)
 
     # COP0.CAUSE IP2 must mirror the INTC line combinationally, never latch.
     add_executable(cause_ip2_combinational_test
@@ -343,6 +363,29 @@ if(BUILD_TESTING)
             $<IF:$<PLATFORM_ID:Darwin>,-Wl$<COMMA>-dead_strip,-Wl$<COMMA>--gc-sections>)
         target_link_libraries(isc_store_test PRIVATE ZLIB::ZLIB)
         add_test(NAME isc_store_test COMMAND isc_store_test)
+
+        # DMA and host stores drop the PGXP shadow of the words they touch
+        # (an identical word is not proof of the same projection): the REAL
+        # memory.c store paths against the REAL pgxp.cpp engine. Same link
+        # doubles as isc_store_test, minus the PGXP one.
+        add_executable(pgxp_untracked_store_test
+            tests/test_pgxp_untracked_store.c
+            tests/psx_ram_runtime_map_stubs.c
+            src/memory.c
+            src/dma.c
+            src/gpu_timeline.c
+            src/boot_state.c
+            src/pgxp.cpp
+            src/psx_ram_geometry.c)
+        target_include_directories(pgxp_untracked_store_test PRIVATE include src)
+        target_compile_definitions(pgxp_untracked_store_test PRIVATE
+            PSX_STUBS_REAL_PGXP=1)
+        target_compile_options(pgxp_untracked_store_test PRIVATE
+            -O2 -flto -ffunction-sections -fdata-sections -Wno-lto-type-mismatch)
+        target_link_options(pgxp_untracked_store_test PRIVATE -flto -Wno-lto-type-mismatch
+            $<IF:$<PLATFORM_ID:Darwin>,-Wl$<COMMA>-dead_strip,-Wl$<COMMA>--gc-sections>)
+        target_link_libraries(pgxp_untracked_store_test PRIVATE ZLIB::ZLIB)
+        add_test(NAME pgxp_untracked_store_test COMMAND pgxp_untracked_store_test)
     endif()
 
     # Loadable BIOS backends (psx_bios_module.h): the host loader against
@@ -422,22 +465,46 @@ if(BUILD_TESTING)
     target_link_libraries(duckstation_texture_pack_test PRIVATE Threads::Threads)
     add_test(NAME duckstation_texture_pack_test COMMAND duckstation_texture_pack_test)
 
-    # Registered since before this change, but it did NOT LINK on origin/master:
-    # sio.c had grown psx_read_word / psx_get_cycle_count / i_mask /
-    # g_debug_last_store_pc references that this test's stub block never gained,
-    # so `ctest` in a runtime tree could not even build. The stubs are added now
-    # (a registered test that cannot compile is worse than an unregistered one —
-    # it breaks the whole suite's build), which exposes a real disagreement:
-    # 27 checks fail, starting with enter.id expected=0x73 (DualShock analog ID)
-    # actual=0xFF (no device). Constant-clock and monotonic-clock stubs give
-    # byte-identical results, so the cycle stub is not the discriminator — this
-    # is the SIO/peripheral axis, not the harness. DISABLED until owned.
+    # Standalone serial-pad protocol tests use explicit SIO/device stubs; they
+    # cover both DualShock rumble and JogCon wire/state behavior.
     add_executable(sio_dualshock_rumble_test
         tests/test_sio_dualshock_rumble.c
         src/sio.c)
     target_include_directories(sio_dualshock_rumble_test PRIVATE include)
     add_test(NAME sio_dualshock_rumble_test COMMAND sio_dualshock_rumble_test)
-    set_tests_properties(sio_dualshock_rumble_test PROPERTIES DISABLED TRUE)
+    add_executable(sio_jogcon_protocol_test
+        tests/test_sio_jogcon_protocol.c
+        src/sio.c)
+    target_include_directories(sio_jogcon_protocol_test PRIVATE include)
+    add_test(NAME sio_jogcon_protocol_test COMMAND sio_jogcon_protocol_test)
+    add_executable(sio_negcon_protocol_test
+        tests/test_sio_negcon_protocol.c
+        src/sio.c)
+    target_include_directories(sio_negcon_protocol_test PRIVATE include)
+    add_test(NAME sio_negcon_protocol_test COMMAND sio_negcon_protocol_test)
+    add_executable(sio_negcon_protocol_multitap_test
+        tests/test_sio_negcon_protocol.c
+        src/sio.c)
+    target_include_directories(sio_negcon_protocol_multitap_test PRIVATE include)
+    target_compile_definitions(sio_negcon_protocol_multitap_test PRIVATE
+        PSX_MAX_PLAYERS=5)
+    add_test(NAME sio_negcon_protocol_multitap_test
+             COMMAND sio_negcon_protocol_multitap_test)
+    # The shared PsxNetPad -> SIO apply and normalization, over the real SIO.
+    add_executable(psx_pad_apply_test
+        tests/test_psx_pad_apply.c
+        src/psx_pad_apply.c
+        src/psx_net_pad.c
+        src/sio.c)
+    target_include_directories(psx_pad_apply_test PRIVATE include)
+    add_test(NAME psx_pad_apply_test COMMAND psx_pad_apply_test)
+
+    add_executable(controller_type_test tests/test_controller_type.cpp)
+    target_include_directories(controller_type_test PRIVATE include)
+    add_test(NAME controller_type_test COMMAND controller_type_test)
+    add_executable(psx_stick_test tests/test_psx_stick.cpp src/psx_stick.c)
+    target_include_directories(psx_stick_test PRIVATE include)
+    add_test(NAME psx_stick_test COMMAND psx_stick_test)
 
     add_executable(openxr_input_test tests/test_openxr_input.c src/psx_openxr.c)
     target_include_directories(openxr_input_test PRIVATE include)
@@ -463,6 +530,16 @@ if(BUILD_TESTING)
     target_include_directories(mod_controller_source_test PRIVATE include)
     add_test(NAME mod_controller_source_test COMMAND mod_controller_source_test)
 
+    add_executable(mod_pad_transform_test
+        tests/test_mod_pad_transform.c src/mod_pad_transform.c)
+    target_include_directories(mod_pad_transform_test PRIVATE include)
+    add_test(NAME mod_pad_transform_test COMMAND mod_pad_transform_test)
+    add_executable(psx_hotkey_pad_test tests/test_psx_hotkey_pad.c)
+    target_include_directories(psx_hotkey_pad_test PRIVATE include)
+    add_test(NAME psx_hotkey_pad_test COMMAND psx_hotkey_pad_test)
+    add_executable(psx_trigger_values_test tests/test_psx_trigger_values.c)
+    target_include_directories(psx_trigger_values_test PRIVATE include)
+    add_test(NAME psx_trigger_values_test COMMAND psx_trigger_values_test)
     add_executable(pad_external_input_test
         tests/test_pad_external_input.c src/pad_external_input.c)
     target_include_directories(pad_external_input_test PRIVATE include src)
@@ -605,6 +682,20 @@ if(BUILD_TESTING)
         target_link_options(ws_shared_split_ui_exec_test PRIVATE -Wl,--gc-sections)
     endif()
     add_test(NAME ws_shared_split_ui_exec_test COMMAND ws_shared_split_ui_exec_test)
+
+    add_executable(ws_local_view_margin_test
+        tests/test_ws_local_view_margin.c
+        src/ws_ui_group.c
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
+    target_include_directories(ws_local_view_margin_test PRIVATE include src)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(ws_local_view_margin_test PRIVATE
+            -ffunction-sections -fdata-sections)
+        target_link_options(ws_local_view_margin_test PRIVATE
+            $<IF:$<PLATFORM_ID:Darwin>,-Wl$<COMMA>-dead_strip,-Wl$<COMMA>--gc-sections>)
+    endif()
+    add_test(NAME ws_local_view_margin_test COMMAND ws_local_view_margin_test)
 
     add_executable(ws_view_anchor_test tests/test_ws_view_anchor.c)
     add_executable(ws_view_anchor_gpu_test tests/test_ws_view_anchor_gpu.c
@@ -876,6 +967,30 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME mod_runtime_test COMMAND mod_runtime_test)
 
+    add_executable(netplay_view_mods_test
+        tests/test_netplay_view_mods.cpp
+        src/iso_reader_c.cpp
+        src/mod_runtime.cpp
+        src/mod_packages.cpp
+        src/mod_media.cpp
+        src/disc_path.cpp
+        src/cue_sheet.cpp
+        src/iso_reader.cpp
+        src/crc32.c
+        src/psx_sha256.c)
+    target_include_directories(netplay_view_mods_test PRIVATE
+        include
+        ../recompiler/include
+        ../recompiler/lib/toml11)
+    target_link_libraries(netplay_view_mods_test PRIVATE chdr-static)
+    if(WIN32)
+        if(MSVC)
+            target_link_options(netplay_view_mods_test PRIVATE /STACK:16777216)
+        else()
+            target_link_options(netplay_view_mods_test PRIVATE -Wl,--stack,16777216)
+        endif()
+    endif()
+    add_test(NAME netplay_view_mods_test COMMAND netplay_view_mods_test)
     get_target_property(mod_runtime_sources mod_runtime_test SOURCES)
     add_executable(mod_runtime_cache_test ${mod_runtime_sources})
     target_include_directories(mod_runtime_cache_test PRIVATE
@@ -1151,6 +1266,11 @@ if(BUILD_TESTING)
             "netplay_*_tests: lib/retcomm-rbengine or lib/recomp-net absent - skipped")
     endif()
 
+    add_executable(netplay_load_probe_test
+        tests/test_netplay_load_probe.c)
+    target_include_directories(netplay_load_probe_test PRIVATE include)
+    add_test(NAME netplay_load_probe_test COMMAND netplay_load_probe_test)
+
     if(PSXRECOMP_TEST_HAS_RBENGINE)
         add_executable(netplay_hash_confirm_test
             tests/test_netplay_hash_confirm.c)
@@ -1209,7 +1329,8 @@ if(BUILD_TESTING)
 
         add_executable(netplay_input_hist_test
             tests/test_netplay_input_hist.c
-            src/netplay_input_hist.c)
+            src/netplay_input_hist.c
+            src/psx_net_pad.c)
         target_include_directories(netplay_input_hist_test PRIVATE
             include
             ${_RNET_ROOT}/include)
@@ -1293,7 +1414,14 @@ if(BUILD_TESTING)
                              --cc ${CMAKE_C_COMPILER})
         endif()
         add_test(NAME fntrace_c_linkage_test COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_fntrace_c_linkage.py)
+        add_test(NAME netplay_load_apply_flow_test
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_netplay_load_apply_flow.py)
         if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+            add_test(NAME netplay_rb_session_reset_test
+                     COMMAND ${Python3_EXECUTABLE}
+                             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_netplay_rb_session_reset.py
+                             --compiler ${CMAKE_C_COMPILER})
             add_test(NAME overlay_retry_c11_test COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_overlay_retry_c11.py --compiler ${CMAKE_C_COMPILER})
         endif()
         add_test(NAME setup_bios_assets_test COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_setup_bios_assets.py)

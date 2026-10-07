@@ -2238,6 +2238,7 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
             cpu->ld_which_t = (uint8_t)rt;
 #endif
             cpu->gpr[rt] = cop0_read;
+            psx_pgxp_alu(cpu, insn, cpu->gpr[rt], 0, 0);
             cpu->gpr[0] = 0;
             return 0;
         }
@@ -2247,6 +2248,7 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
             cpu->ld_which_t = (uint8_t)rt;
 #endif
             cpu->gpr[rt] = cop0_read;
+            psx_pgxp_alu(cpu, insn, cpu->gpr[rt], 0, 0);
             cpu->gpr[0] = 0;
             return 0;
         }

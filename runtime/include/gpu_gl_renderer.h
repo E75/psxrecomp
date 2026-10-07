@@ -118,6 +118,15 @@ uint64_t gl_renderer_pass_backups_reused(void);
 uint32_t gl_renderer_pass_image_textures(uint64_t *bytes);
 /* Debug: dump the images of the next `generations` shown frames as PNGs. */
 void     gl_renderer_pass_dump_arm(const char *dir, int generations);
+/* Netplay local view (psx_mod_render_local_view): the VRAM transaction with
+ * no generation. Available only with a presenter surface separate from the
+ * authoritative CPU VRAM (dual raster). While it is open, draws reach only
+ * that surface. end(keep=1) keeps the rect's presented colour (hr surface and
+ * native-wide band) and restores everything else (stencil, raw mirror, CPU
+ * rows, out-of-rect journal, coherency state); keep=0 restores all. */
+uint32_t gl_renderer_local_view_unavailable(void);
+int gl_renderer_local_view_begin(int x, int y, int w, int h);
+int gl_renderer_local_view_end(int keep);
 /* Stereo shares the VRAM transaction, not the temporal generation/schedule. */
 uint32_t gl_renderer_stereo_unavailable(void);
 int gl_renderer_stereo_begin(int x, int y, int w, int h, int reuse_backup);

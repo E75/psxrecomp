@@ -534,7 +534,9 @@ in-process second session is the lobby rematch: a netplay match launched from
 the lobby returns to the lobby launcher when it ends, and the next launch from
 there, netplay or offline, re-enters the emulator in the same process. The
 session before a rematch is therefore always a netplay match, which ran with
-the plan cleared, so no plugin activated in it.
+the plan cleared, so no plugin activated in it -- except own-view plugins
+(`[[plugin]] netplay = "local_view"`, docs/NETPLAY.md "Own-view mods"), whose
+setters the reset below covers like any other.
 
 The reset is one step of the session start that every session runs,
 immediately before activation (see *A rematch is a full session start* below).

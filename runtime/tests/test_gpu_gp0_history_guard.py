@@ -274,19 +274,23 @@ void ws_ui_group_assign(WsUiGroupItem *items, size_t count,
 int32_t ws_ui_anchor_for_bounds(int32_t x, int32_t width, int32_t display_width)
 { (void)x; (void)width; return display_width / 2; }
 int gte_geometry_correction_enabled(void) { return 0; }
-int gte_nclip_native_wide_sign(int32_t value,int* sign) { (void)value; (void)sign; return 0; }
-int gte_nclip_native_wide_previous_sign(int32_t value,int* sign) { (void)value; (void)sign; return 0; }
-void pgxp_set_projection_tracking(int enabled) { (void)enabled; }
+/* The fixture is software-only, with native-wide/PGXP disabled. Unexpected
+ * geometry/projective paths remain fatal rather than becoming silent stubs. */
+int gte_nclip_native_wide_sign(int32_t mac0, int *sign)
+{ (void)mac0; (void)sign; abort(); }
+int gte_nclip_native_wide_previous_sign(int32_t mac0, int *sign)
+{ (void)mac0; (void)sign; abort(); }
 int pgxp_projection_tracking(void) { return 0; }
-int pgxp_load_projection(uint32_t address,uint32_t word,PGXPProjection* projection) {
-    (void)address; (void)word; (void)projection; return 0;
-}
-void gl_renderer_note_wide_triangle_recovery(int enabled) { (void)enabled; }
-int gl_renderer_projective_supported(void) { return 0; }
-void gl_renderer_draw_projected_triangle(const PSXProjectedVertex vertices[3],uint16_t page,
-    uint16_t cx,uint16_t cy,int raw,int semi,int perspective) {
-    (void)vertices; (void)page; (void)cx; (void)cy; (void)raw; (void)semi; (void)perspective;
-}
+void pgxp_set_projection_tracking(int enabled)
+{ if (enabled) abort(); }
+int pgxp_load_projection(uint32_t addr, uint32_t packed, PGXPProjection *out)
+{ (void)addr; (void)packed; (void)out; abort(); }
+int gl_renderer_projective_supported(void) { abort(); }
+void gl_renderer_draw_projected_triangle(const PSXProjectedVertex vertices[3],
+    uint16_t texpage, uint16_t cx, uint16_t cy, int raw, int semi, int perspective)
+{ (void)vertices; (void)texpage; (void)cx; (void)cy; (void)raw; (void)semi; (void)perspective; abort(); }
+void gl_renderer_note_wide_triangle_recovery(int enabled)
+{ if (enabled) abort(); }
 void pgxp_set_enabled(int enabled) { (void)enabled; }
 int pgxp_get_gte_sxy_checked(uint32_t slot, uint32_t packed, int require_valid,
                              int32_t *x16, int32_t *y16)
