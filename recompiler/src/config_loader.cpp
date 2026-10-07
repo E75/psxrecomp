@@ -748,6 +748,13 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
             rt.video_pgxp_color_correction = toml::find<bool>(video, "pgxp_color_correction");
         if (video.contains("pgxp_depth_threshold"))
             rt.video_pgxp_depth_threshold = toml::find<double>(video, "pgxp_depth_threshold");
+        if (video.contains("pgxp_seam")) {
+            const auto m = toml::find<std::string>(video, "pgxp_seam");
+            if (m == "off") rt.video_pgxp_seam = 0;
+            else if (m == "fine") rt.video_pgxp_seam = 1;
+            else if (m == "wide") rt.video_pgxp_seam = 2;
+            else throw std::runtime_error("[video] pgxp_seam must be \"off\", \"fine\" or \"wide\"");
+        }
         if (video.contains("pgxp_mod_only")) {
             rt.video_pgxp_mod_only = toml::find<bool>(video, "pgxp_mod_only");
         }

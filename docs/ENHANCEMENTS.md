@@ -1209,7 +1209,7 @@ pixel. LWL at byte 3 / LWR at byte 0 (and SWL / SWR likewise) move the whole
 word and copy its shadow. Result in the Fossil Field scene: every ground
 triangle dataflow-precise, `tri_mixed` from ~10% of triangles to 474 of 2.05M,
 seams gone (`test_pgxp` pins the sequence).
-### G1.14 — PGXP renderer: depth buffer, perspective-correct colour (2026-10-06)
+### G1.14 — PGXP renderer: depth buffer, perspective-correct colour, seam expansion (2026-10-06)
 
 **Audit against the references.** Read from DuckStation's published source
 (`github.com/stenzek/duckstation`, CC BY-NC-ND 4.0, so behaviour only, no
@@ -1232,7 +1232,7 @@ vertex depth, `src/core/settings.cpp` defaults). GooseStation
 | Tolerance | `PGXPTolerance` -1 | `pgxp_tolerance` | same |
 | Depth buffer | `PGXPDepthBuffer`: per-vertex w as depth, LEQUAL, only for polygons whose w differ (3D) and opaque unless `PGXPTransparentDepthTest`; cleared on drawing-area change and when average z rises by `PGXPDepthThreshold` (4096) | no | **yes**, `pgxp_depth_buffer` |
 | 2D polygons | sprite mode for non-3D precise polygons; `PGXPDisableOn2DPolygons` draws invalid-w polygons native | unproven vertices native per vertex; precise axis-aligned quads bypass the rect path (G1.11) | same; 2D never tests/writes depth |
-| T-junction / seam handling | none for polygons (line expansion only) | none | same |
+| T-junction / seam handling | none for polygons (line expansion only) | none | **seam expansion**, `pgxp_seam` |
 
 **Depth buffer.** gpu.c passes each triangle's SZ when all three vertices
 are dataflow-precise (`gr_set_depth_triangle`). The GL backend draws an
@@ -1270,6 +1270,26 @@ differ by 801 / 92 / 25 / 0 px, none in the tachometer area.
 **Perspective-correct colour.** Gouraud colour on 3D triangles interpolates
 with 1/SZ (textured triangles with perspective UVs share their w).
 
+**Seam expansion.** At internal scale > 1 a vertex that lies on its
+neighbour's edge only to the PS1's precision leaves a hairline onto the
+background (T-junctions of R4's subdivided near polygons; tunnel walls).
+Opaque 3D triangles move each edge outward (mitred, limited at sharp
+corners): `fine` = 1 output px (`PSX_PGXP_SEAM_PX` tunes it), `wide` = half a
+native px. UVs, colour, q and SZ are extrapolated with the barycentric
+coordinates of the new corners (perspective-correct where the attribute is),
+so textures do not slide. `wide` closes larger gaps but smears edge texels
+and thickens silhouettes (beam undersides at the R4 tunnel entrance); `fine`
+is the recommended setting.
+
+**R4 (hook flavor, 10x headless-opengl, Helter Skelter tunnel, savestates
+at the entrance and inside).** Thin-feature pixel counts (features narrower
+than half a native pixel against both neighbours, HUD excluded):
+entrance base 1524 / PGXP 3560 / +depth+colour 2070 / +seam fine 1410-1518;
+inside base 2323 / PGXP 539 / +depth+colour 540 / +seam fine 541-547. The
+remaining counts are mostly texture detail; the visible base cracks along
+the tunnel walls are gone with PGXP and the residual short ones with `fine`.
+Dataflow 99.86%, mixed triangles 0, 0 dispatch / segment misses; guest pace
+equal with the features on and off.
 Diagnostic: `PSX_PGXP_TRI_LOG=<file>` logs every triangle (depth mode, x y
 SZ) while `<file>.on` exists.
 

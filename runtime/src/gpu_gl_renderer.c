@@ -741,13 +741,14 @@ static float   s_pq[3];
 static int     s_pz_valid = 0;
 static float   s_pz[3];
 /* PGXP renderer features (docs/ENHANCEMENTS.md G1.14), all off by default:
- * depth buffer for opaque 3D polygons and perspective-correct Gouraud
- * colour. */
-static int     s_pgxp_depth = 0, s_pgxp_cpersp = 0;
+ * depth buffer for opaque 3D polygons, perspective-correct Gouraud colour,
+ * and the seam expansion of opaque 3D polygons (0 off, 1 = 1 output px
+ * above 1x, 2 = half a native px). */
+static int     s_pgxp_depth = 0, s_pgxp_cpersp = 0, s_pgxp_seam = 0;
 static float   s_pgxp_depth_threshold = 4096.0f;   /* SZ units, as DuckStation */
 static int     s_depth_need_clear = 1, s_depth_used = 0;
 static float   s_depth_last_avg = 0.0f;
-static uint64_t s_depth_clears = 0, s_depth_tris = 0;
+static uint64_t s_depth_clears = 0, s_depth_tris = 0, s_seam_tris = 0;
 
 /* TEX program uniforms. */
 static GLint s_uVram = -1, s_uTpage = -1, s_uClut = -1, s_uDepth = -1;
@@ -2936,10 +2937,14 @@ void gl_renderer_set_pgxp_depth(int on) {
 int  gl_renderer_get_pgxp_depth(void) { return s_pgxp_depth; }
 void gl_renderer_set_pgxp_color_perspective(int on) { s_pgxp_cpersp = on ? 1 : 0; }
 int  gl_renderer_get_pgxp_color_perspective(void) { return s_pgxp_cpersp; }
+void gl_renderer_set_pgxp_seam(int mode) { s_pgxp_seam = mode < 0 ? 0 : mode > 2 ? 2 : mode; }
+int  gl_renderer_get_pgxp_seam(void) { return s_pgxp_seam; }
 void gl_renderer_set_pgxp_depth_threshold(float sz) { s_pgxp_depth_threshold = sz; }
-void gl_renderer_pgxp_render_stats(uint64_t *depth_tris, uint64_t *depth_clears) {
+void gl_renderer_pgxp_render_stats(uint64_t *depth_tris, uint64_t *depth_clears,
+                                   uint64_t *seam_tris) {
     if (depth_tris) *depth_tris = s_depth_tris;
     if (depth_clears) *depth_clears = s_depth_clears;
+    if (seam_tris) *seam_tris = s_seam_tris;
 }
 static int wide_fast_center_valid(void) {
     /* An explicitly stretched sky differs inside the canonical viewport too.
@@ -3769,7 +3774,7 @@ static void line_to_quad(const float *v, float *q) {
 /* Flat / gouraud triangles and lines share the GEO program. mode: GL_TRIANGLES
  * or GL_LINES; verts are (x, y, r, g, b, a) tuples with colors as 1555. */
 
-/* ---- PGXP depth buffer and perspective colour (G1.14) ------------ -------
+/* ---- PGXP depth buffer, perspective colour, seam expansion (G1.14) -------
  * A triangle is "3D" here when gpu.c proved all three vertices from GTE
  * dataflow shadows: sub-pixel positions (s_pc_valid) and their SZ
  * (s_pz_valid). Everything else (2D, HUD, sprites, CPU-built or unproven
@@ -3857,6 +3862,95 @@ static void depth_before_tri(void) {
     s_depth_tris++;
 }
 
+/* Seam expansion of an opaque 3D triangle. At internal scale > 1 a vertex
+ * that sits on a neighbour's edge only to within the PS1's precision (R4's
+ * subdivided near polygons, T-junctions) leaves a hairline crack onto the
+ * background. Each edge moves outward by e native px (mitred corners,
+ * limited at sharp angles); B[k][i] are the barycentric coordinates of new
+ * corner k in the original triangle, so attributes extrapolate exactly:
+ * affine ones as sum B a, perspective ones as sum B q a / sum B q, depth as
+ * 1/sz' = sum B / sz. The depth buffer resolves the overlap. */
+static float pgxp_seam_width(void) {
+    static float fine_px = -1.0f;   /* PSX_PGXP_SEAM_PX: "fine" width in output px */
+    if (fine_px < 0.0f) {
+        const char *e = getenv("PSX_PGXP_SEAM_PX");
+        fine_px = e && *e ? (float)atof(e) : 1.0f;
+        if (fine_px < 0.0f) fine_px = 0.0f;
+    }
+    if (s_pgxp_seam == 1) return s_out_scale > 1 ? fine_px / (float)s_out_scale : 0.0f;
+    if (s_pgxp_seam == 2) return 0.5f;
+    return 0.0f;
+}
+static int seam_expand(float x[3], float y[3], float e, float B[3][3]) {
+    if (e <= 0.0f) return 0;
+    const float area = (x[1] - x[0]) * (y[2] - y[0]) - (y[1] - y[0]) * (x[2] - x[0]);
+    if (fabsf(area) < 1e-4f) return 0;
+    const float sgn = area > 0.0f ? 1.0f : -1.0f;
+    float nx[3], ny[3];   /* outward unit normal of edge k (k -> k+1) */
+    for (int k = 0; k < 3; k++) {
+        const int k1 = (k + 1) % 3;
+        const float ex = x[k1] - x[k], ey = y[k1] - y[k], l = sqrtf(ex * ex + ey * ey);
+        if (l < 1e-5f) return 0;
+        nx[k] = sgn * ey / l; ny[k] = -sgn * ex / l;
+    }
+    float ox[3], oy[3];
+    for (int k = 0; k < 3; k++) {
+        const int kp = (k + 2) % 3;   /* edges kp and k meet at corner k */
+        float mx = nx[kp] + nx[k], my = ny[kp] + ny[k];
+        const float d = 1.0f + nx[kp] * nx[k] + ny[kp] * ny[k];
+        if (d < 0.25f) {              /* sharp corner: limit the mitre to 2e */
+            const float l = sqrtf(mx * mx + my * my);
+            if (l > 1e-6f) { mx *= 2.0f / l; my *= 2.0f / l; }
+        } else { mx /= d; my /= d; }
+        ox[k] = x[k] + e * mx; oy[k] = y[k] + e * my;
+    }
+    const float inv = 1.0f / area;
+    for (int k = 0; k < 3; k++) {
+        for (int i = 0; i < 3; i++) {
+            const int i1 = (i + 1) % 3, i2 = (i + 2) % 3;
+            B[k][i] = ((x[i2] - x[i1]) * (oy[k] - y[i1]) - (y[i2] - y[i1]) * (ox[k] - x[i1])) * inv;
+        }
+    }
+    for (int k = 0; k < 3; k++) { x[k] = ox[k]; y[k] = oy[k]; }
+    s_seam_tris++;
+    return 1;
+}
+/* Extrapolate n attributes (stride apart) of 3 vertices with B. q != NULL:
+ * perspective-correct with weights q (left unchanged; see seam_q). */
+static void seam_attr(const float B[3][3], float *a, int stride, int n, const float *q) {
+    float src[3][8];
+    for (int i = 0; i < 3; i++) for (int j = 0; j < n; j++) src[i][j] = a[i * stride + j];
+    for (int k = 0; k < 3; k++) {
+        float Q = 0.0f;
+        if (q) for (int i = 0; i < 3; i++) Q += B[k][i] * q[i];
+        for (int j = 0; j < n; j++) {
+            float v = 0.0f;
+            if (q && Q > 1e-12f) {
+                for (int i = 0; i < 3; i++) v += B[k][i] * q[i] * src[i][j];
+                v /= Q;
+            } else {
+                for (int i = 0; i < 3; i++) v += B[k][i] * src[i][j];
+            }
+            a[k * stride + j] = v;
+        }
+    }
+}
+static void seam_q(const float B[3][3], float q[3]) {
+    float o[3];
+    for (int k = 0; k < 3; k++) { o[k] = 0.0f; for (int i = 0; i < 3; i++) o[k] += B[k][i] * q[i]; }
+    for (int k = 0; k < 3; k++) q[k] = o[k] > 1e-9f ? o[k] : q[k];
+}
+static void seam_sz(const float B[3][3], float z[3]) {
+    float o[3];
+    for (int k = 0; k < 3; k++) {
+        float iz = 0.0f;
+        for (int i = 0; i < 3; i++) iz += B[k][i] / z[i];
+        o[k] = iz > 1e-9f ? 1.0f / iz : z[k];
+        if (o[k] < 1.0f) o[k] = 1.0f;
+        if (o[k] > 65535.0f) o[k] = 65535.0f;
+    }
+    for (int k = 0; k < 3; k++) z[k] = o[k];
+}
 
 static void gpu_geometry(GLenum mode, const int *xs, const int *ys,
                          const uint16_t *cs, int n, int semi) {
@@ -4048,6 +4142,16 @@ static void gpu_geometry(GLenum mode, const int *xs, const int *ys,
     }
     if (n == 3 && pgxp_tri_is_3d()) {
         float z[3] = { s_pz[0], s_pz[1], s_pz[2] };
+        if (semi < 0 && s_pgxp_seam) {
+            float x[3], y[3], B[3][3];
+            for (int i = 0; i < 3; i++) { x[i] = v0[i * 6]; y[i] = v0[i * 6 + 1]; }
+            if (seam_expand(x, y, pgxp_seam_width(), B)) {
+                float qc[3] = { 1.0f / z[0], 1.0f / z[1], 1.0f / z[2] };
+                seam_attr(B, v0 + 2, 6, 3, s_pgxp_cpersp ? qc : NULL);
+                seam_sz(B, z);
+                for (int i = 0; i < 3; i++) { v0[i * 6] = x[i]; v0[i * 6 + 1] = y[i]; }
+            }
+        }
         for (int i = 0; i < 3; i++)
             v0[i * 6 + 5] = mask_a + 2.0f * pgxp_vertex_code(z[i]);
     }
@@ -4218,6 +4322,22 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
         if (pgxp_tri_is_3d()) {
             float *t0 = &s_tb[s_tb_n * TEXV];
             float z[3] = { s_pz[0], s_pz[1], s_pz[2] };
+            if (semi < 0 && s_pgxp_seam) {
+                float x[3], y[3], B[3][3];
+                for (int i = 0; i < 3; i++) { x[i] = t0[i * TEXV]; y[i] = t0[i * TEXV + 1]; }
+                if (seam_expand(x, y, pgxp_seam_width(), B)) {
+                    float q[3] = { t0[19], t0[TEXV + 19], t0[2 * TEXV + 19] };
+                    float qc[3] = { 1.0f / z[0], 1.0f / z[1], 1.0f / z[2] };
+                    seam_attr(B, t0 + 2, TEXV, 2, s_pq_valid ? q : NULL);          /* uv  */
+                    seam_attr(B, t0 + 4, TEXV, 3, s_pgxp_cpersp ? (s_pq_valid ? q : qc) : NULL);
+                    if (s_pq_valid) {
+                        seam_q(B, q);
+                        for (int i = 0; i < 3; i++) t0[i * TEXV + 19] = q[i];
+                    }
+                    seam_sz(B, z);
+                    for (int i = 0; i < 3; i++) { t0[i * TEXV] = x[i]; t0[i * TEXV + 1] = y[i]; }
+                }
+            }
             for (int i = 0; i < 3; i++) t0[i * TEXV + 26] = pgxp_vertex_code(z[i]);
         }
         pgxp_tri_log_tri('T', tdmode, semi, &s_tb[s_tb_n * TEXV], TEXV);
