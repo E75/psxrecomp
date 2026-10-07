@@ -99,6 +99,7 @@ extern "C" void psx_event_step_conservative_env_init(void);
 #include "launcher_device.h"
 #include "game_options.h"
 #include "mod_plugins.h"
+#include "mod_local_input_policy.h"
 #include "mod_session_baseline.h"
 #include "mod_runtime.h"
 #include "mod_packages.h"
@@ -5739,6 +5740,49 @@ static void apply_input_override_to_sio(int override_word) {
     sio_request_pad_type(0, eff_analog);
     psx_selfcheck_note_pad(0, w, st[0], st[1], st[2], st[3],
                            (uint8_t)(eff_analog ? 1 : 0));
+}
+
+/* Local host sticks for presentation-only mods (mod_plugins.h). */
+extern "C" int psx_mod_read_local_pad_sticks(uint32_t player,
+                                               uint8_t out[4]) {
+    if (!out) return 0;
+    out[0] = out[1] = out[2] = out[3] = 0x80;
+
+    const bool player_valid = player < PSX_MAX_PLAYERS;
+    const bool netplay = psx_netplay_active() != 0;
+    const bool resimulating = psx_netplay_is_resimulating() != 0;
+    if (!player_valid || netplay || resimulating) return 0;
+
+    PlayerInput& p = g_players[player];
+    const bool dev_here = player == 0 && dev_any_input_enabled();
+    const bool attached = p.kind == 1 || (p.kind == 2 && p.handle);
+    if (!psx_mod_local_input_available(player_valid, attached || dev_here,
+                                       netplay, resimulating))
+        return 0;
+
+#ifndef PSX_NO_DEBUG_TOOLS
+    /* The local debug injector supplies a deterministic host-side sample for
+     * camera/input tests. It is never sourced from rollback or a peer. */
+    if (player == 0) {
+        uint8_t injected[4];
+        if (debug_server_get_axis_override(injected)) {
+            std::memcpy(out, injected, sizeof(injected));
+            return 1;
+        }
+    }
+#endif
+
+    if (attached) {
+        /* Read the host pad mapping directly. The SIO-facing mode can be
+         * digital because the game selected a digital pad; presentation mods
+         * still need local axes without changing that simulation state. */
+        pad_sticks_for(p, (int)player + 1, out);
+        return 1;
+    }
+    const Uint8* keys = SDL_GetKeyboardState(NULL);
+    psx_keybinds_sticks(keys, (int)player + 1, out);
+    dev_any_controller_sticks(out);
+    return 1;
 }
 
 /* Capture one SIO slot's PHYSICAL host pad into a netplay/local blob. Returns

@@ -775,6 +775,14 @@ typedef struct PSXModControllerInput {
 } PSXModControllerInput;
 typedef uint32_t (*PSXModControllerPresentationCallback)(
     const PSXModControllerInput* input);
+/* Read-only snapshot of the local host stick state for an emulation-thread
+ * presentation callback. Values are ordered lx, ly, rx, ry and use the
+ * DualShock byte range (0..255, centered at 128). This reads mapped local
+ * controller axes independently of the guest's current digital/analog SIO
+ * mode and never changes the simulation's controller sample. Returns 0 and
+ * centers the output for invalid/disconnected input, netplay, or rollback
+ * resimulation; presentation state must never follow synchronized peer input. */
+int psx_mod_read_local_pad_sticks(uint32_t player, uint8_t out[4]);
 /*
  * Override one player's resolved controller presentation mode for this launch.
  * This is intentionally a trusted-plugin API, not a generic launcher setting.
