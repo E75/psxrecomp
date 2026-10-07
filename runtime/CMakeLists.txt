@@ -586,7 +586,12 @@ if(BUILD_TESTING)
     add_executable(native_wide_projection_test tests/test_native_wide_projection.c
         src/psx_video_timing.c
         src/gpu_timeline.c)
-    foreach(_anchor_test ws_view_anchor ws_view_anchor_gpu native_wide_projection)
+    add_executable(gpu_render_pass_provenance_test tests/test_gpu_render_pass_provenance.c
+        src/ws_ui_group.c
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
+    foreach(_anchor_test ws_view_anchor ws_view_anchor_gpu native_wide_projection
+                         gpu_render_pass_provenance)
         target_include_directories(${_anchor_test}_test PRIVATE include src)
         if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
             target_compile_options(${_anchor_test}_test PRIVATE -ffunction-sections -fdata-sections)
@@ -601,6 +606,7 @@ if(BUILD_TESTING)
     add_test(NAME ws_view_anchor_test COMMAND ws_view_anchor_test)
     add_test(NAME ws_view_anchor_gpu_test COMMAND ws_view_anchor_gpu_test)
     add_test(NAME native_wide_projection_test COMMAND native_wide_projection_test)
+    add_test(NAME gpu_render_pass_provenance_test COMMAND gpu_render_pass_provenance_test)
 
     add_executable(ws_repeat_rect_test tests/test_ws_repeat_rect.c)
     target_include_directories(ws_repeat_rect_test PRIVATE include)

@@ -221,6 +221,15 @@ mod; `psx_memory.h`), scratchpad, I-cache tags, I_STAT/I_MASK, timers, DMA
 and GPU registers (without the widescreen side effects of a savestate load), the
 VRAM rect (hr colour, mask stencil, raw 16-bit mirror, native-wide band, CPU
 VRAM rows), the renderer's coherency bookkeeping, and every clock value.
+
+RAM-keyed GPU presentation provenance is restored too: sprite/HUD/background
+tags, primitive roles, reveal-clear/repeat/mask proofs, and the automatic UI
+prepass. A synthetic draw can rewrite and retag the same packet addresses;
+restoring only their RAM would leave the canonical draw comparing its original
+words against a synthetic proof. Packet freshness, the full-composite latch,
+backdrop phase, and scene classification evidence return to their pre-pass
+values. Diagnostic counters and rings still include synthetic activity.
+
 A watchdog abort leaves by longjmp from inside guest code, skipping the
 exits of the frames it leaves, so the host nesting those frames own is put
 back from the checkpoint too: the cycle-deferral depth, the native overlay
