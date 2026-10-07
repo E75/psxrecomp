@@ -11,6 +11,15 @@ render_thread = true   # game.toml; PSX_RENDER_THREAD=0/1 overrides
 
 `PSX_RENDER_THREAD_FRAMES=N` (default 2) bounds the closed frames in flight.
 
+**Player settings.** `render_thread`, `present_thread` and `frame_generation`
+are also read from the player's `settings.toml` `[video]`, which wins over the
+game.toml default; the `PSX_*` env vars override both for one run and are
+never saved. The launcher shows them as Settings → Display rows (Render
+thread, Present thread, Frame generation; recomp-ui
+`RECOMP_LAUNCHER_HAS_RENDER_PIPELINE`, OpenGL only, the latter two disabled
+while Render thread is off). The pipeline starts once at boot, so a change
+from the in-game launcher is saved and applies at next launch.
+
 ## Why
 
 Before this change one thread ran the recompiled guest, turned every GP0
@@ -348,7 +357,8 @@ means), `guest_bound`, the step counters and `up_blocked`.
   mistakes: replay reading the tags live, staging uploads from the guest
   array, dropping the stream state.
 - `video_enhancement_settings_test`: the keys (`render_thread`,
-  `present_thread`) default off and parse.
+  `present_thread`, `frame_generation`) default off and parse, and the
+  settings.toml copies parse and round-trip through `save_user_settings`.
 - `present_thread_test` (`test_present_thread.c`): the present core against
   a fake presenter: presentation order is submission order over 600 frames
   with 2-4 slots, a slot is never composed while queued or on screen, each
