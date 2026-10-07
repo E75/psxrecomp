@@ -3,6 +3,7 @@
 #include "cpu_state.h"
 
 #include "disc_path.h"
+#include "host_file_identity.h"
 #include "iso_reader.h"
 #include "mod_packages.h"
 #include "mod_plugins.h"
@@ -105,6 +106,14 @@ struct RuntimeMods {
     std::filesystem::path disc_path;
     std::filesystem::path effective_disc_path;
     uint32_t entry_phys = 0;
+    uint64_t preparation_revision = 1;
+    uint64_t ticket_revision = 0;
+    std::map<std::filesystem::path, std::string> ticket_files;
+    bool ticket_ready = false;
+    bool catalog_stamped = false;
+    std::map<std::filesystem::path, std::string> loaded_catalog;
+    bool cached_prepare = false;
+    bool provider_preparing = false;
     bool initialized = false;
     bool main_applied = false;
     bool disc_enabled = false;
@@ -118,6 +127,96 @@ RuntimeMods& state() {
     static RuntimeMods value;
     return value;
 }
+
+std::filesystem::path media_cache_root() {
+    std::filesystem::path root;
+#if defined(_WIN32)
+    if (const char* local = std::getenv("LOCALAPPDATA")) root = local;
+#else
+    if (const char* cache = std::getenv("XDG_CACHE_HOME")) root = cache;
+    else if (const char* home_dir = std::getenv("HOME")) root = std::filesystem::path(home_dir) / ".cache";
+#endif
+    if (root.empty()) root = std::filesystem::temp_directory_path();
+    return root / "psxrecomp/imports";
+}
+
+bool dependency_files(RuntimeMods& s, const std::filesystem::path& disc,
+                      std::map<std::filesystem::path, std::string>& files) {
+    files.clear();
+    auto add = [&](const std::filesystem::path& path) {
+        if (path.empty()) return true;
+        std::string stamp;
+        if (!host_file_identity(path, stamp)) return false;
+        files[path] = std::move(stamp);
+        return true;
+    };
+    if (!add(disc) || !add(resolve_disc_path(disc).data)) return false;
+    std::error_code ec;
+    size_t entries = 0;
+    for (std::filesystem::recursive_directory_iterator it(s.manager.root(), ec), end;
+         !ec && it != end; it.increment(ec)) {
+        if (++entries > 4096) return false;
+        if (it->is_regular_file(ec) && !add(it->path())) return false;
+    }
+    if (ec) return false;
+    for (const auto& [id, versions] : s.manager.packages()) {
+        (void)versions;
+        const auto* package = s.manager.selected_package(id);
+        if (!package) continue;
+        for (const auto& resource : package->resources) {
+            if (!s.manager.feature_enabled(id, resource.feature_id) &&
+                !s.manager.feature_implicitly_enabled(id, resource.feature_id)) continue;
+            const auto path = s.manager.feature_resource_path(id, resource.feature_id, resource.id);
+            if (!add(path)) return false;
+        }
+    }
+    return add(s.effective_disc_path);
+}
+
+bool catalog_files(RuntimeMods& s, std::map<std::filesystem::path, std::string>& files) {
+    files.clear();
+    std::error_code ec;
+    if (!std::filesystem::exists(s.manager.root(), ec)) return !ec;
+    size_t entries = 0;
+    for (std::filesystem::recursive_directory_iterator it(s.manager.root(), ec), end;
+         !ec && it != end; it.increment(ec)) {
+        if (++entries > 4096) return false;
+        if (it->path().filename() != "manifest.toml") continue;
+        std::string stamp;
+        if (!host_file_identity(it->path(), stamp)) return false;
+        files[it->path()] = std::move(stamp);
+    }
+    return !ec;
+}
+
+bool prepared_ticket_matches(const std::filesystem::path& disc) {
+    auto& s = state();
+    if (!s.ticket_ready || s.main_applied || !mod_runtime_session_plan_fp().empty() ||
+        disc != s.disc_path || s.ticket_revision != s.preparation_revision) return false;
+    std::map<std::filesystem::path, std::string> files;
+    if (!dependency_files(s, disc, files) || files != s.ticket_files) return false;
+    auto manager = s.manager;
+    if (!manager.prepare_resources(s.game_id, disc, media_cache_root(), nullptr, true)) return false;
+    for (const auto& [id, versions] : s.manager.packages()) {
+        (void)versions;
+        const auto* package = s.manager.selected_package(id);
+        if (!package) continue;
+        for (const auto& resource : package->resources)
+            if (manager.feature_resource_path(id, resource.feature_id, resource.id) !=
+                s.manager.feature_resource_path(id, resource.feature_id, resource.id)) return false;
+    }
+    return true;
+}
+
+class ScopedFlag {
+    bool& flag;
+    const bool previous;
+public:
+    explicit ScopedFlag(bool& value) : flag(value), previous(value) { flag = true; }
+    ~ScopedFlag() { flag = previous; }
+    ScopedFlag(const ScopedFlag&) = delete;
+    ScopedFlag& operator=(const ScopedFlag&) = delete;
+};
 
 /* Guest calls made from an entry hook can deliver VBlank callbacks before
  * returning. Every callback owns its resource/completion context; restoring
@@ -423,6 +522,78 @@ bool sha256_file(const std::filesystem::path& path, std::string& out,
     for (uint8_t byte : digest)
         text << std::hex << std::setw(2) << std::setfill('0') << (unsigned)byte;
     out = text.str();
+    return true;
+}
+
+bool measured_disc_digest(const std::filesystem::path& path, std::string& digest, std::string* error) {
+    HostLaunchTimingScope timing(HOST_LAUNCH_DISC_HASH);
+    if (!path.empty()) psx_mod_counter_add("startup.disc_hash", 1);
+    const bool ok = sha256_file(path, digest, error);
+    if (ok) timing.success();
+    return ok;
+}
+
+std::string sha256_text(const std::string& value) {
+    psx_sha256_ctx hash; psx_sha256_init(&hash);
+    psx_sha256_update(&hash, reinterpret_cast<const uint8_t*>(value.data()), value.size());
+    uint8_t bytes[32]; psx_sha256_final(&hash, bytes);
+    std::ostringstream text;
+    for (uint8_t byte : bytes) text << std::hex << std::setw(2) << std::setfill('0') << unsigned(byte);
+    return text.str();
+}
+
+// Offline only: semantics match sha256_file (CUE data / CHD raw sectors).
+bool offline_disc_digest(const std::filesystem::path& path, std::string& digest,
+                         std::string* error, bool cached_only) {
+    digest.clear();
+    if (path.empty()) return true;
+    const auto resolved = resolve_disc_path(path);
+    std::string stamp, mount_stamp;
+    const bool reliable = host_file_identity(resolved.data, stamp) &&
+        host_file_identity(resolved.mount, mount_stamp);
+    const std::string key = "disc-sha-v2\n" + resolved.mount.generic_string() + "\n" +
+        resolved.data.generic_string() + "\n" + stamp + "\n" + mount_stamp + "\n";
+    const bool cacheable = reliable && key.size() <= 4096;
+    const auto directory = media_cache_root() / "disc-digests-v2";
+    const auto receipt = directory / (sha256_text(key) + ".txt");
+    if (cacheable) {
+        std::ifstream file(receipt, std::ios::binary);
+        std::array<char, 4227> buffer{};
+        file.read(buffer.data(), buffer.size());
+        const std::string record(buffer.data(), size_t(file.gcount()));
+        if (file.eof() && record.size() == key.size() + 130 &&
+            record.compare(0, key.size(), key) == 0) {
+            const std::string value = record.substr(key.size(), 64);
+            const std::string body = key + value + "\n";
+            if (std::all_of(value.begin(), value.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }) &&
+                record == body + sha256_text(body) + "\n") {
+                digest = value;
+                psx_mod_counter_add("startup.disc_digest_hit", 1);
+                return true;
+            }
+        }
+    }
+    if (cached_only) return false;
+    if (!measured_disc_digest(path, digest, error)) return false;
+    std::string after, mount_after;
+    if (!cacheable || !host_file_identity(resolved.data, after) || after != stamp ||
+        !host_file_identity(resolved.mount, mount_after) || mount_after != mount_stamp) return true;
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    if (ec) return true;
+#if defined(_WIN32)
+    const auto temporary = receipt.string() + "." + std::to_string(GetCurrentProcessId()) + ".tmp";
+#else
+    const auto temporary = receipt.string() + "." + std::to_string(getpid()) + ".tmp";
+#endif
+    const std::string body = key + digest + "\n";
+    { std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
+      if (!(file << body << sha256_text(body) << '\n')) return true; }
+#if defined(_WIN32)
+    MoveFileExW(std::filesystem::path(temporary).c_str(), receipt.c_str(), MOVEFILE_REPLACE_EXISTING);
+#else
+    std::filesystem::rename(temporary, receipt, ec);
+#endif
     return true;
 }
 
@@ -1129,6 +1300,8 @@ int provider_version_get(void*, const char* package_id, int index,
 
 template <typename Callback>
 int mutate(Callback callback) {
+    state().ticket_ready = false;
+    ++state().preparation_revision;
     std::string error;
     if (!callback(error)) {
         set_error(error);
@@ -1149,6 +1322,9 @@ int provider_install(void*, const char* path) {
         std::string id, version;
         if (!state().manager.install_archive(path, &id, &version, &error)) return false;
         if (!state().manager.scan(&error)) return false;
+#if defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
+        state().catalog_stamped = catalog_files(state(), state().loaded_catalog);
+#endif
         return state().manager.select_version(id, version, &error);
     });
 }
@@ -1156,7 +1332,11 @@ int provider_install(void*, const char* path) {
 int provider_remove(void*, const char* id, const char* version) {
     if (!id || !version) return 0;
     return mutate([&](std::string& error) {
-        return state().manager.remove_version(id, version, &error);
+        if (!state().manager.remove_version(id, version, &error)) return false;
+#if defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
+        state().catalog_stamped = catalog_files(state(), state().loaded_catalog);
+#endif
+        return true;
     });
 }
 
@@ -1184,8 +1364,9 @@ int provider_set_option(void*, const char* id, const char* option, const char* v
 int provider_commit(void*, const char* image_path) {
     HostLaunchTimingScope timing(HOST_LAUNCH_PROVIDER_COMMIT);
     std::string error;
-    if (!mod_runtime_commit(image_path ? std::filesystem::path(image_path) :
-                                      std::filesystem::path(), &error)) {
+    const bool ok = mod_runtime_prepare_for_launcher(
+        image_path ? std::filesystem::path(image_path) : std::filesystem::path(), &error);
+    if (!ok) {
         set_error(error);
         return 0;
     }
@@ -1265,6 +1446,8 @@ bool mod_runtime_initialize(const std::filesystem::path& root,
                             const std::filesystem::path& exe_path,
                             std::string* error) {
     RuntimeMods& s = state();
+    s.ticket_ready = false;
+    ++s.preparation_revision;
     offline_manager_before_netplay.reset();
     mod_runtime_set_session_plan_fp({});
     s.manager.set_root({});
@@ -1292,6 +1475,10 @@ bool mod_runtime_initialize(const std::filesystem::path& root,
     s.manager.set_root(root);
     s.game_id = game_id;
     s.entry_phys = game_entry_pc & 0x1FFFFFFFu;
+#if defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
+    std::map<std::filesystem::path, std::string> catalog_before;
+    const bool catalog_before_stamped = catalog_files(s, catalog_before);
+#endif
     if (!s.manager.scan(&s.error) || !s.manager.load_state(&s.error)) {
         if (error) *error = s.error;
         return false;
@@ -1352,11 +1539,17 @@ bool mod_runtime_initialize(const std::filesystem::path& root,
         s.exe_sha256.clear();
         s.error.clear();
     }
+#if defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
+    s.catalog_stamped = catalog_before_stamped && catalog_files(s, s.loaded_catalog) &&
+        catalog_before == s.loaded_catalog;
+#endif
     s.initialized = true;
     return true;
 }
 
 bool mod_runtime_clear_for_netplay(std::string* error) {
+    state().ticket_ready = false;
+    ++state().preparation_revision;
     RuntimeMods& s = state();
     if (!s.initialized) {
         if (error) error->clear();
@@ -1593,16 +1786,8 @@ bool mod_runtime_prepare_resources(const std::filesystem::path& disc_path, std::
     HostLaunchTimingScope timing(HOST_LAUNCH_PREPARE_RESOURCES);
     RuntimeMods& s = state();
     if (!s.initialized) { timing.success(); return true; }
-    std::filesystem::path media_cache;
-#if defined(_WIN32)
-    if (const char* local = std::getenv("LOCALAPPDATA")) media_cache = local;
-#else
-    if (const char* cache = std::getenv("XDG_CACHE_HOME")) media_cache = cache;
-    else if (const char* home_dir = std::getenv("HOME")) media_cache = std::filesystem::path(home_dir) / ".cache";
-#endif
-    if (media_cache.empty()) media_cache = std::filesystem::temp_directory_path();
-    media_cache /= "psxrecomp/imports";
-    if (!s.manager.prepare_resources(s.game_id, disc_path, media_cache, &s.error)) {
+    const auto media_cache = media_cache_root();
+    if (!s.manager.prepare_resources(s.game_id, disc_path, media_cache, &s.error, s.cached_prepare)) {
         if (error) *error = s.error;
         return false;
     }
@@ -1616,15 +1801,58 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* err
     HostLaunchTimingScope timing(HOST_LAUNCH_COMMIT);
     RuntimeMods& s = state();
     if (!s.initialized) { timing.success(); return true; }
-    if (disc_path != s.disc_path) {
-        HostLaunchTimingScope hash_timing(HOST_LAUNCH_DISC_HASH);
+#if defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
+    std::map<std::filesystem::path, std::string> catalog;
+    if (s.catalog_stamped && (!catalog_files(s, catalog) || catalog != s.loaded_catalog)) {
+        s.ticket_ready = false;
+        s.error = "Mod catalog changed after loading; reopen the launcher to rescan it.";
+        if (error) *error = s.error;
+        return false;
+    }
+    if (save_selection && prepared_ticket_matches(disc_path)) {
+        if (!s.provider_preparing) s.ticket_ready = false;
+        clear_function_entry_hooks();
+        s.disc_extents.clear(); s.audio_tracks.clear(); s.extent_start = 0;
+        s.main_applied = false;
+        s.error.clear();
+        psx_mod_counter_add("startup.plan_reuse", 1);
+        timing.success();
+        return true;
+    }
+#endif
+    s.ticket_ready = false;
+    std::string disc_before, data_before;
+#if defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
+    const bool disc_stamped = disc_path.empty() ||
+        (host_file_identity(disc_path, disc_before) &&
+         host_file_identity(resolve_disc_path(disc_path).data, data_before));
+#else
+    const bool disc_stamped = false;
+#endif
+#if !defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
+    if (disc_path != s.disc_path)
+#endif
+    {
         std::string hash_error, digest;
-        if (!sha256_file(disc_path, digest, &hash_error)) digest.clear();
-        else hash_timing.success();
+#if defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
+        const bool hashed = save_selection
+            ? offline_disc_digest(disc_path, digest, &hash_error, s.cached_prepare)
+            : measured_disc_digest(disc_path, digest, &hash_error);
+#else
+        const bool hashed = measured_disc_digest(disc_path, digest, &hash_error);
+#endif
+        if (!hashed && s.cached_prepare) return false;
+        if (!hashed) digest.clear();
         s.disc_path = disc_path;
         s.disc_sha256 = std::move(digest);
     }
     if (!mod_runtime_prepare_resources(disc_path, error)) return false;
+    std::map<std::filesystem::path, std::string> before_resolve;
+#if defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
+    const bool stable_inputs = dependency_files(s, disc_path, before_resolve);
+#else
+    const bool stable_inputs = false;
+#endif
     ModResolution plan;
     {
         HostLaunchTimingScope resolve_timing(HOST_LAUNCH_RESOLVE);
@@ -1682,6 +1910,15 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* err
         }
         derived_timing.success();
     }
+#if defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
+    std::map<std::filesystem::path, std::string> after_resolve;
+    std::string disc_after, data_after;
+    const bool unchanged_disc = disc_path.empty() ||
+        (disc_stamped && host_file_identity(disc_path, disc_after) && disc_before == disc_after &&
+         host_file_identity(resolve_disc_path(disc_path).data, data_after) && data_before == data_after);
+    const bool unchanged_inputs = unchanged_disc && stable_inputs &&
+        dependency_files(s, disc_path, after_resolve) && before_resolve == after_resolve;
+#endif
     if (save_selection) {
         HostLaunchTimingScope save_timing(HOST_LAUNCH_SAVE_STATE);
         if (!s.manager.save_state(&s.error)) {
@@ -1705,11 +1942,48 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* err
     s.effective_disc_path = std::move(effective_disc);
     s.main_applied = false;
     s.error.clear();
+#if defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
+    if (save_selection && (s.provider_preparing || s.cached_prepare) &&
+        s.catalog_stamped && unchanged_inputs && session_plan_fp().empty()) {
+        s.ticket_revision = s.preparation_revision;
+        s.ticket_ready = dependency_files(s, disc_path, s.ticket_files);
+    }
+#endif
     timing.success();
     return true;
 }
 
+bool mod_runtime_prepare_for_launcher(const std::filesystem::path& disc_path, std::string* error) {
+    ScopedFlag flag(state().provider_preparing);
+    return mod_runtime_commit(disc_path, error, true);
+}
+
+bool mod_runtime_try_prepare_cached(const std::filesystem::path& disc_path) {
+#if defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
+    try {
+        auto& s = state();
+        if (!s.initialized || s.main_applied || !session_plan_fp().empty()) return false;
+        auto probe = s.manager;
+        if (!probe.prepare_resources(s.game_id, disc_path, media_cache_root(), nullptr, true)) return false;
+        ScopedFlag flag(s.cached_prepare);
+        const bool ok = mod_runtime_commit(disc_path, nullptr, true);
+        if (ok && s.ticket_ready) psx_mod_counter_add("startup.preload_hit", 1);
+        return ok && s.ticket_ready;
+    } catch (...) {
+        // Preload is best effort before the launcher exists. The ordinary
+        // provider path reports full-preparation errors once UI is available.
+        state().ticket_ready = false;
+        return false;
+    }
+#else
+    (void)disc_path;
+    return false;
+#endif
+}
+
 void mod_runtime_set_session_plan_fp(const std::string& fp) {
+    state().ticket_ready = false;
+    ++state().preparation_revision;
     session_plan_fp() = fp;
 }
 
@@ -1818,6 +2092,12 @@ const std::filesystem::path& mod_runtime_effective_disc_path() {
 const RecompLauncherCModProvider* mod_runtime_launcher_provider() {
 #if defined(RECOMP_LAUNCHER_HAS_WORKER_MOD_COMMIT) && defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
     provider.commit_worker_safe = 1;
+#if defined(RECOMP_LAUNCHER_HAS_PREPARED_MOD_COMMIT)
+    provider.try_commit = [](void*, const char* path) -> int {
+        return prepared_ticket_matches(path ? std::filesystem::path(path) : std::filesystem::path()) ? 1 : 0;
+    };
+    provider.preparation_revision = [](void*) -> unsigned long long { return state().preparation_revision; };
+#endif
 #endif
     return &provider;
 }
@@ -2215,6 +2495,7 @@ extern "C" void mod_runtime_activate_plugins(void) {
     using namespace PSXRecompV4;
     HostLaunchTimingScope timing(HOST_LAUNCH_PLUGIN_ACTIVATION);
     RuntimeMods& s = state();
+    s.ticket_ready = false;
     psx_projection_reset_session();
     gpu_ws_set_native_scene_predicate(nullptr);
     psx_ram_reset_size_request();

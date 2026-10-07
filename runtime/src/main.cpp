@@ -16136,6 +16136,12 @@ int main(int argc, char** argv) {
                 return qrc;
             }
 #endif
+#if defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
+            // Once per offline preboot: verified receipts make the selected plan
+            // ready before the launcher opens. A miss leaves preparation to UI.
+            if (!net_cfg.enabled && !ls.netplay_launch.enabled && !rui_initial_disc.empty())
+                PSXRecompV4::mod_runtime_try_prepare_cached(rui_initial_disc);
+#endif
             char rui_out_disc[1024] = {0};
             launcher_boot_timing_mark("host:before_run_window");
             int rui_rc = recomp_launcher_run_window(

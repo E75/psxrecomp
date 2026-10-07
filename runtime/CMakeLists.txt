@@ -876,6 +876,22 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME mod_runtime_test COMMAND mod_runtime_test)
 
+    get_target_property(mod_runtime_sources mod_runtime_test SOURCES)
+    add_executable(mod_runtime_cache_test ${mod_runtime_sources})
+    target_include_directories(mod_runtime_cache_test PRIVATE
+        include ../recompiler/include ../recompiler/lib/toml11)
+    target_compile_definitions(mod_runtime_cache_test PRIVATE
+        PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE=1)
+    target_link_libraries(mod_runtime_cache_test PRIVATE chdr-static)
+    if(WIN32)
+        if(MSVC)
+            target_link_options(mod_runtime_cache_test PRIVATE /STACK:16777216)
+        else()
+            target_link_options(mod_runtime_cache_test PRIVATE -Wl,--stack,16777216)
+        endif()
+    endif()
+    add_test(NAME mod_runtime_cache_test COMMAND mod_runtime_cache_test)
+
     add_executable(mod_resident_test
         tests/test_mod_resident.cpp
         src/mod_resident.cpp
