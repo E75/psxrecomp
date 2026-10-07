@@ -1731,6 +1731,9 @@ const std::filesystem::path& mod_runtime_effective_disc_path() {
 
 #if defined(RECOMP_LAUNCHER)
 const RecompLauncherCModProvider* mod_runtime_launcher_provider() {
+#if defined(RECOMP_LAUNCHER_HAS_WORKER_MOD_COMMIT) && defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
+    provider.commit_worker_safe = 1;
+#endif
     return &provider;
 }
 
