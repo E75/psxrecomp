@@ -89,8 +89,8 @@ assert "".join(helper[call_at:call_end].split()) == (
     "&g_mod_owned_baseline,&live,g_mod_native_vblank_rate?1:0);"
 ), "the helper must get the persistent baseline and the live native-pacing flag"
 
-# Before the call: only the copy-in, so nothing (such as clearing the native
-# pacing flag) can change what the helper sees.
+# Before the call: clear the session's local mouse accumulator and copy in
+# the scalars. Neither may change the native-pacing state the helper captures.
 COPIES = (
     ("video_vsync", "g_video_vsync"),
     ("frame_interpolation", "g_frame_interpolation"),
@@ -100,9 +100,11 @@ COPIES = (
     ("frame_period_ms", "g_frame_period_ms"),
 )
 before = c_statements(helper[len(HELPER_SIG):call_at])
-expected = ["PSXModSessionScalars live;"] + [f"live.{f} = {g};" for f, g in COPIES]
+expected = ["psx_local_mouse_clear();", "PSXModSessionScalars live;"] + [
+    f"live.{f} = {g};" for f, g in COPIES
+]
 assert sorted(before) == sorted(expected), \
-    f"only the scalar copy-in may precede the baseline call, got {before}"
+    f"only mouse reset and scalar copy-in may precede the baseline call, got {before}"
 
 # After the call: the copy-out, each once, then the native-pacing flag cleared.
 after = helper[call_end:]
