@@ -272,6 +272,9 @@ void gr_set_precise_triangle(int enabled, int32_t x0, int32_t y0,
 void gr_set_perspective_triangle(int enabled, float q0, float q1, float q2) {
     (void)enabled; (void)q0; (void)q1; (void)q2;
 }
+void gr_set_depth_triangle(int enabled, float z0, float z1, float z2) {
+    (void)enabled; (void)z0; (void)z1; (void)z2;
+}
 void gr_fill_rect(int x, int y, int w, int h, uint16_t color) {
     (void)x; (void)y; (void)w; (void)h; (void)color;
 }

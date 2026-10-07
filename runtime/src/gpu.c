@@ -4504,6 +4504,7 @@ static void prepare_precise_triangle(int i0, int i1, int i2,
         gl_renderer_fg_source(id, pc, hd, vx, vy);
     }
     gr_set_perspective_triangle(0, 0.0f, 0.0f, 0.0f);
+    gr_set_depth_triangle(0, 0.0f, 0.0f, 0.0f);
     const int geometry = gte_geometry_correction_enabled();
     if (!geometry && !s_native_wide_projection_correction) {
         gr_set_precise_triangle(0, 0,0, 0,0, 0,0);
@@ -4511,6 +4512,7 @@ static void prepare_precise_triangle(int i0, int i1, int i2,
     }
     const int idx[3] = { i0, i1, i2 };
     int32_t fx[3], fy[3];
+    uint16_t vz[3] = {0, 0, 0};
     int any_precise = 0, n_precise = 0;
     PGXPTriRecord rec;
     memset(&rec, 0, sizeof rec);
@@ -4526,12 +4528,15 @@ static void prepare_precise_triangle(int i0, int i1, int i2,
         int src = PGXP_SRC_NATIVE;
         px = raw_x * 65536;
         py = raw_y * 65536;
+        sz = 0;
         if (geometry)
             src = pgxp_get_precise_vertex(addr, word, raw_x, raw_y, &px, &py, &sz);
         if (src != PGXP_SRC_NATIVE) {
             any_precise = 1;
             n_precise++;
         }
+        /* PGXP depth (G1.14): only a dataflow shadow carries a validated SZ. */
+        vz[i] = src == PGXP_SRC_DATAFLOW ? sz : 0;
         /* Native-wide edge recovery is not PGXP: it does not count in n_precise. */
         if (native_wide_projection_x(addr, word, raw_x, raw_y, &px))
             any_precise = 1;
@@ -4557,6 +4562,8 @@ static void prepare_precise_triangle(int i0, int i1, int i2,
         return;
     }
     gr_set_precise_triangle(1, fx[0],fy[0], fx[1],fy[1], fx[2],fy[2]);
+    if (vz[0] && vz[1] && vz[2])
+        gr_set_depth_triangle(1, (float)vz[0], (float)vz[1], (float)vz[2]);
 }
 
 /* A textured quad whose four packet vertices form an axis-aligned rectangle

@@ -395,6 +395,8 @@ void gr_set_color_modulation(int r, int g, int b, int raw)
 { (void)r; (void)g; (void)b; (void)raw; }
 void gr_set_perspective_triangle(int enabled, float a, float b, float c)
 { (void)enabled; (void)a; (void)b; (void)c; }
+void gr_set_depth_triangle(int enabled, float a, float b, float c)
+{ (void)enabled; (void)a; (void)b; (void)c; }
 void gr_set_precise_triangle(int enabled, int32_t ax, int32_t ay, int32_t bx,
                              int32_t by, int32_t cx, int32_t cy)
 { (void)enabled; (void)ax; (void)ay; (void)bx; (void)by; (void)cx; (void)cy; }

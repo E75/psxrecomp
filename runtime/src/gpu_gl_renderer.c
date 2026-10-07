@@ -447,7 +447,7 @@ enum {
     RTH_WIDE_DISABLE, RTH_WIDE_CLEAR, RTH_WIDE_CLEAR_MARGINS, RTH_PROJ_TRI,
     RTH_WIDE_RECOVERY, RTH_INTERP_SUSPENDED, RTH_PRESENT_VRAM,
     RTH_PRESENT_WIDE, RTH_STATE, RTH_PEEK, RTH_RING_CAPTURE, RTH_DYN_STEP,
-    RTH_FRAME, RTH_FG_SRC
+    RTH_FRAME, RTH_FG_SRC, RTH_DEPTH
 };
 static int  rth_record_mode(void);
 /* Render-thread frame cost (dynamic resolution; defined with GL_RT_BACKEND). */
@@ -715,7 +715,7 @@ static GLuint s_tex_prog = 0, s_tex_vao = 0, s_tex_vbo = 0;
  * fragment shader read the noperspective varying — i.e. bit-identical to the
  * pre-feature pipeline. twin is the prim's GP0(E2h) texture window, its low 20
  * bits as a whole float (mask x, mask y, offset x, offset y; 5 bits each). */
-#define TEXV 26
+#define TEXV 27   /* + a_pz at 26 (PGXP depth, G1.14) */
 static GLuint s_blit_prog = 0, s_blit_vao = 0, s_blit_vbo = 0;
 static GLuint s_blit_hi_prog = 0;            /* windowed hi surface blit */
 static GLint  s_uBhSrc = -1, s_uBhPass = -1, s_uBhMaskset = -1, s_uBhSrcDiv = -1;
@@ -736,6 +736,17 @@ static float s_projected_u[3], s_projected_v[3];
 static float   s_pc_x[3], s_pc_y[3];            /* native VRAM px, fractional  */
 static int     s_pq_valid = 0;                  /* perspective weights present */
 static float   s_pq[3];
+/* PGXP depth for the next triangle (gr_set_depth_triangle): GTE SZ per
+ * vertex, 1..65535, from validated dataflow shadows. */
+static int     s_pz_valid = 0;
+static float   s_pz[3];
+/* PGXP renderer features (docs/ENHANCEMENTS.md G1.14), all off by default:
+ * depth buffer for opaque 3D polygons. */
+static int     s_pgxp_depth = 0;
+static float   s_pgxp_depth_threshold = 4096.0f;   /* SZ units, as DuckStation */
+static int     s_depth_need_clear = 1, s_depth_used = 0;
+static float   s_depth_last_avg = 0.0f;
+static uint64_t s_depth_clears = 0, s_depth_tris = 0;
 
 /* TEX program uniforms. */
 static GLint s_uVram = -1, s_uTpage = -1, s_uClut = -1, s_uDepth = -1;
@@ -1535,14 +1546,23 @@ static const char *GEO_VS =
     "uniform float u_xscale; /* native-wide 2D-backdrop x-stretch; 1 canonical */\n"
     "uniform float u_xcenter;/* stretch centre in VRAM px; 0 canonical */\n"
     "noperspective out vec4 v_col;\n"
-    "void main(){ v_col = a_col;\n"
+    "void main(){\n"
+    "  /* a_col.a carries the mask bit (0/1) and, for a PGXP 3D vertex, its\n"
+    "   * GTE SZ: a = mask + 2*sz. A\n"
+    "   * negative a is a depth-clear vertex (beyond every SZ, inside the far plane). */\n"
+    "  float a = a_col.a, code = floor(a * 0.5), zn = 0.0, w = 1.0;\n"
+    "  float m = a - 2.0 * code;\n"
+    "  float sz = code;\n"
+    "  if (a < 0.0) { m = 0.0; zn = 0.9999; sz = 0.0; }  /* inside the far plane: never clipped */\n"
+    "  else if (sz > 0.5) { zn = 1.0 - 512.0 / (sz + 256.0); }\n"
+    "  v_col = vec4(a_col.rgb, m);\n"
     "  float xb = a_pos.x;\n"
     "  if (u_xscale < 0.0) {\n"
     "    float s = -u_xscale; float h = u_xhalf / s;\n"
     "    float l = u_xcenter - h, r = u_xcenter + h;\n"
     "    if (xb < l) xb = l + (xb-l)*s; else if (xb > r) xb = r + (xb-r)*s;\n"
     "  } else xb = (xb - u_xcenter)*u_xscale + u_xcenter;\n"
-    "  gl_Position = vec4((xb+u_shift+u_xoff)/u_xhalf - 1.0, (a_pos.y+u_shift)/256.0 - 1.0, 0.0, 1.0); }\n";
+    "  gl_Position = vec4(((xb+u_shift+u_xoff)/u_xhalf - 1.0) * w, ((a_pos.y+u_shift)/256.0 - 1.0) * w, zn * w, w); }\n";
 static const char *GEO_FS =
     "#version 330\n"
     "noperspective in vec4 v_col; out vec4 frag;\n"
@@ -1575,6 +1595,7 @@ static const char *TEX_VS =
     "layout(location=10) in float a_twin; /* GP0(E2h) bits 0..19 */\n"
     "layout(location=11) in vec4 a_hd_source; /* page origin + native extent */\n"
     "layout(location=12) in float a_hd_mode;\n"
+    "layout(location=13) in float a_pz;  /* PGXP: sz; 0 = none */\n"
     "uniform float u_shift;\n"
     "uniform float u_xoff;   /* native-wide x translation (px); 0 canonical */\n"
     "uniform float u_xhalf;  /* x clip half-extent (px); 512 canonical */\n"
@@ -1608,8 +1629,10 @@ static const char *TEX_VS =
     "   * the rasterizer interpolates the smooth varying hyperbolically. With\n"
     "   * a_q == 0 (feature off) w is exactly 1.0 and this is the old expression. */\n"
     "  float w = (a_q > 0.0) ? (1.0 / a_q) : 1.0;\n"
+    "  float sz = a_pz, zn = 0.0;\n"
+    "  if (sz > 0.5) { zn = 1.0 - 512.0 / (sz + 256.0); }\n"
     "  vec2 ndc = vec2((xb+u_shift+u_xoff)/u_xhalf - 1.0, (a_pos.y+u_shift)/256.0 - 1.0);\n"
-    "  gl_Position = vec4(ndc * w, 0.0, w); }\n";
+    "  gl_Position = vec4(ndc * w, zn * w, w); }\n";
 static const char *TEX_FS =
     "#version 330\n"
     "noperspective in vec2 v_uv; noperspective in vec4 v_col;\n"
@@ -1959,6 +1982,28 @@ static void hr_end(void) {
     p_glBindVertexArray(0);
     p_glUseProgram(0);
     p_glBindFramebuffer(PSXGL_FRAMEBUFFER, 0);
+}
+
+/* PGXP depth state for one draw (G1.14). 0: no depth (the default GL state
+ * everywhere else), 1: opaque 3D polygon, LEQUAL test and write, 2: depth
+ * clear draw (always pass, write the far clear depth, no colour or stencil).
+ * Every caller that applies 1 or 2 calls depth_restore after its draw. */
+static void depth_apply(int mode) {
+    if (mode == 0) return;
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    if (mode == 2) {
+        glDepthFunc(GL_ALWAYS);
+        glDisable(GL_STENCIL_TEST);
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    } else {
+        glDepthFunc(GL_LEQUAL);
+    }
+}
+static void depth_restore(int mode) {
+    if (mode == 0) return;
+    glDisable(GL_DEPTH_TEST);
+    if (mode == 2) glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 }
 
 /* ---- coherency: CPU -> GPU upload flush --------------------------------- */
@@ -2834,6 +2879,19 @@ static int s_wide_fast = 1;
 void gl_renderer_set_wide_fast(int on) {
     GL_RT_SYNC("set_wide_fast"); s_wide_fast = on ? 1 : 0; }
 int  gl_renderer_get_wide_fast(void) { return s_wide_fast; }
+
+/* PGXP renderer features (G1.14). Plain flags read at append time, so they
+ * can flip between any two primitives. */
+void gl_renderer_set_pgxp_depth(int on) {
+    s_pgxp_depth = on ? 1 : 0;
+    s_depth_need_clear = 1;
+}
+int  gl_renderer_get_pgxp_depth(void) { return s_pgxp_depth; }
+void gl_renderer_set_pgxp_depth_threshold(float sz) { s_pgxp_depth_threshold = sz; }
+void gl_renderer_pgxp_render_stats(uint64_t *depth_tris, uint64_t *depth_clears) {
+    if (depth_tris) *depth_tris = s_depth_tris;
+    if (depth_clears) *depth_clears = s_depth_clears;
+}
 static int wide_fast_center_valid(void) {
     /* An explicitly stretched sky differs inside the canonical viewport too.
      * Keep the full composite for those scenes, including later foreground
@@ -2919,6 +2977,7 @@ static void wide_clear_bd_scale(GLint uScale, GLint uCenter) {
 static float s_tb[TEXBATCH_MAXV * TEXV];
 static int   s_tb_n = 0;                    /* verts queued */
 static int   s_tb_semi = -2;
+static int   s_tb_depth = 0;                /* PGXP depth mode (batch key) */
 static int   s_tb_mask = 0, s_tb_filter = 0;
 static GLuint s_tb_bank_tex;
 static GLuint s_tb_hd_tex;
@@ -3006,7 +3065,7 @@ static void bind_textured_resources(GLuint source, GLuint palette, GLuint hd) {
     p_glActiveTexture(PSXGL_TEXTURE0);
 }
 static int   s_tb_twin[4] = {0, 0, 0, 0};
-static uint64_t s_batch_total = 0, s_batch_reason[7];
+static uint64_t s_batch_total = 0, s_batch_reason[8];
 
 /* Texture-window batching ([video] texture_window_batching, OpenGL; off by
  * default). Off: a GP0(E2h) texture-window change ends the open textured batch
@@ -3176,7 +3235,9 @@ typedef struct {
     int     wdx;             /* its x shift (wide_dx()) */
     float   wscale, wcenter; /* its backdrop stretch (wide_bd_scale) */
     int     wsx, wsy, wsw, wsh;  /* its wide-surface scissor (native px) */
+    uint8_t depth;           /* PGXP depth mode (depth_apply) */
 } HiCmd;
+static int s_hq_depth_cur = 0;   /* depth mode of the batch being queued */
 static HiCmd  *s_hq = NULL;
 static int     s_hq_n = 0, s_hq_cap = 0;
 static float  *s_hq_v = NULL;
@@ -3206,6 +3267,7 @@ static HiCmd *hiw_enqueue(int kind, const float *verts, int nverts, int stride) 
     memcpy(s_hq_v + s_hq_vn, verts, nf * sizeof(float));
     s_hq_vn += nf;
     c->check = (uint8_t)s_mask_check;
+    c->depth = (uint8_t)s_hq_depth_cur;
     c->ax0 = s_area_x1; c->ay0 = s_area_y1; c->ax1 = s_area_x2; c->ay1 = s_area_y2;
     s_hq_cmds++;
     return c;
@@ -3322,7 +3384,9 @@ static void hiw_replay_wide(void) {
             p_glUniform1i(s_uFilter, c->filter);
             p_glBufferData(PSXGL_ARRAY_BUFFER, (ptrdiff_t)((size_t)c->vcount * TEXV * sizeof(float)),
                            s_hq_v + c->vfirst, PSXGL_STREAM_DRAW);
+            depth_apply(c->depth);
             tex_draw_passes_ex(c->vcount, c->semi, c->mask, c->check, 0);
+            depth_restore(c->depth);
         } else {
             if (cur != HQ_GEO) {
                 p_glUseProgram(s_geo_prog);
@@ -3337,7 +3401,9 @@ static void hiw_replay_wide(void) {
             mask_stencil_ex(c->mask, c->check);
             p_glBufferData(PSXGL_ARRAY_BUFFER, (ptrdiff_t)((size_t)c->vcount * 6 * sizeof(float)),
                            s_hq_v + c->vfirst, PSXGL_STREAM_DRAW);
+            depth_apply(c->depth);
             glDrawArrays(GL_TRIANGLES, 0, c->vcount);
+            depth_restore(c->depth);
         }
     }
     if (!any) return;
@@ -3403,7 +3469,9 @@ static void hiw_flush_queue(void) {
                 p_glUniform1i(s_uFilter, c->filter);
                 p_glBufferData(PSXGL_ARRAY_BUFFER, (ptrdiff_t)((size_t)c->vcount * TEXV * sizeof(float)),
                                s_hq_v + c->vfirst, PSXGL_STREAM_DRAW);
+                depth_apply(c->depth);
                 tex_draw_passes_ex(c->vcount, c->semi, c->mask, c->check, 0);
+                depth_restore(c->depth);
             } else {
                 if (cur != HQ_GEO) {
                     p_glUseProgram(s_geo_prog);
@@ -3415,7 +3483,9 @@ static void hiw_flush_queue(void) {
                 mask_stencil_ex(c->mask, c->check);
                 p_glBufferData(PSXGL_ARRAY_BUFFER, (ptrdiff_t)((size_t)c->vcount * 6 * sizeof(float)),
                                s_hq_v + c->vfirst, PSXGL_STREAM_DRAW);
+                depth_apply(c->depth);
                 glDrawArrays(GL_TRIANGLES, 0, c->vcount);
+                depth_restore(c->depth);
             }
         }
     }
@@ -3446,7 +3516,7 @@ static void hiw_flush_tail(void) {
 static void flush_tex_batch(void) {
     if (s_tb_n == 0) return;
     wide_stencil_ready();   /* before any of this batch's GL state */
-    int nverts = s_tb_n, semi = s_tb_semi;
+    int nverts = s_tb_n, semi = s_tb_semi, dmode = s_tb_depth;
     s_tb_n = 0;                             /* clear first: re-entrancy safe */
     double cw_t0 = cw_ms();
     s_cw_batches++; s_batch_total++; s_cw_flush_depth++;
@@ -3461,7 +3531,9 @@ static void flush_tex_batch(void) {
     p_glBindBuffer(PSXGL_ARRAY_BUFFER, s_tex_vbo);
     p_glBufferData(PSXGL_ARRAY_BUFFER, (ptrdiff_t)(nverts * TEXV * sizeof(float)), s_tb, PSXGL_STREAM_DRAW);
 
+    depth_apply(dmode);
     tex_batch_draw_passes(nverts, semi);
+    depth_restore(dmode);
 
     /* Native-wide mirror — skipped for a batch fully inside the 4:3 frame (its
      * centre content comes from the present-time canonical blit; nothing to add
@@ -3477,8 +3549,10 @@ static void flush_tex_batch(void) {
     /* Windowed high-resolution surface: the same batch at S, queued and
      * replayed in one render pass at the next sync point (see s_hq), with its
      * native-wide mirror. No-op unless that mode is engaged. */
+    s_hq_depth_cur = dmode;
     if ((hiw_on() || (mirror && wide_queue_live())) &&
         hiw_enqueue_tex(nverts, semi, mirror, s_tb_gate)) mirror = 0;
+    s_hq_depth_cur = 0;
 
     if (mirror) {   /* native-wide mirror */
         int dx = wide_dx();
@@ -3486,7 +3560,9 @@ static void flush_tex_batch(void) {
         gl_perf_mirror_begin();
         wide_target_begin(dx, s_tex_uXoff, s_tex_uXhalf);
         wide_set_bd_scale(s_tex_uXscale, s_tex_uXcenter);
+        depth_apply(dmode);
         if (s_ws_ablate != 2) tex_batch_draw_passes(nverts, semi);
+        depth_restore(dmode);
         wide_clear_bd_scale(s_tex_uXscale, s_tex_uXcenter);
         wide_target_end(s_tex_uXoff, s_tex_uXhalf);
         gl_perf_mirror_end();
@@ -3505,6 +3581,7 @@ static void flush_tex_batch(void) {
 static float s_fb[(FLATBATCH_MAXV + 2 * FLATBATCH_MAXL) * 6];
 static int   s_fb_n = 0;
 static int   s_fb_semi = -2;
+static int   s_fb_depth = 0;                /* PGXP depth mode (batch key) */
 static int   s_fb_mask = -1;
 /* GL_TRIANGLES, or GL_LINES for a batch of native-wide lines (gpu_geometry). */
 static GLenum s_fb_mode = GL_TRIANGLES;
@@ -3555,6 +3632,7 @@ static void flush_flat_batch(void) {
     if (s_fb_mode != GL_TRIANGLES && !hiw_on())
         hiw_flush_queue();  /* GL_LINES mirror at once: queued mirrors first */
     int nverts = s_fb_n, semi = s_fb_semi, mask = s_fb_mask, nl = s_fbl_n;
+    int dmode = s_fb_depth;
     GLenum fmode = s_fb_mode;
     s_fb_n = 0;
     s_fbl_n = 0;
@@ -3569,8 +3647,10 @@ static void flush_flat_batch(void) {
     if (nl) memcpy(&s_fb[nverts * 6], s_fbl, (size_t)nl * 2 * 6 * sizeof(float));
     p_glBufferData(PSXGL_ARRAY_BUFFER, (ptrdiff_t)((nverts + 2 * nl) * 6 * sizeof(float)),
                    s_fb, PSXGL_STREAM_DRAW);
+    depth_apply(dmode);
     if (nl) flat_batch_draw_hr_lines(nverts, nl);
     else glDrawArrays(fmode, 0, nverts);
+    depth_restore(dmode);
     int mirror = g_wide_cur && !s_wide_suppress && s_ws_ablate != 1 &&
                  !(!g_ws_bd_stretch_on && mirror_flat_batch_center_only(nverts));
     if (mirror) {
@@ -3578,8 +3658,10 @@ static void flush_flat_batch(void) {
         wide_bd_scale(s_fb_gate, &sc, &ce);
         wst_note_draw(g_wide_cur, s_fb, nverts, 6, wide_dx(), sc, ce, s_mask_check);
     }
+    s_hq_depth_cur = dmode;
     if ((hiw_on() || (mirror && fmode == GL_TRIANGLES && wide_queue_live())) &&
         hiw_enqueue_geo(s_fb, nverts, semi, mask, mirror, s_fb_gate)) mirror = 0;
+    s_hq_depth_cur = 0;
 
     if (mirror) {
         int dx = wide_dx();
@@ -3587,7 +3669,9 @@ static void flush_flat_batch(void) {
         gl_perf_mirror_begin();
         wide_target_begin(dx, s_geo_uXoff, s_geo_uXhalf);
         wide_set_bd_scale(s_geo_uXscale, s_geo_uXcenter);
+        depth_apply(dmode);
         if (s_ws_ablate != 2) glDrawArrays(fmode, 0, nverts);
+        depth_restore(dmode);
         wide_clear_bd_scale(s_geo_uXscale, s_geo_uXcenter);
         wide_target_end(s_geo_uXoff, s_geo_uXhalf);
         gl_perf_mirror_end();
@@ -3635,6 +3719,83 @@ static void line_to_quad(const float *v, float *q) {
 
 /* Flat / gouraud triangles and lines share the GEO program. mode: GL_TRIANGLES
  * or GL_LINES; verts are (x, y, r, g, b, a) tuples with colors as 1555. */
+
+/* ---- PGXP depth buffer (G1.14) ------------------------------------------- -------
+ * A triangle is "3D" here when gpu.c proved all three vertices from GTE
+ * dataflow shadows: sub-pixel positions (s_pc_valid) and their SZ
+ * (s_pz_valid). Everything else (2D, HUD, sprites, CPU-built or unproven
+ * polygons) draws exactly as before: no depth test, no depth write. */
+static int pgxp_tri_is_3d(void) { return s_pc_valid && s_pz_valid; }
+/* PSX_PGXP_TRI_LOG=<file> (diagnostic): while <file>.on exists, every
+ * triangle is logged (kind, depth mode, x y sz per vertex) and every depth
+ * clear as "C". */
+static FILE *pgxp_tri_log(void) {
+    static int init = 0; static char path[400]; static FILE *f = NULL;
+    if (!init) { init = 1; const char *e = getenv("PSX_PGXP_TRI_LOG"); if (e && *e) snprintf(path, sizeof path, "%s", e); }
+    if (!path[0]) return NULL;
+    char on[420]; snprintf(on, sizeof on, "%s.on", path);
+    FILE *t = fopen(on, "r"); if (!t) { if (f) { fclose(f); f = NULL; } return NULL; } fclose(t);
+    if (!f) f = fopen(path, "a");
+    return f;
+}
+static void pgxp_tri_log_tri(char kind, int dmode, int semi, const float *v, int stride) {
+    FILE *f = pgxp_tri_log(); if (!f) return;
+    fprintf(f, "%c %d %d %d", kind, dmode, semi, s_pz_valid);
+    for (int i = 0; i < 3; i++)
+        fprintf(f, " %.3f %.3f %.1f", v[i * stride], v[i * stride + 1], s_pz_valid ? s_pz[i] : 0.0f);
+    fprintf(f, " area %d %d %d %d\n", s_area_x1, s_area_y1, s_area_x2, s_area_y2);
+}
+/* Depth mode of the next triangle: opaque 3D polygons only (DuckStation's
+ * default; semi-transparent polygons neither test nor write). */
+static int pgxp_tri_depth_mode(int semi) {
+    return (s_pgxp_depth && semi < 0 && pgxp_tri_is_3d()) ? 1 : 0;
+}
+/* Per-vertex code the shaders decode: SZ (0 = none). */
+static float pgxp_vertex_code(float sz) {
+    if (!s_pz_valid || sz <= 0.0f) return 0.0f;
+    return sz;
+}
+
+/* The depth buffer is cleared (beyond every SZ, over the drawing area and
+ * the native-wide margins) by a colourless depth-only draw through the flat
+ * batch, so every surface a draw reaches (the hr surface, the high-resolution
+ * window tiles, the wide surfaces) clears in painter order with it. */
+static void depth_clear_now(void) {
+    flush_flat_batch();
+    flush_tex_batch();
+    const float x0 = (float)s_area_x1 - 1024.0f, x1 = (float)s_area_x2 + 1.0f + 1024.0f;
+    const float y0 = (float)s_area_y1, y1 = (float)s_area_y2 + 1.0f;
+    const float q[6][2] = { {x0, y0}, {x1, y0}, {x0, y1}, {x1, y0}, {x1, y1}, {x0, y1} };
+    s_fb_mode = GL_TRIANGLES; s_fb_semi = -1; s_fb_mask = (int)s_mask_set;
+    s_fb_gate = 0; s_fb_depth = 2;
+    for (int i = 0; i < 6; i++) {
+        float *v = &s_fb[i * 6];
+        v[0] = q[i][0]; v[1] = q[i][1]; v[2] = v[3] = v[4] = 0.0f; v[5] = -1.0f;
+    }
+    s_fb_n = 6;
+    flush_flat_batch();
+    s_depth_clears++;
+    { FILE *f = pgxp_tri_log(); if (f) fprintf(f, "C\n"); }
+}
+/* Before a depth-tested triangle: clear when the drawing area changed since
+ * the last one (a new frame buffer) or after a fill, and, like DuckStation's
+ * PGXP depth clear threshold, when the average SZ jumps back by the
+ * threshold or more (the game started a new 3D pass over the same area). */
+static void depth_before_tri(void) {
+    const float avg = (s_pz[0] + s_pz[1] + s_pz[2]) * (1.0f / 3.0f);
+    if (s_depth_used && s_pgxp_depth_threshold > 0.0f &&
+        avg - s_depth_last_avg >= s_pgxp_depth_threshold)
+        s_depth_need_clear = 1;
+    s_depth_last_avg = avg;
+    if (s_depth_need_clear) {
+        s_depth_need_clear = 0;
+        depth_clear_now();
+    }
+    s_depth_used = 1;
+    s_depth_tris++;
+}
+
+
 static void gpu_geometry(GLenum mode, const int *xs, const int *ys,
                          const uint16_t *cs, int n, int semi) {
     flush_tex_batch();   /* flat prim: drain textured draws first (order + program) */
@@ -3660,12 +3821,13 @@ static void gpu_geometry(GLenum mode, const int *xs, const int *ys,
     if (mode == GL_LINES && n == 2 && s_hr_scale == 1 && !s_hiw && g_wide_cur &&
         !bd_prim_gate(xs, n, 0)) {
         if (s_fb_n > 0 && (s_fb_mode != GL_LINES || s_fb_semi != semi ||
-                           s_fb_mask != (int)s_mask_set || s_fb_gate != 0))
+                           s_fb_mask != (int)s_mask_set || s_fb_gate != 0 || s_fb_depth != 0))
             flush_flat_batch();
         if (s_fb_n + 2 > FLATBATCH_MAXV)
             flush_flat_batch();
         s_fb_mode = GL_LINES;
         s_fb_gate = 0;
+        s_fb_depth = 0;   /* lines are 2D: never depth-tested (G1.14) */
         s_fb_semi = semi;
         s_fb_mask = (int)s_mask_set;
         float mask_a = s_mask_set ? 1.0f : 0.0f;
@@ -3706,13 +3868,14 @@ static void gpu_geometry(GLenum mode, const int *xs, const int *ys,
         }
         line_to_quad(lv, quad);
         if (s_fb_n > 0 && (s_fb_mode != GL_TRIANGLES || s_fb_semi != semi ||
-                           s_fb_mask != (int)s_mask_set))
+                           s_fb_mask != (int)s_mask_set || s_fb_depth != 0))
             flush_flat_batch();
         if (s_fb_n + 6 > FLATBATCH_MAXV)
             flush_flat_batch();
         s_fb_mode = GL_TRIANGLES;
         s_fb_semi = semi;
         s_fb_mask = (int)s_mask_set;
+        s_fb_depth = 0;   /* lines are 2D: never depth-tested (G1.14) */
         if (s_hiw) {   /* the 1x hr surface draws the line itself */
             s_fbl_at[s_fbl_n] = s_fb_n;
             memcpy(&s_fbl[s_fbl_n * 2 * 6], lv, sizeof lv);
@@ -3795,8 +3958,11 @@ static void gpu_geometry(GLenum mode, const int *xs, const int *ys,
     }
 
     int gate = bd_prim_gate(xs, n, 0);
+    const int dmode = n == 3 ? pgxp_tri_depth_mode(semi) : 0;
+    if (dmode) depth_before_tri();
     if (s_fb_n > 0 && (s_fb_mode != GL_TRIANGLES || s_fb_semi != semi ||
-                       s_fb_mask != (int)s_mask_set || s_fb_gate != gate))
+                       s_fb_mask != (int)s_mask_set || s_fb_gate != gate ||
+                       s_fb_depth != dmode))
         flush_flat_batch();
     if (s_fb_n + n > FLATBATCH_MAXV)
         flush_flat_batch();
@@ -3804,8 +3970,10 @@ static void gpu_geometry(GLenum mode, const int *xs, const int *ys,
     s_fb_semi = semi;
     s_fb_mask = (int)s_mask_set;
     s_fb_gate = gate;
+    s_fb_depth = dmode;
 
     float mask_a = s_mask_set ? 1.0f : 0.0f;
+    float *v0 = &s_fb[s_fb_n * 6];
     for (int i = 0; i < n; i++) {
         float *v = &s_fb[s_fb_n * 6];
         v[0] = precise ? s_pc_x[i] : (float)xs[i];
@@ -3816,6 +3984,12 @@ static void gpu_geometry(GLenum mode, const int *xs, const int *ys,
         v[5] = mask_a;
         s_fb_n++;
     }
+    if (n == 3 && pgxp_tri_is_3d()) {
+        float z[3] = { s_pz[0], s_pz[1], s_pz[2] };
+        for (int i = 0; i < 3; i++)
+            v0[i * 6 + 5] = mask_a + 2.0f * pgxp_vertex_code(z[i]);
+    }
+    if (n == 3) pgxp_tri_log_tri('G', dmode, semi, v0, 6);
 }
 
 /* Drain a pending native-wide line batch (gpu_geometry). flush_flat_batch()
@@ -3929,6 +4103,8 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
          * on opaque transitions, bank/state changes, masking or subtraction. */
         int isolate = semi >= 0 &&
             !mod_texture_bank_batchable(s_selected_bank_tex != 0, s_mask_check, semi);
+        const int tdmode = pgxp_tri_depth_mode(semi);
+        if (tdmode) depth_before_tri();
         int reason = -1;
         if (s_tb_n > 0) {
             if (s_tb_bank_tex != s_selected_bank_tex || s_tb_bank_live_clut != s_selected_bank_live_clut || s_tb_hd_tex != hd_tex) reason = 0;
@@ -3940,6 +4116,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
             else if ((!s_twin_batching || s_mask_check) &&
                      (twx != s_tb_twin[0] || twy != s_tb_twin[1] ||
                       tox != s_tb_twin[2] || toy != s_tb_twin[3])) reason = 5;
+            else if (tdmode != s_tb_depth) reason = 6;
         }
         if (reason >= 0) {
             s_batch_reason[reason]++;
@@ -3948,6 +4125,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
         if (s_tb_n + 3 > TEXBATCH_MAXV) { s_batch_reason[6]++; flush_tex_batch(); }
         if (s_tb_n == 0) {            /* opening a batch: capture its keyed state */
             s_tb_semi = batch_semi; s_tb_mask = s_mask_set; s_tb_filter = filter; s_tb_gate = gate;
+            s_tb_depth = tdmode;
             s_tb_bank_tex = s_selected_bank_tex;
             s_tb_bank_live_clut = s_selected_bank_live_clut;
             s_tb_hd_tex = hd_tex;
@@ -3973,7 +4151,14 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
             vp[21] = (float)hd.origin_u; vp[22] = (float)hd.origin_v;
             vp[23] = (float)hd.source_width; vp[24] = (float)hd.source_height;
             vp[25] = (float)hd.alpha_mode;
+            vp[26] = 0.0f;                                          /* a_pz     */
         }
+        if (pgxp_tri_is_3d()) {
+            float *t0 = &s_tb[s_tb_n * TEXV];
+            float z[3] = { s_pz[0], s_pz[1], s_pz[2] };
+            for (int i = 0; i < 3; i++) t0[i * TEXV + 26] = pgxp_vertex_code(z[i]);
+        }
+        pgxp_tri_log_tri('T', tdmode, semi, &s_tb[s_tb_n * TEXV], TEXV);
         s_tb_n += 3;
         if (isolate) flush_tex_batch();   /* draw this semi prim alone, in submission order */
     }
@@ -4273,7 +4458,13 @@ static void glb_set_perspective_triangle(int enabled, float q0, float q1, float 
     s_pq[0] = q0; s_pq[1] = q1; s_pq[2] = q2;
     sw_set_perspective_triangle(enabled, q0, q1, q2);
 }
+static void glb_set_depth_triangle(int enabled, float z0, float z1, float z2) {
+    s_pz_valid = (enabled && z0 > 0.0f && z1 > 0.0f && z2 > 0.0f) ? 1 : 0;
+    s_pz[0] = z0; s_pz[1] = z1; s_pz[2] = z2;
+}
 static void glb_set_draw_area(int x1,int y1,int x2,int y2) {
+    if (s_depth_used && (x1 != s_area_x1 || y1 != s_area_y1 || x2 != s_area_x2 || y2 != s_area_y2))
+        s_depth_need_clear = 1;   /* PGXP depth: a new drawing area starts clean */
     flush_flat_batch(); flush_tex_batch(); s_area_x1=x1; s_area_y1=y1; s_area_x2=x2; s_area_y2=y2; sw_set_draw_area(x1,y1,x2,y2); }
 static void glb_get_draw_area(int *x1,int *y1,int *x2,int *y2) { sw_get_draw_area(x1,y1,x2,y2); }
 static void glb_set_draw_offset(int x,int y) { flush_flat_batch(); flush_tex_batch(); s_off_x=x; s_off_y=y; sw_set_draw_offset(x,y); }
@@ -4306,7 +4497,7 @@ static int native_draw_begin(void) {
 static void native_draw_end(int previous) { sw_set_faithful_authority(previous); }
 /* The sub-pixel / perspective override describes exactly one triangle; drop it
  * once that triangle has been submitted so a later prim can never inherit it. */
-static inline void precise_consumed(void) { s_pc_valid = 0; s_pq_valid = 0; s_projected_uv_valid = 0; }
+static inline void precise_consumed(void) { s_pc_valid = 0; s_pq_valid = 0; s_projected_uv_valid = 0; s_pz_valid = 0; }
 
 int gl_renderer_projective_supported(void) {
     if (s_rth_on && !rt_on_render_thread() && !rt_held())
@@ -4381,6 +4572,7 @@ static void glb_draw_gouraud_triangle(int x0,int y0,uint16_t c0,int x1,int y1,ui
 }
 static void glb_fill_rect(int x,int y,int w,int h,uint16_t c){
     if (pass_refuse_write("fill", x, y, w, h)) return;
+    if (s_depth_used) s_depth_need_clear = 1;   /* PGXP depth: the image under it is gone */
     if (cpu_raster_required()) {
         int faithful = native_draw_begin();
         sw_fill_rect(x,y,w,h,c);
@@ -5160,6 +5352,7 @@ static int init_gpu_raster(void) {
         p_glVertexAttribPointer(10, 1, GL_FLOAT, GL_FALSE, st, (void*)(20*sizeof(float))); p_glEnableVertexAttribArray(10); /* twin */
         p_glVertexAttribPointer(11, 4, GL_FLOAT, GL_FALSE, st, (void*)(21*sizeof(float))); p_glEnableVertexAttribArray(11); /* HD source */
         p_glVertexAttribPointer(12, 1, GL_FLOAT, GL_FALSE, st, (void*)(25*sizeof(float))); p_glEnableVertexAttribArray(12); /* HD alpha mode */
+        p_glVertexAttribPointer(13, 1, GL_FLOAT, GL_FALSE, st, (void*)(26*sizeof(float))); p_glEnableVertexAttribArray(13); /* pz   */
     }
 
     p_glGenVertexArrays(1, &s_blit_vao);
@@ -9686,6 +9879,7 @@ static const GpuRenderBackend GL_BACKEND = {
     .wide_clear_margins = glb_wide_clear_margins,
     .render_wide_display = glb_render_wide_display,
     .wide_dump_full = glb_wide_dump_full,
+    .set_depth_triangle = glb_set_depth_triangle,
 };
 
 /* ==== Render thread: recording, replay, hand-off ===========================
@@ -10236,7 +10430,7 @@ static void fg_state_apply(const FgState *st, GLuint wide_cur) {
     view_enabled = st->view[0]; view_shift = st->view[1];
     view_pad_left = st->view[2]; view_pad_right = st->view[3];
     s_rths_flat_bd = st->rths[0]; s_rths_vp_w = st->rths[1]; s_rths_bg_full = st->rths[2];
-    s_pc_valid = 0; s_pq_valid = 0; s_projected_uv_valid = 0;
+    s_pc_valid = 0; s_pq_valid = 0; s_projected_uv_valid = 0; s_pz_valid = 0;
 }
 
 static int fg_list_append(FgList *l, uint16_t op, uint16_t flags, const void *p, uint32_t bytes) {
@@ -10278,7 +10472,7 @@ static int fg_raw_add(const FgRaw *r) {
 static int fg_op_kept(uint16_t op) {
     switch (op) {
     case RTH_SEMI: case RTH_MASK: case RTH_TWIN: case RTH_MOD: case RTH_PRECISE:
-    case RTH_PERSP: case RTH_FILL: case RTH_FLAT_TRI: case RTH_GOURAUD_TRI:
+    case RTH_PERSP: case RTH_DEPTH: case RTH_FILL: case RTH_FLAT_TRI: case RTH_GOURAUD_TRI:
     case RTH_TEX_TRI: case RTH_SHADED_TEX_TRI: case RTH_FLAT_RECT: case RTH_TEX_RECT:
     case RTH_TEX_RECT_SCALED: case RTH_LINE: case RTH_SHADED_LINE: case RTH_AREA:
     case RTH_OFFSET: case RTH_WIDE_VIEW: case RTH_WIDE_TARGET: case RTH_WIDE_DISABLE:
@@ -10679,6 +10873,7 @@ static void fg_replay(const FgList *a, const FgList *b, double t, GLuint gen_wid
             glb_set_perspective_triangle(v[0], q[0], q[1], q[2]);
             break;
         }
+        case RTH_DEPTH: break;   /* generated frames draw without PGXP depth */
         case RTH_AREA:    glb_set_draw_area(v[0], v[1], v[2], v[3]); break;
         case RTH_OFFSET:  glb_set_draw_offset(v[0], v[1]); break;
         case RTH_STATE:   s_rths_flat_bd = v[0]; s_rths_vp_w = v[1]; s_rths_bg_full = v[2]; break;
@@ -10824,7 +11019,8 @@ static int fg_generate(double t, int swap) {
     FgState real;
     fg_state_capture(&real);
     const GLuint real_wide_cur = g_wide_cur;
-    const int real_pc = s_pc_valid, real_pq = s_pq_valid;
+    const int real_pc = s_pc_valid, real_pq = s_pq_valid, real_pz = s_pz_valid;
+    s_pz_valid = 0;   /* generated frames draw without PGXP depth */
     DirtyRect pack = s_pack_dirty, sten = s_stencil_stale, cpu = s_cpu_dirty;
     const int sten_valid = s_stencil_valid, gpu_dirty = s_gpu_dirty;
     uint64_t pres_dirty[PRES_ROWS];
@@ -10904,7 +11100,7 @@ static int fg_generate(double t, int swap) {
         s_wst_x0[iw] = wst[0]; s_wst_y0[iw] = wst[1]; s_wst_x1[iw] = wst[2]; s_wst_y1[iw] = wst[3];
     }
     fg_state_apply(&real, real_wide_cur);
-    s_pc_valid = real_pc; s_pq_valid = real_pq;
+    s_pc_valid = real_pc; s_pq_valid = real_pq; s_pz_valid = real_pz;
     s_pack_dirty = pack; s_stencil_stale = sten; s_cpu_dirty = cpu;
     s_stencil_valid = sten_valid; s_gpu_dirty = gpu_dirty;
     memcpy(s_present_dirty, pres_dirty, sizeof pres_dirty);
@@ -11401,6 +11597,15 @@ static void rtb_set_precise_triangle(int en, int32_t x0, int32_t y0, int32_t x1,
     RTH_DIRECT_OR(RTH_REC(RTH_PRECISE, 0, en, x0, y0, x1, y1, x2, y2));
     glb_set_precise_triangle(en, x0, y0, x1, y1, x2, y2);
 }
+static void rtb_set_depth_triangle(int en, float z0, float z1, float z2) {
+    if (rth_record_mode()) {
+        int32_t v[4] = { en, 0, 0, 0 };
+        memcpy(&v[1], &z0, 4); memcpy(&v[2], &z1, 4); memcpy(&v[3], &z2, 4);
+        rth_rec_ints(RTH_DEPTH, 0, 4, v);
+        return;
+    }
+    glb_set_depth_triangle(en, z0, z1, z2);
+}
 static void rtb_set_perspective_triangle(int en, float q0, float q1, float q2) {
     if (rth_record_mode()) {
         int32_t v[4] = { en, 0, 0, 0 };
@@ -11586,6 +11791,7 @@ static const GpuRenderBackend GL_RT_BACKEND = {
     .wide_clear_margins = rtb_wide_clear_margins,
     .render_wide_display = rtb_render_wide_display,
     .wide_dump_full = rtb_wide_dump_full,
+    .set_depth_triangle = rtb_set_depth_triangle,
 };
 
 /* ---- replay (render thread) ---------------------------------------------- */
@@ -11609,6 +11815,12 @@ static void gl_rth_exec(void *user, const RtCmd *c, const void *payload) {
         float q[3];
         memcpy(q, &v[1], sizeof q);
         glb_set_perspective_triangle(v[0], q[0], q[1], q[2]);
+        break;
+    }
+    case RTH_DEPTH: {
+        float z[3];
+        memcpy(z, &v[1], sizeof z);
+        glb_set_depth_triangle(v[0], z[0], z[1], z[2]);
         break;
     }
     case RTH_FILL:      glb_fill_rect(v[0], v[1], v[2], v[3], (uint16_t)v[4]); break;

@@ -167,6 +167,10 @@ void gr_set_perspective_triangle(int enabled, float q0, float q1, float q2) {
     if (g_b->set_perspective_triangle)
         g_b->set_perspective_triangle(enabled, q0, q1, q2);
 }
+void gr_set_depth_triangle(int enabled, float z0, float z1, float z2) {
+    if (g_b->set_depth_triangle)
+        g_b->set_depth_triangle(enabled, z0, z1, z2);
+}
 void gr_fill_rect(int x, int y, int w, int h, uint16_t c)  { g_b->fill_rect(x, y, w, h, c); gpu_hd_textures_invalidate(x, y, w, h); }
 void gr_copy_rect(int sx, int sy, int dx, int dy, int w, int h) {
     if (!gpu_hd_textures_active()) { g_b->copy_rect(sx, sy, dx, dy, w, h); return; }

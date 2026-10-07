@@ -544,6 +544,14 @@ struct RuntimeConfig {
     // over TCP (pgxp verb). docs/ENHANCEMENTS.md G1.11.
     bool                  video_pgxp_preserve_projection = false;
 
+    // PGXP renderer features (GL backend; docs/ENHANCEMENTS.md G1.14), all
+    // off by default. pgxp_depth_buffer: per-vertex GTE depth with a LEQUAL
+    // depth test for opaque 3D polygons (2D / unproven polygons never test
+    // or write), cleared per drawing area, after fills and when the average
+    // SZ jumps back by pgxp_depth_threshold (SZ units, default 4096).
+    bool                  video_pgxp_depth_buffer = false;
+    double                video_pgxp_depth_threshold = 4096.0;
+
     // pgxp_mod_only: the title ships PGXP through the psx.enhancement.pgxp
     // mod (typically a default-on override of it), which is then the one
     // switch. The [video] geometry_correction / perspective_texturing /
