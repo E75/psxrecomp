@@ -1259,6 +1259,13 @@ a colourless pass then writes the true depth. A later surface within the
 tolerance wins as in painter order; anything clearly behind stays occluded.
 Inside one batch the order is painter's. On slots 1-3 at 10x the image
 matches depth-off within 96 / 36 px (tunnel) and the markings are whole.
+A near lane dash was still cut at the bottom of the screen (behind the
+tachometer, owner report): near the camera SZ quantisation and R4's near
+subdivision disagree by more than the tolerance. Triangles with any vertex
+nearer than SZ 1024 (`PSX_PGXP_DEPTH_NEAR`) now stay out of the depth buffer
+(painter order), the tolerance gains an absolute 48 SZ, and every displayed
+frame starts with a cleared depth buffer. Slots 1-4 at 10x: depth on vs off
+differ by 801 / 92 / 25 / 0 px, none in the tachometer area.
 
 Diagnostic: `PSX_PGXP_TRI_LOG=<file>` logs every triangle (depth mode, x y
 SZ) while `<file>.on` exists.

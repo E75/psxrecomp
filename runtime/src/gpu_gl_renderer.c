@@ -1555,7 +1555,7 @@ static const char *GEO_VS =
     "  float m = a - 2.0 * code;\n"
     "  float sz = code;\n"
     "  if (a < 0.0) { m = 0.0; zn = 0.9999; sz = 0.0; }  /* inside the far plane: never clipped */\n"
-    "  else if (sz > 0.5) { zn = 1.0 - 512.0 / (sz * (1.0 - u_zbias) + 256.0); }\n"
+    "  else if (sz > 0.5) { zn = 1.0 - 512.0 / (max(sz * (1.0 - u_zbias) - (u_zbias > 0.0 ? 48.0 : 0.0), 1.0) + 256.0); }\n"
     "  v_col = vec4(a_col.rgb, m);\n"
     "  float xb = a_pos.x;\n"
     "  if (u_xscale < 0.0) {\n"
@@ -1632,7 +1632,7 @@ static const char *TEX_VS =
     "   * a_q == 0 (feature off) w is exactly 1.0 and this is the old expression. */\n"
     "  float w = (a_q > 0.0) ? (1.0 / a_q) : 1.0;\n"
     "  float sz = a_pz, zn = 0.0;\n"
-    "  if (sz > 0.5) { zn = 1.0 - 512.0 / (sz * (1.0 - u_zbias) + 256.0); }\n"
+    "  if (sz > 0.5) { zn = 1.0 - 512.0 / (max(sz * (1.0 - u_zbias) - (u_zbias > 0.0 ? 48.0 : 0.0), 1.0) + 256.0); }\n"
     "  vec2 ndc = vec2((xb+u_shift+u_xoff)/u_xhalf - 1.0, (a_pos.y+u_shift)/256.0 - 1.0);\n"
     "  gl_Position = vec4(ndc * w, zn * w, w); }\n";
 static const char *TEX_FS =
@@ -3788,8 +3788,20 @@ static void pgxp_tri_log_tri(char kind, int dmode, int semi, const float *v, int
 }
 /* Depth mode of the next triangle: opaque 3D polygons only (DuckStation's
  * default; semi-transparent polygons neither test nor write). */
+/* Near-camera triangles (any vertex SZ below s_pgxp_depth_near) stay out of
+ * the depth buffer: there SZ quantisation and R4's near subdivision make a
+ * road decal's depth disagree with its road by more than any sane tolerance
+ * (the lane dash cut off at the bottom of the screen), and painter order is
+ * what the game was built for. PSX_PGXP_DEPTH_NEAR tunes it (0 = off). */
+static float s_pgxp_depth_near = -1.0f;
 static int pgxp_tri_depth_mode(int semi) {
-    return (s_pgxp_depth && semi < 0 && pgxp_tri_is_3d()) ? 1 : 0;
+    if (!(s_pgxp_depth && semi < 0 && pgxp_tri_is_3d())) return 0;
+    if (s_pgxp_depth_near < 0.0f) {
+        const char *e = getenv("PSX_PGXP_DEPTH_NEAR");
+        s_pgxp_depth_near = e && *e ? (float)atof(e) : 1024.0f;
+    }
+    const float zmin = fminf(s_pz[0], fminf(s_pz[1], s_pz[2]));
+    return zmin >= s_pgxp_depth_near ? 1 : 0;
 }
 /* Per-vertex code the shaders decode: SZ (0 = none). */
 static float pgxp_vertex_code(float sz) {
@@ -6555,6 +6567,9 @@ static void gl_perf_present_enter(void) {
     g_bdg_applied = s_bdg_applied; g_bdg_prims = s_bdg_prims; g_bdg_clearx = s_bdg_clearx;
     g_bdg_cur = (g_wide_cur != 0); g_bdg_base = g_wide_cur_base; g_bdg_w = g_wide_w; g_bdg_off = g_wide_off;
     s_bdg_applied = 0; s_bdg_prims = 0; s_bdg_clearx = -999999;
+    /* PGXP depth (G1.14): every displayed frame starts with a clear depth
+     * buffer, whatever the game does with its drawing areas. */
+    if (s_depth_used) s_depth_need_clear = 1;
     /* Replay: taken on the emulation thread when the present was recorded. */
     { extern void psx_ws_dbg_gate_frame_snapshot(void); if (!rth_replaying()) psx_ws_dbg_gate_frame_snapshot(); }
     if (!s_pf_on || rthf_owns_timer()) return;
