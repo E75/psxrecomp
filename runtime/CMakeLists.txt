@@ -161,6 +161,9 @@ if(BUILD_TESTING)
         add_test(NAME segment_miss_wiring_test COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_segment_miss_wiring.py")
         if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+            add_test(NAME ws_screen_tags_exec_test COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ws_screen_tags_exec.py"
+                --compiler "${CMAKE_C_COMPILER}")
             add_test(NAME ws_activation_bias_exec_test COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ws_activation_bias_exec.py" "${CMAKE_C_COMPILER}")
         endif()
