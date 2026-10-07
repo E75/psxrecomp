@@ -57,6 +57,20 @@ prediction + resimulation), with **delay-sync** still available as an opt-out
 Rollback is the product default for titles that ship it (e.g. MotK). Delay-sync
 remains useful for debugging and for hosts that prefer fixed lag.
 
+- With three or more seats, a tick counts as confirmed (hash confirm, the
+  agreed watermark, a silently promoted button correction) only when every
+  other peer has committed the same digest for it
+  (`rnet_hc_set_peer_mask`). Peers that made the same wrong prediction for a
+  slow seat agree with each other, so confirming against whichever peer spoke
+  last let them skip a rollback the slow seat's real input needed.
+- A peer that falls behind the others' inputs sheds its own view first
+  (`psx_netplay_local_view_shed`, presentation only); its rollbacks then stay
+  short for everyone. `PSX_NET_LOCAL_VIEW_SHED=0` keeps the own view.
+- A match ends after `PSX_NET_ADMIT_STALL_MS` (default 20000) without any
+  progress; a remote input tip that advances is progress, so a slow peer is
+  waited for. A peer silent for `PSX_NET_LIVENESS_MS` (default 1500) counts as
+  gone.
+
 ---
 
 ## Seats vs session slots
@@ -190,7 +204,8 @@ that identical frame; only what its window shows changes:
   A committed image cancels any `psx_netplay_present_local_view` crop
   (`psx_netplay_local_view_clear`). Forward netplay frames only; a title falls
   back to the crop when `psx_mod_render_local_view_status()` is not ready
-  (software present, Vulkan, resimulation).
+  (software present, Vulkan, resimulation, or `FAST_FORWARD` while this peer
+  is behind the match and sheds its own view).
 
 ---
 

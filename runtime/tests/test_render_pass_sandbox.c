@@ -161,6 +161,8 @@ static int s_crop_clears;
 #define s_netplay s_netplay_active
 #define s_resim s_netplay_resim
 void psx_netplay_local_view_clear(void) { s_crop_clears++; }
+static int s_view_shed;
+int  psx_netplay_local_view_shed(void) { return s_view_shed; }
 static int s_ws_scope;
 void gpu_ws_set_local_view_scope(int on) { s_ws_scope = on; }
 int  psx_selfcheck_resim_active(void) { return 0; }
@@ -786,6 +788,11 @@ static void test_local_view(void) {
           !psx_mod_render_local_view(&cpu, &r, never_fn, NULL),
           "no local view while resimulating");
     s_resim = 0;
+    s_view_shed = 1;
+    CHECK(psx_mod_render_local_view_status() == PSX_MOD_RENDER_PASS_FAST_FORWARD &&
+          !psx_mod_render_local_view(&cpu, &r, never_fn, NULL),
+          "a peer behind the match sheds its own view first");
+    s_view_shed = 0;
     s_local_status = PSX_MOD_RENDER_PASS_BACKEND;
     CHECK(psx_mod_render_local_view_status() == PSX_MOD_RENDER_PASS_BACKEND &&
           !psx_mod_render_local_view(&cpu, &r, never_fn, NULL),

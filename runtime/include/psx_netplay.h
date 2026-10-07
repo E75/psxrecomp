@@ -128,6 +128,9 @@ void psx_netplay_apply_env(PsxNetplayConfig *cfg);
 int psx_netplay_content_note(uint32_t epoch, uint32_t word0, uint32_t word1,
                              uint32_t seen, uint8_t slot, uint8_t op, uint8_t flags);
 int  psx_netplay_active(void);
+/* Every other occupied seat of the session (bit i = seat i): the peers that
+ * must all answer a rollback episode. 0 offline. */
+uint32_t psx_netplay_peer_seats(void);
 int  psx_netplay_is_running(void);
 /* "ice" | "lan" | "none" */
 const char *psx_netplay_transport_name(void);
@@ -170,6 +173,11 @@ void psx_netplay_present_local_view(uint32_t x, uint32_t y,
  * A committed psx_mod_render_local_view() image calls it: the peer's own
  * image of the display supersedes a crop of the canonical frame. */
 void psx_netplay_local_view_clear(void);
+/* 1 while this peer is behind the other peers' inputs: presentation-only work
+ * (psx_mod_render_local_view) is shed first so the simulation can catch up.
+ * See psx_netplay_local_view_shed_step. PSX_NET_LOCAL_VIEW_SHED=0 keeps the
+ * own view regardless. 0 offline. */
+int psx_netplay_local_view_shed(void);
 /* 1 and the rectangle while a current request fits a display of
  * display_w x display_h. */
 int psx_netplay_local_view(uint32_t display_w, uint32_t display_h,
