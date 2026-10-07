@@ -6194,7 +6194,35 @@ static void schedule_episode_rereplay(uint32_t prefer_plus_one)
     if (tip_extend_keep_live(prefer))
         return;
 
-    if (g_snaps && netplay_snap_ring_has(g_snaps, prefer)) {
+    /* Still replaying and not past prefer yet: every tick finished so far
+     * ran on rows the extension did not change, so the replay simply goes
+     * on to the raised target. Reloading here picked a ring snap between
+     * load and prefer that the replay had not re-saved -- a pre-episode
+     * live snap -- and forked this follower from the initiator, which
+     * reloaded its freshly replayed prefer (R4 2-peer, epoch 9: FOLLOW
+     * reloaded live 3013, initiator replayed 3017; POST diverge). */
+    if (rnet_rb_get_phase(g_rb) == nRNetRbPhaseReplay && g_episode_snap_applied &&
+        !g_pending_load_valid && sess() && rnet_session_sim_tick(sess()) <= prefer) {
+        fprintf(stderr,
+                "psxrecomp: rb tip-extend continue replay at sim=%u (prefer=%u "
+                "target=%u, nothing to redo)\n",
+                (unsigned)rnet_session_sim_tick(sess()), (unsigned)prefer,
+                (unsigned)rnet_rb_get_target_tick(g_rb));
+        fflush(stderr);
+        return;
+    }
+
+    /* Past prefer: replay again from the episode's own load (the pinned,
+     * frame-boundary baseline every seat matched), never from a snap saved
+     * mid-frame during this replay. Restoring those is not cycle-exact
+     * (resume pc inside the frame), so a seat that reloaded one and a seat
+     * that ran straight through drifted apart (R4 2-peer: initiator reloaded
+     * 3001 @0x800663b4, follower continued; resim core diverge at 3002).
+     * The span is at most the seal span, so the extra replay is short. */
+    if ((g_pin_valid && g_pin_tick == load) ||
+        (g_snaps && netplay_snap_ring_has(g_snaps, load))) {
+        reload = load;
+    } else if (g_snaps && netplay_snap_ring_has(g_snaps, prefer)) {
         reload = prefer;
     } else if (g_snaps) {
         for (t = prefer; t > load; --t) {
