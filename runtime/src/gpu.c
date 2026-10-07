@@ -6178,6 +6178,12 @@ static void ws_ui_prepass_add(const uint32_t *words, uint32_t word_count,
         return;
     }
 
+    /* Vertices are relative to the GP0(E5) draw offset, while grouping and the
+     * thirds split work in display columns. Titles that draw their HUD around a
+     * centred offset (WE2002: offset 256) otherwise anchor left groups mid-screen. */
+    min_x += draw_offset_x;
+    max_x += draw_offset_x;
+
     int32_t width = max_x - min_x, height = max_y - min_y;
     int32_t X = ws_disp_x(), W = ws_disp_w(), H = ws_disp_h();
     /* Anything spanning the display width (to within W/64 of each edge) is a
@@ -6185,9 +6191,12 @@ static void ws_ui_prepass_add(const uint32_t *words, uint32_t word_count,
      * not a widget: it widens with the image. Squashed as UI, a cutscene's
      * bars left the revealed margins showing whatever the frame cleared to,
      * and the pause menu's rules (x 2..510 of 512) stopped short of the band
-     * they frame (Spider-Man). */
+     * they frame (Spider-Man). A quarter-width, half-height block is a tile of
+     * such an overlay (WE2002 rain: four 128x128 sprites), never a widget; kept,
+     * it joined the scoreboard and clock into one full-width group. */
     if ((min_x <= X + W / 64 && max_x >= X + W - W / 64) ||
-        (width > W / 2 && height > H / 4)) {
+        (width > W / 2 && height > H / 4) ||
+        (width >= W / 4 && height >= H / 2)) {
         ws_ui_reject.too_big++;
         return;
     }
@@ -6454,8 +6463,11 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
         groups[i] = ws_ui_prepass[i].group;
     ws_ui_group_assign(groups, ws_ui_prepass_count, ws_disp_w(),
                        ws_auto_ui_dense, ws_auto_ui_in_place);
+    /* Anchors are applied to raw vertices (ws_scale_about), so map the display
+     * column back into the draw-offset space the prepass measured in. */
+    const int32_t anchor_origin = group_origin - draw_offset_x;
     for (uint32_t i = 0; i < ws_ui_prepass_count; i++) {
-        ws_ui_prepass[i].group.anchor = group_origin + groups[i].anchor;
+        ws_ui_prepass[i].group.anchor = anchor_origin + groups[i].anchor;
         ws_ui_prepass[i].group.root = groups[i].root;
     }
 
@@ -6480,7 +6492,7 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
             if (full && x0 < seam && x1 > seam &&
                 x1 - x0 <= W / 2 && y1 - y0 <= H / 4) {
                 ws_ui_prepass[i].shared_split_ui = 1;
-                ws_ui_prepass[i].group.anchor = group_origin + seam;
+                ws_ui_prepass[i].group.anchor = anchor_origin + seam;
             }
         }
     }
