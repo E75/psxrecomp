@@ -11,6 +11,8 @@
 #include "mod_controller_source.h"
 #include "window_size.h"     /* default game-window size */
 #include "internal_resolution.h" /* Settings -> Display -> Internal resolution */
+#include "dynamic_resolution.h"  /* [video] dynamic_resolution: the step controller */
+#include "render_thread.h"        /* rt_get_stats: queue backpressure (dynres) */
 #include "psx_scheduler.h"   /* psx_scheduler_run — deterministic TCB scheduler */
 #include "parity_trace.h"    /* general two-process control-flow parity ring */
 #include "device_trace.h"    /* general two-process device-event cycle ring */
@@ -486,6 +488,7 @@ static Smooth60State g_smooth_60_state;
  * survive soft-return and poison FMV/FPS after session_reboot). */
 static bool     s_disabled_frame_presented = false;
 static bool     s_force_present_after_load = false;
+static void     dynres_note_savestate_loaded(void);   /* dynamic resolution hold */
 /* §33 SW hold-last: sdl_texture is 640x512; Live only uploads the active
  * display rect. Resim must reuse that src/dst — RenderCopy(NULL,NULL) sticks
  * the image in the upper-left corner (user-confirmed). */
@@ -1065,6 +1068,7 @@ extern "C" void psx_frontend_on_savestate_loaded(void) {
     psx_projection_reset_session();
     psx_local_mouse_reset();
     mod_runtime_on_savestate_loaded();
+    dynres_note_savestate_loaded();
 #ifndef PSX_NO_DEBUG_TOOLS
     debug_server_note_savestate_loaded();
 #endif
@@ -1287,6 +1291,51 @@ static int           g_video_renderer = PSXRecompV4::DEFAULT_VIDEO_RENDERER;
  * persisted, so two local peers sharing one settings.toml stay independent. */
 static int           g_video_internal_res = PSX_IR_UNSET;
 static int           g_video_internal_res_env = PSX_IR_UNSET;
+/* Dynamic resolution ([video] dynamic_resolution, dynamic_resolution_min;
+ * dynamic_resolution.h): the internal resolution above is the ceiling, and
+ * the GL scale steps down to the floor only while the game would miss frames.
+ * Same precedence as the preset (game.toml < settings.toml < launcher);
+ * PSX_DYNRES=0/1 and PSX_DYNRES_MIN win for one run, never persisted. */
+static int           g_video_dynres = 0;
+static int           g_video_dynres_min = 720;
+static int           g_video_dynres_env = -1;
+static int           g_video_dynres_min_env = PSX_IR_UNSET;
+/* The controller and its per-interval books (dynres_tick). */
+struct DynresHost {
+    bool active = false;
+    DynresController ctl{};
+    uint64_t last_t = 0;
+    uint64_t last_pacer = 0;
+    GlHostLedger last_ledger{};
+    uint64_t pacer_ticks = 0;     /* frame_pacer_wait, while active */
+    uint64_t step_ticks = 0;      /* the step taken after the last sample */
+    int drawable_w = 0, drawable_h = 0;
+    bool game_started = false;
+    double hold_request_s = 0.0;  /* asked by an event (savestate load) */
+    const char *hold_reason = "";
+    unsigned long long last_windows = 0;
+    /* the last step, for the trace and the dynres command */
+    int step_from = 0, step_to = 0;
+    double step_ms = 0.0, step_interval_ms = 0.0;
+    bool step_measure_next = false;
+    FILE *trace = nullptr;
+    double t0_s = 0.0;
+    /* Render-thread mode (dynres_tick_rt): the render thread's per-frame
+     * costs and the queue's backpressure replace the wall-time model. */
+    bool rt_mode = false;
+    DynrtController rt{};
+    GlRthCosts last_costs{};
+    uint64_t last_bp_ns = 0;
+    unsigned long long rt_last_windows = 0;
+    bool rt_trace_header = false;
+    double rt_win_cpu_ms = 0.0, rt_win_gpu_ms = 0.0;   /* last window's means */
+    double rt_acc_cpu = 0.0, rt_acc_gpu = 0.0;
+    uint64_t rt_acc_frames = 0, rt_acc_gpu_frames = 0;
+};
+static DynresHost g_dynres;
+/* A savestate load re-stages VRAM and re-anchors pacing: hold for a while. */
+static void dynres_note_savestate_loaded(void) { g_dynres.hold_request_s = 2.0; }
+
 static int           g_video_ref_lines = PSX_IR_DEFAULT_REF_LINES;
 /* The scale asked of the backend before its own clamp (GL reports its real
  * scale only after context init), and whether that request applies (netplay
@@ -1403,6 +1452,24 @@ static int           g_fmv_skip_no_xa_hold  = 4;
  * = 30 Hz / 0.50x with the CPU idle. ~60 Hz panels may use vsync as the clock;
  * otherwise the pacer holds 59.94 Hz and present must not wait on the swap. */
 static int           g_low_latency_input = 1;
+/* [video] render_thread (docs/RENDER_THREAD.md): the GL backend runs on its
+ * own thread. Started at the first vblank once the context and every startup
+ * GL call are done; s_render_thread_tried keeps it to one attempt. */
+static int           g_render_thread = 0;
+static int           g_render_thread_frames = 2;
+/* [video] frame_generation (docs/FRAME_GENERATION.md), with the render thread. */
+static int           g_frame_generation = 0;
+/* [video] present_thread (docs/RENDER_THREAD.md), with the render thread. */
+static int           g_present_thread = 0;
+/* The player's persisted pipeline choice (game.toml default < settings.toml),
+ * before any PSX_* env override for this run. The launcher seeds from and
+ * saves to these so a one-run env A/B is never written to settings.toml.
+ * The pipeline starts once at boot: a change applies at next launch. */
+static int           g_render_thread_pref = 0;
+static int           g_present_thread_pref = 0;
+static int           g_frame_generation_pref = 0;
+static int           g_present_thread_slots = 3;
+static int           s_render_thread_tried = 0;
 static int           g_video_vsync        = 1;
 static int           g_frame_interpolation = 0;
 static int           g_frame_interpolation_fps = 0;
@@ -7794,6 +7861,20 @@ static void headless_present_image_ring_capture(void) {
     gpu_get_display_info(&di);
     if (di.disabled || di.width == 0 || di.height == 0 || di.depth24) return;
     const bool fmv_frame = !g_ws_engaged || gpu_ws_present_native_43() != 0;
+#ifndef PSX_SDL_NO_RENDER
+    /* Render thread: the same capture, queued at this point of the frame
+     * instead of a per-frame sync point (gl_renderer_ring_capture). */
+    if (g_headless_opengl && gl_renderer_render_thread_active()) {
+        int slot = netplay_local_viewport_slot();
+        int cw = slot >= 0 ? (int)di.width / 2 : (int)di.width;
+        int cx = (int)di.display_x + (slot == 1 ? (int)di.width - cw : 0);
+        gl_renderer_ring_capture((uint32_t)s_frame_count,
+                                 (!fmv_frame && ws_native_wide_active() && gr_wide_supported()) ? 1 : 0,
+                                 (int)di.display_x, (int)di.display_y, (int)di.height,
+                                 cx, (int)di.display_y, cw, (int)di.height);
+        return;
+    }
+#endif
     static std::vector<uint32_t> buf;
     int w = 0, h = 0;
     uint32_t vx = 0, vy = 0, vw = di.width, vh = di.height;
@@ -8520,8 +8601,11 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
      * resim. */
     if (!psx_netplay_active() && !psx_selfcheck_resim_active()) {
         uint64_t perf_start = runtime_perf_section_begin();
-        if (!manual_turbo_active && !turbo_load_paced && present_should_wall_pace())
+        if (!manual_turbo_active && !turbo_load_paced && present_should_wall_pace()) {
+            const uint64_t dyn_t0 = g_dynres.active ? SDL_GetPerformanceCounter() : 0;
             frame_pacer_wait(&s_frame_pacer, g_frame_period_ms);
+            if (dyn_t0) g_dynres.pacer_ticks += SDL_GetPerformanceCounter() - dyn_t0;
+        }
         runtime_perf_section_end(perf_start, &g_runtime_perf.pacer_ticks);
         latency_ring_mark(LAT_PACED);
 
@@ -9138,13 +9222,426 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
     return ep;
 }
 
+/* Render thread: start once, then close every frame (after its present,
+ * before pacing, so the render thread draws while the guest waits). */
+static void render_thread_vblank(void) {
+#ifndef PSX_SDL_NO_RENDER
+    if (!g_render_thread) return;
+    if (!s_render_thread_tried) {
+        s_render_thread_tried = 1;
+        gl_renderer_set_present_thread(g_present_thread, g_present_thread_slots);
+        if (g_gl_active && gr_backend() == GR_BACKEND_OPENGL &&
+            gl_renderer_render_thread_start(g_render_thread_frames)) {
+            std::fprintf(stdout, "psxrecomp: render thread on (OpenGL, %d frame(s) in flight)\n",
+                         g_render_thread_frames);
+            if (g_frame_generation) {
+                gl_renderer_set_frame_generation(1);
+                std::fprintf(stdout, "psxrecomp: Smooth motion (frame generation) on (render thread, "
+                             "from surplus only)\n");
+            }
+        } else {
+            std::fprintf(stdout, "psxrecomp: render thread requested but not started "
+                         "(needs the OpenGL backend without HD textures/dumping, netplay, frame "
+                         "interpolation or a 24-bit display)\n");
+            if (g_frame_generation)
+                std::fprintf(stdout, "psxrecomp: Smooth motion (frame generation) needs the render thread; off\n");
+        }
+        std::fflush(stdout);
+    }
+    if (g_frame_generation)
+        gl_renderer_frame_gen_configure(g_host_refresh_hz,
+                                        g_guest_frame_period_ms > 0.0
+                                            ? 1000.0 / g_guest_frame_period_ms : 0.0);
+    gl_renderer_render_thread_frame_boundary();
+#endif
+}
+
+/* ---- Dynamic internal resolution: the host side ---------------------------
+ * [video] dynamic_resolution (docs/ENHANCEMENTS.md, IR3). The controller
+ * (dynamic_resolution.c) decides; this feeds it one sample per guest VBlank,
+ * after the present, and applies its level through the GL backend. The
+ * sample is the interval's wall time and its guest work: the wall time minus
+ * the pacer's wait, the frame blend's waits, the swap's vsync block (counted
+ * as work when the interval was late and no render pass ran: the driver then
+ * waited on the GPU, not the display), render passes, the blend's extra
+ * presents and the step itself. Holds discard samples: turbo, fast-forward
+ * and turbo loads, FMV, a disabled display, overlay compiles, savestate loads,
+ * rollback resim, window size changes, and the game's first seconds. */
+
+static int dynres_requested(void) {
+    return g_video_dynres_env >= 0 ? g_video_dynres_env : g_video_dynres;
+}
+
+static int dynres_min_value(void) {
+    return g_video_dynres_min_env != PSX_IR_UNSET ? g_video_dynres_min_env
+                                                  : g_video_dynres_min;
+}
+
+/* After GL context init: the ceiling is what the backend allocated, the
+ * floor the configured minimum as a scale (never above the ceiling). */
+static void dynres_setup(void) {
+    if (g_dynres.trace) { std::fclose(g_dynres.trace); g_dynres.trace = nullptr; }
+    g_dynres = DynresHost{};
+    const int ceiling = g_gl_active ? gl_renderer_dynamic_resolution_ceiling() : 0;
+    if (ceiling < 2) {
+        if (dynres_requested() && g_gl_active)
+            std::fprintf(stdout, "psxrecomp: dynamic resolution off: the internal "
+                         "scale is fixed here (1x, the high-resolution window, or "
+                         "dual raster)\n");
+        return;
+    }
+    int floor_s = psx_resolve_internal_scale(dynres_min_value(), g_video_ref_lines,
+                                             psx_sdl_display_pixel_height(nullptr),
+                                             ceiling);
+    if (floor_s > ceiling) floor_s = ceiling;
+    DynresParams params;
+    dynres_default_params(&params);
+    dynres_init(&g_dynres.ctl, &params, floor_s, ceiling, ceiling);
+    DynrtParams rtp;
+    dynrt_default_params(&rtp);
+    dynrt_init(&g_dynres.rt, &rtp, floor_s, ceiling, ceiling);
+    g_dynres.active = floor_s < ceiling;
+    if (const char* e = std::getenv("PSX_DYNRES_FORCE")) {
+        const int n = std::atoi(e);
+        if (n > 0) {
+            g_dynres.active = true;
+            const int l = dynres_force(&g_dynres.ctl, n);
+            (void)dynrt_force(&g_dynres.rt, n);
+            (void)gl_renderer_step_internal_scale_now(l);
+        }
+    }
+    if (const char* e = std::getenv("PSX_DYNRES_TRACE"))
+        if (*e) g_dynres.trace = std::fopen(e, "w");
+    if (g_dynres.trace)
+        std::fprintf(g_dynres.trace, "t_s,level,load,late,vblank_hz,decision\n");
+    g_dynres.t0_s = (double)SDL_GetPerformanceCounter() /
+                    (double)SDL_GetPerformanceFrequency();
+    std::fprintf(stdout, "psxrecomp: dynamic resolution %s: %dx..%dx (%d..%d lines)\n",
+                 g_dynres.active ? "on" : "inert (floor = ceiling)", floor_s, ceiling,
+                 floor_s * g_video_ref_lines, ceiling * g_video_ref_lines);
+}
+
+static void dynres_apply_level(int level) {
+    GlDynresStats st;
+    gl_renderer_dynres_stats(&st);
+    if (level == st.level) return;
+    const int from = st.level;
+    const uint64_t t0 = SDL_GetPerformanceCounter();
+    const int ok = gl_renderer_step_internal_scale_now(level);
+    const uint64_t t1 = SDL_GetPerformanceCounter();
+    const double sec = (double)(t1 - t0) / (double)SDL_GetPerformanceFrequency();
+    if (ok) {
+        dynres_note_step_cost(&g_dynres.ctl, sec);
+        g_dynres.step_ticks += t1 - t0;
+        g_dynres.step_from = from;
+        g_dynres.step_to = level;
+        g_dynres.step_ms = sec * 1000.0;
+        g_dynres.step_measure_next = true;
+    }
+}
+
+/* Render-thread mode: one sample per guest VBlank from what the render
+ * thread measured since the last one (its frames' costs arrive a few frames
+ * late) and the time the emulation thread spent blocked on the queue. */
+static void dynres_tick_rt(double now_s, double wall, double period, int held,
+                           double tail, const char *why) {
+    DynrtController &c = g_dynres.rt;
+    if (tail > 0.0) dynrt_hold(&c, now_s, tail);
+    if (why) g_dynres.hold_reason = why;
+    else if (now_s >= c.hold_until) g_dynres.hold_reason = "";
+    GlRthCosts co;
+    gl_renderer_render_thread_costs(&co);
+    RtStats rs;
+    rt_get_stats(&rs);
+    const GlRthCosts &c0 = g_dynres.last_costs;
+    const int frames = (int)(co.frames - c0.frames);
+    const double cost = (double)(co.cost_ns - c0.cost_ns) * 1e-9;
+    const uint64_t bp_ns = rs.backpressure_ns + rs.ring_full_ns;
+    const double bp = (double)(bp_ns - g_dynres.last_bp_ns) * 1e-9;
+    g_dynres.rt_acc_cpu += (double)(co.cpu_ns - c0.cpu_ns) * 1e-6;
+    g_dynres.rt_acc_gpu += (double)(co.gpu_ns - c0.gpu_ns) * 1e-6;
+    g_dynres.rt_acc_frames += co.frames - c0.frames;
+    g_dynres.rt_acc_gpu_frames += co.gpu_frames - c0.gpu_frames;
+    g_dynres.last_costs = co;
+    g_dynres.last_bp_ns = bp_ns;
+    DynrtSample smp{ period, wall, frames, cost, bp, held };
+    const int prev_level = c.level;
+    const int level = dynrt_sample(&c, now_s, &smp);
+    /* Frame generation only spends surplus: not while the real frames are
+     * over budget (renewed every over-budget sample) and briefly after a
+     * step down, while the new level's first frames settle. */
+    if (level < prev_level)
+        gl_renderer_frame_gen_hold("dynres stepped down", 0.25);
+    else if (c.over_streak > 0)
+        gl_renderer_frame_gen_hold("dynres over budget", 0.1);
+    if (c.windows != g_dynres.rt_last_windows) {
+        g_dynres.rt_last_windows = c.windows;
+        g_dynres.rt_win_cpu_ms = g_dynres.rt_acc_frames
+            ? g_dynres.rt_acc_cpu / (double)g_dynres.rt_acc_frames : 0.0;
+        g_dynres.rt_win_gpu_ms = g_dynres.rt_acc_gpu_frames
+            ? g_dynres.rt_acc_gpu / (double)g_dynres.rt_acc_gpu_frames : 0.0;
+        g_dynres.rt_acc_cpu = g_dynres.rt_acc_gpu = 0.0;
+        g_dynres.rt_acc_frames = g_dynres.rt_acc_gpu_frames = 0;
+        if (g_dynres.trace) {
+            if (!g_dynres.rt_trace_header) {
+                g_dynres.rt_trace_header = true;
+                std::fprintf(g_dynres.trace, "# render thread: t_s,level,load,bp_share,"
+                             "guest_hz,cpu_ms,gpu_ms,guest_bound,decision\n");
+            }
+            std::fprintf(g_dynres.trace, "%.3f,%d,%.3f,%.3f,%.2f,%.2f,%.2f,%d,%s\n",
+                         now_s - g_dynres.t0_s, c.level, c.last_load, c.last_bp_share,
+                         c.last_hz, g_dynres.rt_win_cpu_ms, g_dynres.rt_win_gpu_ms,
+                         c.last_guest_bound,
+                         c.last_decision_t == now_s ? c.last_reason : "");
+            std::fflush(g_dynres.trace);
+        }
+    }
+    dynres_apply_level(level);
+}
+
+/* One guest VBlank, after its present. */
+static void dynres_tick(void) {
+    if (!g_dynres.active || !g_gl_active) return;
+    const uint64_t now = SDL_GetPerformanceCounter();
+    const double freq = (double)SDL_GetPerformanceFrequency();
+    GlHostLedger led;
+    gl_renderer_host_ledger(&led);
+    const double now_s = (double)now / freq;
+    if (!g_dynres.last_t) {
+        g_dynres.last_t = now;
+        g_dynres.last_ledger = led;
+        g_dynres.last_pacer = g_dynres.pacer_ticks;
+        return;
+    }
+    const GlHostLedger &p0 = g_dynres.last_ledger;
+    const double wall = (double)(now - g_dynres.last_t) / freq;
+    const double period = g_frame_period_ms / 1000.0;
+    const double pacer = (double)(g_dynres.pacer_ticks - g_dynres.last_pacer) / freq;
+    const double idle = (double)(led.idle_ticks - p0.idle_ticks) / freq;
+    const double pass = (double)(led.pass_ticks - p0.pass_ticks) / freq;
+    const double swap = (double)(led.swap_ticks - p0.swap_ticks) / freq;
+    const uint64_t blends = led.interp_presents - p0.interp_presents;
+    const double blend_work = (double)(led.interp_work_ticks - p0.interp_work_ticks) / freq;
+    const double extra = blends > 1 ? blend_work * (double)(blends - 1) / (double)blends : 0.0;
+    const double step = (double)g_dynres.step_ticks / freq;
+    const bool late = wall > period * g_dynres.ctl.p.late_factor;
+    const double swap_idle = (late && pass <= 0.0) ? 0.0 : swap;
+    const double work = wall - pacer - idle - swap_idle - pass - extra - step;
+    g_dynres.last_t = now;
+    g_dynres.last_ledger = led;
+    g_dynres.last_pacer = g_dynres.pacer_ticks;
+    g_dynres.step_ticks = 0;
+    if (g_dynres.step_measure_next) {
+        g_dynres.step_measure_next = false;
+        g_dynres.step_interval_ms = wall * 1000.0;
+        if (g_dynres.trace)
+            std::fprintf(g_dynres.trace, "%.3f,%d,,,,step %d->%d %.2f ms interval %.2f ms\n",
+                         now_s - g_dynres.t0_s, g_dynres.step_to, g_dynres.step_from,
+                         g_dynres.step_to, g_dynres.step_ms, g_dynres.step_interval_ms);
+    }
+
+    /* Holds. */
+    double tail = 0.0;
+    int held = 0;
+    const char *why = nullptr;
+    GpuDisplayInfo di;
+    gpu_get_display_info(&di);
+    const bool started = fntrace_is_game_started() != 0;
+    if (!started) { held = 1; why = "boot"; }
+    else if (!g_dynres.game_started) { tail = 5.0; why = "game entry"; }
+    g_dynres.game_started = started;
+    if (s_presentation_fast_forward) { held = 1; tail = 1.0; why = "fast-forward"; }
+    if (di.disabled || di.depth24 || mdec_recently_active(2)) {
+        held = 1; tail = 1.0; why = "FMV or no display";
+    }
+    if (autocompile_busy()) { held = 1; tail = 1.0; why = "overlay compile"; }
+    if (psx_netplay_is_resimulating()) { held = 1; tail = 1.0; why = "resim"; }
+#ifndef PSX_SDL_NO_RENDER
+    if (sdl_window) {
+        int dw = 0, dh = 0;
+        SDL_GL_GetDrawableSize(sdl_window, &dw, &dh);
+        if (dw != g_dynres.drawable_w || dh != g_dynres.drawable_h) {
+            if (g_dynres.drawable_w) { tail = 1.0; why = "window resize"; }
+            g_dynres.drawable_w = dw;
+            g_dynres.drawable_h = dh;
+        }
+    }
+#endif
+    /* Tails that only cover the wall-time model's settling (a savestate
+     * load re-anchors pacing, the game's first seconds). */
+    bool soft_tail = !held && tail > 0.0 && why && std::strcmp(why, "game entry") == 0;
+    if (g_dynres.hold_request_s > 0.0) {
+        if (g_dynres.hold_request_s > tail) { tail = g_dynres.hold_request_s; soft_tail = !held; }
+        why = "savestate load";
+        g_dynres.hold_request_s = 0.0;
+    }
+    /* The render thread on: its own model (dynres_tick_rt). The level carries
+     * over when the mode changes (the render thread starts at the first
+     * VBlank, after dynres_setup). */
+    const bool rt = gl_renderer_render_thread_active() != 0;
+    if (rt != g_dynres.rt_mode) {
+        g_dynres.rt_mode = rt;
+        gl_renderer_render_thread_measure(rt ? 1 : 0);
+        GlDynresStats st;
+        gl_renderer_dynres_stats(&st);
+        if (rt) {
+            const DynrtParams rp = g_dynres.rt.p;
+            const int forced = g_dynres.rt.forced;
+            dynrt_init(&g_dynres.rt, &rp, g_dynres.ctl.floor, g_dynres.ctl.ceiling, st.level);
+            if (forced) (void)dynrt_force(&g_dynres.rt, forced);
+            gl_renderer_render_thread_costs(&g_dynres.last_costs);
+            RtStats rs;
+            rt_get_stats(&rs);
+            g_dynres.last_bp_ns = rs.backpressure_ns + rs.ring_full_ns;
+        } else {
+            const DynresParams cp = g_dynres.ctl.p;
+            const int forced = g_dynres.ctl.forced;
+            const int fl = g_dynres.ctl.floor, ce = g_dynres.ctl.ceiling;
+            dynres_init(&g_dynres.ctl, &cp, fl, ce, st.level);
+            if (forced) (void)dynres_force(&g_dynres.ctl, forced);
+        }
+        if (tail < 1.0) tail = 1.0;
+        if (!why) why = rt ? "render thread started" : "render thread stopped";
+    }
+    if (rt) {
+        /* The render thread's per-frame cost and the queue need no settling
+         * beyond the frames in flight: a soft tail is cut to half a second,
+         * so a scene that is too heavy right after a load is not left
+         * running slow for seconds. */
+        if (soft_tail && tail > 0.5) tail = 0.5;
+        /* A new scene: let the first sustained overrun jump several levels
+         * (fast descent, dynamic_resolution.h). Render-thread start and a
+         * new resolution re-initialize, which arms too. */
+        if (why && (std::strcmp(why, "savestate load") == 0 ||
+                    std::strcmp(why, "game entry") == 0 ||
+                    std::strcmp(why, "window resize") == 0))
+            dynrt_arm_descent(&g_dynres.rt);
+        dynres_tick_rt(now_s, wall, period, held, tail, why);
+        return;
+    }
+    if (tail > 0.0) dynres_hold(&g_dynres.ctl, now_s, tail);
+    if (why) g_dynres.hold_reason = why;
+    else if (now_s >= g_dynres.ctl.hold_until) g_dynres.hold_reason = "";
+
+    DynresSample smp{ period, wall, work, held };
+    const int level = dynres_sample(&g_dynres.ctl, now_s, &smp);
+    if (g_dynres.trace && g_dynres.ctl.windows != g_dynres.last_windows) {
+        g_dynres.last_windows = g_dynres.ctl.windows;
+        std::fprintf(g_dynres.trace, "%.3f,%d,%.3f,%d,%.2f,%s\n", now_s - g_dynres.t0_s,
+                     g_dynres.ctl.level, g_dynres.ctl.last_load, g_dynres.ctl.last_late,
+                     g_dynres.ctl.last_vblank_hz,
+                     g_dynres.ctl.last_decision_t == now_s ? g_dynres.ctl.last_reason : "");
+        std::fflush(g_dynres.trace);
+    }
+    dynres_apply_level(level);
+}
+
+/* Debug server (dynres, dynres_force, video_info). */
+extern "C" void psx_dynres_summary(int *enabled, int *level, int *floor_s, int *ceiling) {
+    GlDynresStats st;
+    gl_renderer_dynres_stats(&st);
+    if (enabled) *enabled = g_dynres.active ? 1 : 0;
+    if (level) *level = st.level;
+    if (floor_s) *floor_s = g_dynres.active ? g_dynres.ctl.floor : 0;
+    if (ceiling) *ceiling = st.ceiling;
+}
+
+extern "C" int psx_dynres_force(int scale) {
+    if (!g_dynres.active) return -1;
+    const int l = g_dynres.rt_mode ? dynrt_force(&g_dynres.rt, scale)
+                                   : dynres_force(&g_dynres.ctl, scale);
+    dynres_apply_level(l);
+    return l;
+}
+
+extern "C" int psx_dynres_status_json(char *out, int cap) {
+    GlDynresStats st;
+    gl_renderer_dynres_stats(&st);
+    if (g_dynres.rt_mode) {   /* render-thread mode (dynres_tick_rt) */
+        const DynrtController &r = g_dynres.rt;
+        const double now_s = (double)SDL_GetPerformanceCounter() /
+                             (double)SDL_GetPerformanceFrequency();
+        char blocked[256];
+        int bp = 0;
+        blocked[0] = 0;
+        for (int l = r.floor; g_dynres.active && l <= r.ceiling && bp < (int)sizeof blocked - 24; l++) {
+            double b = dynrt_up_blocked_s(&r, l, now_s);
+            if (b > 0.0)
+                bp += std::snprintf(blocked + bp, sizeof blocked - (size_t)bp, "%s\"%d\":%.1f",
+                                    bp ? "," : "", l, b);
+        }
+        GlRthCosts co;
+        gl_renderer_render_thread_costs(&co);
+        const double hold = r.hold_until - now_s;
+        return std::snprintf(out, (size_t)cap,
+            "\"mode\":\"render_thread\",\"enabled\":%d,\"requested\":%d,\"ceiling\":%d,"
+            "\"floor\":%d,\"level\":%d,\"internal_lines\":%d,\"forced\":%d,\"load\":%.3f,"
+            "\"budget\":%.3f,\"bp_share\":%.3f,\"guest_hz\":%.2f,\"cpu_ms\":%.3f,"
+            "\"gpu_ms\":%.3f,\"guest_bound\":%d,\"over\":%d,\"scaled_share\":%.3f,"
+            "\"hold\":\"%s\",\"hold_s\":%.2f,\"last_reason\":\"%s\",\"downs\":%llu,"
+            "\"ups\":%llu,\"undos\":%llu,\"relapses\":%llu,\"windows\":%llu,"
+            "\"held_windows\":%llu,\"guest_bound_windows\":%llu,\"thin_windows\":%llu,"
+            "\"steps\":%llu,\"last_from\":%d,\"last_to\":%d,\"last_ms\":%.3f,"
+            "\"frames_measured\":%llu,\"gpu_frames\":%llu,\"frames_dropped\":%llu,"
+            "\"down_blocked_s\":%.1f,\"up_blocked\":{%s},\"fast_downs\":%llu,"
+            "\"descent_armed\":%d",
+            g_dynres.active ? 1 : 0, dynres_requested(), st.ceiling,
+            g_dynres.active ? r.floor : 0, st.level, st.level * g_video_ref_lines, r.forced,
+            r.last_load, 1.0 - r.p.margin, r.last_bp_share, r.last_hz, g_dynres.rt_win_cpu_ms,
+            g_dynres.rt_win_gpu_ms, r.last_guest_bound, r.last_over, r.f,
+            g_dynres.hold_reason ? g_dynres.hold_reason : "", hold > 0.0 ? hold : 0.0,
+            r.last_reason ? r.last_reason : "", r.downs, r.ups, r.undos, r.relapses,
+            r.windows, r.held_windows, r.guest_bound_windows, r.thin_windows,
+            (unsigned long long)st.steps, st.last_from, st.last_to, st.last_ms,
+            (unsigned long long)co.frames, (unsigned long long)co.gpu_frames,
+            (unsigned long long)co.dropped,
+            r.down_block_until > now_s ? r.down_block_until - now_s : 0.0, blocked,
+            r.fast_downs, r.descent_armed);
+    }
+    const DynresController &c = g_dynres.ctl;
+    const double now_s = (double)SDL_GetPerformanceCounter() /
+                         (double)SDL_GetPerformanceFrequency();
+    char blocked[256];
+    int bp = 0;
+    blocked[0] = 0;
+    for (int l = c.floor; g_dynres.active && l <= c.ceiling && bp < (int)sizeof blocked - 24; l++) {
+        double b = dynres_up_blocked_s(&c, l, now_s);
+        if (b > 0.0)
+            bp += std::snprintf(blocked + bp, sizeof blocked - (size_t)bp, "%s\"%d\":%.1f",
+                                bp ? "," : "", l, b);
+    }
+    double hold = c.hold_until - now_s;
+    return std::snprintf(out, (size_t)cap,
+        "\"enabled\":%d,\"requested\":%d,\"ceiling\":%d,\"floor\":%d,\"level\":%d,"
+        "\"internal_lines\":%d,\"forced\":%d,\"load\":%.3f,\"late\":%d,\"vblank_hz\":%.2f,"
+        "\"scaled_share\":%.3f,\"hold\":\"%s\",\"hold_s\":%.2f,\"last_reason\":\"%s\","
+        "\"downs\":%llu,\"ups\":%llu,\"undos\":%llu,\"relapses\":%llu,\"windows\":%llu,"
+        "\"held_windows\":%llu,\"steps\":%llu,\"deferred\":%llu,\"last_from\":%d,"
+        "\"last_to\":%d,\"last_ms\":%.3f,\"last_interval_ms\":%.3f,\"last_prep_ms\":%.3f,"
+        "\"last_seed_ms\":%.3f,\"last_rects_ms\":%.3f,\"last_wide_ms\":%.3f,"
+        "\"hr_reallocs\":%llu,\"wide_reallocs\":%llu,\"step_cost_ms\":%.3f,\"down_blocked_s\":%.1f,\"up_blocked\":{%s}",
+        g_dynres.active ? 1 : 0, dynres_requested(), st.ceiling,
+        g_dynres.active ? c.floor : 0, st.level, st.level * g_video_ref_lines, c.forced,
+        c.last_load, c.last_late, c.last_vblank_hz, c.f,
+        g_dynres.hold_reason ? g_dynres.hold_reason : "", hold > 0.0 ? hold : 0.0,
+        c.last_reason ? c.last_reason : "", c.downs, c.ups, c.undos, c.relapses,
+        c.windows, c.held_windows, (unsigned long long)st.steps,
+        (unsigned long long)st.deferred, st.last_from, st.last_to, st.last_ms,
+        g_dynres.step_interval_ms, st.last_prep_ms, st.last_seed_ms, st.last_rects_ms,
+        st.last_wide_ms, (unsigned long long)st.hr_reallocs, (unsigned long long)st.wide_reallocs, c.step_cost_s * 1000.0,
+        c.down_block_until > now_s ? c.down_block_until - now_s : 0.0, blocked);
+}
+
+
 static void sdl_vblank_present(void) {
     sync_guest_cadence_to_video_standard();
     NetplayVblankEpilogue ep = sdl_vblank_present_body();
+    render_thread_vblank();
     /* Selfcheck span-end rewind: after present-body C++ RAII, before any
      * further guest progress. Longjmps on success — keeps every resim load
      * on the same VBlank boundary (BB fast-poll tails forked #2 vs #3). */
     psx_selfcheck_flush_load();
+    dynres_tick();   /* after the present: a scale step lands between frames */
     if (!ep.do_epilogue)
         return;
     if (!psx_return_to_lobby_requested())
@@ -14631,6 +15128,12 @@ namespace {
         gi->num_internal_resolutions = g_ir_count;
         gi->internal_resolution_note = kIrNote;
 #endif
+#if defined(RECOMP_LAUNCHER_HAS_DYNAMIC_RESOLUTION)
+        gi->has_dynamic_resolution = 1;
+#endif
+#if defined(RECOMP_LAUNCHER_HAS_RENDER_PIPELINE)
+        gi->has_render_pipeline = 1;   /* OpenGL rows; the launcher gates */
+#endif
         if (language_labels && num_languages > 0) {
             gi->language_labels = language_labels;
             gi->num_languages = num_languages;
@@ -15208,6 +15711,8 @@ int main(int argc, char** argv) {
                 gc.runtime.video_depth24_trailing_margin;
             g_video_internal_res = gc.runtime.video_internal_resolution;
             g_video_ref_lines    = gc.runtime.video_resolution_reference_lines;
+            g_video_dynres       = gc.runtime.video_dynamic_resolution ? 1 : 0;
+            g_video_dynres_min   = gc.runtime.video_dynamic_resolution_min;
             if (gc.runtime.video_window_width > 0) {
                 g_video_win_w = gc.runtime.video_window_width;
             }
@@ -15236,6 +15741,9 @@ int main(int argc, char** argv) {
             g_low_latency_input = gc.runtime.video_low_latency_input ? 1 : 0;
             gl_renderer_set_texture_window_batching(
                 gc.runtime.video_texture_window_batching ? 1 : 0);
+            g_render_thread = gc.runtime.video_render_thread ? 1 : 0;
+            g_frame_generation = gc.runtime.video_frame_generation ? 1 : 0;
+            g_present_thread = gc.runtime.video_present_thread ? 1 : 0;
             g_video_vsync       = gc.runtime.video_vsync;
             g_frame_interpolation = gc.runtime.video_frame_interpolation ? 1 : 0;
             g_frame_interpolation_fps = gc.runtime.video_frame_interpolation_fps;
@@ -15671,6 +16179,8 @@ int main(int argc, char** argv) {
             g_video_internal_res = PSX_IR_UNSET;
         }
         if (us.has_internal_resolution) g_video_internal_res = us.internal_resolution;
+        if (us.has_dynamic_resolution) g_video_dynres = us.dynamic_resolution ? 1 : 0;
+        if (us.has_dynamic_resolution_min) g_video_dynres_min = us.dynamic_resolution_min;
         if (us.has_window_width)   g_video_win_w     = us.window_width;
         if (us.has_antialiasing)   g_video_aa        = us.antialiasing;
         if (us.has_texture_filter) g_video_texfilter = us.texture_filter;
@@ -15805,6 +16315,9 @@ int main(int argc, char** argv) {
         }
         apply_offline_pad_count(game_players, multitap_enabled);
         if (us.has_low_latency_input) g_low_latency_input = us.low_latency_input ? 1 : 0;
+        if (us.has_render_thread)     g_render_thread     = us.render_thread ? 1 : 0;
+        if (us.has_present_thread)    g_present_thread    = us.present_thread ? 1 : 0;
+        if (us.has_frame_generation)  g_frame_generation  = us.frame_generation ? 1 : 0;
         if (us.has_vsync)             g_video_vsync       = us.vsync;
         if (us.has_frame_interpolation)
             g_frame_interpolation = us.frame_interpolation ? 1 : 0;
@@ -16252,6 +16765,19 @@ int main(int argc, char** argv) {
             seed.internal_resolution = internal_resolution_for_launcher();
             seed.has_internal_resolution = true;
 #endif
+#if defined(RECOMP_LAUNCHER_HAS_DYNAMIC_RESOLUTION)
+            seed.dynamic_resolution = dynres_requested() != 0;
+            seed.has_dynamic_resolution = true;
+#endif
+#if defined(RECOMP_LAUNCHER_HAS_RENDER_PIPELINE)
+            seed.render_thread = g_render_thread != 0;
+            seed.present_thread = g_present_thread != 0;
+            seed.frame_generation = g_frame_generation != 0;
+#endif
+#if defined(RECOMP_LAUNCHER_HAS_DYNAMIC_RESOLUTION)
+            seed.dynamic_resolution_min = dynres_min_value();
+            seed.has_dynamic_resolution_min = true;
+#endif
             seed.antialiasing = g_video_aa;               seed.has_antialiasing = true;
             seed.texture_filter = g_video_texfilter;      seed.has_texture_filter = true;
             seed.fmv_filter = g_video_fmv_filter;         seed.has_fmv_filter = true;
@@ -16454,6 +16980,15 @@ int main(int argc, char** argv) {
             ls.supersampling      = seed.supersampling;
 #if defined(RECOMP_LAUNCHER_HAS_INTERNAL_RESOLUTION)
             ls.internal_resolution = seed.internal_resolution;
+#endif
+#if defined(RECOMP_LAUNCHER_HAS_DYNAMIC_RESOLUTION)
+            ls.dynamic_resolution = seed.dynamic_resolution ? 1 : 0;
+            ls.dynamic_resolution_min = seed.dynamic_resolution_min;
+#endif
+#if defined(RECOMP_LAUNCHER_HAS_RENDER_PIPELINE)
+            ls.render_thread    = seed.render_thread ? 1 : 0;
+            ls.present_thread   = seed.present_thread ? 1 : 0;
+            ls.frame_generation = seed.frame_generation ? 1 : 0;
 #endif
             ls.antialiasing       = seed.antialiasing ? 1 : 0;
             ls.texture_filter     = seed.texture_filter;
@@ -16795,6 +17330,17 @@ int main(int argc, char** argv) {
 #if defined(RECOMP_LAUNCHER_HAS_INTERNAL_RESOLUTION)
                 ir_row_result = ls.internal_resolution;
 #endif
+#if defined(RECOMP_LAUNCHER_HAS_DYNAMIC_RESOLUTION)
+                seed.dynamic_resolution = ls.dynamic_resolution != 0;
+                seed.has_dynamic_resolution = true;
+                seed.dynamic_resolution_min = ls.dynamic_resolution_min;
+                seed.has_dynamic_resolution_min = true;
+#endif
+#if defined(RECOMP_LAUNCHER_HAS_RENDER_PIPELINE)
+                seed.render_thread    = ls.render_thread != 0;    seed.has_render_thread    = true;
+                seed.present_thread   = ls.present_thread != 0;   seed.has_present_thread   = true;
+                seed.frame_generation = ls.frame_generation != 0; seed.has_frame_generation = true;
+#endif
                 seed.antialiasing          = ls.antialiasing != 0;     seed.has_antialiasing          = true;
                 seed.geometry_correction   = ls.geometry_correction != 0;
                 seed.has_geometry_correction = true;
@@ -17051,6 +17597,16 @@ int main(int argc, char** argv) {
                     seed.has_internal_resolution = ir.save_ir != PSX_IR_UNSET;
                     seed.internal_resolution     = ir.save_ir;
                 }
+#if defined(RECOMP_LAUNCHER_HAS_DYNAMIC_RESOLUTION)
+                g_video_dynres = seed.dynamic_resolution ? 1 : 0;
+                g_video_dynres_min = seed.dynamic_resolution_min;
+#endif
+#if defined(RECOMP_LAUNCHER_HAS_RENDER_PIPELINE)
+                /* First boot: the pipeline has not started yet. */
+                g_render_thread    = seed.render_thread ? 1 : 0;
+                g_present_thread   = seed.present_thread ? 1 : 0;
+                g_frame_generation = seed.frame_generation ? 1 : 0;
+#endif
                 g_video_aa        = seed.antialiasing;
                 g_video_texfilter = seed.texture_filter;
                 g_video_fmv_filter = seed.fmv_filter;
@@ -17430,6 +17986,14 @@ session_reboot:
     }
     apply_internal_resolution(psx_sdl_display_pixel_height(nullptr));
     if (g_video_scale < 1) g_video_scale = 1;
+    if (const char* e = std::getenv("PSX_DYNRES"))
+        g_video_dynres_env = (*e && *e != '0') ? 1 : 0;
+    if (const char* e = std::getenv("PSX_DYNRES_MIN")) {
+        int v = 0;
+        if (psx_ir_parse(e, &v) && v != PSX_IR_DISPLAY) g_video_dynres_min_env = v;
+        else std::fprintf(stdout, "psxrecomp: PSX_DYNRES_MIN=%s not understood "
+                          "(native, 720p, 1080p, 1440p, 4k, 5k, 8k, or lines)\n", e);
+    }
     {
         /* Per-backend ceiling. OpenGL allocates its hr surface at context init
          * and clamps there to the driver's texture limits and a memory budget
@@ -17508,6 +18072,21 @@ session_reboot:
     /* [video] texture_window_batching A/B (same image, fewer GL draws). */
     if (const char* e = std::getenv("PSX_GL_TEXWIN_BATCH"))
         gl_renderer_set_texture_window_batching((*e && *e != '0') ? 1 : 0);
+    /* [video] render_thread A/B; PSX_RENDER_THREAD_FRAMES bounds frames in
+     * flight (default 2). */
+    g_render_thread_pref = g_render_thread;
+    g_present_thread_pref = g_present_thread;
+    g_frame_generation_pref = g_frame_generation;
+    if (const char* e = std::getenv("PSX_RENDER_THREAD"))
+        g_render_thread = (*e && *e != '0') ? 1 : 0;
+    if (const char* e = std::getenv("PSX_PRESENT_THREAD"))
+        g_present_thread = (*e && *e != '0') ? 1 : 0;
+    if (const char* e = std::getenv("PSX_PRESENT_THREAD_SLOTS"))
+        g_present_thread_slots = std::atoi(e) > 0 ? std::atoi(e) : 3;
+    if (const char* e = std::getenv("PSX_FRAME_GEN"))
+        g_frame_generation = (*e && *e != '0') ? 1 : 0;
+    if (const char* e = std::getenv("PSX_RENDER_THREAD_FRAMES"))
+        g_render_thread_frames = std::atoi(e) > 0 ? std::atoi(e) : 2;
     /* Scanlines: env override wins over config, same as the corrections above,
      * so a headless/free-run boot can be captured with the effect armed from the
      * first present. PSX_SCANLINES=0/1; PSX_SCANLINE_STRENGTH=0..1. Pushed to the
@@ -17989,7 +18568,12 @@ session_reboot:
                          "%d px -> %dx requested\n", dh, s);
         }
         gl_renderer_set_swap_interval(present_effective_swap_interval()); /* applied at context init */
+        /* Dynamic resolution: the surfaces are allocated at the scale above
+         * (the ceiling) and the level steps under it (dynres_setup). */
+        gl_renderer_set_dynamic_resolution(
+            (dynres_requested() && g_video_scale_applies) ? 1 : 0);
         g_gl_active = (gl_renderer_init_context(sdl_window) != 0);
+        dynres_setup();
 
         /* Bezel artwork (Mods): load after the GL context exists. */
         if (!g_bezel_path.empty() && g_gl_active) {
@@ -18760,6 +19344,16 @@ soft_return_lobby:
 #if defined(RECOMP_LAUNCHER_HAS_INTERNAL_RESOLUTION)
         ls.internal_resolution = internal_resolution_for_launcher();
 #endif
+#if defined(RECOMP_LAUNCHER_HAS_DYNAMIC_RESOLUTION)
+        ls.dynamic_resolution = dynres_requested() != 0;
+        ls.dynamic_resolution_min = dynres_min_value();
+#endif
+#if defined(RECOMP_LAUNCHER_HAS_RENDER_PIPELINE)
+        /* The saved choice, not this run's (env A/B or already running). */
+        ls.render_thread    = g_render_thread_pref;
+        ls.present_thread   = g_present_thread_pref;
+        ls.frame_generation = g_frame_generation_pref;
+#endif
         ls.antialiasing = g_video_aa ? 1 : 0;
         ls.texture_filter = g_video_texfilter;
         ls.fmv_filter = cfg_fmv_filter_to_launcher(g_video_fmv_filter);
@@ -19133,6 +19727,24 @@ soft_return_lobby:
                 us.has_supersampling = true;
                 us.internal_resolution = ir.save_ir;
                 us.has_internal_resolution = ir.save_ir != PSX_IR_UNSET;
+#if defined(RECOMP_LAUNCHER_HAS_DYNAMIC_RESOLUTION)
+                us.dynamic_resolution = ls.dynamic_resolution != 0;
+                us.has_dynamic_resolution = true;
+                us.dynamic_resolution_min = ls.dynamic_resolution_min;
+                us.has_dynamic_resolution_min = true;
+                g_video_dynres = us.dynamic_resolution ? 1 : 0;
+                g_video_dynres_min = us.dynamic_resolution_min;
+#endif
+#if defined(RECOMP_LAUNCHER_HAS_RENDER_PIPELINE)
+                /* Persisted only: the running pipeline keeps its threads;
+                 * the new choice applies at next launch. */
+                us.render_thread    = ls.render_thread != 0;    us.has_render_thread    = true;
+                us.present_thread   = ls.present_thread != 0;   us.has_present_thread   = true;
+                us.frame_generation = ls.frame_generation != 0; us.has_frame_generation = true;
+                g_render_thread_pref    = ls.render_thread ? 1 : 0;
+                g_present_thread_pref   = ls.present_thread ? 1 : 0;
+                g_frame_generation_pref = ls.frame_generation ? 1 : 0;
+#endif
                 us.antialiasing = ls.antialiasing != 0;
                 us.has_antialiasing = true;
                 us.texture_filter = ls.texture_filter;

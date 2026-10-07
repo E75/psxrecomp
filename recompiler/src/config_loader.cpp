@@ -653,6 +653,28 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
             }
             rt.video_internal_resolution = value;
         }
+        if (video.contains("dynamic_resolution")) {
+            rt.video_dynamic_resolution = toml::find<bool>(video, "dynamic_resolution");
+        }
+        if (video.contains("dynamic_resolution_min")) {
+            const toml::value& ir = toml::find(video, "dynamic_resolution_min");
+            int value = 0;
+            bool ok = false;
+            if (ir.is_string()) {
+                ok = psx_ir_parse(ir.as_string().str.c_str(), &value) != 0 &&
+                     value != PSX_IR_DISPLAY;
+            } else if (ir.is_integer()) {
+                const auto n = ir.as_integer();
+                ok = n >= PSX_IR_MIN_LINES && n <= PSX_IR_MAX_LINES;
+                value = static_cast<int>(n);
+            }
+            if (!ok) {
+                throw std::runtime_error(
+                    "[video] dynamic_resolution_min must be native, 720p, 1080p, "
+                    "1440p, 4k, 5k, 8k, or a number of lines");
+            }
+            rt.video_dynamic_resolution_min = value;
+        }
         if (video.contains("resolution_reference_lines")) {
             const auto n = toml::find<int64_t>(video, "resolution_reference_lines");
             if (n < 120 || n > 1024) {
@@ -776,6 +798,15 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
         if (video.contains("texture_window_batching")) {
             rt.video_texture_window_batching =
                 toml::find<bool>(video, "texture_window_batching");
+        }
+        if (video.contains("render_thread")) {
+            rt.video_render_thread = toml::find<bool>(video, "render_thread");
+        }
+        if (video.contains("present_thread")) {
+            rt.video_present_thread = toml::find<bool>(video, "present_thread");
+        }
+        if (video.contains("frame_generation")) {
+            rt.video_frame_generation = toml::find<bool>(video, "frame_generation");
         }
         if (video.contains("vsync")) {
             const auto mode = toml::find<std::string>(video, "vsync");
@@ -2679,6 +2710,25 @@ UserSettings load_user_settings(const fs::path& path) {
                 }
             }
         });
+        if (v.contains("dynamic_resolution")) try_get([&]{
+            s.dynamic_resolution = toml::find<bool>(v, "dynamic_resolution");
+            s.has_dynamic_resolution = true;
+        });
+        if (v.contains("dynamic_resolution_min")) try_get([&]{
+            const toml::value& ir = toml::find(v, "dynamic_resolution_min");
+            int value = 0;
+            if (ir.is_string()) {
+                if (psx_ir_parse(ir.as_string().str.c_str(), &value) &&
+                    value != PSX_IR_DISPLAY) {
+                    s.dynamic_resolution_min = value; s.has_dynamic_resolution_min = true;
+                }
+            } else if (ir.is_integer()) {
+                const auto n = ir.as_integer();
+                if (n >= PSX_IR_MIN_LINES && n <= PSX_IR_MAX_LINES) {
+                    s.dynamic_resolution_min = (int)n; s.has_dynamic_resolution_min = true;
+                }
+            }
+        });
         if (v.contains("window_width")) try_get([&]{
             const auto n = toml::find<int64_t>(v, "window_width");
             if (n >= 640 && n <= 7680) { s.window_width = (int)n; s.has_window_width = true; }
@@ -2756,6 +2806,18 @@ UserSettings load_user_settings(const fs::path& path) {
         if (v.contains("low_latency_input")) try_get([&]{
             s.low_latency_input = toml::find<bool>(v, "low_latency_input");
             s.has_low_latency_input = true;
+        });
+        if (v.contains("render_thread")) try_get([&]{
+            s.render_thread = toml::find<bool>(v, "render_thread");
+            s.has_render_thread = true;
+        });
+        if (v.contains("present_thread")) try_get([&]{
+            s.present_thread = toml::find<bool>(v, "present_thread");
+            s.has_present_thread = true;
+        });
+        if (v.contains("frame_generation")) try_get([&]{
+            s.frame_generation = toml::find<bool>(v, "frame_generation");
+            s.has_frame_generation = true;
         });
         if (v.contains("vsync")) try_get([&]{
             const auto m = toml::find<std::string>(v, "vsync");
@@ -3063,6 +3125,17 @@ bool save_user_settings(const fs::path& path, const UserSettings& s) {
         else
             f << "internal_resolution = " << s.internal_resolution << "\n";
     }
+    if (s.has_dynamic_resolution)
+        f << "dynamic_resolution = " << (s.dynamic_resolution ? "true" : "false") << "\n";
+    if (s.has_dynamic_resolution_min &&
+        psx_ir_value_valid(s.dynamic_resolution_min) &&
+        s.dynamic_resolution_min != PSX_IR_DISPLAY) {
+        const char* id = psx_ir_id_for(s.dynamic_resolution_min);
+        if (id)
+            f << "dynamic_resolution_min = \"" << id << "\"\n";
+        else
+            f << "dynamic_resolution_min = " << s.dynamic_resolution_min << "\n";
+    }
     if (s.has_window_width)
         f << "window_width      = " << s.window_width << "\n";
     if (s.has_antialiasing)
@@ -3103,6 +3176,12 @@ bool save_user_settings(const fs::path& path, const UserSettings& s) {
         f << "fullscreen        = " << s.fullscreen << "\n";
     if (s.has_low_latency_input)
         f << "low_latency_input = " << (s.low_latency_input ? "true" : "false") << "\n";
+    if (s.has_render_thread)
+        f << "render_thread = " << (s.render_thread ? "true" : "false") << "\n";
+    if (s.has_present_thread)
+        f << "present_thread = " << (s.present_thread ? "true" : "false") << "\n";
+    if (s.has_frame_generation)
+        f << "frame_generation = " << (s.frame_generation ? "true" : "false") << "\n";
     if (s.has_vsync)
         f << "vsync             = \"" << (s.vsync == 0 ? "immediate" : s.vsync < 0 ? "adaptive" : "on") << "\"\n";
     if (s.has_frame_interpolation)

@@ -49,6 +49,11 @@ the runtime scans them again. Disabling the mod restores the original artwork.
 The plugin does not write replacement pixels into native VRAM or change the
 save namespace.
 
+HD replacements and dumping use synchronous rendering for safety. While
+either is enabled, Render thread and Smooth motion do not run; their saved
+settings are preserved. Disable both and relaunch to use those features.
+Dynamic resolution is still available with HD textures.
+
 Capture defaults follow the referenced DuckStation policy: track uploads,
 union their used rectangles per palette, skip direct-color C16 textures, ignore
 results smaller than 16x16, and reduce palette ranges to used indices. Small
