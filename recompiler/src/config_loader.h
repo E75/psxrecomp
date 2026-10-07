@@ -1463,6 +1463,13 @@ struct UserSettings {
     // on a vsync-light box). vsync: 1=on (tear-free), 0=immediate (lowest
     // display latency, may tear), -1=adaptive.
     bool has_low_latency_input = false; bool low_latency_input = true;
+    // Rendering pipeline (RuntimeConfig::video_render_thread, _present_thread,
+    // _frame_generation; docs/RENDER_THREAD.md). Written only once the player
+    // changed them, so game.toml stays the default. Applied at next launch;
+    // PSX_RENDER_THREAD / PSX_PRESENT_THREAD / PSX_FRAME_GEN override one run.
+    bool has_render_thread    = false; bool render_thread    = false;
+    bool has_present_thread   = false; bool present_thread   = false;
+    bool has_frame_generation = false; bool frame_generation = false;
     bool has_vsync             = false; int  vsync             = 1;
     bool has_frame_interpolation = false; bool frame_interpolation = false;
     bool has_frame_interpolation_fps = false; int frame_interpolation_fps = 0;
