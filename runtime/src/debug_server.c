@@ -8456,9 +8456,11 @@ static void handle_render_pass_stats(int id, const char *json)
 {
     (void)json;
     RenderPassStats st;
+    GLRenderPassPlanDiag admission;
     uint64_t gd[10], image_bytes = 0;
     uint32_t image_textures;
     char failure_json[2048];
+    char admission_json[768];
     char abort_detail_json[sizeof st.last_abort_detail * 6 + 1];
     DirtyRamSpanFailure sf;
     render_pass_get_stats(&st);
@@ -8492,6 +8494,18 @@ static void handle_render_pass_stats(int id, const char *json)
                  b->fbo_status, b->gl_error_before, b->gl_error);
     }
     gl_renderer_pass_diag(gd);
+    gl_renderer_pass_plan_diag(&admission);
+    snprintf(admission_json, sizeof admission_json,
+             "{\"plans\":%llu,\"frame\":%llu,\"zero_credit_refusals\":%llu,"
+             "\"idle_ms\":%.3f,\"present_ms\":%.3f,\"prior_pass_ms\":%.3f,"
+             "\"present_reserve_ms\":%.3f,\"spare_ms\":%.3f,\"frame_ms\":%.3f,"
+             "\"cost_ms\":%.3f,\"budget_ms\":%.3f,\"wanted\":%u,\"planned\":%u}",
+             (unsigned long long)admission.plans,
+             (unsigned long long)admission.frame,
+             (unsigned long long)admission.zero_credit_refusals,
+             admission.idle_ms, admission.present_ms, admission.prior_pass_ms,
+             admission.present_reserve_ms, admission.spare_ms, admission.frame_ms,
+             admission.cost_ms, admission.budget_ms, admission.wanted, admission.planned);
     image_textures = gl_renderer_pass_image_textures(&image_bytes);
     send_fmt("{\"id\":%d,\"ok\":true,\"plans\":%llu,\"planned\":%llu,"
              "\"wanted\":%llu,\"refused\":%llu,\"passes\":%llu,"
@@ -8514,7 +8528,7 @@ static void handle_render_pass_stats(int id, const char *json)
              "\"argument_refused\":%llu,\"status_refused\":%llu,"
              "\"begin_refused\":%llu,\"checkpoint_refused\":%llu,"
              "\"spans\":%llu,\"span_failures\":%llu,"
-             "\"last_failure\":%s,\"last_abort_detail\":\"%s\","
+             "\"admission\":%s,\"last_failure\":%s,\"last_abort_detail\":\"%s\","
              "\"span_fail\":{\"reason\":%u,\"pc\":\"0x%08X\",\"start\":\"0x%08X\","
              "\"stop\":\"0x%08X\",\"ra\":\"0x%08X\",\"after\":\"0x%08X\","
              "\"insns\":%llu}}",
@@ -8548,7 +8562,7 @@ static void handle_render_pass_stats(int id, const char *json)
              (unsigned long long)st.argument_refused, (unsigned long long)st.status_refused,
              (unsigned long long)st.begin_refused, (unsigned long long)st.checkpoint_refused,
              (unsigned long long)st.spans, (unsigned long long)st.span_failures,
-             failure_json, abort_detail_json,
+             admission_json, failure_json, abort_detail_json,
              (unsigned)sf.reason, (unsigned)sf.pc, (unsigned)sf.start_pc,
              (unsigned)sf.stop_pc, (unsigned)sf.ra, (unsigned)sf.after,
              (unsigned long long)sf.insns);

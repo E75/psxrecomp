@@ -272,13 +272,17 @@ first pass copies the rect out (`backups_reused` in `render_pass_stats`).
 
 Passes cost host time inside the game's frame: they run on the emulation
 thread. The budget per frame is `PSX_RENDER_PASS_BUDGET` percent (default 80)
-of the presenter's idle time plus the presents beyond two per frame, learnt
-from the previous frame, over a smoothed per-pass cost. When the budget runs
+of the presenter's idle time plus the presents beyond two per frame and prior
+replay time, learnt from the previous frame, over a smoothed per-pass cost.
+Zero measured credit means zero budget, including startup and a frame after
+replay was shed. It does not grant a fraction of the nominal frame: that would
+repeatedly readmit expensive replay on an already overloaded host.
+When the budget runs
 out, fewer passes are rendered, and a pass that costs more than the budget is
 not planned at all. The cost is measured per presented image size: until
 three passes have been measured at the current size (the first plans, and
-after an aspect or internal-resolution change) a plan asks for one pass, so
-an expensive size costs at most one pass per frame while it is learnt. The
+after an aspect or internal-resolution change) a positive-budget plan asks for
+one pass, so an expensive size costs at most one pass per frame while it is learnt. The
 three seed the average with their median, so one slow pass on a busy host
 does not price passes out. A pass that creates pass textures or
 framebuffers (the first frames at a size, or a slot filled for the first
@@ -288,7 +292,7 @@ busy host, code run for the first time) that costs several times the steady
 state; an estimate that high prices every plan out, so no pass would ever
 correct it. An estimate that no pass has been measured against for 30
 plans that wanted passes (about a second of a 30 Hz game) is measured again:
-the warm-up restarts, with one pass per plan (`cost_rewarms` in
+the warm-up restarts, with one pass per positive-budget plan (`cost_rewarms` in
 `render_pass_stats`). When the new median is not at least a quarter below
 the old estimate, the old one was right (a size that is truly too
 expensive, or a host at its limit), and the next wait doubles, up to 960
@@ -314,6 +318,14 @@ internal resolutions; a size change frees the old set.
   source path and resource stage). FBO status and GL errors are numeric enums;
   `gl_error_before` is distinct from errors produced during that allocation.
   Success does not erase the record; a new mod session clears it.
+  `admission` records the last eligible planner call's guest `frame`, measured
+  `idle_ms`, `present_ms`, `prior_pass_ms`, two-present `present_reserve_ms`,
+  clamped `spare_ms`, nominal `frame_ms`, effective `cost_ms` (zero during a
+  warm-up), `budget_ms`, `wanted` and `planned`. Its `plans` and
+  `zero_credit_refusals` are lifetime counters; use deltas over an active window.
+  The latter counts wanted plans shed with zero budget. Backend refusal leaves
+  this snapshot unchanged, so compare its frame and count before interpreting
+  it as current evidence. Queries neither run a plan nor reset admission history.
 - `render_pass_refuse on=1` (TCP) or `PSX_RENDER_PASS_REFUSE=1`: the backend
   declines passes (`BACKEND`), to test a plugin's fallback.
 - `render_pass_dump path=<dir> count=<n>`: PNGs of the next n frames' images
