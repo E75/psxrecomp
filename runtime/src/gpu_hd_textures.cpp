@@ -383,6 +383,34 @@ extern "C" void gpu_hd_textures_end_copy(void) {
     if (duck_texture_pack_end_copy(session->duck, native_vram, kVramWords) < 0)
         gpu_hd_textures_reset_tracking();
 }
+namespace {
+constexpr uint32_t kResidencyMagic = 0x52444850u; /* "PHDR" */
+constexpr uint32_t kResidencyVersion = 1u;
+void put32(uint8_t* at, uint32_t v) { for (int i = 0; i < 4; ++i) at[i] = uint8_t(v >> (8 * i)); }
+uint32_t get32(const uint8_t* at) { uint32_t v = 0; for (int i = 0; i < 4; ++i) v |= uint32_t(at[i]) << (8 * i); return v; }
+}
+extern "C" int gpu_hd_textures_residency_save(uint8_t** data, size_t* size) {
+    if (data) *data = nullptr;
+    if (size) *size = 0;
+    if (!data || !size || !session || !session->beetle || !native_vram) return 0;
+    uint8_t* tracking = nullptr; size_t tracking_size = 0;
+    if (!hd_texture_pack_tracking_state_save(session->beetle, &tracking, &tracking_size)) return 0;
+    uint8_t* out = static_cast<uint8_t*>(std::malloc(12 + tracking_size));
+    if (!out) { std::free(tracking); return 0; }
+    put32(out, kResidencyMagic); put32(out + 4, kResidencyVersion);
+    put32(out + 8, hd_texture_crc32_words_le(native_vram, kVramWords));
+    if (tracking_size) std::memcpy(out + 12, tracking, tracking_size);
+    std::free(tracking);
+    *data = out; *size = 12 + tracking_size;
+    return 1;
+}
+extern "C" int gpu_hd_textures_residency_load(const uint8_t* data, size_t size) {
+    if (!data || size < 12 || !session || !session->beetle || !native_vram) return 0;
+    if (get32(data) != kResidencyMagic || get32(data + 4) != kResidencyVersion) return 0;
+    if (get32(data + 8) != hd_texture_crc32_words_le(native_vram, kVramWords)) return 0;
+    if (!hd_texture_pack_tracking_state_check(data + 12, size - 12)) return 0;
+    return hd_texture_pack_tracking_state_load(session->beetle, data + 12, size - 12);
+}
 extern "C" void gpu_hd_textures_invalidate(int x, int y, int width, int height) {
     if (!session || width < 1 || height < 1) return;
     if (width > 1024 || height > 512) { gpu_hd_textures_reset_tracking(); return; }

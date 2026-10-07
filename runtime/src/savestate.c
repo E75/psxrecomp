@@ -10,6 +10,7 @@
 #include "boot_state.h"
 #include "cdrom.h"
 #include "gpu.h"
+#include "gpu_hd_textures.h"
 #include "interrupts.h"
 #include "psx_cycles.h"
 #include "psx_netplay.h"
@@ -488,6 +489,47 @@ static int savestate_thumb_path(int slot, char* out, size_t cap) {
     return 1;
 }
 
+/* HD texture-pack residency sidecar (gpu_hd_textures.h): host metadata next
+ * to the slot, never part of the .pst, so states stay renderer-independent. */
+static int savestate_hd_path(int slot, char* out, size_t cap) {
+    if (!s_configured || !out || cap == 0) return 0;
+    if (slot < 0 || slot >= SAVESTATE_SLOTS) return 0;
+    snprintf(out, cap, "%s%sstate_%08X%s_slot%02d.hdres",
+             s_dir, (s_dir[0] ? "/" : ""), (unsigned)s_entry_pc,
+             s_disc_token, slot);
+    return 1;
+}
+static void savestate_write_hd_residency(int slot) {
+    char path[600];
+    uint8_t* data = NULL;
+    size_t size = 0;
+    if (!savestate_hd_path(slot, path, sizeof(path))) return;
+    if (!gpu_hd_textures_residency_save(&data, &size)) { remove(path); return; }
+    FILE* f = fopen(path, "wb");
+    if (f) {
+        const int ok = fwrite(data, 1, size, f) == size;
+        if (fclose(f) != 0 || !ok) remove(path);
+    }
+    free(data);
+}
+static void savestate_read_hd_residency(int slot) {
+    char path[600];
+    if (!savestate_hd_path(slot, path, sizeof(path))) return;
+    FILE* f = fopen(path, "rb");
+    if (!f) return;
+    uint8_t* data = NULL;
+    long size = (fseek(f, 0, SEEK_END) == 0) ? ftell(f) : -1;
+    if (size > 0 && size <= (64L << 20) && fseek(f, 0, SEEK_SET) == 0 &&
+        (data = (uint8_t*)malloc((size_t)size)) != NULL &&
+        fread(data, 1, (size_t)size, f) == (size_t)size) {
+        if (!gpu_hd_textures_residency_load(data, (size_t)size))
+            fprintf(stderr, "savestate: slot %d HD texture residency not restored "
+                            "(different pack or VRAM); replacements resume on new uploads\n", slot);
+    }
+    free(data);
+    fclose(f);
+}
+
 int savestate_slot_exists(int slot) {
     char path[600];
     FILE* f;
@@ -887,6 +929,7 @@ void savestate_poll(CPUState* cpu, uint32_t resume_pc) {
                     s_last_save_pc = pc;
                     s_save_failed = 0;
                     (void)savestate_capture_thumb(slot);
+                    savestate_write_hd_residency(slot);
                 } else {
                     s_last_save_pc = 0;
                     s_save_failed = 1;
@@ -1005,6 +1048,7 @@ void savestate_poll(CPUState* cpu, uint32_t resume_pc) {
             /* Restage FBO/present latch so the restored frame is visible
              * immediately (avoids disabled-display blank latch + stale smooth). */
             psx_frontend_on_savestate_loaded();
+            if (path[0]) savestate_read_hd_residency(slot);
             t_after_frontend = savestate_mono_ms();
             fprintf(stderr,
                     "savestate: LOADED slot %d -> resuming pc=0x%08X "

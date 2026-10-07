@@ -79,9 +79,13 @@ Pack artwork is supplied separately. Matching depends on native game pixels
 and palettes; a different region or revision may not match. PNG, JPEG, and static WebP are supported,
 with a maximum of 8192 pixels per side, 64 MiB encoded, and 64 MiB decoded RGBA.
 Unsupported identities, configuration features, or images fall back to the
-original artwork. After loading a savestate, upload-based replacements need
-fresh texture uploads from the game before they can match again; page-based
-matching remains available. See [DuckStation texture format notes](DUCKSTATION_TEXTURE_FORMAT.md)
+original artwork. Saving a state also writes the Beetle-format upload
+residency beside the slot (`*.hdres`, host metadata only, never in the `.pst`).
+Loading that slot restores it when the restored VRAM is exactly the VRAM it
+was saved with, so a HUD uploaded once per race keeps its replacement. Other
+loads (no sidecar, a different pack, DuckStation `texupload` names, rewind or
+netplay states) need fresh texture uploads from the game before upload-based
+replacements match again; page-based matching remains available. See [DuckStation texture format notes](DUCKSTATION_TEXTURE_FORMAT.md)
 for the exact supported filenames, hashing, alpha behavior, and limitations.
 
 Development builds expose the [TCP `hd_textures` command](TCP_COMMANDS.md).
