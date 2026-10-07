@@ -1184,6 +1184,11 @@ if(BUILD_TESTING)
             "netplay_*_tests: lib/retcomm-rbengine or lib/recomp-net absent - skipped")
     endif()
 
+    add_executable(netplay_load_probe_test
+        tests/test_netplay_load_probe.c)
+    target_include_directories(netplay_load_probe_test PRIVATE include)
+    add_test(NAME netplay_load_probe_test COMMAND netplay_load_probe_test)
+
     if(PSXRECOMP_TEST_HAS_RBENGINE)
         add_executable(netplay_hash_confirm_test
             tests/test_netplay_hash_confirm.c)
@@ -1327,6 +1332,9 @@ if(BUILD_TESTING)
                              --cc ${CMAKE_C_COMPILER})
         endif()
         add_test(NAME fntrace_c_linkage_test COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_fntrace_c_linkage.py)
+        add_test(NAME netplay_load_apply_flow_test
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_netplay_load_apply_flow.py)
         if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
             add_test(NAME overlay_retry_c11_test COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_overlay_retry_c11.py --compiler ${CMAKE_C_COMPILER})
         endif()
