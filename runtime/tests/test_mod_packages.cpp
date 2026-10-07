@@ -663,6 +663,77 @@ int main() {
     check(resource_reload.resolve("SLUS-TEST").ok,
           "required enabled resources must resolve after selecting a path");
 
+    /* A package-relative default supplies a required folder the package
+     * ships; a player selection still wins, and clearing it restores it. */
+    const fs::path default_pack = root / "installed/default-resource.mod/1.0.0/pack";
+    fs::create_directories(default_pack, ec);
+    fs::create_directories(root / "selected/pack", ec);
+    write_text(root / "installed/default-resource.mod/1.0.0/manifest.toml",
+               "format_version = 5\n"
+               "id = \"default-resource.mod\"\n"
+               "version = \"1.0.0\"\n"
+               "name = \"Default Resource Mod\"\n"
+               "resolver = \"declarative\"\n"
+               "[[target]]\n"
+               "game_id = \"SLUS-TEST\"\n"
+               "[[feature]]\n"
+               "id = \"pack\"\n"
+               "name = \"Pack\"\n"
+               "default_enabled = true\n"
+               "[[resource]]\n"
+               "feature = \"pack\"\n"
+               "id = \"pack\"\n"
+               "label = \"Pack folder\"\n"
+               "format = \"directory\"\n"
+               "default = \"pack\"\n"
+               "required = true\n");
+    ModPackageManager default_resource(root);
+    check(default_resource.scan(&error), error.c_str());
+    check(default_resource.feature_resource_path(
+              "default-resource.mod", "pack", "pack") == default_pack,
+          "an unselected resource must use its package-relative default");
+    ModResolution default_resolved = default_resource.resolve("SLUS-TEST");
+    const bool default_in_plan = std::any_of(
+        default_resolved.resources.begin(), default_resolved.resources.end(),
+        [&](const ModResolution::Resource& r) {
+            return r.package_id == "default-resource.mod" && r.path == default_pack;
+        });
+    check(default_in_plan,
+          "a required resource with a default must resolve without a selection");
+    check(default_resource.set_feature_resource_path(
+              "default-resource.mod", "pack", "pack",
+              root / "selected/pack", &error), error.c_str());
+    check(default_resource.feature_resource_path(
+              "default-resource.mod", "pack", "pack") == root / "selected/pack",
+          "a selected resource path must override the package default");
+    fs::remove_all(root / "installed/default-resource.mod", ec);
+    {
+        const fs::path unsafe_root = root / "unsafe-default";
+        write_text(unsafe_root / "installed/unsafe.mod/1.0.0/manifest.toml",
+                   "format_version = 5\n"
+                   "id = \"unsafe.mod\"\n"
+                   "version = \"1.0.0\"\n"
+                   "name = \"Unsafe\"\n"
+                   "resolver = \"declarative\"\n"
+                   "[[target]]\n"
+                   "game_id = \"SLUS-TEST\"\n"
+                   "[[feature]]\n"
+                   "id = \"pack\"\n"
+                   "name = \"Pack\"\n"
+                   "[[resource]]\n"
+                   "feature = \"pack\"\n"
+                   "id = \"pack\"\n"
+                   "label = \"Pack folder\"\n"
+                   "format = \"directory\"\n"
+                   "default = \"../outside\"\n");
+        ModPackageManager unsafe(unsafe_root);
+        unsafe.scan(&error);
+        check(!unsafe.scan_errors().empty(),
+              "an unsafe resource default must be reported by the scan");
+        check(unsafe.feature_resource_path("unsafe.mod", "pack", "pack").empty(),
+              "a resource default outside the package must be rejected");
+    }
+
     write_text(root / "packages/parametric.mod/1.0.0/manifest.toml",
                "format_version = 3\n"
                "id = \"parametric.mod\"\n"

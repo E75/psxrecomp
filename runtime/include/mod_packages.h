@@ -241,6 +241,9 @@ struct ModResource {
     std::string shared_source;
     bool input_only = false;
     bool hidden = false;
+    // Package-relative path used when the player has not selected one (for
+    // example a pack folder the package ships). A selection always wins.
+    std::string default_path;
 };
 
 struct ModDerivedDisc {

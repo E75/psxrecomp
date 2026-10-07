@@ -6,6 +6,10 @@ Use **OpenGL** to display replacements. Software and Vulkan can collect dumps
 but continue to display the original artwork. Tomba USA (`SCUS-94236`) is the
 first integrated game target; game projects can supply their own manifest for
 the same `psx.hd-textures` plugin.
+A title manifest can also ship a pack inside its own package and point the
+`pack` resource at it with `default = "<folder>"` (see
+[MOD_PACKAGES.md](MOD_PACKAGES.md#owner-selected-resources)); a folder the
+player selects still takes precedence.
 
 Tomba provides an [optional drop-in example pack](https://github.com/mstan/TombaRecomp/tree/master/examples/hd-texture-pack)
 with five synthetic checkerboards and a README inside its `SCUS-94236` pack

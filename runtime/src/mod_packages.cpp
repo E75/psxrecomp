@@ -869,10 +869,15 @@ fs::path effective_resource_path(const ModPackage& package,
     if (!feature || feature->legacy) return {};
     const ModFeatureSelection* selected =
         find_feature_selection(package, selection, feature_id);
-    if (!selected) return {};
-    const auto resource = selected->resources.find(id);
-    return resource == selected->resources.end() ? fs::path{} :
-                                                   fs::u8path(resource->second);
+    if (selected) {
+        const auto resource = selected->resources.find(id);
+        if (resource != selected->resources.end() && !resource->second.empty())
+            return fs::u8path(resource->second);
+    }
+    const ModResource* declared = find_resource(package, feature_id, id);
+    if (declared && !declared->default_path.empty() && !package.root.empty())
+        return package.root / fs::u8path(declared->default_path);
+    return {};
 }
 
 bool prospective_feature_enabled(
@@ -1937,6 +1942,15 @@ bool ModPackageManager::read_manifest(const fs::path& path, ModPackage& out,
                 resource.shared_source = toml::find_or<std::string>(v, "shared_source", "");
                 resource.input_only = toml::find_or<bool>(v, "input_only", false);
                 resource.hidden = toml::find_or<bool>(v, "hidden", false);
+                resource.default_path = toml::find_or<std::string>(v, "default", "");
+                if (!resource.default_path.empty() &&
+                    (!safe_archive_name(resource.default_path) ||
+                     !resource.sha256.empty() || resource.input_only ||
+                     !resource.shared_source.empty() ||
+                     (resource.format != "file" && resource.format != "directory" &&
+                      resource.format != "folder")))
+                    throw std::runtime_error(
+                        "resource default must be a safe package-relative file or folder");
                 if ((resource.input_only || resource.hidden || !resource.shared_source.empty()) && out.format_version < 9)
                     throw std::runtime_error("source bindings require format_version 9");
                 if (!resource.shared_source.empty() && (!resource.input_only || !valid_id(resource.shared_source)))
