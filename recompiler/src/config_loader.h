@@ -583,6 +583,11 @@ struct RuntimeConfig {
     // PSX_FRAME_GEN=0/1 overrides.
     bool                  video_frame_generation = false;
 
+    // [timing] guest_cycle_scale (1 = faithful, 1..64) and its gate; title
+    // constants from game.toml only. See config_loader.cpp.
+    int                   guest_cycle_scale = 1;
+    bool                  guest_cycle_scale_gated = false;
+
     // present_thread: with render_thread, composed frames go to offscreen
     // slots and a present thread (second, shared GL context on the window)
     // does the copy and the swap, so the window compositor's wait does not
