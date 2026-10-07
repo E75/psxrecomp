@@ -10424,7 +10424,7 @@ static void handle_render_thread(int id, const char *json)
     send_fmt("{\"id\":%d,\"ok\":true,%s}", id, buf[0] ? buf : "\"active\":0");
 }
 
-/* Frame generation ([video] frame_generation, docs/FRAME_GENERATION.md):
+/* Smooth motion (frame generation; [video] frame_generation, docs/FRAME_GENERATION.md):
  *   {"cmd":"frame_gen"} -> enabled, active, generated / real presents, flips,
  *   the last plan (in-between frames per game frame, display slots), costs,
  *   match counts, breaker. Not a sync point (render-thread counters, racy). */
