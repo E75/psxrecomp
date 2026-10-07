@@ -167,12 +167,13 @@ if(BUILD_TESTING)
     else()
         message(STATUS "gl_readback_region_test: not registered (requires MinGW, SDL3 headers/static library in PSX_GL_READBACK_SDL_ROOT and gcc.exe/g++.exe in PSX_GL_READBACK_COMPILER_BIN)")
     endif()
-    # Real-GL internal-resolution invariance (macOS/Linux, hidden window): the
-    # guest-visible VRAM is identical at every scale, lines stay one native
-    # pixel thick, and an over-limit request clamps inside GL. Needs the SDL3
-    # this tree fetched and a GPU session; labelled hardware like the readback
-    # test above.
-    if(NOT WIN32 AND Python3_Interpreter_FOUND AND TARGET SDL3::SDL3)
+    # Real-GL internal-resolution invariance (macOS, Linux and Windows/MinGW,
+    # hidden window): the guest-visible VRAM is identical at every scale, lines
+    # stay one native pixel thick, and an over-limit request clamps inside GL.
+    # Needs the SDL3 this tree fetched and a GPU session; labelled hardware like
+    # the readback test above. A host with no window/GL 3.3 context (headless,
+    # or Windows over SSH) exits 77 and is reported as skipped.
+    if((NOT WIN32 OR MINGW) AND Python3_Interpreter_FOUND AND TARGET SDL3::SDL3)
         if(DEFINED sdl3_SOURCE_DIR)
             set(_gl_scale_sdl_inc "${sdl3_SOURCE_DIR}/include")
         else()
@@ -186,10 +187,11 @@ if(BUILD_TESTING)
                 --sdl-include "${_gl_scale_sdl_inc}"
                 --sdl-library "$<TARGET_FILE:SDL3::SDL3>"
                 --output "${CMAKE_CURRENT_BINARY_DIR}/gl-scale-results")
-        set_tests_properties(gl_scale_invariance_test PROPERTIES LABELS "gpu;opengl;hardware" TIMEOUT 300)
+        set_tests_properties(gl_scale_invariance_test PROPERTIES
+            LABELS "gpu;opengl;hardware" TIMEOUT 300 SKIP_RETURN_CODE 77)
         unset(_gl_scale_sdl_inc)
     else()
-        message(STATUS "gl_scale_invariance_test: not registered (needs a non-Windows host, Python 3 and SDL3)")
+        message(STATUS "gl_scale_invariance_test: not registered (needs macOS, Linux or MinGW, Python 3 and SDL3)")
     endif()
     if(Python3_Interpreter_FOUND AND TARGET SDL3::SDL3-static)
         add_test(NAME gl_texture_filter_test

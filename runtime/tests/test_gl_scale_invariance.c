@@ -76,6 +76,7 @@ int gpu_display_is_depth24(void){return 0;}
 void gpu_get_display_info(GpuDisplayInfo *out){memset(out,0,sizeof(*out));out->width=320;out->height=240;}
 int psx_ws_prim_in_backdrop(void){return 0;}
 int gpu_ws_nw_flat_backdrop_enabled(void){return 0;}
+int gpu_ws_background_requires_full_composite(void){return 0;}
 int g_ws_tex_edge_pct=0;
 int psx_ws_prim_is_tagged(void){return 0;}
 void psx_ws_dbg_gate_frame_snapshot(void){}
@@ -786,7 +787,14 @@ int main(int argc, char **argv) {
     int scale = argc > 1 ? atoi(argv[1]) : 1;
     const char *mode = argc > 2 ? argv[2] : "scene";
     int window = !strcmp(mode, "window");
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) return 2;
+    /* No video device, window or GL context (a headless or non-interactive
+     * session, such as Windows over SSH) is "this host cannot run the test":
+     * exit 77, which the harness reports as a CTest skip. A context that
+     * exists but fails the renderer's init is a failure. */
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        fprintf(stderr, "SKIP no video (%s)\n", SDL_GetError());
+        return 77;
+    }
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
@@ -795,7 +803,18 @@ int main(int argc, char **argv) {
 #endif
     SDL_Window *win = SDL_CreateWindow("Scale invariance hidden test", 0, 0, 128, 128,
                                        SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
-    if (!win) return 2;
+    if (!win) { fprintf(stderr, "SKIP no window (%s)\n", SDL_GetError()); return 77; }
+    /* Probe with the renderer's attributes: the renderer drops its context on
+     * any init failure, so only a probe tells "no context" from "broken". */
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+    SDL_GLContext probe = SDL_GL_CreateContext(win);
+    if (!probe) {
+        fprintf(stderr, "SKIP no GL 3.3 core context (%s)\n", SDL_GetError());
+        return 77;
+    }
+    SDL_GL_MakeCurrent(win, NULL);
+    SDL_GL_DeleteContext(probe);
     for (int i = 0; i < 1024*512; i++) vram[i] = 0;
     glb_init(vram);
     glb_set_scale(scale);
