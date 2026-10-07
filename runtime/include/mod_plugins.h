@@ -794,13 +794,18 @@ int psx_mod_set_controller_presentation_policy(
     int config_capable);
 
 /* ---- External offline input: ONE ordered resolution per player ----------
- * Two optional, mod-supplied inputs can act on an offline player's pad. The
+ * Three optional, mod-supplied inputs can act on an offline player's pad. The
  * runtime resolves them in a fixed order in pad_external_input.h:
- *   1. physical/local capture (keyboard, controllers: buttons, sticks, type)
+ *   1. physical/local capture (keyboard, controllers: buttons, sticks, type),
+ *      plus the host extras of that port (gamepad present, LT/RT 0..255)
  *   2. offline controller source (psx_mod_set_controller_source): buttons =
  *      source AND physical; sticks/type come from the source, through the
  *      same mode override / multitap rule / presentation policy as a physical
  *      pad. A declined/invalid sample delivers neutral, not the last input.
+ *   2b. title pad transform (psx_mod_set_pad_transform): sees the pad of 1-2
+ *      plus the host extras and may rewrite buttons, sticks and the presented
+ *      controller type (e.g. a NeGcon fed from the triggers). Its output is
+ *      validated; an invalid one delivers neutral.
  *   3. local mouse policy (psx_mod_set_local_mouse_policy), P1 only: may
  *      override ONLY the right analog axes of the pad resolved by 1-2. It sees
  *      the final buttons/analog flag/right stick, so it composes with a
@@ -834,6 +839,89 @@ typedef struct PSXModControllerState {
 } PSXModControllerState;
 typedef int (*PSXModControllerSource)(PSXModControllerState *state);
 int psx_mod_set_controller_source(uint32_t player, PSXModControllerSource source);
+
+/* Title pad transform (stage 2b above). Offline local play only: never under
+ * netplay or rollback resim (the session is vanilla), selfcheck replay or a
+ * plain debug-server override; the debug host-input layer feeds stage 1 and
+ * so does reach it. Main thread; may run more than once per guest frame
+ * (low-latency resample), so keep it a function of its input plus game state.
+ *
+ * The frame is the resolved pad: active-low buttons, sticks (0x80 centred),
+ * type (PSX_MOD_PAD_*), and host extras of the port. A player presented as
+ * digital (and not driven by a controller source) is given as its host pad
+ * instead: the real sticks, and buttons without the stick->D-pad fold, with
+ * type still DIGITAL; the transform decides what the guest sees.
+ * host_flags bit 0 = a
+ * gamepad is assigned, bit 1 / bit 2 = it has a left / right trigger axis;
+ * host_lt / host_rt are those triggers, 0 released .. 255 fully pressed
+ * (0 when absent or while the savestate input guard is armed).
+ *
+ * The output arrives pre-filled with the stock pad (what the player gets
+ * without a transform, so a digital pad keeps its fold and centred sticks;
+ * pressures 0). Return non-zero to apply it, 0 to deliver the stock pad. The
+ * type must be one of allowed_types (bit per PSX_MOD_PAD_*); bytes are
+ * 0..255 and buttons 0..0xFFFF; anything else delivers a neutral frame.
+ * NeGcon uses lx as twist (0x80 centre) and negcon_i / negcon_ii / negcon_l
+ * as pressures. A type change reaches SIO through the deferred, idle-bus
+ * request; entering or leaving NeGcon is a device swap (sio.h).
+ *
+ * Registration validates struct_size, a non-NULL callback, allowed_types
+ * within the known types and initial_type within allowed_types; a bad one
+ * returns 0. initial_type is the type presented at boot/hotplug before the
+ * first frame. NULL detaches with one neutral release frame; mod/session
+ * reset detaches all (with release). Not registering keeps the faithful
+ * default path untouched. */
+enum {
+    PSX_MOD_PAD_DIGITAL = 0,
+    PSX_MOD_PAD_DUALSHOCK = 1,
+    PSX_MOD_PAD_JOGCON = 2,
+    PSX_MOD_PAD_NEGCON = 3
+};
+#define PSX_MOD_PAD_TYPE_BIT(type) (1u << (type))
+enum {
+    PSX_MOD_PAD_HOST_GAMEPAD = 1u << 0,
+    PSX_MOD_PAD_HOST_LT = 1u << 1,
+    PSX_MOD_PAD_HOST_RT = 1u << 2
+};
+typedef struct PSXModPadFrame {
+    uint32_t struct_size, player, buttons, lx, ly, rx, ry, type;
+    uint32_t host_flags, host_lt, host_rt;
+} PSXModPadFrame;
+typedef struct PSXModPadOutput {
+    uint32_t struct_size, buttons, type, lx, ly, rx, ry;
+    uint32_t negcon_i, negcon_ii, negcon_l;
+} PSXModPadOutput;
+typedef struct PSXModPadTransform {
+    uint32_t struct_size, allowed_types, initial_type;
+    int (*transform)(const PSXModPadFrame *frame, PSXModPadOutput *out);
+} PSXModPadTransform;
+int psx_mod_set_pad_transform(uint32_t player, const PSXModPadTransform *transform);
+
+/* Let a host shortcut bound to ONE controller button act on that button
+ * alone. Without this, a one-button binding means Select + button (the
+ * legacy rule), so a title's default one-button binding is safe whether or
+ * not its mod is enabled. While allowed (and, for Rewind, while Rewind is
+ * enabled) the runtime claims that host button: it is removed from P1's
+ * guest pad, and a claim made while it is held lasts until it is released.
+ * Call at mod activation; cleared at every mod/session reset. Returns 0 for
+ * an unknown shortcut. Multi-button bindings are unaffected. */
+enum {
+    PSX_MOD_SHORTCUT_REWIND = 0,
+    PSX_MOD_SHORTCUT_SAVE_STATE_MENU = 1,
+    PSX_MOD_SHORTCUT_FAST_FORWARD = 2,
+    PSX_MOD_SHORTCUT_FAST_FORWARD_TOGGLE = 3
+};
+int psx_mod_allow_direct_shortcut(uint32_t shortcut);
+
+/* Refuse local Rewind while the title is in a mode it must not rewind (e.g.
+ * local split-screen multiplayer). While blocked, opening Rewind is refused
+ * with an OSD note, no history is captured (snapshots already in the ring are
+ * kept), and an allowed direct Rewind shortcut is not in force: its button is
+ * not claimed and reaches the guest pad / title transform as if Rewind were
+ * disabled. Netplay already refuses Rewind on its own. Opt-in: call with 1
+ * when the mode starts and 0 when it ends (setting it every frame from the
+ * title's state is fine). Cleared at every mod/session reset. */
+void psx_mod_set_rewind_blocked(int blocked);
 
 /* Local P1 mouse policy. The runtime delivers ordered events on the SDL owner
  * (main) thread, owns relative capture and folds the resulting right-stick

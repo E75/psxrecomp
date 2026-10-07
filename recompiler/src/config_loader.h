@@ -706,6 +706,15 @@ struct RuntimeConfig {
     bool                  has_multitap_port = false;
     int                   multitap_port     = 1;
 
+    // direct_shortcut / direct_shortcut_button: one host shortcut ("rewind",
+    // "save_state_menu", "fast_forward", "fast_forward_toggle") the launcher
+    // captures as a single controller button, with that SDL GameController
+    // button name (e.g. "y") as its default binding. At run time a
+    // one-button binding acts alone only while the title's mod allows it
+    // (psx_mod_allow_direct_shortcut); otherwise it means Select + button.
+    std::string           direct_shortcut;
+    std::string           direct_shortcut_button;
+
     // multitap_analog: DualShock-on-tap hack (default true). When true,
     // multitap bulk seats may report 0x73 + stick bytes; when false (faithful),
     // tap seats stay plain digital. Overridable by settings.toml / match_caps.

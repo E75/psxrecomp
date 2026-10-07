@@ -75,8 +75,9 @@ Columns: **N** = native, **D** = DuckStation oracle.
 | `cdrom_sector_history_clear` | ✓ |   | — | Reset the CD-ROM sector history ring |
 | `watch` | ✓ | ✓ | `addr` | Set byte-level memory watchpoint (fires per-frame on change) |
 | `unwatch` | ✓ | ✓ | `addr` | Remove memory watchpoint |
-| `set_input` | ✓ | ✓ | `buttons`, optional `frames`, optional `lx`, `ly`, `rx`, `ry` | Override pad1 buttons and optional analog axes (PS1 inverted bitmask, 0 = pressed; axes 0-255). Holds until `clear_input` on both backends; pass `frames=N` (beetle) to auto-release after N frames |
+| `set_input` | ✓ | ✓ | `buttons`, optional `frames`, optional `lx`, `ly`, `rx`, `ry`, `pad_type` | Override pad1 buttons and optional analog axes (PS1 inverted bitmask, 0 = pressed; axes 0-255). Debug builds also accept `pad_type` (0 digital, 1 DualShock, 2 JogCon) to test an emulated device identity. Holds until `clear_input` on both backends; pass `frames=N` (beetle) to auto-release after N frames. Runtime: `layer="host"` instead arms a virtual P1 gamepad (`buttons`, `lx`..`ry`, `lt`/`rt` 0-255) that feeds the normal offline input path (controller source, title pad transform, trigger values) and host shortcut polling, also headless; a plain override still wins while armed; `clear_input` disarms it |
 | `clear_input` | ✓ | ✓ | — | Remove input and analog axis overrides |
+| `rewind_status` | ✓ |   | — | Local Rewind: `enabled`, `open`, `title_blocked` (`psx_mod_set_rewind_blocked`) and `snaps` held in the ring |
 | `turbo` | ✓ |   | `enabled` | Enable/disable TCP-controlled frontend turbo for fast-forward validation |
 | `turbo_state` | ✓ |   | — | Query TCP-controlled turbo state |
 | `pause` | ✓ |   | — | **REMOVED** — still registered, but always returns an error. Query a ring buffer (`fn_entry_tail`, `wtrace_dump`, `gpu_frame_dump`) instead of synthesizing a snapshot |
@@ -434,9 +435,9 @@ The TCP server is the canonical instrumentation surface. Rule 3 in `CLAUDE.md` i
 
 ## Complete command index (generated)
 
-**349 commands registered** — 336 on the native server (`runtime/src/debug_server.c`), 61 on the Beetle server (`runtime/src/beetle_debug_server.c`).
+**352 commands registered** — 339 on the native server (`runtime/src/debug_server.c`), 61 on the Beetle server (`runtime/src/beetle_debug_server.c`).
 
-68 of 349 have prose above; **281 are index-only**. An index-only command still works — it just has no description here yet. Send it `{"cmd":"<name>"}` and read the reply, or find its `handle_*` function in the server source.
+69 of 352 have prose above; **283 are index-only**. An index-only command still works — it just has no description here yet. Send it `{"cmd":"<name>"}` and read the reply, or find its `handle_*` function in the server source.
 
 Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this block has drifted from the code.
 
@@ -654,6 +655,8 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `pgxp` | ✓ |  | ✓ |
 | `pgxp_miss_ring` | ✓ |  |  |
 | `pgxp_shadow` | ✓ |  |  |
+| `pgxp_store_ring` | ✓ |  |  |
+| `pgxp_tri_ring` | ✓ |  |  |
 | `phase_hot` | ✓ |  |  |
 | `phase_profile` | ✓ |  | ✓ |
 | `ping` | ✓ | ✓ | ✓ |
@@ -680,6 +683,7 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `restore_trace` | ✓ |  |  |
 | `restore_trace_clear` | ✓ |  |  |
 | `restore_trace_window` | ✓ |  |  |
+| `rewind_status` | ✓ |  | ✓ |
 | `rtrace_arm` | ✓ | ✓ |  |
 | `rtrace_clear` | ✓ |  |  |
 | `rtrace_disarm` |  | ✓ |  |

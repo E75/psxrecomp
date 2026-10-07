@@ -67,6 +67,10 @@ extern "C" void psx_event_step_conservative_env_init(void);
 #endif
 #include "psx_netplay.h"
 #include "psx_stick.h"       /* radial SDL-stick -> DualShock response transform */
+#include "psx_trigger.h"     /* continuous SDL trigger -> 0..255 magnitude */
+#include "mod_pad_transform.h"
+#include "psx_hotkey_pad.h"   /* host shortcut bindings, direct claims */
+#include "psx_controller_type.h" /* mapped wheel-name classification */
 #include "psx_netplay_rb.h"
 #include "psx_selfcheck.h"
 #include "psx_lobby_client.h"
@@ -415,6 +419,7 @@ struct PlayerInput {
     uint8_t rumble_large = 0;
     bool    rumble_known = false;
     bool    rumble_warned = false;
+    bool    steering_wheel = false;
 };
 static PlayerInput g_players[PSX_MAX_PLAYERS];
 /* Offline SIO sample loop bound (from game.toml players; clamped). */
@@ -1335,6 +1340,27 @@ static int           g_hotkey_pad_rewind = 1272;       /* select + r3 */
 static int           g_hotkey_pad_save_state_menu = 2040;/* select + r1 */
 static int           g_hotkey_pad_fast_forward = 1528;   /* select + l1 (hold) */
 static int           g_hotkey_pad_fast_forward_toggle = 0; /* unbound: latch fast-forward */
+/* Direct host shortcuts the running title allows (bit per PSX_MOD_SHORTCUT_*,
+ * psx_mod_allow_direct_shortcut); cleared at every mod session start. */
+static uint32_t      g_direct_shortcut_allowed = 0;
+/* SDL buttons of P1's gamepad (or the debug host layer) currently claimed by
+ * a direct shortcut and removed from the guest pad; see psx_hotkey_pad.h. */
+static uint32_t      g_p1_claimed_buttons = 0;
+static uint32_t      g_p1_claim_latched = 0;
+/* Title-declared direct shortcut ([controller] direct_shortcut / _button):
+ * the launcher captures that action as one button and defaults it there. */
+static int           g_title_direct_shortcut = -1;
+static int           g_title_direct_button = -1;
+
+extern "C" int psx_mod_allow_direct_shortcut(uint32_t shortcut) {
+    if (shortcut > PSX_MOD_SHORTCUT_FAST_FORWARD_TOGGLE) return 0;
+    g_direct_shortcut_allowed |= 1u << shortcut;
+    return 1;
+}
+
+extern "C" void psx_mod_set_rewind_blocked(int blocked) {
+    psx_rewind_set_title_blocked(blocked);
+}
 static uint32_t      g_savestate_input_guard_min_until = 0;
 static uint32_t      g_savestate_input_guard_max_until = 0;
 static int           g_headless       = 0;   /* debug/CI frontend: no SDL window/audio */
@@ -4970,6 +4996,7 @@ static void close_player(PlayerInput& p) {
     p.rumble_large = 0;
     p.rumble_known = false;
     p.rumble_warned = false;
+    p.steering_wheel = false;
 }
 
 static void close_controller(void) {
@@ -5020,8 +5047,13 @@ static void open_player(PlayerInput& p, int self_slot) {
             SDL_JoystickGetGUIDString(g, p.guid, (int)sizeof(p.guid));
         }
         const char* name = SDL_GameControllerName(p.handle);
+        p.steering_wheel = psx_controller_name_is_wheel(name);
         std::fprintf(stdout, "psxrecomp runtime: opened controller for slot: %s\n",
                      name ? name : "(unnamed)");
+        if (p.steering_wheel)
+            std::fprintf(stdout,
+                "psxrecomp runtime: steering wheel detected for slot %d; using JogCon SIO input\n",
+                self_slot + 1);
         p.rumble_known = false;
         p.rumble_warned = false;
     }
@@ -5086,6 +5118,18 @@ static int pad_mode_boot_analog(int mode) {
     return mode == PSXRecompV4::PAD_MODE_ANALOG ? 1 : 0;
 }
 
+static int pad_type_boot(const PlayerInput& p, int mode) {
+    return p.steering_wheel ? SIO_PAD_JOGCON
+         : (pad_mode_boot_analog(mode) ? SIO_PAD_DUALSHOCK : SIO_PAD_DIGITAL);
+}
+
+/* Boot/hotplug type for slot s: a registered title pad transform names the
+ * type it presents before its first frame; otherwise the device/mode type. */
+static int pad_type_boot_for_slot(int s, const PlayerInput& p, int mode) {
+    const int initial = mod_pad_transform_initial_type((uint32_t)s);
+    return initial >= 0 ? initial : pad_type_boot(p, mode);
+}
+
 /* Keyboard mappings can drive both DualShock sticks. Honor the configured
  * mode, including analog-only title locks; multitap policy belongs to the
  * SIO seat below and applies equally to keyboards and physical controllers. */
@@ -5119,7 +5163,8 @@ static int assert_sio_pad_profile(int s, bool dev_here) {
      * Multitap taps are always digital (see sio_pad_on_multitap). */
     sio_set_pad_config_capable(
         s, policy.callback ? policy.config_capable
-                           : mode != PSXRecompV4::PAD_MODE_DIGITAL);
+                           : (p.steering_wheel ||
+                              mode != PSXRecompV4::PAD_MODE_DIGITAL));
     return boot_mode;
 }
 
@@ -5132,12 +5177,28 @@ static void refresh_player_devices(void) {
     const int netplay = psx_netplay_active();
     for (int s = 0; s < PSX_MAX_PLAYERS; s++) {
         PlayerInput& p = g_players[s];
-        if (p.kind != 2) close_player(p);           /* keyboard/none: no handle */
-        else open_player(p, s);
+        char active_guid[40] = {0};
+        const bool attached = p.handle &&
+                              SDL_GameControllerGetAttached(p.handle);
+        if (p.handle) {
+            SDL_Joystick* joy = SDL_GameControllerGetJoystick(p.handle);
+            if (joy) SDL_JoystickGetGUIDString(SDL_JoystickGetGUID(joy),
+                                              active_guid,
+                                              (int)sizeof(active_guid));
+        }
+        /* The launcher may change GUID while the old handle remains attached;
+         * pure policy covers that and unplug paths with mockable inputs. */
+        if (psx_controller_handle_needs_close(
+                p.kind == 2, p.handle != nullptr, attached,
+                p.guid, active_guid))
+            close_player(p);
+        if (p.kind == 2) open_player(p, s);
         if (netplay) continue;
         const int boot_mode = assert_sio_pad_profile(s, false);
-        sio_set_pad_analog(s, pad_mode_boot_analog(boot_mode),
-                           0x80, 0x80, 0x80, 0x80);
+        const int boot_type = pad_type_boot_for_slot(s, p, boot_mode);
+        if (boot_type == SIO_PAD_DUALSHOCK || boot_type == SIO_PAD_JOGCON)
+            sio_set_pad_config_capable(s, 1);
+        sio_set_pad_type(s, boot_type, 0x80, 0x80, 0x80, 0x80);
     }
 }
 
@@ -5223,12 +5284,20 @@ static bool source_is_stick_axis(const ControllerSource& s) {
 static uint16_t controller_pad_buttons(const ControllerMap& map,
                                        SDL_GameController* h,
                                        bool suppress_stick_axes,
-                                       int deadzone_raw) {
+                                       int deadzone_raw,
+                                       uint32_t claimed_buttons = 0) {
     uint16_t buttons = 0xFFFF;  /* all released */
     if (!h) return buttons;
     for (const auto& entry : map) {
         for (const auto& source : entry.sources) {
             if (suppress_stick_axes && source_is_stick_axis(source)) continue;
+            /* A host button claimed by a direct shortcut never reaches the
+             * guest (psx_hotkey_pad.h). */
+            if (claimed_buttons &&
+                source.kind == ControllerSource::Kind::Button &&
+                source.id >= 0 && source.id < 32 &&
+                (claimed_buttons & (1u << source.id)))
+                continue;
             if (!controller_source_pressed_h(h, source, deadzone_raw)) continue;
             if (entry.bit)
                 buttons &= (uint16_t)~entry.bit;
@@ -5266,7 +5335,8 @@ static uint16_t pad_buttons_for(const PlayerInput& p, int player, bool suppress_
     if (p.kind == 1) return pad_from_keyboard(player);
     if (p.kind == 2)
         return controller_pad_buttons(controller_map_for(p), p.handle,
-                                      suppress_stick_axes, p.deadzone);
+                                      suppress_stick_axes, p.deadzone,
+                                      player == 1 ? g_p1_claimed_buttons : 0u);
     return 0xFFFF;
 }
 
@@ -5715,8 +5785,13 @@ static void apply_input_override_to_sio(int override_word) {
 
     const int effective_mode = controller_policy_resolve_override_mode(
         0, 1, mode, w, st, stick_live, dpad_live);
-    const int eff_analog =
+    int eff_analog =
         effective_mode == (int)PSXRecompV4::PAD_MODE_ANALOG ? 1 : 0;
+#ifndef PSX_NO_DEBUG_TOOLS
+    const int debug_type = debug_server_get_pad_type_override();
+    if (debug_type == SIO_PAD_DUALSHOCK || debug_type == SIO_PAD_JOGCON)
+        eff_analog = 1;
+#endif
     /* Injected input only (set_input / dev routing): fold the injected D-pad
      * word onto the left stick so stick-only menu/move paths respond to a
      * button-bit injection that has no physical stick behind it.
@@ -5736,9 +5811,16 @@ static void apply_input_override_to_sio(int override_word) {
     }
     if (!eff_analog) { st[0] = st[1] = st[2] = st[3] = 0x80; }
     sio_set_pad_sticks(0, st[0], st[1], st[2], st[3]);
-    sio_request_pad_type(0, eff_analog);
+    int injected_type = p.steering_wheel ? SIO_PAD_JOGCON
+                                         : (eff_analog ? SIO_PAD_DUALSHOCK
+                                                       : SIO_PAD_DIGITAL);
+#ifndef PSX_NO_DEBUG_TOOLS
+    if (debug_type >= SIO_PAD_DIGITAL && debug_type <= SIO_PAD_JOGCON)
+        injected_type = debug_type;
+#endif
+    sio_request_pad_type(0, injected_type);
     psx_selfcheck_note_pad(0, w, st[0], st[1], st[2], st[3],
-                           (uint8_t)(eff_analog ? 1 : 0));
+                           (uint8_t)injected_type);
 }
 
 /* Capture one SIO slot's PHYSICAL host pad into a netplay/local blob. Returns
@@ -5746,12 +5828,88 @@ static void apply_input_override_to_sio(int override_word) {
  * disconnected. `guarded` (savestate input guard) delivers neutral buttons and
  * sticks but still resolves presence/type. No mouse or source side effects:
  * those are layered on top by pad_ext_resolve(). */
-static int capture_pad_slot(int s, PsxNetPad* out, bool guarded) {
+/* Debug host-pad layer (set_input {"layer":"host"}): a virtual P1 gamepad. */
+static int host_pad_layer(uint16_t* buttons, uint8_t st[4], uint8_t* lt,
+                          uint8_t* rt) {
+#ifndef PSX_NO_DEBUG_TOOLS
+    return debug_server_get_host_pad(buttons, st, lt, rt);
+#else
+    (void)buttons; (void)st; (void)lt; (void)rt;
+    return 0;
+#endif
+}
+
+/* The host layer's PSX word expressed as the Xbox-layout SDL buttons a
+ * default-mapped gamepad would press (L2/R2 are trigger axes). */
+static const struct { int sdl; uint16_t psx; } kHostLayerButtons[] = {
+    { SDL_CONTROLLER_BUTTON_A, PAD_CROSS },
+    { SDL_CONTROLLER_BUTTON_B, PAD_CIRCLE },
+    { SDL_CONTROLLER_BUTTON_X, PAD_SQUARE },
+    { SDL_CONTROLLER_BUTTON_Y, PAD_TRIANGLE },
+    { SDL_CONTROLLER_BUTTON_BACK, PAD_SELECT },
+    { SDL_CONTROLLER_BUTTON_START, PAD_START },
+    { SDL_CONTROLLER_BUTTON_LEFTSTICK, PAD_L3 },
+    { SDL_CONTROLLER_BUTTON_RIGHTSTICK, PAD_R3 },
+    { SDL_CONTROLLER_BUTTON_LEFTSHOULDER, PAD_L1 },
+    { SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, PAD_R1 },
+    { SDL_CONTROLLER_BUTTON_DPAD_UP, PAD_UP },
+    { SDL_CONTROLLER_BUTTON_DPAD_DOWN, PAD_DOWN },
+    { SDL_CONTROLLER_BUTTON_DPAD_LEFT, PAD_LEFT },
+    { SDL_CONTROLLER_BUTTON_DPAD_RIGHT, PAD_RIGHT },
+};
+
+static uint32_t host_layer_sdl_held(uint16_t word) {
+    uint32_t held = 0;
+    for (const auto& b : kHostLayerButtons)
+        if ((word & b.psx) == 0) held |= 1u << b.sdl;
+    return held;
+}
+
+static uint16_t host_layer_release_claimed(uint16_t word, uint32_t claimed) {
+    for (const auto& b : kHostLayerButtons)
+        if (claimed & (1u << b.sdl)) word |= b.psx;
+    return word;
+}
+
+/* Stage 1 for P1 while the host layer is armed: buttons less any claimed
+ * shortcut button; DualShock with the layer's sticks unless P1 is digital
+ * (host_view, the transform's host pad: the sticks in either mode). */
+static int capture_host_layer_pad(PsxNetPad* out, uint16_t word,
+                                  const uint8_t st[4], bool guarded,
+                                  bool host_view) {
+    const int mode = effective_player_mode_for_sio(g_players[0], 0);
+    const bool analog = mode != PSXRecompV4::PAD_MODE_DIGITAL;
+    const bool sticks = analog || host_view;
+    out->buttons = host_layer_release_claimed(word, g_p1_claimed_buttons);
+    out->lx = sticks ? st[0] : 0x80; out->ly = sticks ? st[1] : 0x80;
+    out->rx = sticks ? st[2] : 0x80; out->ry = sticks ? st[3] : 0x80;
+    out->analog = analog ? SIO_PAD_DUALSHOCK : SIO_PAD_DIGITAL;
+    out->connected = 1;
+    if (guarded) {
+        out->buttons = 0xFFFFu;
+        out->lx = out->ly = out->rx = out->ry = 0x80u;
+    }
+    return 1;
+}
+
+/* host_view: the port's host pad before presentation, for a title pad
+ * transform (PadExtHooks.host_pad): real sticks and buttons without the
+ * digital stick->D-pad fold, whatever the configured mode; type unchanged. */
+static int capture_pad_slot_view(int s, PsxNetPad* out, bool guarded,
+                                 bool host_view) {
     if (!out) return 0;
     out->buttons = 0xFFFFu;
     out->lx = out->ly = out->rx = out->ry = 0x80u;
     out->analog = 0;
     out->connected = 0;
+
+    if (s == 0) {
+        uint16_t host_word;
+        uint8_t host_st[4], host_lt, host_rt;
+        if (host_pad_layer(&host_word, host_st, &host_lt, &host_rt))
+            return capture_host_layer_pad(out, host_word, host_st, guarded,
+                                          host_view);
+    }
 
     PlayerInput& p = g_players[s];
     const int  player  = s + 1;             /* keybinds.ini section (1..5) */
@@ -5773,8 +5931,8 @@ static int capture_pad_slot(int s, PsxNetPad* out, bool guarded) {
 
     const int mode = effective_player_mode_for_sio(p, s);
     uint8_t st[4] = { 0x80, 0x80, 0x80, 0x80 };
-    if (mode == PSXRecompV4::PAD_MODE_ANALOG ||
-        g_mod_controller_policy[s].callback) {
+    if (mode == PSXRecompV4::PAD_MODE_ANALOG || p.steering_wheel ||
+        g_mod_controller_policy[s].callback || host_view) {
         pad_sticks_for(p, player, st);
     }
     const uint16_t policy_buttons =
@@ -5783,10 +5941,17 @@ static int capture_pad_slot(int s, PsxNetPad* out, bool guarded) {
         s, player, mode, src, p, policy_buttons, st);
     const int eff_analog =
         effective_mode == PSXRecompV4::PAD_MODE_ANALOG ? 1 : 0;
+    int frame_type = p.steering_wheel ? SIO_PAD_JOGCON
+                   : (eff_analog ? SIO_PAD_DUALSHOCK : SIO_PAD_DIGITAL);
+#ifndef PSX_NO_DEBUG_TOOLS
+    const int debug_type = debug_server_get_pad_type_override();
+    if (debug_type >= SIO_PAD_DIGITAL && debug_type <= SIO_PAD_JOGCON)
+        frame_type = debug_type;
+#endif
     if (guarded) {
         out->buttons = 0xFFFFu;
         out->lx = out->ly = out->rx = out->ry = 0x80u;
-        out->analog = eff_analog ? 1u : 0u;
+        out->analog = (uint8_t)frame_type;
         out->connected = 1;
         return 1;
     }
@@ -5800,7 +5965,8 @@ static int capture_pad_slot(int s, PsxNetPad* out, bool guarded) {
      * exactly as on a real DualShock. This is what stops a dual-analog game's
      * D-pad control (Ape Escape's camera rotate) from being spun by stick
      * movement or centre drift. Digital mode keeps the stick->D-pad fold. */
-    const bool suppress_stick = (eff_analog != 0);
+    const bool suppress_stick = (eff_analog != 0) || p.steering_wheel ||
+                                host_view;
     uint16_t btn = src.device ? pad_buttons_for(p, player, suppress_stick)
                               : (uint16_t)0xFFFF;
     /* kind==1 already consumed the binds inside pad_buttons_for — ANDing the
@@ -5818,7 +5984,7 @@ static int capture_pad_slot(int s, PsxNetPad* out, bool guarded) {
      * may press a button may also steer. kind==1 already folded its binds
      * inside pad_sticks_for; psx_keybinds_sticks only widens a deflection, so
      * applying it twice is idempotent. */
-    if (eff_analog) {
+    if (eff_analog || host_view) {
         if (src.keybinds) {
             const Uint8* keys = SDL_GetKeyboardState(NULL);
             psx_keybinds_sticks(keys, player, st);
@@ -5826,15 +5992,19 @@ static int capture_pad_slot(int s, PsxNetPad* out, bool guarded) {
         if (src.all_pads)
             dev_any_controller_sticks(st);
     }
-    if (!eff_analog) {
+    if (!eff_analog && !p.steering_wheel && !host_view) {
         st[0] = st[1] = st[2] = st[3] = 0x80;
     }
 
     out->buttons = btn;
     out->lx = st[0]; out->ly = st[1]; out->rx = st[2]; out->ry = st[3];
-    out->analog = eff_analog ? 1u : 0u;
+    out->analog = (uint8_t)frame_type;
     out->connected = 1;
     return 1;
+}
+
+static int capture_pad_slot(int s, PsxNetPad* out, bool guarded) {
+    return capture_pad_slot_view(s, out, guarded, false);
 }
 
 /* Netplay-only capture: assigned PlayerInput for this slot only. Never merges
@@ -5859,7 +6029,7 @@ static int capture_pad_slot_exclusive(int s, PsxNetPad* out, int present_sio_slo
     const int sio_slot = (present_sio_slot >= 0) ? present_sio_slot : s;
     int mode = effective_player_mode_for_sio(p, sio_slot);
     uint8_t st[4] = { 0x80, 0x80, 0x80, 0x80 };
-    if (mode == PSXRecompV4::PAD_MODE_ANALOG ||
+    if (mode == PSXRecompV4::PAD_MODE_ANALOG || p.steering_wheel ||
         g_mod_controller_policy[s].callback) {
         pad_sticks_for(p, player, st);
     }
@@ -5868,27 +6038,25 @@ static int capture_pad_slot_exclusive(int s, PsxNetPad* out, int present_sio_slo
         s, player, mode, src, p, policy_buttons, st);
     const int eff_analog =
         effective_mode == PSXRecompV4::PAD_MODE_ANALOG ? 1 : 0;
+    const int frame_type = p.steering_wheel ? SIO_PAD_JOGCON
+                         : (eff_analog ? SIO_PAD_DUALSHOCK : SIO_PAD_DIGITAL);
 
-    const bool suppress_stick = (eff_analog != 0);
+    const bool suppress_stick = (eff_analog != 0) || p.steering_wheel;
     uint16_t btn = pad_buttons_for(p, player, suppress_stick);
 
-    if (!eff_analog) {
+    if (!eff_analog && !p.steering_wheel) {
         st[0] = st[1] = st[2] = st[3] = 0x80;
     }
 
     out->buttons = btn;
     out->lx = st[0]; out->ly = st[1]; out->rx = st[2]; out->ry = st[3];
-    out->analog = eff_analog ? 1u : 0u;
+    out->analog = (uint8_t)frame_type;
     out->connected = 1;
     return 1;
 }
 
 static void apply_pad_slot_to_sio(int s, const PsxNetPad& pad) {
-    if (sio_pad_on_multitap(s) && !sio_get_multitap_analog())
-        sio_set_pad_config_capable(s, 0);
-    sio_set_pad_state_slot(s, pad.buttons);
-    sio_set_pad_sticks(s, pad.lx, pad.ly, pad.rx, pad.ry);
-    sio_request_pad_type(s, pad.analog ? 1 : 0);
+    psx_pad_apply_to_sio(s, &pad);
     /* Solo resim self-check records exactly what was applied this boundary. */
     psx_selfcheck_note_pad(s, pad.buttons, pad.lx, pad.ly, pad.rx, pad.ry,
                            pad.analog);
@@ -6000,8 +6168,19 @@ static void capture_override_pad(int override_word, PsxNetPad* out) {
 
     const int effective_mode = controller_policy_resolve_override_mode(
         0, 1, mode, w, st, stick_live, dpad_live);
-    const int eff_analog =
+    int eff_analog =
         effective_mode == (int)PSXRecompV4::PAD_MODE_ANALOG ? 1 : 0;
+#ifndef PSX_NO_DEBUG_TOOLS
+    const int debug_type = debug_server_get_pad_type_override();
+    if (debug_type == SIO_PAD_DUALSHOCK || debug_type == SIO_PAD_JOGCON)
+        eff_analog = 1;
+#endif
+    int frame_type = p.steering_wheel ? SIO_PAD_JOGCON
+                   : (eff_analog ? SIO_PAD_DUALSHOCK : SIO_PAD_DIGITAL);
+#ifndef PSX_NO_DEBUG_TOOLS
+    if (debug_type >= SIO_PAD_DIGITAL && debug_type <= SIO_PAD_JOGCON)
+        frame_type = debug_type;
+#endif
     /* Injected input only; see the note on the sibling fold above. Not
      * hardware behaviour, retained solely so injection can steer stick-only
      * games. */
@@ -6016,7 +6195,7 @@ static void capture_override_pad(int override_word, PsxNetPad* out) {
 
     out->buttons = w;
     out->lx = st[0]; out->ly = st[1]; out->rx = st[2]; out->ry = st[3];
-    out->analog = eff_analog ? 1u : 0u;
+    out->analog = (uint8_t)frame_type;
     out->connected = 1;
 }
 
@@ -6409,6 +6588,50 @@ static void pad_ext_source_resolve(void*, int s, const PSXModControllerState* so
                            : mode != PSXRecompV4::PAD_MODE_DIGITAL);
 }
 static void pad_ext_mouse_reset(void*) { psx_local_mouse_reset(); }
+/* Host extras of port s for the title transform: the assigned gamepad and its
+ * analog triggers (SDL 0..32767 -> 0..255, unthresholded). */
+static void pad_ext_host_extras(void*, int s, uint32_t* flags, uint32_t* lt,
+                                uint32_t* rt) {
+    *flags = *lt = *rt = 0;
+    if (s < 0 || s >= PSX_MAX_PLAYERS) return;
+    if (s == 0) {
+        uint16_t word;
+        uint8_t st[4], hl, hr;
+        if (host_pad_layer(&word, st, &hl, &hr)) {
+            *flags = PSX_MOD_PAD_HOST_GAMEPAD | PSX_MOD_PAD_HOST_LT |
+                     PSX_MOD_PAD_HOST_RT;
+            *lt = hl; *rt = hr;
+            return;
+        }
+    }
+    SDL_GameController* handle = g_players[s].handle;
+    if (g_players[s].kind != 2 || !handle) return;
+    *flags = PSX_MOD_PAD_HOST_GAMEPAD;
+    if (SDL_GameControllerHasAxis(handle, SDL_CONTROLLER_AXIS_TRIGGERLEFT)) {
+        *flags |= PSX_MOD_PAD_HOST_LT;
+        *lt = psx_trigger_axis_to_u8(
+            SDL_GameControllerGetAxis(handle, SDL_CONTROLLER_AXIS_TRIGGERLEFT));
+    }
+    if (SDL_GameControllerHasAxis(handle, SDL_CONTROLLER_AXIS_TRIGGERRIGHT)) {
+        *flags |= PSX_MOD_PAD_HOST_RT;
+        *rt = psx_trigger_axis_to_u8(
+            SDL_GameControllerGetAxis(handle, SDL_CONTROLLER_AXIS_TRIGGERRIGHT));
+    }
+}
+/* (1) Host pad of port s before presentation, for the transform frame. */
+static int pad_ext_host_pad(void*, int s, uint16_t* buttons, uint8_t st[4]) {
+    PsxNetPad pad;
+    if (s < 0 || s >= PSX_MAX_PLAYERS) return 0;
+    if (!capture_pad_slot_view(s, &pad, false, true)) return 0;
+    *buttons = pad.buttons;
+    st[0] = pad.lx; st[1] = pad.ly; st[2] = pad.rx; st[3] = pad.ry;
+    return 1;
+}
+static int pad_ext_pad_transform(void*, int s, const PSXModPadFrame* frame,
+                                 const PSXModPadOutput* stock,
+                                 PSXModPadOutput* out) {
+    return mod_pad_transform_run((uint32_t)s, frame, stock, out);
+}
 static void pad_ext_mouse_fold(void*, int connected, int analog, uint16_t buttons,
                                uint8_t* rx, uint8_t* ry) {
     psx_local_mouse_pad(connected != 0, analog != 0, buttons, *rx, *ry);
@@ -6422,6 +6645,9 @@ static PadExtHooks pad_ext_main_hooks(void) {
     h.source_resolve = pad_ext_source_resolve;
     h.mouse_reset = pad_ext_mouse_reset;
     h.mouse_fold = pad_ext_mouse_fold;
+    h.host_extras = pad_ext_host_extras;
+    h.pad_transform = pad_ext_pad_transform;
+    h.host_pad = pad_ext_host_pad;
     return h;
 }
 
@@ -6473,6 +6699,16 @@ static void sample_headless_pad_into_sio(int override) {
     }
     if (override >= 0) {
         apply_input_override_to_sio(override);
+        return;
+    }
+    if (host_pad_layer(nullptr, nullptr, nullptr, nullptr)) {
+        /* Debug host layer: P1 goes through the full offline resolution
+         * (source, title transform) exactly as a windowed gamepad would. */
+        PadExtHooks hooks = pad_ext_main_hooks();
+        PsxNetPad pad;
+        if (pad_ext_resolve(&hooks, 0, &pad))
+            apply_pad_slot_to_sio(0, pad);
+        sio_set_pad_state_slot(1, 0xFFFFu);
         return;
     }
 #ifdef PSX_COSIM
@@ -6861,42 +7097,119 @@ static int normalize_hotkey_pad_binding(int binding, int fallback) {
     return fallback;
 }
 
-static int hotkey_pad_binding_down(int binding) {
-    SDL_GameController *h = g_players[0].handle;
-    if (!h || binding == 0)
-        return 0;
-    if (PSX_HOTKEY_PAD_IS_BUTTON_COMBO(binding)) {
-        uint32_t mask = (uint32_t)PSX_HOTKEY_PAD_BUTTON_COMBO_MASK(binding);
-        if (!mask)
-            return 0;
-        for (int code = 0; code < SDL_CONTROLLER_BUTTON_MAX && code < 32; ++code) {
-            if ((mask & ((uint32_t)1u << code)) == 0)
-                continue;
-            if (!SDL_GameControllerGetButton(
-                    h, (SDL_GameControllerButton)code))
-                return 0;
+/* P1 host controller state for shortcut polling: the debug host layer while
+ * armed, else P1's assigned SDL gamepad. */
+static int p1_host_button_down(void*, int code) {
+    uint16_t word;
+    uint8_t st[4], lt, rt;
+    if (host_pad_layer(&word, st, &lt, &rt))
+        return (host_layer_sdl_held(word) >> code) & 1u;
+    SDL_GameController* h = g_players[0].handle;
+    if (!h || code < 0 || code >= SDL_CONTROLLER_BUTTON_MAX) return 0;
+    return SDL_GameControllerGetButton(h, (SDL_GameControllerButton)code) != 0;
+}
+
+static int p1_host_axis_value(void*, int axis) {
+    uint16_t word;
+    uint8_t st[4], lt, rt;
+    if (host_pad_layer(&word, st, &lt, &rt)) {
+        switch (axis) {
+        case SDL_CONTROLLER_AXIS_LEFTX: return ((int)st[0] - 0x80) * 256;
+        case SDL_CONTROLLER_AXIS_LEFTY: return ((int)st[1] - 0x80) * 256;
+        case SDL_CONTROLLER_AXIS_RIGHTX: return ((int)st[2] - 0x80) * 256;
+        case SDL_CONTROLLER_AXIS_RIGHTY: return ((int)st[3] - 0x80) * 256;
+        case SDL_CONTROLLER_AXIS_TRIGGERLEFT: return (int)lt * 128;
+        case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: return (int)rt * 128;
+        default: return 0;
         }
-        return 1;
     }
-    if (!SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_BACK))
+    SDL_GameController* h = g_players[0].handle;
+    if (!h || axis < 0 || axis >= SDL_CONTROLLER_AXIS_MAX) return 0;
+    return SDL_GameControllerGetAxis(h, (SDL_GameControllerAxis)axis);
+}
+
+static int p1_host_present(void) {
+    uint16_t word;
+    uint8_t st[4], lt, rt;
+    return host_pad_layer(&word, st, &lt, &rt) || g_players[0].handle;
+}
+
+/* Whether the title's direct allowance for `shortcut` is in force. Rewind's
+ * needs Rewind enabled and not blocked by the title; otherwise its button is
+ * neither claimed nor a one-button shortcut and reaches the guest pad. */
+static int direct_shortcut_active(int shortcut) {
+    if (shortcut < 0 || shortcut >= 32) return 0;
+    return psx_hotkey_direct_active(
+        g_direct_shortcut_allowed, shortcut,
+        shortcut == PSX_ASSIST_BIND_REWIND, g_rewind_enabled,
+        psx_rewind_title_blocked());
+}
+
+/* Whether host shortcut `shortcut` (PSX_ASSIST_BIND_*) bound to `binding` is
+ * held. A one-button combination is direct only while the title allows that
+ * shortcut; otherwise it is Select + button, like the legacy encoding. */
+static int hotkey_shortcut_down(int shortcut, int binding) {
+    if (!p1_host_present() || binding == 0)
         return 0;
-    if (PSX_HOTKEY_PAD_IS_BUTTON(binding)) {
-        int code = PSX_HOTKEY_PAD_BUTTON_CODE(binding);
-        if (code < 0 || code >= SDL_CONTROLLER_BUTTON_MAX)
-            return 0;
-        return SDL_GameControllerGetButton(h, (SDL_GameControllerButton)code) != 0;
+    const int direct = direct_shortcut_active(shortcut);
+    return psx_hotkey_pad_down(binding, direct, SDL_CONTROLLER_BUTTON_BACK,
+                               p1_host_button_down, p1_host_axis_value,
+                               nullptr);
+}
+
+/* Per frame, before P1 is sampled: the SDL buttons claimed by allowed direct
+ * shortcuts leave the guest pad (claimed, and through release once claimed
+ * while held). Rewind claims its button only while Rewind is enabled and the
+ * title has not blocked it. */
+static void direct_shortcut_claim_update(void) {
+    const int bindings[PSX_ASSIST_BIND_COUNT] = {
+        g_hotkey_pad_rewind, g_hotkey_pad_save_state_menu,
+        g_hotkey_pad_fast_forward, g_hotkey_pad_fast_forward_toggle,
+    };
+    uint32_t claimed = 0, held = 0;
+    for (int i = 0; i < PSX_ASSIST_BIND_COUNT; ++i) {
+        if (!direct_shortcut_active(i)) continue;
+        const int b = psx_hotkey_pad_single_button(bindings[i]);
+        if (b >= 0) claimed |= 1u << b;
     }
-    if (PSX_HOTKEY_PAD_IS_AXIS(binding)) {
-        int code = PSX_HOTKEY_PAD_AXIS_CODE(binding);
-        Sint16 v;
-        if (code < 0 || code >= SDL_CONTROLLER_AXIS_MAX)
-            return 0;
-        v = SDL_GameControllerGetAxis(h, (SDL_GameControllerAxis)code);
-        return PSX_HOTKEY_PAD_AXIS_POSITIVE(binding)
-            ? (v > 16000)
-            : (v < -16000);
+    for (int code = 0; code < SDL_CONTROLLER_BUTTON_MAX && code < 32; ++code)
+        if (p1_host_button_down(nullptr, code)) held |= 1u << code;
+    g_p1_claimed_buttons =
+        psx_hotkey_claim_update(&g_p1_claim_latched, claimed, held);
+}
+
+static int* hotkey_pad_binding_slot(int shortcut) {
+    switch (shortcut) {
+    case PSX_ASSIST_BIND_REWIND: return &g_hotkey_pad_rewind;
+    case PSX_ASSIST_BIND_SAVE_STATE_MENU: return &g_hotkey_pad_save_state_menu;
+    case PSX_ASSIST_BIND_FAST_FORWARD: return &g_hotkey_pad_fast_forward;
+    case PSX_ASSIST_BIND_FAST_FORWARD_TOGGLE: return &g_hotkey_pad_fast_forward_toggle;
+    default: return nullptr;
     }
-    return 0;
+}
+
+/* game.toml [controller] direct_shortcut(_button): that shortcut's default
+ * becomes the one-button combination (saved settings still win) and the
+ * launcher captures it as one button. */
+static void apply_title_direct_shortcut(const std::string& shortcut,
+                                        const std::string& button) {
+    static const char* const kNames[PSX_ASSIST_BIND_COUNT] = {
+        "rewind", "save_state_menu", "fast_forward", "fast_forward_toggle",
+    };
+    int index = -1;
+    for (int i = 0; i < PSX_ASSIST_BIND_COUNT; ++i)
+        if (shortcut == kNames[i]) index = i;
+    const int code = (int)SDL_GameControllerGetButtonFromString(button.c_str());
+    if (index < 0 || code < 0 || code >= SDL_CONTROLLER_BUTTON_MAX || code >= 32) {
+        std::fprintf(stderr,
+            "psxrecomp: [controller] direct_shortcut '%s' / button '%s' "
+            "not recognised; ignored\n", shortcut.c_str(), button.c_str());
+        return;
+    }
+    g_title_direct_shortcut = index;
+    g_title_direct_button = code;
+    *hotkey_pad_binding_slot(index) =
+        PSX_HOTKEY_PAD_BUTTON_COMBO((uint32_t)1u << code);
 }
 
 static int savestate_menu_open = 0;
@@ -7038,7 +7351,7 @@ static void savestate_menu_poll_nav(uint32_t now_ms) {
             cancel = 1;
     }
 
-    const int toggle = hotkey_pad_binding_down(g_hotkey_pad_save_state_menu);
+    const int toggle = hotkey_shortcut_down(PSX_ASSIST_BIND_SAVE_STATE_MENU, g_hotkey_pad_save_state_menu);
     if (savestate_menu_ignore_toggle_release) {
         if (!toggle)
             savestate_menu_ignore_toggle_release = 0;
@@ -7073,7 +7386,7 @@ static void savestate_menu_poll_nav(uint32_t now_ms) {
 }
 
 static int rewind_toggle_buttons_down(void) {
-    return hotkey_pad_binding_down(g_hotkey_pad_rewind);
+    return hotkey_shortcut_down(PSX_ASSIST_BIND_REWIND, g_hotkey_pad_rewind);
 }
 
 static void rewind_poll_toggle_buttons(void) {
@@ -7088,7 +7401,7 @@ static void rewind_poll_toggle_buttons(void) {
 
 static void savestate_menu_poll_toggle_buttons(void) {
     static int was_down;
-    int down = hotkey_pad_binding_down(g_hotkey_pad_save_state_menu);
+    int down = hotkey_shortcut_down(PSX_ASSIST_BIND_SAVE_STATE_MENU, g_hotkey_pad_save_state_menu);
     if (down && !was_down && !psx_rewind_is_open())
         savestate_menu_toggle(0);
     was_down = down;
@@ -7117,7 +7430,7 @@ static void fast_forward_toggle_flip(void) {
 
 static void fast_forward_toggle_poll_buttons(void) {
     static int was_down;
-    int down = hotkey_pad_binding_down(g_hotkey_pad_fast_forward_toggle);
+    int down = hotkey_shortcut_down(PSX_ASSIST_BIND_FAST_FORWARD_TOGGLE, g_hotkey_pad_fast_forward_toggle);
     if (down && !was_down)
         fast_forward_toggle_flip();
     was_down = down;
@@ -7135,6 +7448,12 @@ static void rewind_poll_nav(uint32_t now_ms) {
     /* Honor remapped Cross/Circle (and Select/R3) via the same pad path as
      * gameplay — GameController A/B alone miss keyboard-as-pad and remaps. */
     uint16_t btn = pad_buttons_for(g_players[0], 1, true);
+    {
+        uint16_t host_word;
+        uint8_t host_st[4], host_lt, host_rt;
+        if (host_pad_layer(&host_word, host_st, &host_lt, &host_rt))
+            btn = host_word;
+    }
     if ((btn & PAD_LEFT) == 0)
         left = 1;
     if ((btn & PAD_RIGHT) == 0)
@@ -7191,6 +7510,17 @@ static void rewind_host_pause_loop(void) {
     psx_local_mouse_reset();
     freeze_heartbeat_set_paused(1);
     while (psx_rewind_is_open()) {
+#ifndef PSX_NO_DEBUG_TOOLS
+        /* The guest is frozen; keep the debug endpoint live so injected
+         * input, screenshots and status reads can drive the filmstrip. */
+        debug_server_poll();
+#endif
+        if (g_headless) {
+            rewind_poll_nav((uint32_t)SDL_GetTicks());
+            starvation_watchdog_heartbeat();
+            SDL_Delay(1);
+            continue;
+        }
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             (void)psx_local_mouse_event(ev);
@@ -7651,6 +7981,9 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                                  &g_runtime_perf.provider_poll_ticks);
     }
 
+    /* Direct-shortcut claims are settled before any shortcut poll or pad
+     * sample this frame (no-op unless a title allowed a direct shortcut). */
+    direct_shortcut_claim_update();
     if (!g_headless) {
         /* Pump SDL events to prevent window freeze. */
         psx_local_mouse_begin(sdl_window, local_mouse_live(override));
@@ -7662,6 +7995,15 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
         psx_rewind_present_tick((uint32_t)SDL_GetTicks());
         if (savestate_menu_open)
             savestate_menu_host_pause_loop();
+        if (psx_rewind_is_open())
+            rewind_host_pause_loop();
+    } else if (host_pad_layer(nullptr, nullptr, nullptr, nullptr)) {
+        /* Headless with the debug host layer: the host shortcuts that need no
+         * window (Rewind capture/open, fast-forward latch) poll as they would
+         * windowed, so scripted runs can drive them. */
+        rewind_poll_toggle_buttons();
+        fast_forward_toggle_poll_buttons();
+        psx_rewind_note_frame();
         if (psx_rewind_is_open())
             rewind_host_pause_loop();
     }
@@ -7899,7 +8241,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
         const bool kb_turbo = host_hotkey_input_focused() &&
             host_keymap_down(HOST_KEYMAP_TURBO, host_keys, (int)SDL_GetModState());
         if (kb_turbo || g_manual_turbo_latched ||
-            hotkey_pad_binding_down(g_hotkey_pad_fast_forward)) {
+            hotkey_shortcut_down(PSX_ASSIST_BIND_FAST_FORWARD, g_hotkey_pad_fast_forward)) {
             const int mult = manual_fast_forward_multiplier();
             const int present_every = (mult < 0) ? 4 : (mult <= 4 ? 2 : 4);
             manual_turbo_active = true;
@@ -14063,6 +14405,24 @@ namespace {
         gi->settings_bindings = 1;
         gi->assist_binding_labels = kPsxHostShortcutLabels;
         gi->assist_binding_count = PSX_ASSIST_BIND_COUNT;
+#if defined(RECOMP_LAUNCHER_HAS_DIRECT_ASSIST_BIND)
+        /* Title-declared direct shortcut: captured as one button, defaulted
+         * to the title's button; the other shortcuts keep their defaults. */
+        if (g_title_direct_shortcut >= 0) {
+            /* recomp-ui copies RECOMP_LAUNCHER_MAX_ASSIST_BINDINGS entries. */
+            static int pad_defaults[RECOMP_LAUNCHER_MAX_ASSIST_BINDINGS];
+            static const int key_defaults[RECOMP_LAUNCHER_MAX_ASSIST_BINDINGS] = {};
+            pad_defaults[PSX_ASSIST_BIND_REWIND] = PSX_HOTKEY_PAD_SELECT_R3;
+            pad_defaults[PSX_ASSIST_BIND_SAVE_STATE_MENU] = PSX_HOTKEY_PAD_SELECT_R1;
+            pad_defaults[PSX_ASSIST_BIND_FAST_FORWARD] = PSX_HOTKEY_PAD_SELECT_L1;
+            pad_defaults[PSX_ASSIST_BIND_FAST_FORWARD_TOGGLE] = 0;
+            pad_defaults[g_title_direct_shortcut] = PSX_HOTKEY_PAD_BUTTON_COMBO(
+                (uint32_t)1u << g_title_direct_button);
+            gi->assist_default_pad_bind = pad_defaults;
+            gi->assist_default_key_bind = key_defaults;
+            gi->assist_direct_pad_bind_action = g_title_direct_shortcut + 1;
+        }
+#endif
         gi->has_skip_fmv = skip_fmv_offered_b ? 1 : 0;
         gi->has_turbo_loads = turbo_loads_offered_b ? 1 : 0;
         /* The Perspective textures row. Hidden for a title that ships PGXP
@@ -14907,6 +15267,9 @@ int main(int argc, char** argv) {
             g_auto_skip_fmv    = gc.runtime.video_auto_skip_fmv ? 1 : 0;
             /* [controller] game-declared input defaults (settings.toml/launcher
              * still override below). */
+            if (!gc.runtime.direct_shortcut.empty())
+                apply_title_direct_shortcut(gc.runtime.direct_shortcut,
+                                            gc.runtime.direct_shortcut_button);
             if (gc.runtime.has_default_mode) {
                 for (int i = 0; i < PSX_MAX_PLAYERS; ++i) {
                     player_mode[i] = (i == 0) ? gc.runtime.default_p1_mode
@@ -16641,6 +17004,10 @@ int main(int argc, char** argv) {
          * latched across a soft return. */
         g_mod_controller_mode_override.fill(-1);
         mod_controller_source_reset();
+        mod_pad_transform_reset();
+        g_direct_shortcut_allowed = 0;
+        g_p1_claimed_buttons = 0;
+        psx_rewind_set_title_blocked(0);
         for (auto& policy : g_mod_controller_policy)
             policy = ModControllerPresentationPolicy{};
         g_mod_load_wall_multiplier = -1;

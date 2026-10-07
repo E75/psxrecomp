@@ -368,6 +368,7 @@ set(PSXRECOMP_RUNTIME_SOURCES
     ${PSXRECOMP_ROOT}/runtime/src/psx_openxr.c
     ${PSXRECOMP_ROOT}/runtime/src/mod_controller_source.c
     ${PSXRECOMP_ROOT}/runtime/src/pad_external_input.c
+    ${PSXRECOMP_ROOT}/runtime/src/mod_pad_transform.c
     ${PSXRECOMP_ROOT}/runtime/src/vr_pose_math.c
     ${PSXRECOMP_ROOT}/runtime/src/gpu_vk_renderer.c
     ${PSXRECOMP_ROOT}/runtime/src/dma_gpu_ll.c
@@ -468,6 +469,8 @@ set(PSXRECOMP_RUNTIME_SOURCES
     ${PSXRECOMP_ROOT}/runtime/src/psx_bios_backend.c
     ${PSXRECOMP_ROOT}/runtime/src/psx_bios_module.c
     ${PSXRECOMP_ROOT}/runtime/src/psx_netplay.c
+    ${PSXRECOMP_ROOT}/runtime/src/psx_net_pad.c
+    ${PSXRECOMP_ROOT}/runtime/src/psx_pad_apply.c
     ${PSXRECOMP_ROOT}/runtime/src/psx_lobby_client.c
     ${PSXRECOMP_ROOT}/runtime/src/netplay_bios_settle.c
     ${PSXRECOMP_ROOT}/runtime/src/netplay_exit_reason.c
