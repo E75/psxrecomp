@@ -135,6 +135,12 @@ if(BUILD_TESTING)
     set(PSX_GL_READBACK_COMPILER_BIN "${_gl_test_default_bin}" CACHE PATH "GCC/MinGW bin for GL fixture")
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
+        add_test(NAME host_launch_timings_protocol_test COMMAND ${CMAKE_COMMAND} -E env
+            "CC=${CMAKE_C_COMPILER}" "CXX=${CMAKE_CXX_COMPILER}" "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_host_launch_timings_protocol.py")
+        set_tests_properties(host_launch_timings_protocol_test PROPERTIES SKIP_RETURN_CODE 77)
+        add_test(NAME tcp_command_index_check COMMAND "${Python3_EXECUTABLE}"
+            "${PSXRECOMP_ROOT}/tools/gen_tcp_commands.py" --check)
         add_test(NAME wtrace_dump_test COMMAND ${CMAKE_COMMAND} -E env
             "CC=${CMAKE_C_COMPILER}" "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wtrace_dump.py")
