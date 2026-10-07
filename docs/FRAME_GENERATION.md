@@ -30,19 +30,34 @@ has measured time to spare.
   game frame; a present of the same buffer is the same frame again. R4
   updates every other VBlank, so generation interpolates between flips (30 Hz
   game frames), not between VBlanks.
-- **Matching** (`frame_gen.c`). Triangles are keyed by op, texture page,
-  CLUT, texture coordinates and the draw area they were clipped to
-  (relative to their buffer); positions are relative to the buffer. Each
-  newer triangle pairs, in draw order, with the nearest older one of the same
-  key whose three vertices moved at most 96 native px and alike (within
-  24 px of each other). R4 races pair 87-97 % of their triangles.
-- **Drawing.** An in-between frame redraws the newer list into separate
-  surfaces (a copy of the displayed buffer's hr rect and wide rows) with each
-  matched triangle at `lerp(older, newer, t)`, sub-pixel via the precise
-  triangle path; unmatched triangles, rects, lines, fills (2D, HUD) draw as
-  the newer frame has them. The raw texture mirror is not packed from the
-  generated surfaces; all bookkeeping the draws touch is restored, so the
-  real stream is unaffected.
+- **Sources.** While generation is on, every RTPS/RTPT output is noted
+  (gte.cpp, `gte_fg_source_*`) with an identity (the issuing function `ra`
+  and the model-space vertex), the camera-space position the GTE divided and
+  H, indexed by the packed screen word. gpu.c looks each polygon vertex up by
+  its packet word and records the sources ahead of the triangle
+  (`RTH_FG_SRC`, never drawn). CPU-built vertices have none. Guest-visible
+  GTE results are untouched.
+- **Camera** (`frame_gen.c`, `fg_cam_fit`). No primitive is paired by draw
+  order. Per view (draw area), vertices of the two frames with the same
+  identity are paired in camera space (instances: the clearly nearest) and a
+  rigid motion is fitted (RANSAC + least squares, inliers within 1 screen px
+  at their depth). The static world agrees with it; paired vertices that
+  disagree are objects (cars, the followed car). Verdict: no projections, a
+  view with few pairs or under half inliers, or a turn/travel no camera makes
+  between two frames rejects the generated frame (the real frame shows).
+- **Drawing** (`fg_cam_place`). One real frame is redrawn from an
+  in-between camera: world vertices re-projected through the fraction of the
+  fitted motion, object vertices lerped in camera space, CPU-built vertices
+  of placed triangles moved with their neighbours, everything else (HUD, 2D,
+  sprites, the mirror's own view if unprojected) unchanged. Moving forward
+  the older frame is redrawn (seen from further on it spreads past the
+  screen edges); otherwise the newer. Drawing starts on the newer real
+  frame's image and skips the clears before the first draw, and strips along
+  a view's edges the picture moved away from are copied from that image, so
+  what the in-between camera uncovers shows the newer frame instead of a
+  hole. Triangles crossing the camera plane are dropped. The raw texture
+  mirror is not packed from the generated surfaces; all bookkeeping the draws
+  touch is restored, so the real stream is unaffected.
 - **Schedule.** With `n` in-between frames per game frame, at the flip the
   real frame is composed and kept (its buffer may be drawn over before it is
   shown), frames `t = k/(n+1)` are presented `flip/(n+1)` apart, then the
@@ -73,7 +88,9 @@ has measured time to spare.
 
 ## Limits
 
-- Only triangles move; sprites, lines and fills are the newer frame's.
+- Only GTE-projected triangles move; sprites, lines and fills are the
+  redrawn frame's. Areas uncovered by the in-between camera show the newer
+  frame (thin slivers at depth discontinuities are possible).
 - A texture the frame drew earlier into its own displayed buffer is sampled
   as the raw mirror holds it when the in-between frame is drawn.
 - Single-buffered games never flip, so nothing is generated.
@@ -83,17 +100,26 @@ has measured time to spare.
 
 `{"cmd":"frame_gen"}` (not a sync point): generated / real presents, flips,
 dups, plan (`last_n`, `slots`), costs (`real_ms`, `gen_ms`, `swap_ms`), last
-match counts, breaker, last hold, total swaps.
+camera fit (`views`, `pairs`, `inliers`, `place_*`, `cam_angle_deg`,
+`cam_shift`), verdict (`verdict_ok`, `rejected`, `reject_why`), breaker,
+ceiling, last hold, total swaps.
 
 `PSX_PRESENT_SHOT_GENERATED=1` (diagnostic): a staged `present_shot` is
 taken at the next generated frame instead of the next present, to inspect
-in-between images in game.
+in-between images in game. `PSX_PRESENT_SHOT_BURST=N`: a staged
+`present_shot` takes the next N composed frames (written after the burst as
+`<path>_NN_{r|g}_f<flip>.png`, in composition order: a real frame precedes
+the in-between frames that lead up to it).
 
 ## Tests
 
-- `frame_gen_test`: matching (moved scenes, keys, move and deformation
-  limits, duplicates, pair-once), interpolation endpoints, the plan, the
-  breaker.
+- `frame_gen_test`: the camera fit on a synthetic grandstand of one
+  repeated texture, redrawn in another order with a row culled and one added
+  (the case the old draw-order matcher paired wrongly: 225 of 226 pairs) -
+  phase 0 / 0.5 / 1 land where the older / halfway / newer camera sees each
+  vertex; a followed car, a HUD triangle, a CPU-built vertex; the verdict
+  (no projections, a cut, an impossible turn, inconsistent motion); the plan,
+  breaker, cost, pace, ceiling.
 - `render_thread_test`: the tick hook runs on the render thread with the
   context, never early, and wakes an idle thread.
 - `gl_frame_gen_test` (real GL, `gpu;opengl;hardware`): a double-buffered
