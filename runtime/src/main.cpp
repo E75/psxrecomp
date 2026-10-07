@@ -1461,6 +1461,13 @@ static int           g_render_thread_frames = 2;
 static int           g_frame_generation = 0;
 /* [video] present_thread (docs/RENDER_THREAD.md), with the render thread. */
 static int           g_present_thread = 0;
+/* The player's persisted pipeline choice (game.toml default < settings.toml),
+ * before any PSX_* env override for this run. The launcher seeds from and
+ * saves to these so a one-run env A/B is never written to settings.toml.
+ * The pipeline starts once at boot: a change applies at next launch. */
+static int           g_render_thread_pref = 0;
+static int           g_present_thread_pref = 0;
+static int           g_frame_generation_pref = 0;
 static int           g_present_thread_slots = 3;
 static int           s_render_thread_tried = 0;
 static int           g_video_vsync        = 1;
@@ -15124,6 +15131,9 @@ namespace {
 #if defined(RECOMP_LAUNCHER_HAS_DYNAMIC_RESOLUTION)
         gi->has_dynamic_resolution = 1;
 #endif
+#if defined(RECOMP_LAUNCHER_HAS_RENDER_PIPELINE)
+        gi->has_render_pipeline = 1;   /* OpenGL rows; the launcher gates */
+#endif
         if (language_labels && num_languages > 0) {
             gi->language_labels = language_labels;
             gi->num_languages = num_languages;
@@ -16305,6 +16315,9 @@ int main(int argc, char** argv) {
         }
         apply_offline_pad_count(game_players, multitap_enabled);
         if (us.has_low_latency_input) g_low_latency_input = us.low_latency_input ? 1 : 0;
+        if (us.has_render_thread)     g_render_thread     = us.render_thread ? 1 : 0;
+        if (us.has_present_thread)    g_present_thread    = us.present_thread ? 1 : 0;
+        if (us.has_frame_generation)  g_frame_generation  = us.frame_generation ? 1 : 0;
         if (us.has_vsync)             g_video_vsync       = us.vsync;
         if (us.has_frame_interpolation)
             g_frame_interpolation = us.frame_interpolation ? 1 : 0;
@@ -16755,6 +16768,13 @@ int main(int argc, char** argv) {
 #if defined(RECOMP_LAUNCHER_HAS_DYNAMIC_RESOLUTION)
             seed.dynamic_resolution = dynres_requested() != 0;
             seed.has_dynamic_resolution = true;
+#endif
+#if defined(RECOMP_LAUNCHER_HAS_RENDER_PIPELINE)
+            seed.render_thread = g_render_thread != 0;
+            seed.present_thread = g_present_thread != 0;
+            seed.frame_generation = g_frame_generation != 0;
+#endif
+#if defined(RECOMP_LAUNCHER_HAS_DYNAMIC_RESOLUTION)
             seed.dynamic_resolution_min = dynres_min_value();
             seed.has_dynamic_resolution_min = true;
 #endif
@@ -16964,6 +16984,11 @@ int main(int argc, char** argv) {
 #if defined(RECOMP_LAUNCHER_HAS_DYNAMIC_RESOLUTION)
             ls.dynamic_resolution = seed.dynamic_resolution ? 1 : 0;
             ls.dynamic_resolution_min = seed.dynamic_resolution_min;
+#endif
+#if defined(RECOMP_LAUNCHER_HAS_RENDER_PIPELINE)
+            ls.render_thread    = seed.render_thread ? 1 : 0;
+            ls.present_thread   = seed.present_thread ? 1 : 0;
+            ls.frame_generation = seed.frame_generation ? 1 : 0;
 #endif
             ls.antialiasing       = seed.antialiasing ? 1 : 0;
             ls.texture_filter     = seed.texture_filter;
@@ -17311,6 +17336,11 @@ int main(int argc, char** argv) {
                 seed.dynamic_resolution_min = ls.dynamic_resolution_min;
                 seed.has_dynamic_resolution_min = true;
 #endif
+#if defined(RECOMP_LAUNCHER_HAS_RENDER_PIPELINE)
+                seed.render_thread    = ls.render_thread != 0;    seed.has_render_thread    = true;
+                seed.present_thread   = ls.present_thread != 0;   seed.has_present_thread   = true;
+                seed.frame_generation = ls.frame_generation != 0; seed.has_frame_generation = true;
+#endif
                 seed.antialiasing          = ls.antialiasing != 0;     seed.has_antialiasing          = true;
                 seed.geometry_correction   = ls.geometry_correction != 0;
                 seed.has_geometry_correction = true;
@@ -17570,6 +17600,12 @@ int main(int argc, char** argv) {
 #if defined(RECOMP_LAUNCHER_HAS_DYNAMIC_RESOLUTION)
                 g_video_dynres = seed.dynamic_resolution ? 1 : 0;
                 g_video_dynres_min = seed.dynamic_resolution_min;
+#endif
+#if defined(RECOMP_LAUNCHER_HAS_RENDER_PIPELINE)
+                /* First boot: the pipeline has not started yet. */
+                g_render_thread    = seed.render_thread ? 1 : 0;
+                g_present_thread   = seed.present_thread ? 1 : 0;
+                g_frame_generation = seed.frame_generation ? 1 : 0;
 #endif
                 g_video_aa        = seed.antialiasing;
                 g_video_texfilter = seed.texture_filter;
@@ -18038,6 +18074,9 @@ session_reboot:
         gl_renderer_set_texture_window_batching((*e && *e != '0') ? 1 : 0);
     /* [video] render_thread A/B; PSX_RENDER_THREAD_FRAMES bounds frames in
      * flight (default 2). */
+    g_render_thread_pref = g_render_thread;
+    g_present_thread_pref = g_present_thread;
+    g_frame_generation_pref = g_frame_generation;
     if (const char* e = std::getenv("PSX_RENDER_THREAD"))
         g_render_thread = (*e && *e != '0') ? 1 : 0;
     if (const char* e = std::getenv("PSX_PRESENT_THREAD"))
@@ -19309,6 +19348,12 @@ soft_return_lobby:
         ls.dynamic_resolution = dynres_requested() != 0;
         ls.dynamic_resolution_min = dynres_min_value();
 #endif
+#if defined(RECOMP_LAUNCHER_HAS_RENDER_PIPELINE)
+        /* The saved choice, not this run's (env A/B or already running). */
+        ls.render_thread    = g_render_thread_pref;
+        ls.present_thread   = g_present_thread_pref;
+        ls.frame_generation = g_frame_generation_pref;
+#endif
         ls.antialiasing = g_video_aa ? 1 : 0;
         ls.texture_filter = g_video_texfilter;
         ls.fmv_filter = cfg_fmv_filter_to_launcher(g_video_fmv_filter);
@@ -19689,6 +19734,16 @@ soft_return_lobby:
                 us.has_dynamic_resolution_min = true;
                 g_video_dynres = us.dynamic_resolution ? 1 : 0;
                 g_video_dynres_min = us.dynamic_resolution_min;
+#endif
+#if defined(RECOMP_LAUNCHER_HAS_RENDER_PIPELINE)
+                /* Persisted only: the running pipeline keeps its threads;
+                 * the new choice applies at next launch. */
+                us.render_thread    = ls.render_thread != 0;    us.has_render_thread    = true;
+                us.present_thread   = ls.present_thread != 0;   us.has_present_thread   = true;
+                us.frame_generation = ls.frame_generation != 0; us.has_frame_generation = true;
+                g_render_thread_pref    = ls.render_thread ? 1 : 0;
+                g_present_thread_pref   = ls.present_thread ? 1 : 0;
+                g_frame_generation_pref = ls.frame_generation ? 1 : 0;
 #endif
                 us.antialiasing = ls.antialiasing != 0;
                 us.has_antialiasing = true;

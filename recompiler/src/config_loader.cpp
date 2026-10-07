@@ -2807,6 +2807,18 @@ UserSettings load_user_settings(const fs::path& path) {
             s.low_latency_input = toml::find<bool>(v, "low_latency_input");
             s.has_low_latency_input = true;
         });
+        if (v.contains("render_thread")) try_get([&]{
+            s.render_thread = toml::find<bool>(v, "render_thread");
+            s.has_render_thread = true;
+        });
+        if (v.contains("present_thread")) try_get([&]{
+            s.present_thread = toml::find<bool>(v, "present_thread");
+            s.has_present_thread = true;
+        });
+        if (v.contains("frame_generation")) try_get([&]{
+            s.frame_generation = toml::find<bool>(v, "frame_generation");
+            s.has_frame_generation = true;
+        });
         if (v.contains("vsync")) try_get([&]{
             const auto m = toml::find<std::string>(v, "vsync");
             if      (m == "on"  || m == "vsync")    { s.vsync = 1;  s.has_vsync = true; }
@@ -3164,6 +3176,12 @@ bool save_user_settings(const fs::path& path, const UserSettings& s) {
         f << "fullscreen        = " << s.fullscreen << "\n";
     if (s.has_low_latency_input)
         f << "low_latency_input = " << (s.low_latency_input ? "true" : "false") << "\n";
+    if (s.has_render_thread)
+        f << "render_thread = " << (s.render_thread ? "true" : "false") << "\n";
+    if (s.has_present_thread)
+        f << "present_thread = " << (s.present_thread ? "true" : "false") << "\n";
+    if (s.has_frame_generation)
+        f << "frame_generation = " << (s.frame_generation ? "true" : "false") << "\n";
     if (s.has_vsync)
         f << "vsync             = \"" << (s.vsync == 0 ? "immediate" : s.vsync < 0 ? "adaptive" : "on") << "\"\n";
     if (s.has_frame_interpolation)
