@@ -1469,6 +1469,8 @@ static const char *TEX_FS =
     "      if(native==0) discard; stp=(native>>15)&1;\n"
     "    } else if(v_hd_mode==2){\n"
     "      if(hd.a<128.0/255.0) discard; stp=0;\n"
+    "    } else if(v_hd_mode==4){\n"
+    "      if(hd.a==0.0) discard; stp=hd.a<1.0 ? 1 : 0;\n"
     "    } else {\n"
     "      stp=hd.a<=242.0/255.0 ? 1 : 0;\n"
     "      if(all(equal(hd,vec4(0.0))) || (stp==0 && all(equal(hd.rgb,vec3(0.0))))) discard;\n"

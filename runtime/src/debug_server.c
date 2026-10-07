@@ -10034,13 +10034,17 @@ static void handle_hd_textures(int id, const char *json)
     }
     char root_json[8192];
     json_escape_string(root_json, sizeof(root_json), info.root ? info.root : "");
+    char diagnostic_json[4096];
+    json_escape_string(diagnostic_json, sizeof(diagnostic_json),
+                       info.diagnostic ? info.diagnostic : "");
     const int backend = gr_backend();
     send_fmt("{\"id\":%d,\"ok\":true,\"root\":\"%s\",\"active\":%s,"
              "\"replacements\":%s,\"dump\":%s,\"format\":%d,"
              "\"backend\":\"%s\",\"replacement_backend_supported\":%s,"
              "\"replacement_count\":%llu,\"draw_queries\":%llu,"
              "\"matched_draws\":%llu,\"ready_draws\":%llu,"
-             "\"applied_draws\":%llu,\"dumped_textures\":%llu}",
+             "\"applied_draws\":%llu,\"dumped_textures\":%llu,"
+             "\"pending_dump_sources\":%llu,\"diagnostic\":\"%s\"}",
              id, root_json, info.active ? "true" : "false",
              info.replacements ? "true" : "false", info.dump ? "true" : "false", info.format,
              backend == GR_BACKEND_OPENGL ? "opengl" :
@@ -10049,7 +10053,8 @@ static void handle_hd_textures(int id, const char *json)
              (unsigned long long)info.replacement_count,
              (unsigned long long)info.draw_queries, (unsigned long long)info.matched_draws,
              (unsigned long long)info.ready_draws, (unsigned long long)info.applied_draws,
-             (unsigned long long)info.dumped_textures);
+             (unsigned long long)info.dumped_textures,
+             (unsigned long long)info.pending_dump_sources, diagnostic_json);
 }
 
 static void handle_video_info(int id, const char *json)

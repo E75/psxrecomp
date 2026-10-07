@@ -44,6 +44,20 @@ netplay binary: `runtime/licenses/libjuice-NOTICES.txt`. MPL-2.0 is file-level
 copyleft: a change to a libjuice file must be published under MPL-2.0. The build
 changes none.
 
+## libwebp - static texture-image decoder
+
+[libwebp 1.6.0](https://chromium.googlesource.com/webm/libwebp/+/refs/tags/v1.6.0)
+by Google Inc. and WebM contributors is licensed **BSD-3-Clause**. The runtime
+builds only its static decoder, without command-line tools, the encoder, or a
+libwebp DLL. The dependency is unmodified and pinned to commit
+`4fa21912338357f89e4fd51cf2368325b59e9bd9`, with immutable archive SHA-256
+`923f3382a47a2af185c3240c954cf004428b237bd7317413a95146d01eb4b94b` in
+`third_party/deps.manifest`. Its original COPYING, PATENTS, and AUTHORS texts
+ship in `runtime/licenses/libwebp-NOTICES.txt`, which release packagers carry
+into `licenses/`. Developers can use the verified archive or an explicit
+`FETCHCONTENT_SOURCE_DIR_PSX_LIBWEBP` / `PSX_LIBWEBP_SOURCE_DIR` source override.
+PNG and JPEG continue to use the existing shared stb_image implementation.
+
 ## Vendored libraries
 
 These are checked in under `recompiler/lib/` and `runtime/third_party/` with

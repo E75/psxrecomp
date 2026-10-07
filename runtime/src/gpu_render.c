@@ -158,7 +158,14 @@ void gr_set_perspective_triangle(int enabled, float q0, float q1, float q2) {
         g_b->set_perspective_triangle(enabled, q0, q1, q2);
 }
 void gr_fill_rect(int x, int y, int w, int h, uint16_t c)  { g_b->fill_rect(x, y, w, h, c); gpu_hd_textures_invalidate(x, y, w, h); }
-void gr_copy_rect(int sx, int sy, int dx, int dy, int w, int h) { g_b->copy_rect(sx, sy, dx, dy, w, h); gpu_hd_textures_invalidate(dx, dy, w, h); }
+void gr_copy_rect(int sx, int sy, int dx, int dy, int w, int h) {
+    if (!gpu_hd_textures_active()) { g_b->copy_rect(sx, sy, dx, dy, w, h); return; }
+    if (g_effective == GR_BACKEND_VULKAN) g_b->vram_read(0,0);
+    gpu_hd_textures_begin_copy(sx,sy,dx,dy,w,h);
+    g_b->copy_rect(sx, sy, dx, dy, w, h);
+    if (g_effective == GR_BACKEND_VULKAN) g_b->vram_read(0,0);
+    gpu_hd_textures_end_copy();
+}
 void gr_draw_flat_triangle(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t c) {
     g_b->draw_flat_triangle(x0, y0, x1, y1, x2, y2, c);
     hd_invalidate_triangle(x0, y0, x1, y1, x2, y2);
@@ -214,7 +221,7 @@ int gr_render_display(uint32_t *o, int p, int dx, int dy, int dw, int dh) {
 int gr_render_display_hires(uint32_t *o, int p, int dx, int dy, int dw, int dh) {
     return g_b->render_display_hires(o, p, dx, dy, dw, dh);
 }
-void gr_vram_upload_begin(int x, int y, int w, int h) { gpu_hd_textures_invalidate(x,y,w,h); }
+void gr_vram_upload_begin(int x, int y, int w, int h) { gpu_hd_textures_begin_upload(x,y,w,h); }
 void gr_vram_write(int x, int y, uint16_t pixel)     { g_b->vram_write(x, y, pixel); gpu_hd_textures_invalidate(x,y,1,1); }
 uint16_t gr_vram_read(int x, int y)                  { return g_b->vram_read(x, y); }
 void gr_vram_transfer_in(int x, int y, int w, int h, const uint16_t *d)  { g_b->vram_transfer_in(x, y, w, h, d); gpu_hd_textures_track_upload(x,y,w,h,d); }

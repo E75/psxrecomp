@@ -2,6 +2,7 @@
 #define PSX_TEST_HD_TEXTURE_PACK 1
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
+#define STBI_ONLY_JPEG
 #include "../third_party/stb_image.h"
 #define main scale_fixture_main
 #include "test_gl_scale_invariance.c"
@@ -29,6 +30,60 @@ static uint16_t source_words[4*4];
 static uint16_t reference[1024*512];
 static uint8_t pixels[64*64*4];
 static const uint16_t texture_page=8u|(2u<<7);
+static uint16_t part_words[16];
+static uint16_t part_palette[16];
+static const uint16_t part_p4_words[2]={0x1010,0x1132};
+
+static void part_png(const char* root,const DuckTextureKey* key,int width,int height,int pattern) {
+    char stem[256],path[2048];
+    check(duck_texture_format_name(key,stem,sizeof(stem)),"partial fixture filename");
+    snprintf(path,sizeof(path),"%s/replacements/%s.png",root,stem);
+    uint8_t rgba[8*8*4];
+    for(int y=0;y<height;++y) for(int x=0;x<width;++x) {
+        uint8_t* pixel=rgba+(y*width+x)*4;
+        pixel[0]=255; pixel[1]=pixel[2]=0; pixel[3]=255;
+        if(pattern==0 && x==1) { pixel[0]=0;pixel[3]=128; }
+        if(pattern==0 && x==2) { pixel[0]=0;pixel[2]=255;pixel[3]=127; }
+        if(pattern==1) {
+            pixel[0]=pixel[1]=0;pixel[2]=255;
+            if(x==0) pixel[3]=0;
+            else if(x==1) pixel[3]=243;
+            else if(x==2) pixel[2]=pixel[3]=0;
+            else {pixel[2]=0;pixel[3]=128;}
+        }
+        if(pattern==3) {pixel[0]=(x&1)?0:255;pixel[2]=(x&1)?255:0;}
+    }
+    FILE* file=fopen(path,"wb");check(file!=NULL,"open partial fixture PNG");
+    if(file){check(png_write_rgba(file,rgba,width,height),"write partial fixture PNG");fclose(file);}
+}
+static void pack_config(const char* root,int linear) {
+    char path[2048];snprintf(path,sizeof(path),"%s/config.yaml",root);
+    FILE* file=fopen(path,"wb");check(file!=NULL,"open fixture config");
+    if(file){fprintf(file,"DumpC16Textures: true\nMaxVRAMWriteSplits: 16\nReplacementScaleLinearFilter: %s\n",linear?"true":"false");fclose(file);}
+}
+static void pack_parts(const char* root) {
+    for(int y=0;y<2;++y) for(int x=0;x<8;++x)
+        part_words[y*8+x]=x==2?0x83e0:x==4?0:x==5?0x8000:x==6?0x7c00:0x03e0;
+    for(int i=0;i<16;++i) part_palette[i]=i==2?0x83e0:i==3?0x7c00:0x03e0;
+    DuckTextureKey key={0};
+    key.source_hash=duck_texture_hash_words_le(part_words,16);
+    key.source_width_words=8;key.source_height=2;key.width=2;key.height=2;
+    key.depth=HD_TEXTURE_DEPTH_16BPP;key.kind=DUCK_TEXTURE_UPLOAD;
+    part_png(root,&key,8,8,0);
+    key.offset_x=2;key.semitransparent=1;part_png(root,&key,4,4,1);
+    /* This image is added later to test reload/filtering, including reruns. */
+    key.offset_x=6;key.semitransparent=0;
+    char stem[256],path[2048];
+    if(duck_texture_format_name(&key,stem,sizeof(stem))) {
+        snprintf(path,sizeof(path),"%s/replacements/%s.png",root,stem);remove(path);
+    }
+    key=(DuckTextureKey){0};
+    key.source_hash=duck_texture_hash_words_le(part_p4_words,2);
+    key.source_width_words=2;key.source_height=1;key.width=4;key.height=1;
+    key.depth=HD_TEXTURE_DEPTH_4BPP;key.kind=DUCK_TEXTURE_UPLOAD;
+    key.palette_max=1;key.palette_hash=duck_texture_hash_words_le(part_palette,2);
+    part_png(root,&key,8,4,2);
+}
 
 static void pack_png(const char* root,int st) {
     DuckTextureKey key={0};
@@ -107,6 +162,104 @@ static void capture(void) {
 }
 static const uint8_t* sample(int x,int y) { return pixels+(y*64+x)*4; }
 
+static void composition_scene(const char* root) {
+    const uint16_t tp=12u|(2u<<7);
+    const int bounds[4]={0,0,7,1};
+    state();gr_vram_transfer_in(768,0,8,2,part_words);
+    int ready=0;
+    for(int i=0;i<2000 && !ready;++i) {
+        GpuHdTextureImage image={0};
+        if(gpu_hd_textures_acquire_draw(tp,0,0,bounds,0,1,&image))
+            ready=image.alpha_mode==4 && image.width==32 && image.height==8 &&
+                image.rgba[8*4+2]>200 && image.rgba[8*4+3]==128;
+        gpu_hd_textures_release_image(&image);if(!ready) SDL_Delay(1);
+    }
+    if(!ready) {
+        GpuHdTextureImage image={0};
+        if(gpu_hd_textures_acquire_draw(tp,0,0,bounds,0,1,&image))
+            fprintf(stderr,"composition mode=%u size=%ux%u pixel8=%u,%u,%u,%u\n",image.alpha_mode,image.width,image.height,
+                image.rgba[32],image.rgba[33],image.rgba[34],image.rgba[35]);
+        gpu_hd_textures_release_image(&image);
+    }
+    check(ready,"adjacent mixed-density replacements decode and compose");
+    gr_fill_rect(0,0,16,16,0x001f);gr_set_semi_transparency(1,1);
+    gr_draw_textured_rect(2,2,8,2,0,0,0,0,tp);capture();
+    check(sample(8,8)[0]>200 && sample(8,8)[1]<20,"first partial region displays its replacement");
+    check(sample(9,8)[0]==0 && sample(9,8)[1]==0 && sample(9,8)[2]==0,
+          "composed non-ST alpha128 keeps occupied black");
+    check(sample(10,8)[0]>200 && sample(10,8)[1]<20 && sample(10,8)[2]<20,
+          "replacement cutout exposes destination rather than native base");
+    check(sample(16,8)[0]>200 && sample(16,8)[1]<20 && sample(16,8)[2]>200,
+          "ST colored alpha0 blends once without native-base double blend");
+    check(sample(18,8)[0]<20 && sample(18,8)[2]>200,"composed ST alpha243 remains opaque");
+    check(sample(20,8)[0]>200 && sample(20,8)[2]<20,"composed all-zero ST cutout retains destination");
+    check(sample(24,8)[0]>200 && sample(24,8)[1]<20,"native transparent hole remains cutout");
+    check(sample(32,8)[0]<20 && sample(32,8)[2]>200,"uncovered native opaque texel retains native color");
+    uint16_t output[8];gr_vram_transfer_out(2,2,8,1,output);
+    check(output[0]==0x03e0 && output[2]==0x03ff && output[6]==0x7c00,
+          "composition does not change guest native draw or STP behavior");
+    GpuHdTextureImage first={0},again={0};
+    check(gpu_hd_textures_acquire_draw(tp,0,0,bounds,0,1,&first),"composed cache acquire");
+    check(gpu_hd_textures_acquire_draw(tp,0,0,bounds,0,1,&again) && first.cache_key==again.cache_key,
+          "unchanged native content reuses composition cache");
+    const uint64_t old_key=first.cache_key;
+    gpu_hd_textures_release_image(&first);gpu_hd_textures_release_image(&again);
+    gr_vram_write(775,0,0x7c00);
+    check(gpu_hd_textures_acquire_draw(tp,0,0,bounds,0,1,&again) && again.cache_key!=old_key &&
+          again.rgba[28*4+2]>200 && again.rgba[28*4+1]<20,
+          "native hole write refreshes composed content without touching replacements");
+    gpu_hd_textures_release_image(&again);
+
+    /* Reduced palette key uses entries 0..1; native holes use other colors.
+     * Updating an unused replacement-key color must still refresh the holes. */
+    const uint16_t p4_tp=13;
+    const int p4_bounds[4]={0,16,7,16};
+    state();gr_vram_transfer_in(0,300,16,1,part_palette);
+    gr_vram_transfer_in(832,16,2,1,part_p4_words);
+    ready=0;
+    for(int i=0;i<2000 && !ready;++i) {
+        if(gpu_hd_textures_acquire_draw(p4_tp,0,300,p4_bounds,0,0,&again))
+            ready=again.alpha_mode==4 && again.rgba[0]>200 && again.rgba[1]<20;
+        gpu_hd_textures_release_image(&again);if(!ready) SDL_Delay(1);
+    }
+    check(ready,"word-aligned P4 partial replacement composes");
+    check(gpu_hd_textures_acquire_draw(p4_tp,0,300,p4_bounds,0,0,&first) && first.rgba[8*4+1]>200 && first.rgba[8*4+3]==128,
+          "native P4 hole decodes current CLUT and native STP");
+    const uint64_t palette_key=first.cache_key;gpu_hd_textures_release_image(&first);
+    gr_vram_write(2,300,0x7c00);
+    check(gpu_hd_textures_acquire_draw(p4_tp,0,300,p4_bounds,0,0,&again) && again.cache_key!=palette_key &&
+          again.rgba[8*4+2]>200 && again.rgba[8*4+1]<20 && again.rgba[8*4+3]==255,
+          "CLUT write outside replacement palette range refreshes native holes");
+    gpu_hd_textures_release_image(&again);
+    gr_fill_rect(0,0,16,16,0x001f);gr_draw_textured_rect(2,8,8,1,0,16,0,300,p4_tp);capture();
+    check(sample(8,32)[0]>200 && sample(24,32)[2]>200 && sample(28,32)[2]>200,
+          "P4 replacement and updated native palette holes render together");
+    check(vram[8*1024+2]==0x03e0 && vram[8*1024+6]==0x7c00,
+          "P4 replacement presentation leaves native VRAM intact");
+
+    /* Adding another lower-density image exercises scale filtering. The
+     * native guest still sees blue; the replacement alternates red and blue. */
+    DuckTextureKey key={0};key.source_hash=duck_texture_hash_words_le(part_words,16);
+    key.source_width_words=8;key.source_height=2;key.offset_x=6;key.width=2;key.height=2;
+    key.depth=HD_TEXTURE_DEPTH_16BPP;key.kind=DUCK_TEXTURE_UPLOAD;
+    part_png(root,&key,4,4,3);char error[256]={0};
+    for(int linear=0;linear<2;++linear) {
+        pack_config(root,linear);check(gpu_hd_textures_reload(error,sizeof(error)),"mixed-density filtering reload");
+        state();gr_vram_transfer_in(768,0,8,2,part_words);ready=0;
+        for(int i=0;i<2000 && !ready;++i) {
+            if(gpu_hd_textures_acquire_draw(tp,0,0,bounds,0,0,&again))
+                ready=again.alpha_mode==4 && again.width==32 && again.rgba[24*4]>200;
+            gpu_hd_textures_release_image(&again);if(!ready) SDL_Delay(1);
+        }
+        check(ready,"mixed-density scaling fixture ready");
+        gr_fill_rect(0,0,16,16,0x03e0);gr_draw_textured_rect(2,2,8,2,0,0,0,0,tp);capture();
+        const uint8_t* scaled=sample(33,8);
+        check(linear ? scaled[0]>170 && scaled[0]<220 && scaled[2]>40 && scaled[2]<90 :
+              scaled[0]>240 && scaled[2]<20,"root scale-filter option changes lower-density replacement colors");
+        check(vram[2*1024+8]==0x7c00,"replacement scaling filter never changes native VRAM");
+    }
+}
+
 int main(int argc,char** argv) {
     if(argc==2 && !strcmp(argv[1],"--native-baseline")) {
         char* native_args[]={"hd-baseline","4","twin","1"};
@@ -114,7 +267,7 @@ int main(int argc,char** argv) {
     }
     if(argc!=2) return 2;
     for(int i=0;i<16;++i) source_words[i]=i%4==3?0:i%4==2?0x8000:i%4==1?0x83e0:0x03e0;
-    pack_png(argv[1],0); pack_png(argv[1],1);
+    pack_png(argv[1],0); pack_png(argv[1],1);pack_parts(argv[1]);pack_config(argv[1],0);
     gr_set_backend(GR_BACKEND_SOFTWARE); gr_init(reference);
     sw_set_faithful_authority(1); native_scene(); sw_set_faithful_authority(0);
     if(SDL_Init(SDL_INIT_VIDEO)!=0) return 2;
@@ -134,6 +287,12 @@ int main(int argc,char** argv) {
     check(gpu_hd_textures_reload(error,sizeof(error)),"live pack reload succeeds");
     /* No new upload: a reload must retain identities of resident textures. */
     wait_ready(0); wait_ready(1);
+    state();gr_copy_rect(512,0,540,0,4,4);
+    const int copied_bounds[4]={28,0,31,3};GpuHdTextureImage copied={0};
+    check(!gpu_hd_textures_acquire_draw(texture_page,0,0,copied_bounds,0,0,&copied),
+          "default VRAM copy does not invent source upload provenance at destination");
+    gpu_hd_textures_release_image(&copied);
+    gr_fill_rect(540,0,4,4,0);
     native_scene(); gl_renderer_sync_cpu();
     check(memcmp(vram,reference,sizeof(vram))==0,"HD native VRAM matches faithful software across all operations");
     uint16_t readback[64*64];
@@ -168,6 +327,7 @@ int main(int argc,char** argv) {
     check(sample(17,24)[0]==0 && sample(17,24)[1]>200 && sample(17,24)[2]==0,
           "ST black alpha127 remains occupied semitransparent black");
     gr_set_semi_transparency(0,0);
+    composition_scene(argv[1]);state();wait_ready(0);wait_ready(1);
 
     /* A queued draw must consume its source before a later source overwrite.
      * The next draw falls back because upload identity has been invalidated. */
@@ -184,8 +344,9 @@ int main(int argc,char** argv) {
     check(readback[0]==0x03e0 && readback[1]==0x03e0 && readback[2]==0x03e0 && readback[3]==0x03e0,
           "self-overlap keeps sequential native texture reads");
     const int bounds[4]={0,0,3,3}; GpuHdTextureImage lease={0};
-    check(!gpu_hd_textures_acquire_draw(texture_page,0,0,bounds,0,0,&lease),
-          "self-overlap invalidates upload only after its draw");
+    check(gpu_hd_textures_acquire_draw(texture_page,0,0,bounds,0,0,&lease) && lease.alpha_mode==4 &&
+          lease.rgba[4*4+1]>200 && lease.rgba[0]>200,
+          "self-overlap preserves surviving replacement regions with new native holes");
     gpu_hd_textures_release_image(&lease);
     gr_vram_transfer_in(512,0,4,4,source_words);
     check(gpu_hd_textures_acquire_draw(texture_page,0,0,bounds,0,0,&lease),
