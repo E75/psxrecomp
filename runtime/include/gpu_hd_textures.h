@@ -25,6 +25,8 @@ typedef struct GpuHdTextureDiag {
     int active, replacements, dump, format;
     uint64_t draw_queries, matched_draws, ready_draws, applied_draws, dumped_textures;
     size_t replacement_count;
+    const char* diagnostic;
+    uint64_t pending_dump_sources;
 } GpuHdTextureDiag;
 void gpu_hd_textures_get_diag(GpuHdTextureDiag* out);
 void gpu_hd_textures_note_applied(void);
@@ -39,6 +41,11 @@ void gpu_hd_textures_observe_draw(uint16_t texpage, uint16_t clut_x,
 void gpu_hd_textures_set_vram(const uint16_t* vram);
 void gpu_hd_textures_track_upload(int x, int y, int width_words, int height,
                                  const uint16_t* words);
+/* Header-before-payload invalidation and pre/post native copy observations. */
+void gpu_hd_textures_begin_upload(int x, int y, int width_words, int height);
+void gpu_hd_textures_begin_copy(int source_x, int source_y, int destination_x,
+                                int destination_y, int width_words, int height);
+void gpu_hd_textures_end_copy(void);
 void gpu_hd_textures_invalidate(int x, int y, int width_words, int height);
 void gpu_hd_textures_reset_tracking(void);
 
@@ -49,14 +56,16 @@ typedef struct GpuHdTextureImage {
     uint64_t generation;
     int32_t origin_u, origin_v;
     uint32_t source_width, source_height;
-    /* 1: Beetle (native STP), 2: Duck non-ST, 3: Duck ST alpha encoding. */
+    /* 1: Beetle (native STP), 2: Duck non-ST, 3: Duck ST alpha encoding,
+     * 4: composed cutout/STP/opaque classes (alpha 0/128/255). */
     int alpha_mode;
     void* lease;
 } GpuHdTextureImage;
 
 /* Inclusive page-UV bounds, before native raster writes the destination.
  * Texture-window masks are applied to the queried footprint. Pending decode,
- * ambiguity and unsupported geometry all return 0 for native sampling. */
+ * ambiguity and unsupported geometry return native sampling. Ready partial
+ * replacements compose with native holes; pending parts never decode here. */
 int gpu_hd_textures_acquire_draw(uint16_t texpage, uint16_t clut_x,
                                 uint16_t clut_y, const int limits[4],
                                 uint32_t texture_window, int semitransparent,

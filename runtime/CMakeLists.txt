@@ -260,6 +260,8 @@ if(BUILD_TESTING)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_gl_texture_filter.py"
                 --hd-pack --fixture "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gl_hd_texture_pack.c"
                 --cc "${CMAKE_C_COMPILER}" --cxx "${CMAKE_CXX_COMPILER}"
+                --webp-include "$<TARGET_PROPERTY:psx_texture_image_decode,PSX_WEBP_INCLUDE_DIR>"
+                --webp-decoder "$<TARGET_FILE:webpdecoder>"
                 --sdl-include "$<TARGET_PROPERTY:SDL3::Headers,INTERFACE_INCLUDE_DIRECTORIES>"
                 --sdl-library "$<TARGET_FILE:SDL3::SDL3-static>"
                 --output "${CMAKE_CURRENT_BINARY_DIR}/gl-hd-texture-results")
@@ -493,7 +495,12 @@ if(BUILD_TESTING)
         src/duckstation_texture_pack.cpp)
     target_include_directories(duckstation_texture_pack_test PRIVATE include)
     target_link_libraries(duckstation_texture_pack_test PRIVATE Threads::Threads)
+    target_link_libraries(duckstation_texture_pack_test PRIVATE psx_texture_image_decode)
     add_test(NAME duckstation_texture_pack_test COMMAND duckstation_texture_pack_test)
+    add_executable(texture_image_decode_test tests/test_texture_image_decode.cpp)
+    target_link_libraries(texture_image_decode_test PRIVATE psx_texture_image_decode)
+    add_test(NAME texture_image_decode_test COMMAND texture_image_decode_test
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/texture_images")
 
     # Standalone serial-pad protocol tests use explicit SIO/device stubs; they
     # cover both DualShock rumble and JogCon wire/state behavior.

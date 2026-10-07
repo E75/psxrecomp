@@ -16,6 +16,8 @@ def main():
     parser.add_argument('--fixture',type=Path)
     parser.add_argument('--hd-pack', action='store_true')
     parser.add_argument('--cxx')
+    parser.add_argument('--webp-include')
+    parser.add_argument('--webp-decoder')
     parser.add_argument('--argument', action='append', default=[])
     args=parser.parse_args()
     fw=Path(__file__).resolve().parents[2]
@@ -50,11 +52,15 @@ def main():
         obj=out/(name+'.o'); run([args.cc,*flags,'-c',source,'-o',obj]); objects.append(obj)
     if args.hd_pack:
         if not args.cxx: parser.error('--hd-pack requires --cxx')
+        if not args.webp_include or not args.webp_decoder:
+            parser.error('--hd-pack requires --webp-include and --webp-decoder')
         cppflags=[arg if arg!='-std=gnu11' else '-std=c++17' for arg in flags]
-        for name in ('gpu_hd_textures','hd_texture_pack','duckstation_texture_pack'):
+        cppflags+=['-I',args.webp_include]
+        for name in ('gpu_hd_textures','hd_texture_pack','duckstation_texture_pack','texture_image_decode'):
             obj=out/(name+'.o')
             run([args.cxx,*cppflags,'-c',fw/'runtime/src'/(name+'.cpp'),'-o',obj])
             objects.append(obj)
+        objects.append(args.webp_decoder)
     exe=out/('filter.exe' if platform.system()=='Windows' else 'filter')
     libraries=['-lm']
     if platform.system()=='Windows':
