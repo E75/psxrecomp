@@ -7952,6 +7952,8 @@ static void handle_unwatch(int id, const char *json)
     send_err(id, "watchpoint not found");
 }
 
+static int s_trigger_override;
+static uint32_t s_trigger_lt, s_trigger_rt;
 /* Host-pad layer (set_input {"layer":"host"}): a virtual P1 gamepad that
  * feeds stage 1 of the normal offline input path (and host shortcut
  * polling) instead of replacing it, so title transforms, direct shortcuts
@@ -8004,7 +8006,23 @@ static void handle_set_input(int id, const char *json)
         int v = ax[i] < 0 ? 0x80 : (ax[i] > 255 ? 255 : ax[i]);
         s_axis_st[i] = (uint8_t)v;
     }
+    /* Optional host triggers lt/rt (0..255) for a title pad transform, as a
+     * gamepad's analog triggers would give it. Absent -> released. */
+    {
+        const int lt = json_get_int(json, "lt", -1), rt = json_get_int(json, "rt", -1);
+        s_trigger_override = lt >= 0 || rt >= 0;
+        s_trigger_lt = (uint32_t)(lt < 0 ? 0 : (lt > 255 ? 255 : lt));
+        s_trigger_rt = (uint32_t)(rt < 0 ? 0 : (rt > 255 ? 255 : rt));
+    }
     send_ok(id);
+}
+
+int debug_server_get_trigger_override(uint32_t *lt, uint32_t *rt)
+{
+    if (!s_trigger_override) return 0;
+    *lt = s_trigger_lt;
+    *rt = s_trigger_rt;
+    return 1;
 }
 
 static void handle_press(int id, const char *json)
@@ -8544,6 +8562,8 @@ static void handle_render_pass_stats(int id, const char *json)
              "\"argument_refused\":%llu,\"status_refused\":%llu,"
              "\"begin_refused\":%llu,\"checkpoint_refused\":%llu,"
              "\"spans\":%llu,\"span_failures\":%llu,"
+             "\"local_views\":%llu,\"local_attempts\":%llu,"
+             "\"local_status\":%u,"
              "\"last_failure\":%s,\"last_abort_detail\":\"%s\","
              "\"span_fail\":{\"reason\":%u,\"pc\":\"0x%08X\",\"start\":\"0x%08X\","
              "\"stop\":\"0x%08X\",\"ra\":\"0x%08X\",\"after\":\"0x%08X\","
@@ -8578,6 +8598,9 @@ static void handle_render_pass_stats(int id, const char *json)
              (unsigned long long)st.argument_refused, (unsigned long long)st.status_refused,
              (unsigned long long)st.begin_refused, (unsigned long long)st.checkpoint_refused,
              (unsigned long long)st.spans, (unsigned long long)st.span_failures,
+             (unsigned long long)st.local_views,
+             (unsigned long long)st.local_attempts,
+             psx_mod_render_local_view_status(),
              failure_json, abort_detail_json,
              (unsigned)sf.reason, (unsigned)sf.pc, (unsigned)sf.start_pc,
              (unsigned)sf.stop_pc, (unsigned)sf.ra, (unsigned)sf.after,

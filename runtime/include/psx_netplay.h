@@ -145,6 +145,36 @@ int  psx_netplay_host_spectates(void);
 /* Resolved host player index used for local capture. */
 int  psx_netplay_input_player(void);
 uint32_t psx_netplay_sim_tick(void);
+/* Session seats, including any host gallery seat; zero when offline. */
+int psx_netplay_seat_count(void);
+/* Read the pad actually published for one session seat in the current
+ * simulation tick. This follows the delay-sync publisher and rollback's
+ * sealed-frame override of predicted history, so a trusted game plugin can
+ * use the same seat inputs that SIO sees when a title consumes more player
+ * commands than its SIO protocol exposes. Call on the emulation thread while
+ * guest code runs; returns 0 when netplay is off, the seat is absent, or no
+ * pad has been published for this tick. */
+int psx_netplay_sim_pad(int seat, PsxNetPad *out);
+
+/* Presentation-only local view. A title whose netplay mode draws every seat's
+ * view into one frame on every peer (so guest state stays identical) asks the
+ * present path to show only this peer's view: a rectangle of the display area
+ * in guest pixels, relative to the GP1(05h) display start. The present path
+ * scales it to the window at 4:3. Host state only: never serialized, never
+ * visible to the guest. A request lapses a few simulation ticks after the
+ * last renewal, so the title renews it every frame its multi-view screen is
+ * up. Ignored while netplay is off. */
+void psx_netplay_present_local_view(uint32_t x, uint32_t y,
+                                    uint32_t w, uint32_t h);
+/* Drop any current request at once (the full frame is presented again).
+ * A committed psx_mod_render_local_view() image calls it: the peer's own
+ * image of the display supersedes a crop of the canonical frame. */
+void psx_netplay_local_view_clear(void);
+/* 1 and the rectangle while a current request fits a display of
+ * display_w x display_h. */
+int psx_netplay_local_view(uint32_t display_w, uint32_t display_h,
+                           uint32_t *x, uint32_t *y,
+                           uint32_t *w, uint32_t *h);
 
 /*
  * Snapshot for diagnostic dumps (starvation_dump.jsonl meta, etc.).

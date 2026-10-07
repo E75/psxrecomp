@@ -43,6 +43,13 @@ if(BUILD_TESTING)
         src/netplay_exit_reason.c)
     target_include_directories(netplay_exit_reason_test PRIVATE include)
     add_test(NAME netplay_exit_reason_test COMMAND netplay_exit_reason_test)
+    add_executable(netplay_sim_pad_cache_test tests/test_netplay_sim_pad_cache.c)
+    target_include_directories(netplay_sim_pad_cache_test PRIVATE include)
+    target_compile_definitions(netplay_sim_pad_cache_test PRIVATE PSX_MAX_PLAYERS=4)
+    add_test(NAME netplay_sim_pad_cache_test COMMAND netplay_sim_pad_cache_test)
+    add_executable(netplay_local_view_test tests/test_netplay_local_view.c)
+    target_include_directories(netplay_local_view_test PRIVATE include)
+    add_test(NAME netplay_local_view_test COMMAND netplay_local_view_test)
     add_executable(ws_scene_hold_test tests/test_ws_scene_hold.c)
     target_include_directories(ws_scene_hold_test PRIVATE include)
     add_test(NAME ws_scene_hold_test COMMAND ws_scene_hold_test)
@@ -661,6 +668,20 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME ws_shared_split_ui_exec_test COMMAND ws_shared_split_ui_exec_test)
 
+    add_executable(ws_local_view_margin_test
+        tests/test_ws_local_view_margin.c
+        src/ws_ui_group.c
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
+    target_include_directories(ws_local_view_margin_test PRIVATE include src)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(ws_local_view_margin_test PRIVATE
+            -ffunction-sections -fdata-sections)
+        target_link_options(ws_local_view_margin_test PRIVATE
+            $<IF:$<PLATFORM_ID:Darwin>,-Wl$<COMMA>-dead_strip,-Wl$<COMMA>--gc-sections>)
+    endif()
+    add_test(NAME ws_local_view_margin_test COMMAND ws_local_view_margin_test)
+
     add_executable(ws_view_anchor_test tests/test_ws_view_anchor.c)
     add_executable(ws_view_anchor_gpu_test tests/test_ws_view_anchor_gpu.c
         src/psx_video_timing.c
@@ -924,6 +945,31 @@ if(BUILD_TESTING)
         endif()
     endif()
     add_test(NAME mod_runtime_test COMMAND mod_runtime_test)
+
+    add_executable(netplay_view_mods_test
+        tests/test_netplay_view_mods.cpp
+        src/iso_reader_c.cpp
+        src/mod_runtime.cpp
+        src/mod_packages.cpp
+        src/mod_media.cpp
+        src/disc_path.cpp
+        src/cue_sheet.cpp
+        src/iso_reader.cpp
+        src/crc32.c
+        src/psx_sha256.c)
+    target_include_directories(netplay_view_mods_test PRIVATE
+        include
+        ../recompiler/include
+        ../recompiler/lib/toml11)
+    target_link_libraries(netplay_view_mods_test PRIVATE chdr-static)
+    if(WIN32)
+        if(MSVC)
+            target_link_options(netplay_view_mods_test PRIVATE /STACK:16777216)
+        else()
+            target_link_options(netplay_view_mods_test PRIVATE -Wl,--stack,16777216)
+        endif()
+    endif()
+    add_test(NAME netplay_view_mods_test COMMAND netplay_view_mods_test)
 
     add_executable(mod_resident_test
         tests/test_mod_resident.cpp

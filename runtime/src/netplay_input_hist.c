@@ -41,6 +41,8 @@ void netplay_ih_pad_to_frame(const PsxNetPad *pad, uint32_t tick, uint8_t predic
     out->stick_x = u8_to_i8_stick(n.lx);
     out->stick_y = u8_to_i8_stick(n.ly);
     out->analog = n.analog;
+    out->rx = n.rx; /* the rest of the pad: right stick, NeGcon I/II */
+    out->ry = n.ry;
 }
 
 void netplay_ih_frame_to_pad(const RNetRbFrame *frame, PsxNetPad *pad)
@@ -56,6 +58,8 @@ void netplay_ih_frame_to_pad(const RNetRbFrame *frame, PsxNetPad *pad)
     pad->lx = i8_to_u8_stick(frame->stick_x);
     pad->ly = i8_to_u8_stick(frame->stick_y);
     pad->analog = frame->analog <= PSX_NETPAD_TYPE_MAX ? frame->analog : 0u;
+    pad->rx = frame->rx;
+    pad->ry = frame->ry;
     psx_netplay_normalize_pad(pad);
 }
 

@@ -505,6 +505,11 @@ static uint64_t s_idle_ticks_accum_fwd(uint64_t add);
  * open, GPU writes are confined to its rect: the scissor is intersected with
  * it and writes that bypass the scissor are refused and counted. */
 static int      s_pass_active = 0;
+/* The open transaction is a netplay local view (gl_renderer_local_view_*):
+ * its draws reach only the presenter surface, never the authoritative CPU
+ * VRAM, and end(keep) keeps the rect's presented colour. */
+static int      s_pass_local = 0;
+static uint64_t s_local_commits = 0;
 /* Textures/framebuffers made for passes (pass_make_color_fbo, pass image
  * slots), and the count when the current pass began: a pass that allocated
  * is left out of the pass-cost average (render_pass_cost_add). */
@@ -6723,13 +6728,16 @@ static void pass_journal_rollback(void) {
     render_pass_journal_rollback(&s_pj_cpu, s_vram, VRAM_W);
 }
 
+/* kind: 0 temporal pass, 1 stereo eye, 2 netplay local view. */
 static int transaction_begin(int x, int y, int w, int h, int open_gen,
-                              uint32_t period_vblanks, int reuse_backup, int stereo) {
+                              uint32_t period_vblanks, int reuse_backup, int kind) {
+    const int stereo = kind == 1, local = kind == 2;
     int S = s_hr_scale, gi, wide, tw, th;
     PassGen *g;
     memset(&s_pass_begin_diag, 0, sizeof s_pass_begin_diag);
-    s_pass_begin_diag.status = stereo ? gl_renderer_stereo_unavailable()
-                                    : gl_renderer_pass_unavailable();
+    s_pass_begin_diag.status = local ? gl_renderer_local_view_unavailable()
+                             : stereo ? gl_renderer_stereo_unavailable()
+                                      : gl_renderer_pass_unavailable();
     s_pass_begin_diag.active = s_pass_active;
     s_pass_begin_diag.open_gen = open_gen;
     s_pass_begin_diag.hr_scale = S;
@@ -6765,7 +6773,9 @@ static int transaction_begin(int x, int y, int w, int h, int open_gen,
     s_pass_begin_diag.requested_h = th;
     gi = 1 - s_pgen_cur;
     g = &s_pgen[gi];
-    if (stereo) {
+    if (local) {
+        /* No generation: the image stays in the presenter surface. */
+    } else if (stereo) {
         StereoPair *pair = &s_stereo_pair[1 - s_stereo_current];
         pair->x = x; pair->y = y; pair->w = w; pair->h = h;
     } else if (open_gen) {
@@ -6852,24 +6862,27 @@ backed_up:
     if (s_pass_verify) pass_verify_read(&s_pv_hr, &s_pv_hr_cap, &s_pv_raw, &s_pv_raw_cap);
     s_pj_cpu.n = 0;
     s_pass_active = 1;
+    s_pass_local = local;
     return 1;
 }
 
-static void transaction_restore(void) {
+/* keep_color: a committed netplay local view keeps the rect's presented
+ * colour (hr surface, native-wide band); everything else is put back. */
+static void transaction_restore_ex(int keep_color) {
     int S = s_hr_scale, gi = 1 - s_pgen_cur;
+    const GLbitfield hr_bits = keep_color ? GL_STENCIL_BUFFER_BIT
+                                          : GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
     (void)gi;
     if (!s_pass_active) return;
     /* Roll the journal, then the rect back. */
     pass_journal_rollback();
     pass_blit(s_pb_hr_fbo, s_hr_fbo, 0, 0, s_pass_x * S, s_pass_y * S,
-              s_pass_w * S, s_pass_h * S,
-              GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+              s_pass_w * S, s_pass_h * S, hr_bits);
     pass_blit(s_pb_raw_fbo, s_raw_fbo, 0, 0, s_pass_x, s_pass_y, s_pass_w,
               s_pass_h, GL_COLOR_BUFFER_BIT);
     if (s_pb_wide_src && s_pb_wide_src == pass_wide_fbo_for(s_pass_x))
         pass_blit(s_pb_wide_fbo, s_pb_wide_src, 0, 0, 0, s_pass_y * S,
-                  g_wide_w * S, s_pass_h * S,
-                  GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+                  g_wide_w * S, s_pass_h * S, hr_bits);
     for (int row = 0; row < s_pass_h; row++)
         memcpy(s_vram + (size_t)(s_pass_y + row) * VRAM_W + s_pass_x,
                s_pb_cpu + (size_t)row * s_pass_w,
@@ -6886,7 +6899,15 @@ static void transaction_restore(void) {
     s_last_dx = s_pb_last_dx; s_last_dy = s_pb_last_dy;
     s_last_dw = s_pb_last_dw; s_last_dh = s_pb_last_dh;
     s_pass_active = 0;
-    s_pb_valid = 1;
+    s_pass_local = 0;
+    s_pb_valid = !keep_color;
+    if (keep_color) {
+        /* The rect now differs from the backup and from the last present. */
+        present_dirty_rect(s_pass_x, s_pass_y, s_pass_x + s_pass_w - 1,
+                           s_pass_y + s_pass_h - 1, 1);
+        s_pv_ok = 1; /* the kept rect is the product, not a leak */
+        return;
+    }
 
     if (s_pass_verify) {
         static uint8_t *after_hr = NULL, *after_raw = NULL;
@@ -6898,6 +6919,29 @@ static void transaction_restore(void) {
                   memcmp(s_pv_hr, after_hr, hn) == 0 &&
                   memcmp(s_pv_raw, after_raw, rn) == 0;
     }
+}
+
+static void transaction_restore(void) { transaction_restore_ex(0); }
+
+uint32_t gl_renderer_local_view_unavailable(void) {
+    pass_refusal_init();
+    if (!s_ctx || !s_raster_ok || !s_hr_fbo || gpu_display_is_depth24())
+        return PSX_MOD_RENDER_PASS_NO_PRESENTER;
+    /* Only a presenter surface separate from the authoritative VRAM can hold
+     * a peer's own image; the high-resolution window presents other tiles. */
+    if (!s_cpu_auth_dual || s_hiw || s_pass_force_refuse > 0)
+        return PSX_MOD_RENDER_PASS_BACKEND;
+    return PSX_MOD_RENDER_PASS_READY;
+}
+int gl_renderer_local_view_begin(int x, int y, int w, int h) {
+    return transaction_begin(x, y, w, h, 0, 0, 0, 2);
+}
+int gl_renderer_local_view_end(int keep) {
+    if (!s_pass_active || !s_pass_local) return 0;
+    flush_flat_batch(); flush_tex_batch(); flush_cpu_upload();
+    transaction_restore_ex(keep ? 1 : 0);
+    if (keep) s_local_commits++;
+    return 1;
 }
 
 int gl_renderer_pass_begin(int x, int y, int w, int h, int open_gen,

@@ -1514,7 +1514,7 @@ static int g_netplay_content_negotiation = 0;
 static bool netplay_commit_mods(const std::filesystem::path& disc,
                                 std::string* error) {
     if (!g_netplay_content_negotiation)
-        return PSXRecompV4::mod_runtime_clear_for_netplay(error);
+        return PSXRecompV4::mod_runtime_commit_netplay_view(disc, error);
     const PsxLobbyMatchCaps* caps = psx_lobby_match_caps();
     return (!caps || !caps->valid)
         ? PSXRecompV4::mod_runtime_commit_for_direct_netplay(disc, error)
@@ -2006,7 +2006,10 @@ static void refresh_widescreen_projection() {
                               (g_netplay_local_viewport_projection || psx_netplay_active()))
         ? local_native_wide
         : (g_ws_native_wide != 0);
-    const int mode = wide ? (native_wide ? 2 : 1) : 0;
+    /* Squash changes the GTE projection, which the guest sees: never while
+     * widescreen is a netplay peer's own-view presentation. */
+    const int mode = wide ? (native_wide ? 2 : (gpu_ws_local_view_only() ? 0 : 1))
+                          : 0;
     int proj_num = g_video_aspect_num;
     int proj_den = g_video_aspect_den;
     if (mode == 1) {
@@ -6313,6 +6316,29 @@ static int crop_present_to_netplay_local_viewport(uint32_t* pixels,
     return 1;
 }
 
+/* Title-requested local view (psx_netplay_present_local_view): a seat
+ * rectangle of the display this peer presents alone, at 4:3. Wins over the
+ * game.toml vertical-split local viewport. */
+static bool netplay_game_local_view(const GpuDisplayInfo& di, uint32_t* x,
+                                    uint32_t* y, uint32_t* w, uint32_t* h) {
+    if (di.disabled || di.depth24 || di.width == 0 || di.height == 0)
+        return false;
+    return psx_netplay_local_view(di.width, di.height, x, y, w, h) != 0;
+}
+
+/* Crop a staged ARGB frame (pitch src_w) to the scaled local-view rectangle
+ * in place; the result has pitch w * scale. */
+static void crop_present_to_game_local_view(uint32_t* pixels, int src_w,
+                                            int scale, uint32_t x, uint32_t y,
+                                            uint32_t w, uint32_t h) {
+    const int cx = (int)x * scale, cy = (int)y * scale;
+    const int cw = (int)w * scale, ch = (int)h * scale;
+    for (int row = 0; row < ch; ++row)
+        memmove(pixels + (size_t)row * (size_t)cw,
+                pixels + (size_t)(cy + row) * (size_t)src_w + cx,
+                (size_t)cw * sizeof(uint32_t));
+}
+
 static void netplay_present_gap_stats(uint32_t *p95_out, uint32_t *max_out) {
     unsigned n = s_present_gaps_n;
     unsigned idx;
@@ -6330,6 +6356,63 @@ static void netplay_present_gap_stats(uint32_t *p95_out, uint32_t *max_out) {
 /* Stage local pad + poll admit until published. Parks the guest fiber when
  * called from the vblank callback (or before scheduler entry). Latches one
  * sample per sim tick; stalls on INPUT_CONFIRM desync. */
+static void pad_ext_host_extras(void*, int s, uint32_t* flags, uint32_t* lt,
+                                uint32_t* rt);
+#ifndef PSX_NO_DEBUG_TOOLS
+extern "C" int debug_server_get_trigger_override(uint32_t* lt, uint32_t* rt);
+#endif
+
+/* Netplay input transform ([[plugin]] netplay = "input"): this player's own
+ * title pad transform runs on its local pad before staging, so the
+ * transformed pad (buttons, sticks, presented type, NeGcon I/II) is what every
+ * peer receives and simulates. Each peer transforms only its own seat. */
+static void netplay_transform_local_pad(PsxNetPad* pad, int override_active) {
+    if (!PSXRecompV4::mod_runtime_netplay_input_active() ||
+        psx_netplay_is_spectator())
+        return;
+    const int seat = psx_netplay_local_slot();
+    if (seat < 0 || seat >= PSX_MAX_PLAYERS) return;
+    PSXModPadFrame f{};
+    f.struct_size = sizeof f;
+    f.player = (uint32_t)seat;
+    f.buttons = pad->buttons;
+    f.lx = pad->lx; f.ly = pad->ly; f.rx = pad->rx; f.ry = pad->ry;
+    f.type = pad->analog;
+    if (override_active) {
+#ifndef PSX_NO_DEBUG_TOOLS
+        uint32_t lt = 0, rt = 0;
+        if (debug_server_get_trigger_override(&lt, &rt)) {
+            f.host_flags = PSX_MOD_PAD_HOST_GAMEPAD | PSX_MOD_PAD_HOST_LT |
+                           PSX_MOD_PAD_HOST_RT;
+            f.host_lt = lt;
+            f.host_rt = rt;
+        }
+#endif
+    } else {
+        const int card = psx_netplay_input_player();
+        pad_ext_host_extras(nullptr, card >= 0 ? card : 0, &f.host_flags,
+                            &f.host_lt, &f.host_rt);
+    }
+    PSXModPadOutput stock{}, o{};
+    stock.struct_size = sizeof stock;
+    stock.buttons = f.buttons; stock.type = f.type;
+    stock.lx = f.lx; stock.ly = f.ly; stock.rx = f.rx; stock.ry = f.ry;
+    if (!mod_pad_transform_run((uint32_t)seat, &f, &stock, &o)) return;
+    pad->buttons = (uint16_t)o.buttons;
+    pad->analog = (uint8_t)o.type;
+    if (o.type == PSX_MOD_PAD_NEGCON) {
+        pad->lx = (uint8_t)o.lx;
+        pad->ly = (uint8_t)o.negcon_l;
+        pad->rx = (uint8_t)o.negcon_i;
+        pad->ry = (uint8_t)o.negcon_ii;
+    } else if (o.type == PSX_MOD_PAD_DIGITAL) {
+        pad->lx = pad->ly = pad->rx = pad->ry = 0x80;
+    } else {
+        pad->lx = (uint8_t)o.lx; pad->ly = (uint8_t)o.ly;
+        pad->rx = (uint8_t)o.rx; pad->ry = (uint8_t)o.ry;
+    }
+}
+
 static void netplay_barrier_admit(int override) {
     if (!psx_netplay_active()) return;
     /* Launcher/game window teardown can leave a queued SDL_QUIT; draining it
@@ -6497,6 +6580,7 @@ static void netplay_barrier_admit(int override) {
             } else {
                 capture_local_human_pad(&local);
             }
+            netplay_transform_local_pad(&local, override >= 0);
             psx_netplay_stage_local(&local);
         } else if (psx_start_bisect_spin_log() && !g_headless) {
             /* Dense SDL-only samples while admit waits without capture. */
@@ -7680,7 +7764,10 @@ static void headless_present_image_ring_capture(void) {
     const bool fmv_frame = !g_ws_engaged || gpu_ws_present_native_43() != 0;
     static std::vector<uint32_t> buf;
     int w = 0, h = 0;
-    if (!fmv_frame && ws_native_wide_active() && gr_wide_supported()) {
+    uint32_t vx = 0, vy = 0, vw = di.width, vh = di.height;
+    const bool game_view = netplay_game_local_view(di, &vx, &vy, &vw, &vh);
+    if (!game_view && !fmv_frame && ws_native_wide_active() &&
+        gr_wide_supported()) {
         buf.resize((size_t)1024 * 4 * 512 * 4);
         if (gr_wide_dump_full(buf.data(), (int)buf.size(), &w, &h,
                               (int)di.display_x) > 0 && h >= 512) {
@@ -7697,23 +7784,24 @@ static void headless_present_image_ring_capture(void) {
     /* Capture GL's real FBO, including the selected projection half, without
      * feeding readback into canonical netplay VRAM or its state hashes. */
     if (g_headless_opengl) {
-        int slot = netplay_local_viewport_slot();
-        int cw = slot >= 0 ? (int)di.width / 2 : (int)di.width;
-        int cx = (int)di.display_x + (slot == 1 ? (int)di.width - cw : 0);
+        int slot = game_view ? -1 : netplay_local_viewport_slot();
+        int cw = slot >= 0 ? (int)di.width / 2 : (int)vw;
+        int cx = (int)(di.display_x + vx) + (slot == 1 ? (int)di.width - cw : 0);
+        int cy = (int)(di.display_y + vy);
         int scale = gr_scale();
-        w = cw * scale; h = (int)di.height * scale;
+        w = cw * scale; h = (int)vh * scale;
         buf.resize((size_t)w * h);
-        if (gl_renderer_capture_display_hires(buf.data(), w * 4, cx, (int)di.display_y,
-                                              cw, (int)di.height) != w * h) return;
+        if (gl_renderer_capture_display_hires(buf.data(), w * 4, cx, cy,
+                                              cw, (int)vh) != w * h) return;
         present_image_ring_push_argb((uint32_t)s_frame_count, buf.data(), w, h, w);
         return;
     }
-    w = (int)di.width; h = (int)di.height;
+    w = (int)vw; h = (int)vh;
     buf.resize((size_t)w * h);
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++) {
-            const uint16_t p = gpu_vram_peek((int)(di.display_x + x),
-                                             (int)(di.display_y + y));
+            const uint16_t p = gpu_vram_peek((int)(di.display_x + vx + x),
+                                             (int)(di.display_y + vy + y));
             buf[(size_t)y * w + x] = 0xFF000000u | ((uint32_t)(p & 31) << 19) |
                                      ((uint32_t)((p >> 5) & 31) << 11) |
                                      ((uint32_t)((p >> 10) & 31) << 3);
@@ -8489,6 +8577,8 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                                 game frame that could not present wide) */
     bool depth24_frame = false;
     bool local_viewport_crop_applied = false;
+    bool game_view_applied = false;
+    uint32_t gv_x = 0, gv_y = 0, gv_w = 0, gv_h = 0;
     if (s_force_present_after_load && g_gl_active)
         gl_renderer_flush_cpu_uploads();
     {
@@ -8545,7 +8635,10 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
         if (g_gl_active)
             gl_renderer_set_interpolation_suspended(
                 fmv_frame || mdec_recently_active(2));
-        const int local_viewport_slot = netplay_local_viewport_slot();
+        const bool game_view =
+            netplay_game_local_view(di, &gv_x, &gv_y, &gv_w, &gv_h);
+        const int local_viewport_slot =
+            game_view ? -1 : netplay_local_viewport_slot();
         const bool local_viewport_crop = local_viewport_slot >= 0;
         bool local_viewport_wide =
             local_viewport_crop && g_ws_engaged && ws_native_wide_active() &&
@@ -8561,6 +8654,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
          * from the displayed buffer's surface. FMV/menu frames stay 4:3. */
         bool wide_present = (!fmv_frame && !di.depth24 && g_ws_engaged &&
                              ws_native_wide_active() && gr_wide_supported() &&
+                             !game_view &&
                              (!local_viewport_crop || local_viewport_wide));
         if (wide_present) {
             present_w = local_viewport_wide
@@ -8605,6 +8699,14 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
          * present this peer's half straight from the high-resolution FBO.
          * The CPU crop below reads the 1x canonical frame, which throws away
          * internal resolution and smears the proportion-corrected HUD. */
+        if (g_gl_active && g_gl_fbo_present && game_view) {
+            gl_renderer_present_vram((int)(di.display_x + gv_x),
+                                     (int)(di.display_y + gv_y),
+                                     (int)gv_w, (int)gv_h,
+                                     g_video_aa ? 1 : 0, 1);
+            netplay_note_present();
+            return ep;
+        }
         if (g_gl_active && g_gl_fbo_present && !di.depth24 &&
             local_viewport_crop && !local_viewport_wide) {
             const int half = (int)w / 2;
@@ -8616,7 +8718,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
             return ep;
         }
         if (g_gl_active && g_gl_fbo_present && !di.depth24 &&
-            (!local_viewport_crop || local_viewport_wide)) {
+            (!local_viewport_crop || local_viewport_wide) && !game_view) {
             if (wide_present) {
                 /* GPU-direct native-wide present: blit the displayed buffer's
                  * wide FBO straight to the window (GPU-side, like the canonical
@@ -8743,7 +8845,15 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
 
         int present_px_w = (int)present_w * active_scale;
         int present_px_h = (int)present_h * active_scale;
-        if (!local_viewport_wide &&
+        if (game_view && !wide_present) {
+            crop_present_to_game_local_view(sdl_pixel_buf, present_px_w,
+                                            active_scale, gv_x, gv_y,
+                                            gv_w, gv_h);
+            present_px_w = (int)gv_w * active_scale;
+            present_px_h = (int)gv_h * active_scale;
+            pin_43 = true;
+            game_view_applied = true;
+        } else if (!local_viewport_wide &&
             crop_present_to_netplay_local_viewport(sdl_pixel_buf,
                                                    &present_px_w,
                                                    present_px_h)) {
@@ -8778,7 +8888,8 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                 !g_smooth_60fps.load(std::memory_order_acquire)) {
                 static uint32_t prev_buf[640 * 512];
                 static uint32_t prev_px = 0;
-                const uint32_t npx = local_viewport_crop_applied
+                const uint32_t npx = (local_viewport_crop_applied ||
+                                      game_view_applied)
                                        ? (uint32_t)(present_px_w * present_px_h)
                                        : present_w * h;
                 if (npx <= (uint32_t)(640 * 512)) {
@@ -8810,6 +8921,10 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
     int src_h = (int)present_h * active_scale;
     if (local_viewport_crop_applied && src_w >= 2)
         src_w /= 2;
+    if (game_view_applied) {
+        src_w = (int)gv_w * active_scale;
+        src_h = (int)gv_h * active_scale;
+    }
     if (g_gl_active) {
         /* OpenGL present: upload the active display rect and draw a full-screen
          * quad. Either SwapWindow vsync OR the wall-clock pacer owns timing,
@@ -14951,6 +15066,8 @@ int main(int argc, char** argv) {
             game_id   = gc.id;
             game_region = gc.region;
             game_players = gc.players;
+            if (gc.runtime.has_multitap_default)
+                multitap_enabled = gc.runtime.multitap_default;
             apply_offline_pad_count(game_players, multitap_enabled);
             game_has_disc_crc = gc.has_disc_crc;
             game_disc_crc     = gc.disc_crc;
@@ -17070,6 +17187,10 @@ int main(int argc, char** argv) {
                       "reset_mod_owned_presentation() would clobber a launcher "
                       "setting; restore only when the feature is mod-owned");
         reset_mod_owned_presentation();
+        /* Netplay own-view mods: the widescreen margin follows them into the
+         * sandboxed own view only; the shared game keeps the stock cull. */
+        gpu_ws_set_local_view_only(
+            netplay && PSXRecompV4::mod_runtime_netplay_view_active() ? 1 : 0);
         mod_runtime_activate_plugins();
         apply_netplay_local_viewport_aspect(netplay);
         for (int i = 0; i < PSX_MAX_PLAYERS; ++i) {

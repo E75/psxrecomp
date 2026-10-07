@@ -721,6 +721,14 @@ struct RuntimeConfig {
     bool                  has_multitap_analog = false;
     bool                  multitap_analog     = true;
 
+    // multitap: title default for the offline multitap (players >= 3). false
+    // keeps offline play at two standalone pads for a title whose local game
+    // has no multitap support but whose netplay seats more players (players
+    // still sets the netplay seat ceiling). settings.toml [controller]
+    // multitap / the launcher toggle override it.
+    bool                  has_multitap_default = false;
+    bool                  multitap_default     = true;
+
     // legacy_pad_config: per-game pad-protocol compatibility opt-in. false (default)
     // = the modern DualShock config state machine (proper 0x43 enter/exit, config id
     // 0xF3 only while in config) — required by MMX6 and the correct default for every

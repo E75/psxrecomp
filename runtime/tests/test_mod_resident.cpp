@@ -343,3 +343,6 @@ int main() {
     std::cout << "mod resident tests passed\n";
     return 0;
 }
+
+/* render_pass.c: no sandboxed local view runs in this test. */
+extern "C" int psx_mod_local_view_scope(void) { return 0; }

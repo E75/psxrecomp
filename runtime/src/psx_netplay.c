@@ -4,6 +4,8 @@
 
 #include "psx_netplay.h"
 #include "netplay_load_probe.h"
+#include "netplay_sim_pad_cache.h"
+#include "netplay_local_view.h"
 
 #include "host_time.h"
 #include "memcard.h"
@@ -442,7 +444,39 @@ uint32_t psx_netplay_sim_tick(void) { return 0; }
 int psx_netplay_content_note(uint32_t e, uint32_t a, uint32_t b, uint32_t seen,
                              uint8_t slot, uint8_t op, uint8_t flags)
 { (void)e;(void)a;(void)b;(void)seen;(void)slot;(void)op;(void)flags;return 0; }
-int  psx_netplay_start(const PsxNetplayConfig *cfg) { (void)cfg; return -1; }
+int psx_netplay_seat_count(void) { return 0; }
+int psx_netplay_sim_pad(int seat, PsxNetPad *out)
+{
+    (void)seat;
+    (void)out;
+    return 0;
+}
+void psx_netplay_present_local_view(uint32_t x, uint32_t y,
+                                    uint32_t w, uint32_t h)
+{
+    (void)x;
+    (void)y;
+    (void)w;
+    (void)h;
+}
+void psx_netplay_local_view_clear(void) {}
+int psx_netplay_local_view(uint32_t display_w, uint32_t display_h,
+                           uint32_t *x, uint32_t *y,
+                           uint32_t *w, uint32_t *h)
+{
+    (void)display_w;
+    (void)display_h;
+    (void)x;
+    (void)y;
+    (void)w;
+    (void)h;
+    return 0;
+}
+int  psx_netplay_start(const PsxNetplayConfig *cfg)
+{
+    (void)cfg;
+    return -1;
+}
 void psx_netplay_shutdown(void) {}
 void psx_netplay_cold_reset(void) {}
 void psx_netplay_stage_local(const PsxNetPad *pad) { (void)pad; }
@@ -2362,6 +2396,18 @@ void psx_netplay_pad_trace_dev(int card, int fallback, int sdl_start,
     }
 }
 
+/* A game plugin reads the exact seat row last published to SIO for this tick.
+ * Keep this host-side cache outside savestates: each admitted/replayed tick
+ * publishes it again, including sealed rollback authority overwrites. */
+static PsxNetplaySimPadCache s_sim_pad_cache;
+/* Host-only presentation request; see psx_netplay_present_local_view. */
+static PsxNetplayLocalView s_local_view;
+
+static void note_sim_pad(int slot, uint32_t tick, const PsxNetPad *pad)
+{
+    psx_netplay_sim_pad_cache_publish(&s_sim_pad_cache, slot, tick, pad);
+}
+
 static void apply_pad_slot(int slot, const PsxNetPad *pad)
 {
     if (slot < 0 || slot >= g_np.slot_count || slot >= NP_SLOT_CAP || !pad) return;
@@ -2467,7 +2513,6 @@ static void host_publish(rnet_u32 tick, const RNetInputSample *by_slot, int slot
 {
     int i;
     int n;
-    (void)tick;
     (void)ctx;
     if (!by_slot || slots <= 0) return;
     n = g_np.slot_count;
@@ -2478,6 +2523,7 @@ static void host_publish(rnet_u32 tick, const RNetInputSample *by_slot, int slot
         PsxNetPad pad;
         decode_pad(&by_slot[i], &pad);
         apply_pad_slot(i, &pad);
+        note_sim_pad(i, tick, &pad);
     }
 }
 
@@ -2504,25 +2550,29 @@ static void np_publish_hist_sio(uint32_t tick)
             continue;
         netplay_ih_frame_to_pad(&row, &pad);
         apply_pad_slot(i, &pad);
+        note_sim_pad(i, tick, &pad);
     }
 }
 
 static void np_rb_apply_frame_slot(int slot, uint32_t tick, uint16_t buttons,
-                                   int8_t sx, int8_t sy, uint8_t analog)
+                                   int8_t sx, int8_t sy, uint8_t analog,
+                                   uint8_t rx, uint8_t ry)
 {
     RNetRbFrame row;
     PsxNetPad pad;
-    (void)tick;
     memset(&row, 0, sizeof(row));
     row.tick = tick;
     row.buttons = buttons;
     row.stick_x = sx;
     row.stick_y = sy;
     row.analog = analog <= PSX_NETPAD_TYPE_MAX ? analog : 0u;
+    row.rx = rx;
+    row.ry = ry;
     row.is_valid = 1;
     netplay_ih_frame_to_pad(&row, &pad);
     force_session_pads_connected(g_np.slot_count);
     apply_pad_slot(slot, &pad);
+    note_sim_pad(slot, tick, &pad);
 }
 
 static void np_rb_bind_and_start(void)
@@ -2618,9 +2668,7 @@ static void np_scrub_ahead_predicted(int slot, rnet_u32 release_tick,
             continue;
         if (!row.is_predicted)
             continue;
-        if (row.buttons == released->buttons &&
-            row.stick_x == released->stick_x &&
-            row.stick_y == released->stick_y)
+        if (netplay_ih_pad_payload_equal(&row, released))
             continue;
         scrub = *released;
         scrub.tick = t;
@@ -2679,9 +2727,7 @@ static void np_tip_hold_coalesce_ahead(void)
                 break;
             decode_pad(&sample, &pad);
             netplay_ih_pad_to_frame(&pad, t, 0, &wire_frame);
-            if (wire_frame.buttons == tip_row.buttons &&
-                wire_frame.stick_x == tip_row.stick_x &&
-                wire_frame.stick_y == tip_row.stick_y)
+            if (netplay_ih_pad_payload_equal(&wire_frame, &tip_row))
                 continue;
             edge = t;
             break;
@@ -2869,6 +2915,7 @@ static void np_rollback_reconcile_wire(void)
             rnet_u32 wire;
             int pads_differ;
             int buttons_differ;
+            int rest_differ;
 
             if (!netplay_ih_get(&g_np.ih, slot, t, &published))
                 continue;
@@ -2884,7 +2931,10 @@ static void np_rollback_reconcile_wire(void)
             netplay_ih_frame_to_contract(&published, &pub_c);
             netplay_ih_frame_to_contract(&wire_frame, &wire_c);
             buttons_differ = (pub_c.buttons != wire_c.buttons);
-            pads_differ = buttons_differ ||
+            /* The rest of the pad (type, right stick, NeGcon I/II) is not in the
+             * contract view; any difference there is a real mispredict. */
+            rest_differ = netplay_ih_extra_pad_differ(&published, &wire_frame);
+            pads_differ = buttons_differ || rest_differ ||
                           (pub_c.stick_x != wire_c.stick_x) ||
                           (pub_c.stick_y != wire_c.stick_y);
             completed = (sim > t) ? 1u : 0u;
@@ -2895,7 +2945,7 @@ static void np_rollback_reconcile_wire(void)
              * release) without opening an episode. Distinct from the old
              * ungated menu soft-promote that forked RAM: HC fail-closed
              * means a real state-affecting press still rewinds. */
-            if (buttons_differ && completed &&
+            if (buttons_differ && !rest_differ && completed &&
                 np_hc_silent_promote_enabled() &&
                 netplay_hc_confirm_through(&g_np.hc, t)) {
                 (void)netplay_ih_promote(&g_np.ih, slot, &wire_frame);
@@ -2942,14 +2992,14 @@ static void np_rollback_reconcile_wire(void)
                 continue;
             }
             gate_ctx.tick = t;
-            d = rnet_input_contract_stick_replace_decide(
-                &pub_c, &wire_c, completed, &params, &gates);
+            d = netplay_ih_pad_correction_decide(
+                &published, &wire_frame, completed, &params, &gates);
             if (rnet_input_contract_decision_is_rewind(d)) {
                 /* FMV/settle only: soft-promote releases (skip must rewind on
                  * press). Menu soft-promote + hold-last invent forked RAM
                  * (sticky Up skipped resim). Live invent is hold-last again —
                  * menu releases open a real episode unless §46 HC-silent. */
-                if (fmv_defer && np_digital_release_only(&pub_c, &wire_c)) {
+                if (!rest_differ && fmv_defer && np_digital_release_only(&pub_c, &wire_c)) {
                     (void)netplay_ih_promote(&g_np.ih, slot, &wire_frame);
                     np_scrub_ahead_predicted(slot, t, &wire_frame);
                     if (n_soft_release == 0) {
@@ -2964,7 +3014,7 @@ static void np_rollback_reconcile_wire(void)
                 /* §48: post-FMV UNLOCK_GRACE — invent is on (§26) but sticky
                  * hold-last D-pad vs wire release must not open tip episodes
                  * into the title/menu (soak: pub=ffef wire=ffff @902). */
-                if (published.is_predicted &&
+                if (!rest_differ && published.is_predicted &&
                     np_digital_release_only(&pub_c, &wire_c) &&
                     psx_netplay_rb_fmv_unlock_grace_active()) {
                     (void)netplay_ih_promote(&g_np.ih, slot, &wire_frame);
@@ -2980,7 +3030,7 @@ static void np_rollback_reconcile_wire(void)
                     continue;
                 }
                 /* FMV: non-press pad noise → promote only (avoid CD thrash). */
-                if (fmv_defer && !np_digital_new_press(&pub_c, &wire_c)) {
+                if (!rest_differ && fmv_defer && !np_digital_new_press(&pub_c, &wire_c)) {
                     (void)netplay_ih_promote(&g_np.ih, slot, &wire_frame);
                     if (pads_differ) {
                         if (n_no_resim == 0) {
@@ -3369,6 +3419,46 @@ uint32_t psx_netplay_sim_tick(void)
     return rnet_session_sim_tick(g_np.session);
 }
 
+int psx_netplay_seat_count(void)
+{
+    return psx_netplay_active() ? g_np.slot_count : 0;
+}
+
+int psx_netplay_sim_pad(int seat, PsxNetPad *out)
+{
+    if (!out || !psx_netplay_active() || seat < 0 || seat >= g_np.slot_count)
+        return 0;
+    return psx_netplay_sim_pad_cache_read(
+        &s_sim_pad_cache, seat, g_np.slot_count,
+        rnet_session_sim_tick(g_np.session), out);
+}
+
+void psx_netplay_present_local_view(uint32_t x, uint32_t y,
+                                    uint32_t w, uint32_t h)
+{
+    if (!psx_netplay_active())
+        return;
+    (void)psx_netplay_local_view_set(&s_local_view,
+                                     rnet_session_sim_tick(g_np.session),
+                                     x, y, w, h);
+}
+
+void psx_netplay_local_view_clear(void)
+{
+    psx_netplay_local_view_reset(&s_local_view);
+}
+
+int psx_netplay_local_view(uint32_t display_w, uint32_t display_h,
+                           uint32_t *x, uint32_t *y,
+                           uint32_t *w, uint32_t *h)
+{
+    if (!psx_netplay_active())
+        return 0;
+    return psx_netplay_local_view_get(&s_local_view,
+                                      rnet_session_sim_tick(g_np.session),
+                                      display_w, display_h, x, y, w, h);
+}
+
 void psx_netplay_stage_local(const PsxNetPad *pad)
 {
     /* Host in the gallery: its seat still publishes a row every tick (the
@@ -3683,6 +3773,8 @@ int psx_netplay_start(const PsxNetplayConfig *cfg)
 
     if (!cfg || !cfg->enabled) return -1;
     if (g_np.session) psx_netplay_shutdown();
+    psx_netplay_sim_pad_cache_reset(&s_sim_pad_cache);
+    psx_netplay_local_view_reset(&s_local_view);
 
     slots = cfg->slot_count;
     if (slots < 2) slots = 2;
@@ -4257,6 +4349,8 @@ void psx_netplay_cold_reset(void)
         }
     }
     g_local_pad_prev = 0xFFFFu;
+    psx_netplay_sim_pad_cache_reset(&s_sim_pad_cache);
+    psx_netplay_local_view_reset(&s_local_view);
     g_local_pad_have = 0;
     g_live_trace_prev = 0xFFFFu;
     g_live_trace_have = 0;
@@ -4787,13 +4881,13 @@ static int np_try_admit_gameplay(void)
 }
 
 /*
- * §95: rollback LOAD barrier admit — tip + hold-last invent, no INPUT_CONFIRM.
- * Delay-sync try_admit wait_confirm hung the slower peer after the faster one
- * applied and froze (guest LOADED, host stuck load_applying+wait_confirm).
+ * LOAD barrier admit — tip + hold-last invent, no INPUT_CONFIRM.
+ * Confirmed admission can hang the slower peer after the faster one applies
+ * and freezes, including when a graphical peer is paced behind headless peers.
  * Load will hard_resync at mutual ready; pads here only need guest cycles for
  * savestate_poll / one resume tick.
  */
-static int np_try_admit_load_barrier_rb(void)
+static int np_try_admit_load_barrier_unconfirmed(void)
 {
     rnet_u32 sim = rnet_session_sim_tick(g_np.session);
     rnet_u32 wire;
@@ -4879,31 +4973,27 @@ int psx_netplay_poll_admit(void)
 
     /* Staged load must run guest cycles — bypass starvation latch. ICE xfer
      * often leaves lead=D-1 and would otherwise block try_admit forever.
-     * §95: rollback must not use delay-sync confirm here. */
+     * Neither netplay mode can wait for confirmation from an already-frozen
+     * peer during the apply barrier. */
     if (g_np.xfer == NP_XFER_LOAD_APPLYING && savestate_pending()) {
         if (g_np.needs_advance)
             return 1;
-        if (g_np.rollback)
-            return np_try_admit_load_barrier_rb();
-        return np_try_admit_gameplay();
+        return np_try_admit_load_barrier_unconfirmed();
     }
 
-    /* Both peers: after mutual ready + sync, stay in LOAD_READY until admit
-     * succeeds. Dropping the barrier early on the host let it spin on confirm
-     * with FPS/present already "live". §95: rollback exits via tip invent. */
+    /* After mutual ready + sync, stay in LOAD_READY until a confirmed first
+     * tick is available. Rollback's invented rows are only needed while a
+     * slower peer is still applying the save; inventing the first resumed
+     * tick let peers run different inputs from the identical restored state. */
     if (g_np.xfer == NP_XFER_LOAD_READY) {
         if (g_np.load_sync_done && g_np.load_ready_replied && !g_np.needs_advance) {
             int admitted;
-            if (g_np.rollback)
-                admitted = np_try_admit_load_barrier_rb();
-            else {
-                sim = rnet_session_sim_tick(g_np.session);
-                admitted = rnet_session_try_admit(g_np.session, sim);
-                if (admitted)
-                    g_np.needs_advance = 1;
-                else
-                    force_session_pads_connected(g_np.slot_count);
-            }
+            sim = rnet_session_sim_tick(g_np.session);
+            admitted = rnet_session_try_admit(g_np.session, sim);
+            if (admitted)
+                g_np.needs_advance = 1;
+            else
+                force_session_pads_connected(g_np.slot_count);
             if (admitted) {
                 g_np.xfer = NP_XFER_NONE;
                 g_np.load_applied_local = 0;

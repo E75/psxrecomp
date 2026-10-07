@@ -159,6 +159,43 @@ int main(void)
     CHECK(d == nRNetInputContractPromoteHashConfirm, "hash_confirm → promote");
     CHECK(!rnet_input_contract_decision_is_rewind(d), "promote not rewind");
 
+    /* A type-only late correction used to disappear in the stick contract.
+     * Cover the production PSX wrapper, including a permissive HC callback. */
+    {
+        RNetRbFrame predicted = {0}, actual;
+        predicted.tick = 42;
+        predicted.buttons = 0xFFFFu;
+        predicted.rx = predicted.ry = 0x80;
+        predicted.is_valid = predicted.is_predicted = 1;
+        actual = predicted;
+        actual.is_predicted = 0;
+        CHECK(netplay_ih_pad_payload_equal(&predicted, &actual),
+              "prediction metadata does not change pad payload");
+        CHECK(!netplay_ih_extra_pad_differ(&predicted, &actual),
+              "unchanged extra pad fields stay equal");
+        for (uint8_t type = 1; type <= PSX_NETPAD_TYPE_MAX; ++type) {
+            actual.analog = type;
+            CHECK(!netplay_ih_pad_payload_equal(&predicted, &actual) &&
+                  netplay_ih_extra_pad_differ(&predicted, &actual),
+                  "every controller-type change is a payload correction");
+            d = netplay_ih_pad_correction_decide(&predicted, &actual, 1, &params, &gates);
+            CHECK(rnet_input_contract_decision_is_rewind(d),
+                  "completed type correction rewinds even with hash-confirm gate");
+        }
+        actual = predicted; actual.rx++;
+        CHECK(rnet_input_contract_decision_is_rewind(
+                  netplay_ih_pad_correction_decide(&predicted, &actual, 1, &params, &gates)),
+              "completed RX/NeGcon-I correction rewinds");
+        actual = predicted; actual.ry++;
+        CHECK(rnet_input_contract_decision_is_rewind(
+                  netplay_ih_pad_correction_decide(&predicted, &actual, 1, &params, &gates)),
+              "completed RY/NeGcon-II correction rewinds");
+        actual = predicted; actual.analog = 1;
+        CHECK(!rnet_input_contract_decision_is_rewind(
+                  netplay_ih_pad_correction_decide(&predicted, &actual, 0, &params, &gates)),
+              "uncompleted type correction may replace history without rewind");
+    }
+
     if (failures) {
         printf("%d failure(s)\n", failures);
         return 1;

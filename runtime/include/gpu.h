@@ -282,6 +282,11 @@ int  gpu_ws_present_native_43(void);
 /* Per-side X cull-margin (screen/world units) emitted into the game's draw-
  * cull immediates by the recompiler ([widescreen.cull]); 0 unless stretching. */
 int  psx_ws_x_margin(void);
+/* Netplay own-view mods: while on, psx_ws_x_margin() is 0 (the stock cull)
+ * except inside a sandboxed local-view render (render_pass.c sets the scope). */
+void gpu_ws_set_local_view_only(int on);
+void gpu_ws_set_local_view_scope(int on);
+int  gpu_ws_local_view_only(void);
 void gpu_ws_set_cull_guard_pixels(int pixels);
 /* Bias/range activation-window margin. This may include an additional
  * resident-object lead while render/terrain paths retain psx_ws_x_margin(). */

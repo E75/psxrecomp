@@ -230,6 +230,37 @@ the interpreter's active/phase/precise flags, resume latch and pending load
 its callback's normal return resets.
 After 8 faults (watchdog or refused writes) passes stay off for the session.
 
+## Netplay local view
+
+```c
+int psx_mod_render_local_view(struct CPUState *cpu, const PSXModRenderPass *rect,
+                              PSXModRenderPassFn fn, void *user);
+uint32_t psx_mod_render_local_view_status(void);
+```
+
+A title whose netplay frame draws every seat's view (so guest state stays
+identical on every peer) can give each player their own seat's single view:
+at the point where the next flip will show `rect` and the guest has finished
+drawing it, `fn` redraws that rect with the game's code (alpha 0) in the same
+sandbox as a pass. Everything a pass restores is restored; the difference is
+the product. The OpenGL presenter's surface keeps the rect's colour (the
+internal-resolution surface and the native-wide band) until the guest draws
+there again, while the stencil, raw mirror, CPU VRAM rows, out-of-rect journal
+and coherency state are put back. Its draws skip the software raster, so the
+authoritative CPU VRAM never sees them. A committed image cancels any
+`psx_netplay_present_local_view()` crop.
+
+It needs a netplay session on a forward frame and the OpenGL dual-raster
+presenter (a surface separate from the authoritative VRAM); it does not need
+frame interpolation. The status is `SESSION` offline, while resimulating, in
+rewind or lockstep replay; `BACKEND` without dual raster or in the
+high-resolution window; `NO_PRESENTER` without an OpenGL surface or with
+24-bit scanout; plus the usual `FAST_FORWARD`, `DISABLED` and `BUSY`.
+`render_pass_stats` counts `local_attempts` and `local_views` and reports
+`local_status`. `PSX_RENDER_PASS_VERIFY=1` checks the guest state as for a
+pass (the kept rect is the product, so its VRAM comparison is skipped).
+R4's online Link Battle (`src/mods/r4_link_netplay.c`) is the worked example.
+
 ## Gates
 
 The plan returns 0 in netplay, rollback resimulation, self-check, rewind,

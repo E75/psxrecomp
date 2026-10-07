@@ -60,6 +60,15 @@ extern uint32_t g_psx_mod_instruction_hooks;
 int psx_mod_register_function_filter_plugin(
     const char* id, uint32_t address, PSXModFunctionFilterCallback callback);
 int psx_mod_function_entry(struct CPUState* cpu, uint32_t address);
+/* Trusted game code (not a mod package) may hook guest functions for netplay
+ * only. These are independent of the mod package plan, which every online
+ * match clears, and run only while netplay is active; offline execution stays
+ * stock. A filter returning nonzero consumes the whole call (PC <- $ra); it
+ * must supply any guest-visible side effects itself. */
+int psx_game_register_netplay_function_entry(
+    uint32_t address, PSXModFunctionEntryCallback callback);
+int psx_game_register_netplay_function_filter(
+    uint32_t address, PSXModFunctionFilterCallback filter);
 /* Complete a guest function from its trusted entry callback after supplying
  * its full result. Valid only for that callback's CPU. Publishes pc=$ra and
  * prevents the original body from executing. Nested callbacks have separate
@@ -538,6 +547,39 @@ enum {
     PSX_MOD_RENDER_PASS_BUSY = 6
 };
 uint32_t psx_mod_render_pass_status(void);
+/*
+ * Netplay local view: this peer's own image of a display rect, drawn by the
+ * game's code inside the render-pass sandbox, replaces what the presenter
+ * shows of that rect. For a title whose netplay frame draws every seat's view
+ * (so guest state stays identical on every peer) but whose players should
+ * each see their own seat's single full-screen view.
+ *
+ * `fn` runs as a render pass does (frozen guest time, sandboxed stores, the
+ * watchdog; CPU with the GTE, RAM, scratchpad, devices and the authoritative
+ * VRAM restored afterwards) and draws into rect->x/y/w/h; alpha_q16 is 0. When
+ * it returns nonzero the presenter's own copy of the rect keeps the image
+ * until the guest draws there again: the canonical frame stays in the
+ * authoritative VRAM, savestates, rollback snapshots and digests. A committed
+ * image also cancels any psx_netplay_present_local_view() crop. Call it where
+ * the next flip will show rect and the guest has finished drawing it.
+ *
+ * Only in a netplay session on forward frames, with the OpenGL presenter
+ * keeping a surface separate from the authoritative VRAM (dual raster); never
+ * while resimulating, in rewind, lockstep replay, fast-forward, inside an
+ * exception or a pass. psx_mod_render_local_view_status() says why not, with
+ * the PSX_MOD_RENDER_PASS_* reasons; a title then shows its canonical frame
+ * (for example its own view's part of it through
+ * psx_netplay_present_local_view). Returns 1 when the image was committed.
+ */
+int psx_mod_render_local_view(struct CPUState* cpu,
+                              const PSXModRenderPass* rect,
+                              PSXModRenderPassFn fn, void* user);
+uint32_t psx_mod_render_local_view_status(void);
+/* 1 while a psx_mod_render_local_view draw runs. In that scope a netplay
+ * match's own-view mods ([[plugin]] netplay = "local_view") run their hooks
+ * and the widescreen cull margin is this peer's; outside it neither touches
+ * the shared simulation. */
+int psx_mod_local_view_scope(void);
 /* Simultaneous stereo capture, independent of temporal interpolation. Each
  * eye starts from the same guest state; CPU/RAM/devices/VRAM are restored
  * before the other eye and on failure. Publish only after both succeed.
