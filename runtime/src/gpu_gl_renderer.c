@@ -2936,6 +2936,7 @@ static size_t s_hd_gl_cache_bytes;
 static uint64_t s_hd_gl_cache_clock;
 
 void gl_renderer_clear_hd_texture_cache(void) {
+    GL_RT_SYNC("clear_hd_texture_cache");
     flush_flat_batch(); flush_tex_batch(); hiw_flush_queue();
     for (int i = 0; i < HD_GL_CACHE_CAP; ++i) {
         if (s_ctx && s_hd_gl_cache[i].texture)
@@ -5693,6 +5694,10 @@ void gl_renderer_set_cpu_auth_dual(int on) {
 }
 
 void gl_renderer_set_hd_texture_mode(int on) {
+    /* Residency and CPU-authoritative VRAM stay on the emulation thread.
+     * Drain the GPU-authoritative stream before entering that mode; the
+     * eligibility gate below keeps the render thread parked until HD is off. */
+    GL_RT_SYNC("set_hd_texture_mode");
     on = on ? 1 : 0;
     if (on == s_hd_native_authority) return;
     if (s_raster_ok) {
@@ -5705,6 +5710,11 @@ void gl_renderer_set_hd_texture_mode(int on) {
         }
     }
     s_hd_native_authority = on;
+    if (on && s_rth_on) {
+        fprintf(stdout, "psxrecomp: HD textures/dumping use synchronous rendering; "
+                        "render thread and Smooth motion paused until HD is off\n");
+        fflush(stdout);
+    }
     s_gpu_dirty = 0; rect_clear(&s_cpu_dirty);
     if (on) s_selected_bank_tex = 0;
 }
@@ -9763,7 +9773,7 @@ static uint16_t rth_prim_flags(void) {
 
 static int gl_rth_eligible(void) {
     extern int psx_netplay_active(void);
-    return s_raster_ok && s_ctx && !s_cpu_auth_dual && !s_depth24_skip_up &&
+    return s_raster_ok && s_ctx && !s_cpu_auth_dual && !s_hd_native_authority && !s_depth24_skip_up &&
            !gpu_display_is_depth24() && !s_interp_enabled && !s_pass_active &&
            !psx_netplay_active() && !psx_openxr_session_active() &&
            gr_backend() == GR_BACKEND_OPENGL;
@@ -11336,7 +11346,7 @@ int gl_renderer_frame_gen_json(char *out, int cap) {
         "\"place_camera\":%u,\"place_object\":%u,\"place_neighbour\":%u,"
         "\"place_unchanged\":%u,\"cam_angle_deg\":%.3f,\"cam_shift\":%.1f,"
         "\"clamped\":%u,\"guessed\":%u,\"verdict_ok\":%d,\"rejected\":%llu,\"reject_why\":\"%s\"",
-        s_fg_on, s_fg_on && s_rth_on && open, s_fg_force,
+        s_fg_on, s_fg_on && s_rth_on && !s_hd_native_authority && open, s_fg_force,
         (unsigned long long)s_fg_generated, (unsigned long long)s_fg_real_presents,
         (unsigned long long)s_fg_flips, (unsigned long long)s_fg_dups,
         (unsigned long long)s_fg_flushed, (unsigned long long)s_fg_skipped_plan,

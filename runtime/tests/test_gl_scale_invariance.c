@@ -90,8 +90,10 @@ void gpu_vram_dirty_mark_all(void){}
 int psx_netplay_active(void){return 0;}
 /* The renderer's facade hooks (gpu_render.c) for the render thread, which
  * these fixtures never start. */
+#ifndef PSX_TEST_HD_TEXTURE_PACK
 GrBackend gr_backend(void){return GR_BACKEND_OPENGL;}
 void gr_refresh_backend(void){}
+#endif
 int gpu_display_is_depth24(void){return 0;}
 void gpu_get_display_info(GpuDisplayInfo *out){memset(out,0,sizeof(*out));out->width=320;out->height=240;}
 int psx_ws_prim_in_backdrop(void){return 0;}

@@ -9241,7 +9241,7 @@ static void render_thread_vblank(void) {
             }
         } else {
             std::fprintf(stdout, "psxrecomp: render thread requested but not started "
-                         "(needs the OpenGL backend without netplay, frame "
+                         "(needs the OpenGL backend without HD textures/dumping, netplay, frame "
                          "interpolation or a 24-bit display)\n");
             if (g_frame_generation)
                 std::fprintf(stdout, "psxrecomp: Smooth motion (frame generation) needs the render thread; off\n");
