@@ -7,6 +7,12 @@ but continue to display the original artwork. Tomba USA (`SCUS-94236`) is the
 first integrated game target; game projects can supply their own manifest for
 the same `psx.hd-textures` plugin.
 
+Tomba provides an [optional drop-in example pack](https://github.com/mstan/TombaRecomp/tree/master/examples/hd-texture-pack)
+with five synthetic checkerboards and a README inside its `SCUS-94236` pack
+directory. It includes no original game artwork or dumps and remains opt-in.
+Copy its `mods` folder into the game's writable directory, then enable the mod
+and select OpenGL to see the example title textures.
+
 ## Install a pack
 
 1. Open the launcher's **Mods** page and enable **HD Texture Packs**.
