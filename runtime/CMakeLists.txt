@@ -203,6 +203,15 @@ if(BUILD_TESTING)
                 --sdl-library "$<TARGET_FILE:SDL3::SDL3-static>"
                 --output "${CMAKE_CURRENT_BINARY_DIR}/gl-filter-results")
         set_tests_properties(gl_texture_filter_test PROPERTIES LABELS "gpu;opengl;hardware" TIMEOUT 180)
+        add_test(NAME gl_hd_texture_pack_test
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_gl_texture_filter.py"
+                --hd-pack --fixture "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gl_hd_texture_pack.c"
+                --cc "${CMAKE_C_COMPILER}" --cxx "${CMAKE_CXX_COMPILER}"
+                --sdl-include "$<TARGET_PROPERTY:SDL3::Headers,INTERFACE_INCLUDE_DIRECTORIES>"
+                --sdl-library "$<TARGET_FILE:SDL3::SDL3-static>"
+                --output "${CMAKE_CURRENT_BINARY_DIR}/gl-hd-texture-results")
+        set_tests_properties(gl_hd_texture_pack_test PROPERTIES LABELS "gpu;opengl;hardware" TIMEOUT 180)
     endif()
     add_executable(launcher_device_roundtrip_test
         tests/test_launcher_device_roundtrip.cpp)
@@ -220,6 +229,14 @@ if(BUILD_TESTING)
     target_include_directories(launcher_pad_mode_resolve_test PRIVATE include)
     add_test(NAME launcher_pad_mode_resolve_test
              COMMAND launcher_pad_mode_resolve_test)
+
+    # Presentation-only mod input must not be sourced from disconnected,
+    # peer-synchronized, or rollback-replayed pad state.
+    add_executable(mod_local_input_scope_test
+        tests/test_mod_local_input_scope.c)
+    target_include_directories(mod_local_input_scope_test PRIVATE src)
+    add_test(NAME mod_local_input_scope_test
+             COMMAND mod_local_input_scope_test)
 
     # COP0.CAUSE IP2 must mirror the INTC line combinationally, never latch.
     add_executable(cause_ip2_combinational_test
@@ -324,6 +341,29 @@ if(BUILD_TESTING)
             $<IF:$<PLATFORM_ID:Darwin>,-Wl$<COMMA>-dead_strip,-Wl$<COMMA>--gc-sections>)
         target_link_libraries(isc_store_test PRIVATE ZLIB::ZLIB)
         add_test(NAME isc_store_test COMMAND isc_store_test)
+
+        # DMA and host stores drop the PGXP shadow of the words they touch
+        # (an identical word is not proof of the same projection): the REAL
+        # memory.c store paths against the REAL pgxp.cpp engine. Same link
+        # doubles as isc_store_test, minus the PGXP one.
+        add_executable(pgxp_untracked_store_test
+            tests/test_pgxp_untracked_store.c
+            tests/psx_ram_runtime_map_stubs.c
+            src/memory.c
+            src/dma.c
+            src/gpu_timeline.c
+            src/boot_state.c
+            src/pgxp.cpp
+            src/psx_ram_geometry.c)
+        target_include_directories(pgxp_untracked_store_test PRIVATE include src)
+        target_compile_definitions(pgxp_untracked_store_test PRIVATE
+            PSX_STUBS_REAL_PGXP=1)
+        target_compile_options(pgxp_untracked_store_test PRIVATE
+            -O2 -flto -ffunction-sections -fdata-sections -Wno-lto-type-mismatch)
+        target_link_options(pgxp_untracked_store_test PRIVATE -flto -Wno-lto-type-mismatch
+            $<IF:$<PLATFORM_ID:Darwin>,-Wl$<COMMA>-dead_strip,-Wl$<COMMA>--gc-sections>)
+        target_link_libraries(pgxp_untracked_store_test PRIVATE ZLIB::ZLIB)
+        add_test(NAME pgxp_untracked_store_test COMMAND pgxp_untracked_store_test)
     endif()
 
     # Loadable BIOS backends (psx_bios_module.h): the host loader against
@@ -396,6 +436,12 @@ if(BUILD_TESTING)
     find_package(Threads REQUIRED)
     target_link_libraries(hd_texture_pack_test PRIVATE Threads::Threads)
     add_test(NAME hd_texture_pack_test COMMAND hd_texture_pack_test)
+    add_executable(duckstation_texture_pack_test
+        tests/test_duckstation_texture_pack.cpp
+        src/duckstation_texture_pack.cpp)
+    target_include_directories(duckstation_texture_pack_test PRIVATE include)
+    target_link_libraries(duckstation_texture_pack_test PRIVATE Threads::Threads)
+    add_test(NAME duckstation_texture_pack_test COMMAND duckstation_texture_pack_test)
 
     # Standalone serial-pad protocol tests use explicit SIO/device stubs; they
     # cover both DualShock rumble and JogCon wire/state behavior.

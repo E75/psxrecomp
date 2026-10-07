@@ -26,6 +26,11 @@ void (*g_overlay_flush_pending_cycles)(void);
 uint32_t g_psx_cyc_batch;
 uint32_t g_psx_cyc_batch_limit;
 uint32_t *g_psx_cyc_local_acc;
+#ifndef PSX_STUBS_REAL_PGXP
+/* memory.c drops the PGXP shadow of a DMA / host store (pgxp.cpp).
+ * pgxp_untracked_store_test links the real engine. */
+void pgxp_invalidate_word(uint32_t addr) { (void)addr; }
+#endif
 #ifndef PSX_STUBS_REAL_ICACHE
 /* The I-cache model (psx_icache.c). isc_store_test links the real one. */
 uint32_t g_psx_icache_tv[1024];
@@ -170,3 +175,4 @@ void gr_vram_transfer_in(int x, int y, int w, int h, const uint16_t *d) {
     (void)x; (void)y; memcpy(s_vram, d, (size_t)w * (size_t)h * 2u);
     g_stub_device_restores++;
 }
+void gr_vram_upload_begin(int x,int y,int w,int h) { (void)x; (void)y; (void)w; (void)h; }

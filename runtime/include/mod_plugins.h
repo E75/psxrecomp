@@ -328,6 +328,11 @@ void psx_mod_set_world_scene_predicate(PSXModWorldScenePredicate predicate);
  */
 int psx_mod_option_value(const char* package_id, const char* feature_id,
                          const char* option_id, char* out, uint32_t out_size);
+/* Read an option of the package/feature whose trusted callback is running.
+ * Shared framework plugins use this without hard-coding a title package id.
+ * The same committed-plan and buffer rules as psx_mod_option_value apply. */
+int psx_mod_current_option_value(const char* option_id,
+                                 char* out, uint32_t out_size);
 /*
  * Read the committed owner-selected path for a resource declared by the
  * package feature whose trusted plugin is currently running. Returns 0 when
@@ -336,6 +341,15 @@ int psx_mod_option_value(const char* package_id, const char* feature_id,
  */
 int psx_mod_current_resource_path(const char* resource_id,
                                   char* out, uint32_t out_size);
+/* Configure the host HD texture pack from this callback's directory resource.
+ * Replacements are currently OpenGL-only; dumping also works on software and
+ * Vulkan. Configuration is host state, never guest RAM or savestate data.
+ * Activation/emulation-thread only. Failure is reported to the runtime log. */
+int psx_mod_set_hd_texture_pack(const char* resource_id,
+                                int replacements_enabled, int dump_enabled);
+/* Emulation-thread controls for an already configured pack. */
+int psx_mod_set_hd_texture_dump(int enabled);
+int psx_mod_reload_hd_texture_pack(void);
 /* Read-only canonical media verified by the engine for this plugin's owning
  * package/feature. The pointer lives until the committed plan is replaced or
  * cleared. Available only during that plugin's callbacks; returns 0 for an
@@ -775,6 +789,14 @@ typedef struct PSXModControllerInput {
 } PSXModControllerInput;
 typedef uint32_t (*PSXModControllerPresentationCallback)(
     const PSXModControllerInput* input);
+/* Read-only snapshot of the local host stick state for an emulation-thread
+ * presentation callback. Values are ordered lx, ly, rx, ry and use the
+ * DualShock byte range (0..255, centered at 128). This reads mapped local
+ * controller axes independently of the guest's current digital/analog SIO
+ * mode and never changes the simulation's controller sample. Returns 0 and
+ * centers the output for invalid/disconnected input, netplay, or rollback
+ * resimulation; presentation state must never follow synchronized peer input. */
+int psx_mod_read_local_pad_sticks(uint32_t player, uint8_t out[4]);
 /*
  * Override one player's resolved controller presentation mode for this launch.
  * This is intentionally a trusted-plugin API, not a generic launcher setting.

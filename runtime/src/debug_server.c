@@ -35,6 +35,7 @@
 #endif
 #include "dma.h"
 #include "gpu.h"
+#include "gpu_hd_textures.h"
 #include "gpu_render.h"   /* gr_scale + gr_render_display_hires (screenshot_hires) */
 #include "present_ring.h"
 #include "gpu_timeline.h"
@@ -9916,6 +9917,56 @@ encode:;
  * surface was actually allocated at (after the driver/memory clamp), the
  * driver limit, the hr surface size, and the window's point and pixel sizes
  * (the HiDPI drawable). Everything a preset needs to be verified against. */
+static void handle_hd_textures(int id, const char *json)
+{
+    GpuHdTextureDiag info;
+    gpu_hd_textures_get_diag(&info);
+    /* Development validation controls run at the emulation-thread boundary.
+     * The normal owner workflow remains the Mods controls applied on Play. */
+    const int replacements = json_get_int(json, "replacements", -1);
+    const int dump = json_get_int(json, "dump", -1);
+    const int reload = json_get_int(json, "reload", 0);
+    if (replacements != -1 || dump != -1 || reload) {
+        if ((replacements < -1 || replacements > 1) || (dump < -1 || dump > 1)) {
+            send_err(id, "replacements and dump must be 0 or 1"); return;
+        }
+        if (!info.root || !info.root[0]) {
+            send_err(id, "no texture pack is configured; enable the mod and click Play"); return;
+        }
+        char error[512] = "";
+        if (replacements != -1) {
+            if (!gpu_hd_textures_configure(info.root, replacements,
+                    dump == -1 ? info.dump : dump, error, sizeof(error))) {
+                send_err(id, error); return;
+            }
+        } else {
+            if (dump != -1) gpu_hd_textures_set_dump_enabled(dump);
+            if (reload && !gpu_hd_textures_reload(error, sizeof(error))) {
+                send_err(id, error); return;
+            }
+        }
+        gpu_hd_textures_get_diag(&info);
+    }
+    char root_json[8192];
+    json_escape_string(root_json, sizeof(root_json), info.root ? info.root : "");
+    const int backend = gr_backend();
+    send_fmt("{\"id\":%d,\"ok\":true,\"root\":\"%s\",\"active\":%s,"
+             "\"replacements\":%s,\"dump\":%s,\"format\":%d,"
+             "\"backend\":\"%s\",\"replacement_backend_supported\":%s,"
+             "\"replacement_count\":%llu,\"draw_queries\":%llu,"
+             "\"matched_draws\":%llu,\"ready_draws\":%llu,"
+             "\"applied_draws\":%llu,\"dumped_textures\":%llu}",
+             id, root_json, info.active ? "true" : "false",
+             info.replacements ? "true" : "false", info.dump ? "true" : "false", info.format,
+             backend == GR_BACKEND_OPENGL ? "opengl" :
+                 backend == GR_BACKEND_VULKAN ? "vulkan" : "software",
+             backend == GR_BACKEND_OPENGL ? "true" : "false",
+             (unsigned long long)info.replacement_count,
+             (unsigned long long)info.draw_queries, (unsigned long long)info.matched_draws,
+             (unsigned long long)info.ready_draws, (unsigned long long)info.applied_draws,
+             (unsigned long long)info.dumped_textures);
+}
+
 static void handle_video_info(int id, const char *json)
 {
     (void)json;
@@ -15484,6 +15535,7 @@ static const CmdEntry s_commands[] = {
     { "dump_buffer",       handle_dump_buffer },
     { "wide_full",         handle_wide_full },
     { "video_info",        handle_video_info },
+    { "hd_textures",       handle_hd_textures },
     { "screenshot_wide_hires", handle_screenshot_wide_hires },
     { "wide_shot",         handle_wide_shot },
     { "gpu_opcodes",       handle_gpu_opcodes },

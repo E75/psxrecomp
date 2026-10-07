@@ -1,5 +1,6 @@
 /* Original source-owned GL readback-coherence regression. No retail payload. */
 #include "gpu_gl_renderer.c"
+#include "gpu_hd_texture_stubs.inc"
 #include "mod_texture_banks.c"
 #include "gpu_timeline.c"
 uint64_t psx_cycle_count=0;
