@@ -1209,7 +1209,7 @@ pixel. LWL at byte 3 / LWR at byte 0 (and SWL / SWR likewise) move the whole
 word and copy its shadow. Result in the Fossil Field scene: every ground
 triangle dataflow-precise, `tri_mixed` from ~10% of triangles to 474 of 2.05M,
 seams gone (`test_pgxp` pins the sequence).
-### G1.14 — PGXP renderer: depth buffer (2026-10-06)
+### G1.14 — PGXP renderer: depth buffer, perspective-correct colour (2026-10-06)
 
 **Audit against the references.** Read from DuckStation's published source
 (`github.com/stenzek/duckstation`, CC BY-NC-ND 4.0, so behaviour only, no
@@ -1225,7 +1225,7 @@ vertex depth, `src/core/settings.cpp` defaults). GooseStation
 | Geometry correction (sub-pixel vertices) | dataflow shadows, `GetPreciseVertex` | yes (G1.10/G1.11, hook flavor 99.9% on R4) | same |
 | Culling correction | `PGXPCulling`, default on | yes, mod option (G1.12) | same |
 | Texture correction | perspective UV via w | yes | same |
-| Colour correction | `PGXPColorCorrection`, default off | no (Gouraud affine) | same |
+| Colour correction | `PGXPColorCorrection`, default off | no (Gouraud affine) | **yes**, `pgxp_color_correction` |
 | Vertex cache | `PGXPVertexCache`, default off | position cache (`pgxp_position_fallback`) | same |
 | CPU mode | `PGXPCPU`, default off | `pgxp_cpu_mode` (tier-2) | same |
 | Preserve projection precision | `PGXPPreserveProjFP` | exact projection (G1.11) | same |
@@ -1266,6 +1266,9 @@ nearer than SZ 1024 (`PSX_PGXP_DEPTH_NEAR`) now stay out of the depth buffer
 (painter order), the tolerance gains an absolute 48 SZ, and every displayed
 frame starts with a cleared depth buffer. Slots 1-4 at 10x: depth on vs off
 differ by 801 / 92 / 25 / 0 px, none in the tachometer area.
+
+**Perspective-correct colour.** Gouraud colour on 3D triangles interpolates
+with 1/SZ (textured triangles with perspective UVs share their w).
 
 Diagnostic: `PSX_PGXP_TRI_LOG=<file>` logs every triangle (depth mode, x y
 SZ) while `<file>.on` exists.

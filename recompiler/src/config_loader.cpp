@@ -744,6 +744,8 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
         }
         if (video.contains("pgxp_depth_buffer"))
             rt.video_pgxp_depth_buffer = toml::find<bool>(video, "pgxp_depth_buffer");
+        if (video.contains("pgxp_color_correction"))
+            rt.video_pgxp_color_correction = toml::find<bool>(video, "pgxp_color_correction");
         if (video.contains("pgxp_depth_threshold"))
             rt.video_pgxp_depth_threshold = toml::find<double>(video, "pgxp_depth_threshold");
         if (video.contains("pgxp_mod_only")) {

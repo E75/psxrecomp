@@ -1275,8 +1275,9 @@ static float         g_video_pgxp_tolerance        = 0.5f;
  * Defaults keep the historical behaviour. game.toml [video] only. */
 static int           g_video_pgxp_position_fallback   = 1;
 static int           g_video_pgxp_preserve_projection = 0;
-/* PGXP renderer features (G1.14); PSX_PGXP_DEPTH overrides. */
+/* PGXP renderer features (G1.14); PSX_PGXP_DEPTH / _COLOR override. */
 static int           g_video_pgxp_depth_buffer = 0;
+static int           g_video_pgxp_color_correction = 0;
 static float         g_video_pgxp_depth_threshold = 4096.0f;
 /* [video] pgxp_mod_only (G1.12): the title ships PGXP through the
  * psx.enhancement.pgxp mod, which is then the one switch -- the [video]
@@ -15734,6 +15735,7 @@ int main(int argc, char** argv) {
                 gc.runtime.video_pgxp_preserve_projection ? 1 : 0;
             g_video_pgxp_mod_only = gc.runtime.video_pgxp_mod_only ? 1 : 0;
             g_video_pgxp_depth_buffer = gc.runtime.video_pgxp_depth_buffer ? 1 : 0;
+            g_video_pgxp_color_correction = gc.runtime.video_pgxp_color_correction ? 1 : 0;
             g_video_pgxp_depth_threshold = (float)gc.runtime.video_pgxp_depth_threshold;
             g_video_renderer   = gc.runtime.video_renderer;
             g_video_screen     = gc.runtime.video_screen_kind;
@@ -18076,7 +18078,9 @@ session_reboot:
     if (pgxp_in.env_cpu_mode >= 0) g_video_pgxp_cpu_mode = pgxp_in.env_cpu_mode;
     /* PGXP renderer features (G1.14): [video] keys, env overrides. */
     if (const char* e = std::getenv("PSX_PGXP_DEPTH")) g_video_pgxp_depth_buffer = (*e && *e != '0');
+    if (const char* e = std::getenv("PSX_PGXP_COLOR")) g_video_pgxp_color_correction = (*e && *e != '0');
     gl_renderer_set_pgxp_depth(g_video_pgxp_depth_buffer);
+    gl_renderer_set_pgxp_color_perspective(g_video_pgxp_color_correction);
     if (const char* e = std::getenv("PSX_PGXP_DEPTH_THRESHOLD")) g_video_pgxp_depth_threshold = (float)std::atof(e);
     gl_renderer_set_pgxp_depth_threshold(g_video_pgxp_depth_threshold);
     /* [video] texture_window_batching A/B (same image, fewer GL draws). */

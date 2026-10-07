@@ -549,7 +549,9 @@ struct RuntimeConfig {
     // depth test for opaque 3D polygons (2D / unproven polygons never test
     // or write), cleared per drawing area, after fills and when the average
     // SZ jumps back by pgxp_depth_threshold (SZ units, default 4096).
+    // pgxp_color_correction: perspective-correct Gouraud colour.
     bool                  video_pgxp_depth_buffer = false;
+    bool                  video_pgxp_color_correction = false;
     double                video_pgxp_depth_threshold = 4096.0;
 
     // pgxp_mod_only: the title ships PGXP through the psx.enhancement.pgxp

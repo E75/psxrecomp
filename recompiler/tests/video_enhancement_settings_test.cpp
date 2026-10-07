@@ -422,7 +422,7 @@ static void test_pgxp_title_keys() {
           "pgxp_preserve_projection defaults OFF (unchanged behaviour)");
     check(!gc.runtime.video_pgxp_mod_only,
           "pgxp_mod_only defaults OFF (unchanged behaviour)");
-    check(!gc.runtime.video_pgxp_depth_buffer &&
+    check(!gc.runtime.video_pgxp_depth_buffer && !gc.runtime.video_pgxp_color_correction &&
           gc.runtime.video_pgxp_depth_threshold == 4096.0,
           "PGXP renderer features default OFF (G1.14)");
     fs::remove(p);
@@ -430,9 +430,10 @@ static void test_pgxp_title_keys() {
     p = write_game_toml("psxrecomp_pgxp_render_keys.toml",
         "[video]\n"
         "pgxp_depth_buffer = true\n"
+        "pgxp_color_correction = true\n"
         "pgxp_depth_threshold = 2048.0\n");
     gc = PSXRecompV4::load_game_config(p);
-    check(gc.runtime.video_pgxp_depth_buffer &&
+    check(gc.runtime.video_pgxp_depth_buffer && gc.runtime.video_pgxp_color_correction &&
           gc.runtime.video_pgxp_depth_threshold == 2048.0,
           "PGXP renderer keys are honoured");
     fs::remove(p);
