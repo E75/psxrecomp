@@ -9236,7 +9236,7 @@ static void render_thread_vblank(void) {
                          g_render_thread_frames);
             if (g_frame_generation) {
                 gl_renderer_set_frame_generation(1);
-                std::fprintf(stdout, "psxrecomp: frame generation on (render thread, "
+                std::fprintf(stdout, "psxrecomp: Smooth motion (frame generation) on (render thread, "
                              "from surplus only)\n");
             }
         } else {
@@ -9244,7 +9244,7 @@ static void render_thread_vblank(void) {
                          "(needs the OpenGL backend without netplay, frame "
                          "interpolation or a 24-bit display)\n");
             if (g_frame_generation)
-                std::fprintf(stdout, "psxrecomp: frame generation needs the render thread; off\n");
+                std::fprintf(stdout, "psxrecomp: Smooth motion (frame generation) needs the render thread; off\n");
         }
         std::fflush(stdout);
     }
