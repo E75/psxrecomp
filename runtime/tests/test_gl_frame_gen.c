@@ -19,7 +19,17 @@
 static void fixture_present(int generated);
 #define GL_PRESENT_TEST_HOOK(gen) fixture_present(gen)
 #include "gpu_gl_renderer.c"
+#include "gpu_hd_texture_stubs.inc"
 #include "mod_texture_banks.c"
+/* gpu_render.c (the facade) observes draws for HD texture packs: no pack here. */
+int gpu_hd_textures_active(void){return 0;}
+int gpu_hd_textures_dump_enabled(void){return 0;}
+void gpu_hd_textures_observe_draw(uint16_t tp,uint16_t cx,uint16_t cy,const int l[4],
+    uint32_t w,int semi){(void)tp;(void)cx;(void)cy;(void)l;(void)w;(void)semi;}
+void gpu_hd_textures_set_vram(const uint16_t* v){(void)v;}
+void gpu_hd_textures_track_upload(int x,int y,int w,int h,const uint16_t* words){
+    (void)x;(void)y;(void)w;(void)h;(void)words;}
+void gpu_hd_textures_invalidate(int x,int y,int w,int h){(void)x;(void)y;(void)w;(void)h;}
 uint32_t psx_mod_gpu_dma_memory_alloc(uint32_t n,uint32_t a){(void)n;(void)a;return 0;}
 uint32_t psx_mod_read_word(uint32_t a){(void)a;return 0;}
 int g_psx_vram_dirty_tracking=0;
