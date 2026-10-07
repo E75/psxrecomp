@@ -11223,6 +11223,20 @@ static int fg_on_present(uint16_t op, const uint8_t *p, uint32_t bytes, int stal
     /* The verdict: a frame whose correspondence is not trustworthy is not
      * generated; the real frame shows at its own time. A forced run (the
      * fixture's synthetic scenes carry no GTE identities) skips it. */
+    /* Geometry the in-between camera passes through (a tunnel ceiling, a
+     * bridge overhead) has no correct in-between image without clipping at
+     * the near plane: such a game frame shows its real frames. */
+    if (s_fg_fit.ok && s_fg_pos_cap < src->prims.n) {
+        float *nx = (float *)realloc(s_fg_px, (size_t)src->prims.n * 3 * sizeof *nx);
+        if (nx) s_fg_px = nx;
+        float *ny = (float *)realloc(s_fg_py, (size_t)src->prims.n * 3 * sizeof *ny);
+        if (ny) s_fg_py = ny;
+        if (nx && ny) s_fg_pos_cap = src->prims.n;
+    }
+    if (s_fg_fit.ok && s_fg_pos_cap >= src->prims.n) {   /* the phase furthest from the redrawn frame */
+        fg_cam_place(&src->prims, &s_fg_fit, s_fg_verts, 1.0 / (double)(n + 1), s_fg_px, s_fg_py, NULL);
+        if (s_fg_fit.clamped) { s_fg_fit.ok = 0; s_fg_fit.why = "camera passes through geometry"; }
+    }
     if (!s_fg_fit.ok && !s_fg_force) {
         s_fg_rejected++;
         s_fg_reject_why = s_fg_fit.why;
@@ -11320,7 +11334,7 @@ int gl_renderer_frame_gen_json(char *out, int cap) {
         "\"trips_late\":%u,\"trips_backed_up\":%u,\"trips_behind\":%u,"
         "\"place_camera\":%u,\"place_object\":%u,\"place_neighbour\":%u,"
         "\"place_unchanged\":%u,\"cam_angle_deg\":%.3f,\"cam_shift\":%.1f,"
-        "\"verdict_ok\":%d,\"rejected\":%llu,\"reject_why\":\"%s\"",
+        "\"clamped\":%u,\"guessed\":%u,\"verdict_ok\":%d,\"rejected\":%llu,\"reject_why\":\"%s\"",
         s_fg_on, s_fg_on && s_rth_on && open, s_fg_force,
         (unsigned long long)s_fg_generated, (unsigned long long)s_fg_real_presents,
         (unsigned long long)s_fg_flips, (unsigned long long)s_fg_dups,
@@ -11343,7 +11357,7 @@ int gl_renderer_frame_gen_json(char *out, int cap) {
         2.0 * acos(fmin(1.0, fabs(s_fg_fit.v[0].q[0]))) * 57.29578,
         sqrt(s_fg_fit.v[0].t[0] * s_fg_fit.v[0].t[0] + s_fg_fit.v[0].t[1] * s_fg_fit.v[0].t[1] +
              s_fg_fit.v[0].t[2] * s_fg_fit.v[0].t[2]),
-        s_fg_fit.ok,
+        s_fg_fit.clamped, s_fg_fit.guessed, s_fg_fit.ok,
         (unsigned long long)s_fg_rejected, s_fg_reject_why ? s_fg_reject_why : "");
 }
 
