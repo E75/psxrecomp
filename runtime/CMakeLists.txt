@@ -23,6 +23,12 @@ psxrecomp_add_runtime_target(psx-runtime
 # (docs/ENHANCEMENTS.md G1.10). Titles get their <exe>_pgxp the same way.
 
 if(BUILD_TESTING)
+    find_package(Threads REQUIRED)
+    add_executable(host_launch_timing_test
+        tests/test_host_launch_timing.cpp tests/host_launch_timing_helper.cpp)
+    target_include_directories(host_launch_timing_test PRIVATE include)
+    target_link_libraries(host_launch_timing_test PRIVATE Threads::Threads)
+    add_test(NAME host_launch_timing_test COMMAND host_launch_timing_test)
     add_executable(disasm_test tests/test_disasm.cpp src/disasm_shim.cpp
         ../recompiler/src/mips_decoder.cpp)
     target_include_directories(disasm_test PRIVATE include ../recompiler/include)

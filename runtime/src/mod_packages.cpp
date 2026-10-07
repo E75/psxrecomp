@@ -1,4 +1,5 @@
 #include "mod_packages.h"
+#include "host_launch_timing.h"
 
 #include "crc32.h"
 #include "mod_plugins.h"
@@ -3452,8 +3453,13 @@ bool ModPackageManager::prepare_resources(const std::string& game_id,
                 }
                 std::map<std::string, fs::path> outputs;
                 std::string reason;
-                if (!provider->second(context, outputs, reason))
-                    throw std::runtime_error(package->name + ": " + reason);
+                {
+                    HostLaunchTimingScope timing(HOST_LAUNCH_MEDIA_PROVIDER,
+                        package->id.c_str(), feature.id.c_str());
+                    if (!provider->second(context, outputs, reason))
+                        throw std::runtime_error(package->name + ": " + reason);
+                    timing.success();
+                }
                 for (const auto& [name, path] : outputs) {
                     const auto* resource = find_resource(*package, feature.id, name);
                     if (!resource || resource->input_only || resource->sha256.empty())

@@ -17,6 +17,7 @@
 #endif
 #include <time.h>
 #include "debug_server.h"
+#include "host_launch_timing.h"
 #include "psx_video_timing.h"
 #include "psx_netplay.h"
 #include "psx_bss.h"
@@ -8125,6 +8126,53 @@ static void handle_netplay_status(int id, const char *json)
     debug_server_send_line(out);
 }
 
+/* Startup host work recorded before TCP was initialized; always-on, read-only.
+ * Completion order is not start order. Parents include their children. */
+static void handle_host_launch_timings(int id, const char *json)
+{
+    int requested = json_get_int(json, "count", HOST_LAUNCH_TIMING_CAPACITY);
+    if (requested < 1) requested = 1;
+    if (requested > (int)HOST_LAUNCH_TIMING_CAPACITY)
+        requested = HOST_LAUNCH_TIMING_CAPACITY;
+    HostLaunchTimingEvent *events = (HostLaunchTimingEvent *)malloc(
+        (size_t)requested * sizeof(*events));
+    if (!events) { send_err(id, "alloc failed"); return; }
+    uint64_t total = 0, overwritten = 0;
+    uint32_t n = host_launch_timing_snapshot(events, (uint32_t)requested,
+                                            &total, &overwritten);
+    /* Two labels may each expand sixfold when JSON-escaped. */
+    size_t cap = 512u + (size_t)n * 1536u;
+    char *buf = (char *)malloc(cap);
+    if (!buf) { free(events); send_err(id, "alloc failed"); return; }
+    size_t off = (size_t)snprintf(buf, cap,
+        "{\"id\":%d,\"ok\":true,\"clock\":\"steady_us\","
+        "\"nested_durations_overlap\":true,\"capacity\":%u,"
+        "\"total\":%llu,\"overwritten\":%llu,\"entries\":[",
+        id, HOST_LAUNCH_TIMING_CAPACITY, (unsigned long long)total,
+        (unsigned long long)overwritten);
+    for (uint32_t i = 0; i < n; ++i) {
+        const HostLaunchTimingEvent *e = &events[i];
+        char package[HOST_LAUNCH_TIMING_LABEL * 6u + 1u];
+        char feature[HOST_LAUNCH_TIMING_LABEL * 6u + 1u];
+        json_escape_string(package, sizeof(package), e->package_id);
+        json_escape_string(feature, sizeof(feature), e->feature_id);
+        off += (size_t)snprintf(buf + off, cap - off,
+            "%s{\"seq\":%llu,\"scope_id\":%llu,\"parent_id\":%llu,"
+            "\"stage\":\"%s\",\"start_us\":%llu,\"duration_us\":%llu,"
+            "\"ok\":%u,\"package\":\"%s\",\"feature\":\"%s\","
+            "\"labels_truncated\":%u}",
+            i ? "," : "", (unsigned long long)e->seq,
+            (unsigned long long)e->scope_id, (unsigned long long)e->parent_id,
+            host_launch_timing_stage_name(e->stage),
+            (unsigned long long)e->start_us, (unsigned long long)e->duration_us,
+            e->ok, package, feature, e->labels_truncated);
+    }
+    snprintf(buf + off, cap - off, "]}");
+    debug_server_send_line(buf);
+    free(buf);
+    free(events);
+}
+
 static void handle_mod_counters(int id, const char *json)
 {
     extern int psx_mod_counters_snapshot(const char **names, uint64_t *counts,
@@ -15172,6 +15220,7 @@ static const CmdEntry s_commands[] = {
     { "ws_hud_mode",       handle_ws_hud_mode },
     { "ws_tag_stats",      handle_ws_tag_stats },
     { "mod_counters",      handle_mod_counters },
+    { "host_launch_timings", handle_host_launch_timings },
     { "resident_status",   handle_resident_status },
     { "netplay_status",    handle_netplay_status },
     { "resident_events",   handle_resident_events },

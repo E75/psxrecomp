@@ -1,4 +1,5 @@
 #include "mod_runtime.h"
+#include "host_launch_timing.h"
 #include "cpu_state.h"
 
 #include "disc_path.h"
@@ -11,6 +12,22 @@
 #include "psx_sha256.h"
 #include "cpu_state.h"
 #include "psx_lobby_client.h"
+
+extern "C" uint32_t host_launch_timing_snapshot(HostLaunchTimingEvent* out,
+    uint32_t cap, uint64_t* total, uint64_t* overwritten) {
+    return PSXRecompV4::host_launch_timing_ring().snapshot(out, cap, total, overwritten);
+}
+
+extern "C" const char* host_launch_timing_stage_name(uint32_t stage) {
+    static const char* const names[] = {
+        "provider_commit", "runtime_commit", "commit", "disc_hash",
+        "prepare_resources", "media_provider", "resolve", "overlay_verify",
+        "derived_disc", "save_state", "build_disc_index", "overlay_worker",
+        "overlay_join", "plugin_activation", "plugin_callback",
+        "provider_netplay_commit"
+    };
+    return stage < sizeof(names) / sizeof(names[0]) ? names[stage] : "unknown";
+}
 
 #if defined(RECOMP_LAUNCHER)
 #include "recomp_launcher.h"
@@ -1164,6 +1181,7 @@ int provider_set_option(void*, const char* id, const char* option, const char* v
 }
 
 int provider_commit(void*, const char* image_path) {
+    HostLaunchTimingScope timing(HOST_LAUNCH_PROVIDER_COMMIT);
     std::string error;
     if (!mod_runtime_commit(image_path ? std::filesystem::path(image_path) :
                                       std::filesystem::path(), &error)) {
@@ -1171,10 +1189,12 @@ int provider_commit(void*, const char* image_path) {
         return 0;
     }
     state().error.clear();
+    timing.success();
     return 1;
 }
 
 int provider_commit_netplay(void*, const char* image_path) {
+    HostLaunchTimingScope timing(HOST_LAUNCH_PROVIDER_NETPLAY_COMMIT);
     std::string error;
     /* Without [netplay] content_negotiation every netplay session is vanilla. */
     if (!(mod_runtime_netplay_content_negotiation()
@@ -1185,6 +1205,7 @@ int provider_commit_netplay(void*, const char* image_path) {
         return 0;
     }
     state().error.clear();
+    timing.success();
     return 1;
 }
 
@@ -1531,8 +1552,9 @@ static bool netplay_resources_verified(const ModResolution& plan,
 }
 
 bool mod_runtime_prepare_resources(const std::filesystem::path& disc_path, std::string* error) {
+    HostLaunchTimingScope timing(HOST_LAUNCH_PREPARE_RESOURCES);
     RuntimeMods& s = state();
-    if (!s.initialized) return true;
+    if (!s.initialized) { timing.success(); return true; }
     std::filesystem::path media_cache;
 #if defined(_WIN32)
     if (const char* local = std::getenv("LOCALAPPDATA")) media_cache = local;
@@ -1546,23 +1568,31 @@ bool mod_runtime_prepare_resources(const std::filesystem::path& disc_path, std::
         if (error) *error = s.error;
         return false;
     }
+    timing.success();
     return true;
 }
 
 bool mod_runtime_verify_session_plan_fp(std::string* error);
 
 bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* error, bool save_selection) {
+    HostLaunchTimingScope timing(HOST_LAUNCH_COMMIT);
     RuntimeMods& s = state();
-    if (!s.initialized) return true;
+    if (!s.initialized) { timing.success(); return true; }
     if (disc_path != s.disc_path) {
+        HostLaunchTimingScope hash_timing(HOST_LAUNCH_DISC_HASH);
         std::string hash_error, digest;
         if (!sha256_file(disc_path, digest, &hash_error)) digest.clear();
+        else hash_timing.success();
         s.disc_path = disc_path;
         s.disc_sha256 = std::move(digest);
     }
     if (!mod_runtime_prepare_resources(disc_path, error)) return false;
-    ModResolution plan =
-        s.manager.resolve(s.game_id, s.exe_sha256, s.disc_sha256);
+    ModResolution plan;
+    {
+        HostLaunchTimingScope resolve_timing(HOST_LAUNCH_RESOLVE);
+        plan = s.manager.resolve(s.game_id, s.exe_sha256, s.disc_sha256);
+        if (plan.ok) resolve_timing.success();
+    }
     s.validation = plan;
     /* A derived activation is not in state.toml, so name it: a player (or a
      * test) reading the log can see why a hidden feature is running. */
@@ -1587,28 +1617,40 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* err
         if (error) *error = s.error;
         return false;
     }
-    for (const ModResolution::Overlay& overlay : plan.overlays) {
-        if (overlay.expected_sha256.empty()) continue;
-        std::string actual;
-        if (!sha256_disc_range(
-                s.disc_path, overlay.target, overlay.location,
-                overlay.payload.size(), actual, &s.error) ||
-            actual != overlay.expected_sha256) {
-            if (s.error.empty())
-                s.error = overlay.package_id + "/" + overlay.feature_id +
-                    ": stock overlay range checksum failed";
+    {
+        HostLaunchTimingScope overlay_timing(HOST_LAUNCH_OVERLAY_VERIFY);
+        for (const ModResolution::Overlay& overlay : plan.overlays) {
+            if (overlay.expected_sha256.empty()) continue;
+            std::string actual;
+            if (!sha256_disc_range(
+                    s.disc_path, overlay.target, overlay.location,
+                    overlay.payload.size(), actual, &s.error) ||
+                actual != overlay.expected_sha256) {
+                if (s.error.empty())
+                    s.error = overlay.package_id + "/" + overlay.feature_id +
+                        ": stock overlay range checksum failed";
+                if (error) *error = s.error;
+                return false;
+            }
+        }
+        overlay_timing.success();
+    }
+    std::filesystem::path effective_disc;
+    {
+        HostLaunchTimingScope derived_timing(HOST_LAUNCH_DERIVED_DISC);
+        if (!materialize_derived_disc(s, plan, effective_disc, &s.error)) {
             if (error) *error = s.error;
             return false;
         }
+        derived_timing.success();
     }
-    std::filesystem::path effective_disc;
-    if (!materialize_derived_disc(s, plan, effective_disc, &s.error)) {
-        if (error) *error = s.error;
-        return false;
-    }
-    if (save_selection && !s.manager.save_state(&s.error)) {
-        if (error) *error = s.error;
-        return false;
+    if (save_selection) {
+        HostLaunchTimingScope save_timing(HOST_LAUNCH_SAVE_STATE);
+        if (!s.manager.save_state(&s.error)) {
+            if (error) *error = s.error;
+            return false;
+        }
+        save_timing.success();
     }
     /* Hooks follow activation, never a bare commit: a new plan runs none of
      * its function-entry hooks until mod_runtime_activate_plugins(). */
@@ -1617,10 +1659,15 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* err
     s.audio_tracks.clear();
     s.extent_start = 0;
     s.plan = std::move(plan);
-    build_disc_index(s);
+    {
+        HostLaunchTimingScope index_timing(HOST_LAUNCH_BUILD_DISC_INDEX);
+        build_disc_index(s);
+        index_timing.success();
+    }
     s.effective_disc_path = std::move(effective_disc);
     s.main_applied = false;
     s.error.clear();
+    timing.success();
     return true;
 }
 
@@ -2125,21 +2172,26 @@ bool mod_runtime_read_disc_file_sectors(const std::string& path, uint32_t max_by
 
 extern "C" void mod_runtime_activate_plugins(void) {
     using namespace PSXRecompV4;
+    HostLaunchTimingScope timing(HOST_LAUNCH_PLUGIN_ACTIVATION);
     RuntimeMods& s = state();
     psx_projection_reset_session();
     gpu_ws_set_native_scene_predicate(nullptr);
     psx_ram_reset_size_request();
-    if (!s.initialized || !s.plan.ok) return;
+    if (!s.initialized || !s.plan.ok) { timing.success(); return; }
     s.disc_extents.clear();
     s.audio_tracks.clear();
     s.extent_start = 0;
     s.activating = true;
     for (const ModResolution::Plugin& plugin : s.plan.plugins) {
+        HostLaunchTimingScope plugin_timing(HOST_LAUNCH_PLUGIN_CALLBACK,
+            plugin.package_id.c_str(), plugin.feature_id.c_str());
         PluginCallbackScope scope(s, &plugin);
         mod_invoke_activation_plugin(plugin.id);
+        plugin_timing.success();
     }
     s.activating = false;
     build_function_entry_hooks(s);
+    timing.success();
 }
 
 extern "C" void mod_runtime_on_vblank(void) {
