@@ -204,7 +204,9 @@ assert first_commit < session_start < first_start < first_disc < reboot, \
 # Soft return (rematch) re-enters below that block via `goto session_reboot`,
 # so the rematch path runs the same session start after its commit / netplay
 # clear, and mounts the disc the new plan selects.
-rematch = MAIN[MAIN.index('"psxrecomp: cannot clear mods for netplay "'):]
+rematch_start = MAIN.index('"psxrecomp: cannot apply netplay mods "',
+                           MAIN.index("soft_return_lobby:"))
+rematch = MAIN[rematch_start:]
 rematch = rematch[:rematch.index("goto session_reboot;")]
 commit = rematch.index("mod_runtime_commit(resolved_disc,")
 rematch_session = rematch.index("start_mod_session(net_cfg.enabled);")
@@ -224,7 +226,6 @@ assert rematch.count(clamp) == 1, "rematch must re-clamp the aspect to 4:3"
 clamp_at = rematch.index(clamp)
 assert commit < clamp_at < rematch_session, \
     "4:3 re-clamp must follow the commit and precede the session start"
-rematch_start = MAIN.index('"psxrecomp: cannot clear mods for netplay "')
 assert MAIN.rfind("case 1:  g_video_aspect_num = 16; g_video_aspect_den = 9; break;",
                   0, rematch_start) > MAIN.index("soft_return_lobby:"), \
     "the launcher's aspect must be applied before the rematch re-clamp"
