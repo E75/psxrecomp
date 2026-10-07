@@ -33,7 +33,11 @@ has measured time to spare.
 - **Sources.** While generation is on, every RTPS/RTPT output is noted
   (gte.cpp, `gte_fg_source_*`) with an identity (the issuing function `ra`
   and the model-space vertex), the camera-space position the GTE divided and
-  H, indexed by the packed screen word. gpu.c looks each polygon vertex up by
+  H, indexed by the packed screen word. The same point projected again in a
+  frame (a corner shared by separate meshes, another function) is one vertex
+  (the smaller identity); up to two different points on one pixel are kept,
+  and gpu.c picks the one projected by the same function as the triangle's
+  other vertices, else the one nearest their depth. gpu.c looks each polygon vertex up by
   its packet word and records the sources ahead of the triangle
   (`RTH_FG_SRC`, never drawn). CPU-built vertices have none. Guest-visible
   GTE results are untouched.
@@ -98,7 +102,7 @@ has measured time to spare.
   redrawn frame's. Areas uncovered by the in-between camera show the newer
   frame. Vertices without a projection that are neither on a placed edge nor
   shared take their triangle's mean motion (`guessed` counts those over a
-  1 px spread); near R4's tunnel walls this still opens thin cracks.
+  1 px spread; 0 in R4 races once shared corners resolve).
 - A texture the frame drew earlier into its own displayed buffer is sampled
   as the raw mirror holds it when the in-between frame is drawn.
 - Single-buffered games never flip, so nothing is generated.

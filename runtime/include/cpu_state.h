@@ -224,7 +224,8 @@ extern int      gte_geometry_correction_enabled(void);
 /* Frame generation's vertex sources (gte.cpp): 0 = unknown. */
 extern void     gte_fg_source_set(int enabled);
 extern int      gte_fg_source_enabled(void);
-extern int      gte_fg_source_lookup(uint32_t packed, uint32_t *id, int32_t p[3], int32_t *hdist);
+typedef struct GteFgSrc { uint32_t id, ra; int32_t p[3], h; } GteFgSrc;
+extern int      gte_fg_source_lookup(uint32_t packed, GteFgSrc out[2]);
 /* Corrected vertices consumed since the last gte_geometry_correction_set —
  * the "is this actually doing anything on this title" counter. */
 extern uint32_t gte_geometry_correction_hits(void);
