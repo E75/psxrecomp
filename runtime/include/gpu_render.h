@@ -220,7 +220,8 @@ typedef struct GpuRenderBackend {
     void (*hd_texture_note)(int op, int x, int y, int w, int h, int sx, int sy);
 } GpuRenderBackend;
 
-enum { GR_HD_NOTE_INVALIDATE = 0, GR_HD_NOTE_TRACK_UPLOAD = 1, GR_HD_NOTE_BEGIN_UPLOAD = 2,
+enum { GR_HD_NOTE_INVALIDATE = 0, GR_HD_NOTE_TRACK_UPLOAD = 1,
+       GR_HD_NOTE_BEGIN_UPLOAD = 2 /* GP0(A0) header: invalidate; payload streams */,
        GR_HD_NOTE_BEGIN_COPY = 3, GR_HD_NOTE_END_COPY = 4 };
 
 #ifdef __cplusplus

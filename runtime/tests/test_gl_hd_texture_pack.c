@@ -414,6 +414,17 @@ int main(int argc,char** argv) {
     capture();
     check(sample(16,16)[0]>200 && sample(16,16)[1]<20,"render thread: replacement drawn from the upload recorded before it");
     check(sample(32,16)[2]>200 && sample(32,16)[0]<20,"render thread: later overwrite draws the new native source");
+    /* HD authority rasterizes native VRAM on the render thread's copy; a
+     * guest readback (a sync point) must see it in gpu.c's array. */
+    gl_renderer_render_thread_frame_boundary();   /* the capture held the context */
+    check(!rt_held(),"render thread owns the context again");
+    state(); gr_fill_rect(96,96,4,4,0x1234);
+    gr_draw_flat_rect(104,96,4,4,0x0421);
+    gl_renderer_render_thread_frame_boundary();
+    uint16_t back[2]={0,0};
+    gr_vram_transfer_out(96,96,1,1,&back[0]); gr_vram_transfer_out(104,96,1,1,&back[1]);
+    check(back[0]==0x1234 && back[1]==0x0421 && vram[96*1024+96]==0x1234 && vram[96*1024+104]==0x0421,
+          "render thread: guest readback sees native draws under HD authority");
     gl_renderer_render_thread_stop();
     check(!gl_renderer_render_thread_active(),"render thread stopped");
     memcpy(reference,vram,sizeof(vram));

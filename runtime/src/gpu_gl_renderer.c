@@ -9785,9 +9785,34 @@ static int gl_rth_eligible(void) {
            gr_backend() == GR_BACKEND_OPENGL;
 }
 
+/* GP0(A0) whose payload gpu.c is still streaming into its array (HD only;
+ * set from the facade's residency notes on the emulation thread). */
+static int s_rthm_open_upload[4], s_rthm_open_upload_set = 0;
+
+/* HD texture authority keeps native VRAM on the CPU raster, which runs on
+ * the render thread's private copy: hand its result to gpu.c's array, the
+ * way ensure_cpu reads the FBO back otherwise. Words of an upload still
+ * streaming are the guest's newer data and stay. */
+static void rth_hd_publish_private(void) {
+    if (!s_hd_native_authority) return;
+    const size_t row = (size_t)VRAM_W;
+    for (int y = 0; y < VRAM_H; ++y) {
+        uint16_t *dst = s_rth_vram_pub + (size_t)y * row;
+        const uint16_t *src = s_rth_vram_priv + (size_t)y * row;
+        const int *o = s_rthm_open_upload;
+        if (!s_rthm_open_upload_set || ((y - o[1]) & (VRAM_H - 1)) >= o[3]) {
+            memcpy(dst, src, row * sizeof(uint16_t));
+            continue;
+        }
+        for (int x = 0; x < VRAM_W; ++x)
+            if (((x - o[0]) & (VRAM_W - 1)) >= o[2]) dst[x] = src[x];
+    }
+}
+
 static void gl_rth_acquire(const char *reason) {
     if (!s_rth_on || rt_on_render_thread() || rt_held()) return;
     rt_acquire(reason);
+    rth_hd_publish_private();
     s_vram = s_rth_vram_pub;
     rth_rebind_vram(s_rth_vram_pub);
 }
@@ -11501,6 +11526,12 @@ static void hd_note_exec(int op, int x, int y, int w, int h, int sx, int sy) {
 }
 /* After the upload/draw it follows, in command order, against s_vram. */
 static void rtb_hd_texture_note(int op, int x, int y, int w, int h, int sx, int sy) {
+    if (op == GR_HD_NOTE_BEGIN_UPLOAD) {
+        s_rthm_open_upload[0] = x & (VRAM_W - 1); s_rthm_open_upload[1] = y & (VRAM_H - 1);
+        s_rthm_open_upload[2] = w; s_rthm_open_upload[3] = h; s_rthm_open_upload_set = 1;
+    } else if (op == GR_HD_NOTE_TRACK_UPLOAD) {
+        s_rthm_open_upload_set = 0;
+    }
     RTH_DIRECT_OR(RTH_REC(RTH_HD_NOTE, 0, op, x, y, w, h, sx, sy)); hd_note_exec(op, x, y, w, h, sx, sy); }
 static void rtb_vram_transfer_out(int x, int y, int w, int h, uint16_t *d) {
     GL_RT_SYNC("vram_transfer_out"); glb_vram_transfer_out(x, y, w, h, d); }
