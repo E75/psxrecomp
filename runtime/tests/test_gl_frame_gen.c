@@ -278,6 +278,15 @@ int main(int argc, char **argv) {
             FILE *f = fopen("pm.rgba", "wb"); fwrite(img, 4, (size_t)ww * wh, f); fclose(f);
         }
         check(dm != r0 && dm != r1, "phase 0.5 is neither endpoint");
+        /* With an HD texture pack the CPU raster is native VRAM's authority;
+         * an in-between frame is presentation only and must not draw there. */
+        gl_renderer_set_hd_texture_mode(1);
+        static uint16_t before[1024 * 512];
+        memcpy(before, s_vram, sizeof before);
+        check(fg_generate(0.5, 0) == 1, "compose at phase 0.5 under HD authority");
+        check(memcmp(before, s_vram, sizeof before) == 0,
+              "generated frame leaves native VRAM unchanged under HD authority");
+        gl_renderer_set_hd_texture_mode(0);
         free(img);
         check(n_gen > 0, "generated frames were presented");
     }

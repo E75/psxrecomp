@@ -4262,8 +4262,9 @@ static int cpu_raster_required(void) {
      * GPU surface. The CPU mirror stays the authoritative record of the real
      * frame, so the pass never rasterizes into it. depth24 scanout still
      * presents from the CPU mirror and keeps its write-through. */
+    /* A generated (in-between) frame is presentation only, like a pass. */
     return !s_raster_ok || s_depth24_skip_up ||
-           ((s_cpu_auth_dual || s_hd_native_authority) && !s_pass_active);
+           ((s_cpu_auth_dual || s_hd_native_authority) && !s_pass_active && !s_fg_drawing);
 }
 /* Bracket each authoritative draw so a later netplay/session policy change
  * cannot accidentally disable the faithful floor for HD replacement mode. */
