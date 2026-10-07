@@ -20,9 +20,11 @@ bool mod_runtime_initialize(const std::filesystem::path& root,
 bool mod_runtime_commit(const std::filesystem::path& disc_path = {},
                         std::string* error = nullptr,
                         bool save_selection = true);
-/* Prepare enabled media without installing a guest plan or saving choices. */
+/* Audited preboot only: load and verify a plan using existing receipts.
+ * A miss never invokes a media converter or computes a disc digest. */
 bool mod_runtime_try_prepare_cached(const std::filesystem::path& disc_path);
 
+/* Prepare enabled media without installing a guest plan or saving choices. */
 bool mod_runtime_prepare_resources(const std::filesystem::path& disc_path,
                                    std::string* error = nullptr);
 /* Apply a host-published online/LAN plan without rewriting persisted offline

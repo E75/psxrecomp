@@ -483,7 +483,7 @@ bool offline_disc_digest(const std::filesystem::path& path, std::string& digest,
         resolved.data.generic_string() + "\n" + stamp + "\n" + mount_stamp;
     psx_sha256_ctx hash;
     psx_sha256_init(&hash);
-    psx_sha256_update(&hash, key.data(), key.size());
+    psx_sha256_update(&hash, reinterpret_cast<const uint8_t*>(key.data()), key.size());
     uint8_t bytes[32]; psx_sha256_final(&hash, bytes);
     std::ostringstream filename;
     for (const auto byte : bytes) filename << std::hex << std::setw(2) << std::setfill('0') << unsigned(byte);
@@ -1686,9 +1686,13 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* err
          host_file_identity(resolve_disc_path(disc_path).data, data_before));
     {
         std::string hash_error, digest;
+#if defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
         const bool hashed = save_selection
             ? offline_disc_digest(disc_path, digest, &hash_error, s.cached_prepare)
             : sha256_file(disc_path, digest, &hash_error);
+#else
+        const bool hashed = sha256_file(disc_path, digest, &hash_error);
+#endif
         if (!hashed && s.cached_prepare) return false;
         if (!hashed) digest.clear();
         s.disc_path = disc_path;
@@ -1696,7 +1700,11 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* err
     }
     if (!mod_runtime_prepare_resources(disc_path, error)) return false;
     std::map<std::filesystem::path, std::string> before_resolve;
+#if defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
     const bool stable_inputs = dependency_files(s, disc_path, before_resolve);
+#else
+    const bool stable_inputs = false;
+#endif
     ModResolution plan =
         s.manager.resolve(s.game_id, s.exe_sha256, s.disc_sha256);
     s.validation = plan;
