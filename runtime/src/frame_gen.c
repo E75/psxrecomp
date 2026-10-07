@@ -604,12 +604,7 @@ void fg_cam_place(const FgPrimList *newer, FgCamFit *fit, const FgVert *verts,
     free(done);
     fit->clamped = clamped;
     fit->guessed = guessed;
-    /* Motion to 1/8 px: the fit's rounding error must not move an edge off
-     * a pixel boundary (a whole-pixel move stays whole). */
-    for (uint32_t i = 0; i < n * 3u; i++) {
-        x[i] += roundf(dxs[i] * 8.0f) / 8.0f;
-        y[i] += roundf(dys[i] * 8.0f) / 8.0f;
-    }
+    for (uint32_t i = 0; i < n * 3u; i++) { x[i] += dxs[i]; y[i] += dys[i]; }
     /* Margins: vertices on or past a view edge that moved inward. */
     if (margin)
         for (uint32_t j = 0; j < n; j++)

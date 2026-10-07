@@ -415,8 +415,8 @@ extern "C" int gte_geometry_correction_lookup_probe(uint32_t packed,
  * to in one frame is ambiguous. Entries a few frames old are not believed.
  * Allocated only while frame generation is on: the guest-visible GTE results
  * are untouched either way. */
-struct FgSrcEntry { uint32_t seq; uint32_t gen; };   /* gen: frame << 1 | ambiguous */
-struct FgSrcRec { uint32_t seq, id; int32_t p[3]; int32_t h; };
+struct FgSrcEntry { uint32_t seq, seq2; uint32_t gen; };   /* gen: frame << 1 | ambiguous; seq2: a second point */
+struct FgSrcRec { uint32_t seq, id, ra; int32_t p[3]; int32_t h; };
 #define FGSRC_RING (1u << 17)
 static FgSrcEntry *s_fgsrc = nullptr;
 static FgSrcRec   *s_fgsrc_ring = nullptr;
@@ -453,6 +453,7 @@ static void fgsrc_note(const GTEState *g, int32_t packed, uint32_t ra, const int
     FgSrcRec &r = s_fgsrc_ring[seq & (FGSRC_RING - 1u)];
     r.seq = seq;
     r.id = h;
+    r.ra = ra;
     for (int i = 0; i < 3; i++) {
         int64_t m = (int64_t)g->TR[i] * 4096;
         for (int k = 0; k < 3; k++) m += (int64_t)g->RT[i][k] * v[k];
@@ -461,13 +462,22 @@ static void fgsrc_note(const GTEState *g, int32_t packed, uint32_t ra, const int
     r.h = gte_h_scaled(g);
     FgSrcEntry &e = s_fgsrc[slot];
     const uint32_t f = fgsrc_frame();
-    if ((e.gen >> 1) == f && e.seq && s_fgsrc_ring[e.seq & (FGSRC_RING - 1u)].seq == e.seq &&
-        s_fgsrc_ring[e.seq & (FGSRC_RING - 1u)].id != h) {
-        e.gen |= 1u;   /* two vertices, one pixel */
-        return;
-    }
-    if ((e.gen >> 1) != f) e.gen = f << 1;
-    e.seq = seq;
+    if ((e.gen >> 1) != f) { e.gen = f << 1; e.seq = seq; e.seq2 = 0; return; }
+    /* Earlier this frame: the same point projected again (another function,
+     * another model vertex: shared corners of separate meshes) is one vertex,
+     * keeping the smaller identity so the choice does not depend on draw
+     * order. Up to two different points on one pixel are kept (the GPU side
+     * picks by the triangle's other vertices); a third is ambiguous. */
+    auto same = [&](uint32_t sq) {
+        const FgSrcRec &o = s_fgsrc_ring[sq & (FGSRC_RING - 1u)];
+        return o.seq == sq && std::abs(o.p[0] - r.p[0]) <= 2 && std::abs(o.p[1] - r.p[1]) <= 2 &&
+               std::abs(o.p[2] - r.p[2]) <= 2;
+    };
+    auto keep = [&](uint32_t &sq) { if (s_fgsrc_ring[sq & (FGSRC_RING - 1u)].id > h) sq = seq; };
+    if (same(e.seq)) { keep(e.seq); return; }
+    if (!e.seq2) { e.seq2 = seq; return; }
+    if (same(e.seq2)) { keep(e.seq2); return; }
+    e.gen |= 1u;
 }
 
 static void fgsrc_record(const GTEState *g, uint32_t cmd, uint32_t ra) {
@@ -481,22 +491,27 @@ static void fgsrc_record(const GTEState *g, uint32_t cmd, uint32_t ra) {
     }
 }
 
-/* The source of the vertex last projected to a packed screen word: 0 when
- * none, ambiguous or stale; else 1 with its identity, camera-space position
- * and projection distance. */
-extern "C" int gte_fg_source_lookup(uint32_t packed, uint32_t *id, int32_t p[3], int32_t *hdist) {
+/* The sources of the vertices last projected to a packed screen word this
+ * frame (or a few frames ago): 0 when none, ambiguous or stale, else 1 or 2
+ * (two different points on that pixel). */
+extern "C" int gte_fg_source_lookup(uint32_t packed, GteFgSrc out[2]) {
     if (!s_fgsrc) return 0;
     const int64_t slot = geom_slot(packed);
     if (slot < 0) return 0;
     const FgSrcEntry &e = s_fgsrc[slot];
     if (!e.seq || (e.gen & 1u)) return 0;
     if (((fgsrc_frame() - (e.gen >> 1)) & 0x7FFFFFFFu) > FGSRC_MAX_AGE) return 0;
-    const FgSrcRec &r = s_fgsrc_ring[e.seq & (FGSRC_RING - 1u)];
-    if (r.seq != e.seq) return 0;
-    *id = r.id;
-    p[0] = r.p[0]; p[1] = r.p[1]; p[2] = r.p[2];
-    *hdist = r.h;
-    return 1;
+    int n = 0;
+    const uint32_t sq[2] = { e.seq, e.seq2 };
+    for (int i = 0; i < 2; i++) {
+        if (!sq[i]) continue;
+        const FgSrcRec &r = s_fgsrc_ring[sq[i] & (FGSRC_RING - 1u)];
+        if (r.seq != sq[i]) continue;
+        out[n].id = r.id; out[n].ra = r.ra; out[n].h = r.h;
+        for (int k = 0; k < 3; k++) out[n].p[k] = r.p[k];
+        n++;
+    }
+    return n;
 }
 
 /* Render-pass checkpoint for the gte.cpp side of precision tracking: the
