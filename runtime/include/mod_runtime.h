@@ -21,6 +21,8 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path = {},
                         std::string* error = nullptr,
                         bool save_selection = true);
 /* Prepare enabled media without installing a guest plan or saving choices. */
+bool mod_runtime_try_prepare_cached(const std::filesystem::path& disc_path);
+
 bool mod_runtime_prepare_resources(const std::filesystem::path& disc_path,
                                    std::string* error = nullptr);
 /* Apply a host-published online/LAN plan without rewriting persisted offline

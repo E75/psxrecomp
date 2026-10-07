@@ -2,6 +2,7 @@
 #include "cpu_state.h"
 
 #include "disc_path.h"
+#include "host_file_identity.h"
 #include "iso_reader.h"
 #include "mod_packages.h"
 #include "mod_plugins.h"
@@ -87,6 +88,12 @@ struct RuntimeMods {
     std::filesystem::path disc_path;
     std::filesystem::path effective_disc_path;
     uint32_t entry_phys = 0;
+    uint64_t preparation_revision = 1;
+    uint64_t ticket_revision = 0;
+    std::map<std::filesystem::path, std::string> ticket_files;
+    bool ticket_ready = false;
+    bool cached_prepare = false;
+    bool provider_preparing = false;
     bool initialized = false;
     bool main_applied = false;
     bool disc_enabled = false;
@@ -99,6 +106,61 @@ struct RuntimeMods {
 RuntimeMods& state() {
     static RuntimeMods value;
     return value;
+}
+
+std::filesystem::path media_cache_root() {
+    std::filesystem::path root;
+#if defined(_WIN32)
+    if (const char* local = std::getenv("LOCALAPPDATA")) root = local;
+#else
+    if (const char* cache = std::getenv("XDG_CACHE_HOME")) root = cache;
+    else if (const char* home_dir = std::getenv("HOME")) root = std::filesystem::path(home_dir) / ".cache";
+#endif
+    if (root.empty()) root = std::filesystem::temp_directory_path();
+    return root / "psxrecomp/imports";
+}
+
+bool dependency_files(RuntimeMods& s, const std::filesystem::path& disc,
+                      std::map<std::filesystem::path, std::string>& files) {
+    files.clear();
+    auto add = [&](const std::filesystem::path& path) {
+        if (path.empty()) return true;
+        std::string stamp;
+        if (!host_file_identity(path, stamp)) return false;
+        files[path] = std::move(stamp);
+        return true;
+    };
+    if (!add(disc) || !add(resolve_disc_path(disc).data)) return false;
+    std::error_code ec;
+    size_t entries = 0;
+    for (std::filesystem::recursive_directory_iterator it(s.manager.root(), ec), end;
+         !ec && it != end; it.increment(ec)) {
+        if (++entries > 4096) return false;
+        if (it->is_regular_file(ec) && !add(it->path())) return false;
+    }
+    if (ec) return false;
+    for (const auto& [id, versions] : s.manager.packages()) {
+        (void)versions;
+        const auto* package = s.manager.selected_package(id);
+        if (!package) continue;
+        for (const auto& resource : package->resources) {
+            if (!s.manager.feature_enabled(id, resource.feature_id) &&
+                !s.manager.feature_implicitly_enabled(id, resource.feature_id)) continue;
+            const auto path = s.manager.feature_resource_path(id, resource.feature_id, resource.id);
+            if (!add(path)) return false;
+        }
+    }
+    return add(s.effective_disc_path);
+}
+
+bool prepared_ticket_matches(const std::filesystem::path& disc) {
+    auto& s = state();
+    if (!s.ticket_ready || s.main_applied || !mod_runtime_session_plan_fp().empty() ||
+        disc != s.disc_path || s.ticket_revision != s.preparation_revision) return false;
+    std::map<std::filesystem::path, std::string> files;
+    if (!dependency_files(s, disc, files) || files != s.ticket_files) return false;
+    auto manager = s.manager;
+    return manager.prepare_resources(s.game_id, disc, media_cache_root(), nullptr, true);
 }
 
 /* Guest calls made from an entry hook can deliver VBlank callbacks before
@@ -405,6 +467,58 @@ bool sha256_file(const std::filesystem::path& path, std::string& out,
     for (uint8_t byte : digest)
         text << std::hex << std::setw(2) << std::setfill('0') << (unsigned)byte;
     out = text.str();
+    return true;
+}
+
+// Offline only: the digest semantics match sha256_file (CUE data / CHD raw sectors).
+bool offline_disc_digest(const std::filesystem::path& path, std::string& digest,
+                         std::string* error, bool cached_only) {
+    digest.clear();
+    if (path.empty()) return true;
+    const auto resolved = resolve_disc_path(path);
+    std::string stamp, mount_stamp;
+    const bool reliable = host_file_identity(resolved.data, stamp) &&
+        host_file_identity(resolved.mount, mount_stamp);
+    const std::string key = "disc-sha-v1\n" + resolved.mount.generic_string() + "\n" +
+        resolved.data.generic_string() + "\n" + stamp + "\n" + mount_stamp;
+    psx_sha256_ctx hash;
+    psx_sha256_init(&hash);
+    psx_sha256_update(&hash, key.data(), key.size());
+    uint8_t bytes[32]; psx_sha256_final(&hash, bytes);
+    std::ostringstream filename;
+    for (const auto byte : bytes) filename << std::hex << std::setw(2) << std::setfill('0') << unsigned(byte);
+    const auto directory = media_cache_root() / "disc-digests-v1";
+    const auto receipt = directory / (filename.str() + ".txt");
+    if (reliable) {
+        std::ifstream file(receipt, std::ios::binary);
+        std::string version, value, extra;
+        if (std::getline(file, version) && std::getline(file, value) &&
+            !std::getline(file, extra) && version == "disc-sha-v1" && value.size() == 64 &&
+            std::all_of(value.begin(), value.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); })) {
+            digest = value;
+            return true;
+        }
+    }
+    if (cached_only) return false;
+    if (!sha256_file(path, digest, error)) return false;
+    std::string after, mount_after;
+    if (!reliable || !host_file_identity(resolved.data, after) || after != stamp ||
+        !host_file_identity(resolved.mount, mount_after) || mount_after != mount_stamp) return true;
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    if (ec) return true;
+#if defined(_WIN32)
+    const auto temporary = receipt.string() + "." + std::to_string(GetCurrentProcessId()) + ".tmp";
+#else
+    const auto temporary = receipt.string() + "." + std::to_string(getpid()) + ".tmp";
+#endif
+    { std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
+      if (!(file << "disc-sha-v1\n" << digest << '\n')) return true; }
+#if defined(_WIN32)
+    MoveFileExW(std::filesystem::path(temporary).c_str(), receipt.c_str(), MOVEFILE_REPLACE_EXISTING);
+#else
+    std::filesystem::rename(temporary, receipt, ec);
+#endif
     return true;
 }
 
@@ -1111,6 +1225,8 @@ int provider_version_get(void*, const char* package_id, int index,
 
 template <typename Callback>
 int mutate(Callback callback) {
+    state().ticket_ready = false;
+    ++state().preparation_revision;
     std::string error;
     if (!callback(error)) {
         set_error(error);
@@ -1165,8 +1281,11 @@ int provider_set_option(void*, const char* id, const char* option, const char* v
 
 int provider_commit(void*, const char* image_path) {
     std::string error;
-    if (!mod_runtime_commit(image_path ? std::filesystem::path(image_path) :
-                                      std::filesystem::path(), &error)) {
+    state().provider_preparing = true;
+    const bool ok = mod_runtime_commit(image_path ? std::filesystem::path(image_path) :
+                                      std::filesystem::path(), &error);
+    state().provider_preparing = false;
+    if (!ok) {
         set_error(error);
         return 0;
     }
@@ -1243,6 +1362,8 @@ bool mod_runtime_initialize(const std::filesystem::path& root,
                             const std::filesystem::path& exe_path,
                             std::string* error) {
     RuntimeMods& s = state();
+    s.ticket_ready = false;
+    ++s.preparation_revision;
     offline_manager_before_netplay.reset();
     mod_runtime_set_session_plan_fp({});
     s.manager.set_root({});
@@ -1298,6 +1419,8 @@ bool mod_runtime_initialize(const std::filesystem::path& root,
 }
 
 bool mod_runtime_clear_for_netplay(std::string* error) {
+    state().ticket_ready = false;
+    ++state().preparation_revision;
     RuntimeMods& s = state();
     if (!s.initialized) {
         if (error) error->clear();
@@ -1533,16 +1656,8 @@ static bool netplay_resources_verified(const ModResolution& plan,
 bool mod_runtime_prepare_resources(const std::filesystem::path& disc_path, std::string* error) {
     RuntimeMods& s = state();
     if (!s.initialized) return true;
-    std::filesystem::path media_cache;
-#if defined(_WIN32)
-    if (const char* local = std::getenv("LOCALAPPDATA")) media_cache = local;
-#else
-    if (const char* cache = std::getenv("XDG_CACHE_HOME")) media_cache = cache;
-    else if (const char* home_dir = std::getenv("HOME")) media_cache = std::filesystem::path(home_dir) / ".cache";
-#endif
-    if (media_cache.empty()) media_cache = std::filesystem::temp_directory_path();
-    media_cache /= "psxrecomp/imports";
-    if (!s.manager.prepare_resources(s.game_id, disc_path, media_cache, &s.error)) {
+    const auto media_cache = media_cache_root();
+    if (!s.manager.prepare_resources(s.game_id, disc_path, media_cache, &s.error, s.cached_prepare)) {
         if (error) *error = s.error;
         return false;
     }
@@ -1554,13 +1669,34 @@ bool mod_runtime_verify_session_plan_fp(std::string* error);
 bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* error, bool save_selection) {
     RuntimeMods& s = state();
     if (!s.initialized) return true;
-    if (disc_path != s.disc_path) {
+#if defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
+    if (save_selection && prepared_ticket_matches(disc_path)) {
+        if (!s.provider_preparing) s.ticket_ready = false;
+        clear_function_entry_hooks();
+        s.disc_extents.clear(); s.audio_tracks.clear(); s.extent_start = 0;
+        s.main_applied = false;
+        s.error.clear();
+        return true;
+    }
+#endif
+    s.ticket_ready = false;
+    std::string disc_before, data_before;
+    const bool disc_stamped = disc_path.empty() ||
+        (host_file_identity(disc_path, disc_before) &&
+         host_file_identity(resolve_disc_path(disc_path).data, data_before));
+    {
         std::string hash_error, digest;
-        if (!sha256_file(disc_path, digest, &hash_error)) digest.clear();
+        const bool hashed = save_selection
+            ? offline_disc_digest(disc_path, digest, &hash_error, s.cached_prepare)
+            : sha256_file(disc_path, digest, &hash_error);
+        if (!hashed && s.cached_prepare) return false;
+        if (!hashed) digest.clear();
         s.disc_path = disc_path;
         s.disc_sha256 = std::move(digest);
     }
     if (!mod_runtime_prepare_resources(disc_path, error)) return false;
+    std::map<std::filesystem::path, std::string> before_resolve;
+    const bool stable_inputs = dependency_files(s, disc_path, before_resolve);
     ModResolution plan =
         s.manager.resolve(s.game_id, s.exe_sha256, s.disc_sha256);
     s.validation = plan;
@@ -1606,6 +1742,13 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* err
         if (error) *error = s.error;
         return false;
     }
+    std::map<std::filesystem::path, std::string> after_resolve;
+    std::string disc_after, data_after;
+    const bool unchanged_disc = disc_path.empty() ||
+        (disc_stamped && host_file_identity(disc_path, disc_after) && disc_before == disc_after &&
+         host_file_identity(resolve_disc_path(disc_path).data, data_after) && data_before == data_after);
+    const bool unchanged_inputs = unchanged_disc && stable_inputs &&
+        dependency_files(s, disc_path, after_resolve) && before_resolve == after_resolve;
     if (save_selection && !s.manager.save_state(&s.error)) {
         if (error) *error = s.error;
         return false;
@@ -1621,10 +1764,35 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* err
     s.effective_disc_path = std::move(effective_disc);
     s.main_applied = false;
     s.error.clear();
+#if defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
+    if (save_selection && (s.provider_preparing || s.cached_prepare) &&
+        unchanged_inputs && session_plan_fp().empty()) {
+        s.ticket_revision = s.preparation_revision;
+        s.ticket_ready = dependency_files(s, disc_path, s.ticket_files);
+    }
+#endif
     return true;
 }
 
+bool mod_runtime_try_prepare_cached(const std::filesystem::path& disc_path) {
+#if defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
+    auto& s = state();
+    if (!s.initialized || s.main_applied || !session_plan_fp().empty()) return false;
+    auto probe = s.manager;
+    if (!probe.prepare_resources(s.game_id, disc_path, media_cache_root(), nullptr, true)) return false;
+    s.cached_prepare = true;
+    const bool ok = mod_runtime_commit(disc_path, nullptr, true);
+    s.cached_prepare = false;
+    return ok;
+#else
+    (void)disc_path;
+    return false;
+#endif
+}
+
 void mod_runtime_set_session_plan_fp(const std::string& fp) {
+    state().ticket_ready = false;
+    ++state().preparation_revision;
     session_plan_fp() = fp;
 }
 
@@ -1733,6 +1901,12 @@ const std::filesystem::path& mod_runtime_effective_disc_path() {
 const RecompLauncherCModProvider* mod_runtime_launcher_provider() {
 #if defined(RECOMP_LAUNCHER_HAS_WORKER_MOD_COMMIT) && defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
     provider.commit_worker_safe = 1;
+#if defined(RECOMP_LAUNCHER_HAS_PREPARED_MOD_COMMIT)
+    provider.try_commit = [](void*, const char* path) -> int {
+        return prepared_ticket_matches(path ? std::filesystem::path(path) : std::filesystem::path()) ? 1 : 0;
+    };
+    provider.preparation_revision = [](void*) -> unsigned long long { return state().preparation_revision; };
+#endif
 #endif
     return &provider;
 }
@@ -2129,6 +2303,7 @@ bool mod_runtime_read_disc_file_sectors(const std::string& path, uint32_t max_by
 extern "C" void mod_runtime_activate_plugins(void) {
     using namespace PSXRecompV4;
     RuntimeMods& s = state();
+    s.ticket_ready = false;
     psx_projection_reset_session();
     gpu_ws_set_native_scene_predicate(nullptr);
     psx_ram_reset_size_request();

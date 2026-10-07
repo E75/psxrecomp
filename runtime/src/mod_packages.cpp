@@ -33,8 +33,9 @@ std::map<std::string, ModBuiltinResolver>& builtin_resolvers() {
     return value;
 }
 
-std::map<std::string, ModMediaPreparer>& media_preparers() {
-    static std::map<std::string, ModMediaPreparer> value;
+struct MediaPreparer { ModMediaPreparer prepare, probe; };
+std::map<std::string, MediaPreparer>& media_preparers() {
+    static std::map<std::string, MediaPreparer> value;
     return value;
 }
 
@@ -1443,8 +1444,8 @@ std::string fingerprint_text(const std::string& text) {
 
 } // namespace
 
-bool mod_register_media_preparer(const std::string& id, ModMediaPreparer callback) {
-    return valid_id(id) && callback && media_preparers().emplace(id, std::move(callback)).second;
+bool mod_register_media_preparer(const std::string& id, ModMediaPreparer callback, ModMediaPreparer cache_probe) {
+    return valid_id(id) && callback && media_preparers().emplace(id, MediaPreparer{std::move(callback), std::move(cache_probe)}).second;
 }
 
 bool mod_register_builtin_resolver(const std::string& id, ModBuiltinResolver resolver) {
@@ -3427,7 +3428,7 @@ std::string ModPackageManager::feature_option_value(
 }
 
 bool ModPackageManager::prepare_resources(const std::string& game_id,
-    const fs::path& disc_path, const fs::path& cache_root, std::string* error) {
+    const fs::path& disc_path, const fs::path& cache_root, std::string* error, bool cached_only) {
     auto effective = effective_selections(nullptr, nullptr, nullptr);
     auto pending = selections_;
     try {
@@ -3452,7 +3453,8 @@ bool ModPackageManager::prepare_resources(const std::string& game_id,
                 }
                 std::map<std::string, fs::path> outputs;
                 std::string reason;
-                if (!provider->second(context, outputs, reason))
+                const auto& callback = cached_only ? provider->second.probe : provider->second.prepare;
+                if (!callback || !callback(context, outputs, reason))
                     throw std::runtime_error(package->name + ": " + reason);
                 for (const auto& [name, path] : outputs) {
                     const auto* resource = find_resource(*package, feature.id, name);
