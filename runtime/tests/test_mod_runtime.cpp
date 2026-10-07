@@ -305,12 +305,19 @@ int main() {
     const fs::path root = fs::temp_directory_path() / "psxrecomp-mod-runtime-cache-test";
     const auto isolated_cache = root / "test-cache";
 #if defined(_WIN32)
-    check(SetEnvironmentVariableW(L"LOCALAPPDATA", isolated_cache.c_str()) != FALSE,
+    check(_wputenv_s(L"LOCALAPPDATA", isolated_cache.c_str()) == 0,
           "isolate audited digest receipts from owner cache");
 #else
     check(setenv("XDG_CACHE_HOME", isolated_cache.c_str(), 1) == 0,
           "isolate audited digest receipts from owner cache");
 #endif
+#if defined(_WIN32)
+    const char* configured_cache = std::getenv("LOCALAPPDATA");
+#else
+    const char* configured_cache = std::getenv("XDG_CACHE_HOME");
+#endif
+    check(configured_cache && fs::path(configured_cache) == isolated_cache,
+          "CRT getenv observes the isolated audited cache");
 #else
     const fs::path root = fs::temp_directory_path() / "psxrecomp-mod-runtime-test";
 #endif
