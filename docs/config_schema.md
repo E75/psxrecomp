@@ -690,6 +690,15 @@ ignores all of these.
 Netplay rollback is a separate subsystem with its own ring and is unaffected by
 this setting; rewind is in fact suppressed while a netplay session is active.
 
+A title can also block Rewind while it is in a mode that must not be rewound,
+such as local split-screen multiplayer: a trusted mod plugin calls
+`psx_mod_set_rewind_blocked(1)` when the mode starts and `0` when it ends
+(`runtime/include/mod_plugins.h`). While blocked, opening Rewind is refused
+with an OSD note, no snapshots are captured (the ring keeps what it already
+has), and a title-allowed direct Rewind button (`psx_mod_allow_direct_shortcut`)
+is not claimed, so it reaches the game as if Rewind were off. The block clears
+at every mod/session reset; nothing changes for a title that never calls it.
+
 Bezel artwork is intentionally not a `[video]` key. It is exposed as the
 disabled-by-default `psx.presentation.bezel` mod package, which draws a
 user-selected image resource behind the game image in OpenGL letterbox or

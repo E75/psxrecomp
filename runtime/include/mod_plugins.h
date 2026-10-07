@@ -902,6 +902,32 @@ typedef struct PSXModPadTransform {
 } PSXModPadTransform;
 int psx_mod_set_pad_transform(uint32_t player, const PSXModPadTransform *transform);
 
+/* Let a host shortcut bound to ONE controller button act on that button
+ * alone. Without this, a one-button binding means Select + button (the
+ * legacy rule), so a title's default one-button binding is safe whether or
+ * not its mod is enabled. While allowed (and, for Rewind, while Rewind is
+ * enabled) the runtime claims that host button: it is removed from P1's
+ * guest pad, and a claim made while it is held lasts until it is released.
+ * Call at mod activation; cleared at every mod/session reset. Returns 0 for
+ * an unknown shortcut. Multi-button bindings are unaffected. */
+enum {
+    PSX_MOD_SHORTCUT_REWIND = 0,
+    PSX_MOD_SHORTCUT_SAVE_STATE_MENU = 1,
+    PSX_MOD_SHORTCUT_FAST_FORWARD = 2,
+    PSX_MOD_SHORTCUT_FAST_FORWARD_TOGGLE = 3
+};
+int psx_mod_allow_direct_shortcut(uint32_t shortcut);
+
+/* Refuse local Rewind while the title is in a mode it must not rewind (e.g.
+ * local split-screen multiplayer). While blocked, opening Rewind is refused
+ * with an OSD note, no history is captured (snapshots already in the ring are
+ * kept), and an allowed direct Rewind shortcut is not in force: its button is
+ * not claimed and reaches the guest pad / title transform as if Rewind were
+ * disabled. Netplay already refuses Rewind on its own. Opt-in: call with 1
+ * when the mode starts and 0 when it ends (setting it every frame from the
+ * title's state is fine). Cleared at every mod/session reset. */
+void psx_mod_set_rewind_blocked(int blocked);
+
 /* Local P1 mouse policy. The runtime delivers ordered events on the SDL owner
  * (main) thread, owns relative capture and folds the resulting right-stick
  * bytes after native input/presentation (and after any controller source),

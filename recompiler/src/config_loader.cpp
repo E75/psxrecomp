@@ -908,6 +908,22 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
         if (ct.contains("legacy_pad_config")) {
             rt.legacy_pad_config = toml::find<bool>(ct, "legacy_pad_config");
         }
+        if (ct.contains("direct_shortcut")) {
+            rt.direct_shortcut = toml::find<std::string>(ct, "direct_shortcut");
+            if (rt.direct_shortcut != "rewind" &&
+                rt.direct_shortcut != "save_state_menu" &&
+                rt.direct_shortcut != "fast_forward" &&
+                rt.direct_shortcut != "fast_forward_toggle")
+                throw std::runtime_error(fmt::format(
+                    "[controller] direct_shortcut must be rewind, "
+                    "save_state_menu, fast_forward or fast_forward_toggle, "
+                    "got '{}'", rt.direct_shortcut));
+            if (!ct.contains("direct_shortcut_button"))
+                throw std::runtime_error(
+                    "[controller] direct_shortcut needs direct_shortcut_button");
+            rt.direct_shortcut_button =
+                toml::find<std::string>(ct, "direct_shortcut_button");
+        }
         if (ct.contains("anti_deadzone")) {
             const auto n = toml::find<int64_t>(ct, "anti_deadzone");
             if (n < 0 || n > 32767)
