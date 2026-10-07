@@ -1482,7 +1482,8 @@ static void dump_post_diverge_diag(const char *why)
                             hist.is_predicted ? "P" : "");
                     if (have_s && (seal.buttons != hist.buttons ||
                                    seal.stick_x != hist.stick_x ||
-                                   seal.stick_y != hist.stick_y))
+                                   seal.stick_y != hist.stick_y ||
+                                   seal.rx != hist.rx || seal.ry != hist.ry))
                         fprintf(stderr, "!");
                 } else {
                     fprintf(stderr, "/h=----");
@@ -4170,7 +4171,7 @@ static void publish_sealed_sio(uint32_t tick)
         if (!rnet_rb_get_sealed_frame(g_rb, slot, tick, &row) || !row.is_valid)
             continue;
         g_b.apply_frame_slot(slot, tick, row.buttons, row.stick_x, row.stick_y,
-                             row.analog);
+                             row.analog, row.rx, row.ry);
     }
 }
 

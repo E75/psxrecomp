@@ -2501,7 +2501,8 @@ static void np_publish_hist_sio(uint32_t tick)
 }
 
 static void np_rb_apply_frame_slot(int slot, uint32_t tick, uint16_t buttons,
-                                   int8_t sx, int8_t sy, uint8_t analog)
+                                   int8_t sx, int8_t sy, uint8_t analog,
+                                   uint8_t rx, uint8_t ry)
 {
     RNetRbFrame row;
     PsxNetPad pad;
@@ -2511,6 +2512,8 @@ static void np_rb_apply_frame_slot(int slot, uint32_t tick, uint16_t buttons,
     row.stick_x = sx;
     row.stick_y = sy;
     row.analog = analog <= PSX_NETPAD_TYPE_MAX ? analog : 0u;
+    row.rx = rx;
+    row.ry = ry;
     row.is_valid = 1;
     netplay_ih_frame_to_pad(&row, &pad);
     force_session_pads_connected(g_np.slot_count);
@@ -2613,7 +2616,8 @@ static void np_scrub_ahead_predicted(int slot, rnet_u32 release_tick,
             continue;
         if (row.buttons == released->buttons &&
             row.stick_x == released->stick_x &&
-            row.stick_y == released->stick_y)
+            row.stick_y == released->stick_y &&
+            row.rx == released->rx && row.ry == released->ry)
             continue;
         scrub = *released;
         scrub.tick = t;
@@ -2674,7 +2678,8 @@ static void np_tip_hold_coalesce_ahead(void)
             netplay_ih_pad_to_frame(&pad, t, 0, &wire_frame);
             if (wire_frame.buttons == tip_row.buttons &&
                 wire_frame.stick_x == tip_row.stick_x &&
-                wire_frame.stick_y == tip_row.stick_y)
+                wire_frame.stick_y == tip_row.stick_y &&
+                wire_frame.rx == tip_row.rx && wire_frame.ry == tip_row.ry)
                 continue;
             edge = t;
             break;
@@ -2862,6 +2867,7 @@ static void np_rollback_reconcile_wire(void)
             rnet_u32 wire;
             int pads_differ;
             int buttons_differ;
+            int rest_differ;
 
             if (!netplay_ih_get(&g_np.ih, slot, t, &published))
                 continue;
@@ -2877,7 +2883,11 @@ static void np_rollback_reconcile_wire(void)
             netplay_ih_frame_to_contract(&published, &pub_c);
             netplay_ih_frame_to_contract(&wire_frame, &wire_c);
             buttons_differ = (pub_c.buttons != wire_c.buttons);
-            pads_differ = buttons_differ ||
+            /* The rest of the pad (right stick, NeGcon I/II) is not in the
+             * contract view; any difference there is a real mispredict. */
+            rest_differ = published.rx != wire_frame.rx ||
+                          published.ry != wire_frame.ry;
+            pads_differ = buttons_differ || rest_differ ||
                           (pub_c.stick_x != wire_c.stick_x) ||
                           (pub_c.stick_y != wire_c.stick_y);
             completed = (sim > t) ? 1u : 0u;
@@ -2888,7 +2898,7 @@ static void np_rollback_reconcile_wire(void)
              * release) without opening an episode. Distinct from the old
              * ungated menu soft-promote that forked RAM: HC fail-closed
              * means a real state-affecting press still rewinds. */
-            if (buttons_differ && completed &&
+            if (buttons_differ && !rest_differ && completed &&
                 np_hc_silent_promote_enabled() &&
                 netplay_hc_confirm_through(&g_np.hc, t)) {
                 (void)netplay_ih_promote(&g_np.ih, slot, &wire_frame);
@@ -2937,6 +2947,8 @@ static void np_rollback_reconcile_wire(void)
             gate_ctx.tick = t;
             d = rnet_input_contract_stick_replace_decide(
                 &pub_c, &wire_c, completed, &params, &gates);
+            if (rest_differ && completed)
+                d = nRNetInputContractRewind;
             if (rnet_input_contract_decision_is_rewind(d)) {
                 /* FMV/settle only: soft-promote releases (skip must rewind on
                  * press). Menu soft-promote + hold-last invent forked RAM

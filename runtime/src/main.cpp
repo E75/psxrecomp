@@ -6169,6 +6169,63 @@ static void netplay_present_gap_stats(uint32_t *p95_out, uint32_t *max_out) {
 /* Stage local pad + poll admit until published. Parks the guest fiber when
  * called from the vblank callback (or before scheduler entry). Latches one
  * sample per sim tick; stalls on INPUT_CONFIRM desync. */
+static void pad_ext_host_extras(void*, int s, uint32_t* flags, uint32_t* lt,
+                                uint32_t* rt);
+#ifndef PSX_NO_DEBUG_TOOLS
+extern "C" int debug_server_get_trigger_override(uint32_t* lt, uint32_t* rt);
+#endif
+
+/* Netplay input transform ([[plugin]] netplay = "input"): this player's own
+ * title pad transform runs on its local pad before staging, so the
+ * transformed pad (buttons, sticks, presented type, NeGcon I/II) is what every
+ * peer receives and simulates. Each peer transforms only its own seat. */
+static void netplay_transform_local_pad(PsxNetPad* pad, int override_active) {
+    if (!PSXRecompV4::mod_runtime_netplay_input_active() ||
+        psx_netplay_is_spectator())
+        return;
+    const int seat = psx_netplay_local_slot();
+    if (seat < 0 || seat >= PSX_MAX_PLAYERS) return;
+    PSXModPadFrame f{};
+    f.struct_size = sizeof f;
+    f.player = (uint32_t)seat;
+    f.buttons = pad->buttons;
+    f.lx = pad->lx; f.ly = pad->ly; f.rx = pad->rx; f.ry = pad->ry;
+    f.type = pad->analog;
+    if (override_active) {
+#ifndef PSX_NO_DEBUG_TOOLS
+        uint32_t lt = 0, rt = 0;
+        if (debug_server_get_trigger_override(&lt, &rt)) {
+            f.host_flags = PSX_MOD_PAD_HOST_GAMEPAD | PSX_MOD_PAD_HOST_LT |
+                           PSX_MOD_PAD_HOST_RT;
+            f.host_lt = lt;
+            f.host_rt = rt;
+        }
+#endif
+    } else {
+        const int card = psx_netplay_input_player();
+        pad_ext_host_extras(nullptr, card >= 0 ? card : 0, &f.host_flags,
+                            &f.host_lt, &f.host_rt);
+    }
+    PSXModPadOutput stock{}, o{};
+    stock.struct_size = sizeof stock;
+    stock.buttons = f.buttons; stock.type = f.type;
+    stock.lx = f.lx; stock.ly = f.ly; stock.rx = f.rx; stock.ry = f.ry;
+    if (!mod_pad_transform_run((uint32_t)seat, &f, &stock, &o)) return;
+    pad->buttons = (uint16_t)o.buttons;
+    pad->analog = (uint8_t)o.type;
+    if (o.type == PSX_MOD_PAD_NEGCON) {
+        pad->lx = (uint8_t)o.lx;
+        pad->ly = (uint8_t)o.negcon_l;
+        pad->rx = (uint8_t)o.negcon_i;
+        pad->ry = (uint8_t)o.negcon_ii;
+    } else if (o.type == PSX_MOD_PAD_DIGITAL) {
+        pad->lx = pad->ly = pad->rx = pad->ry = 0x80;
+    } else {
+        pad->lx = (uint8_t)o.lx; pad->ly = (uint8_t)o.ly;
+        pad->rx = (uint8_t)o.rx; pad->ry = (uint8_t)o.ry;
+    }
+}
+
 static void netplay_barrier_admit(int override) {
     if (!psx_netplay_active()) return;
     /* Launcher/game window teardown can leave a queued SDL_QUIT; draining it
@@ -6333,6 +6390,7 @@ static void netplay_barrier_admit(int override) {
             } else {
                 capture_local_human_pad(&local);
             }
+            netplay_transform_local_pad(&local, override >= 0);
             psx_netplay_stage_local(&local);
         } else if (psx_start_bisect_spin_log() && !g_headless) {
             /* Dense SDL-only samples while admit waits without capture. */

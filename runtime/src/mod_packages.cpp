@@ -2540,10 +2540,12 @@ bool ModPackageManager::read_manifest(const fs::path& path, ModPackage& out,
                 {
                     const std::string netplay =
                         toml::find_or<std::string>(v, "netplay", "");
-                    if (!netplay.empty() && netplay != "local_view")
+                    if (!netplay.empty() && netplay != "local_view" &&
+                        netplay != "input")
                         throw std::runtime_error(
-                            "plugin netplay must be \"local_view\"");
+                            "plugin netplay must be \"local_view\" or \"input\"");
                     plugin.netplay_local_view = netplay == "local_view";
+                    plugin.netplay_input = netplay == "input";
                 }
                 read_conditions(v, out.options, plugin.feature_id,
                                 plugin.when, "plugin");
@@ -3803,6 +3805,7 @@ ModResolution ModPackageManager::resolve(const std::string& game_id,
             resolved.package_id = package->id;
             resolved.feature_id = plugin->feature_id;
             resolved.netplay_local_view = plugin->netplay_local_view;
+            resolved.netplay_input = plugin->netplay_input;
             result.plugins.push_back(std::move(resolved));
         }
         for (const ModResource& resource : package->resources) {

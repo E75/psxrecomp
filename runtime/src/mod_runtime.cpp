@@ -1409,7 +1409,7 @@ std::vector<std::string> mod_runtime_netplay_view_features(const ModResolution& 
     for (const ModResolution::Plugin& p : plan.plugins) {
         const std::string key = p.package_id + "/" + p.feature_id;
         auto it = ok.find(key);
-        const bool good = p.netplay_local_view;
+        const bool good = p.netplay_local_view || p.netplay_input;
         ok[key] = it == ok.end() ? good : (it->second && good);
     }
     for (const ModResolution::Write& w : plan.writes)
@@ -1426,6 +1426,14 @@ std::vector<std::string> mod_runtime_netplay_view_features(const ModResolution& 
         out.push_back(key);
     }
     return out;
+}
+
+bool mod_runtime_netplay_input_active() {
+    const RuntimeMods& s = state();
+    if (!s.netplay_view_plan || !s.plan.ok) return false;
+    for (const ModResolution::Plugin& p : s.plan.plugins)
+        if (p.netplay_input) return true;
+    return false;
 }
 
 bool mod_runtime_netplay_view_active() {

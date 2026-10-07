@@ -219,6 +219,10 @@ struct ModPlugin {
      * run only inside the sandboxed own-view render
      * (psx_mod_render_local_view), never in the shared simulation. */
     bool netplay_local_view = false;
+    /* netplay = "input": the plugin only transforms this player's own pad
+     * before it is staged (psx_mod_set_pad_transform). Online it stays on per
+     * player: the post-transform pad is what every peer simulates. */
+    bool netplay_input = false;
 };
 
 struct ModResource {
@@ -354,6 +358,7 @@ struct ModResolution {
         std::string package_id;
         std::string feature_id;
         bool netplay_local_view = false;
+        bool netplay_input = false;
     };
     std::vector<Plugin> plugins;
     struct Resource {

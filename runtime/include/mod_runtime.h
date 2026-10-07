@@ -33,6 +33,9 @@ bool mod_runtime_commit_netplay_view(const std::filesystem::path& disc_path,
                                      std::string* error = nullptr);
 /* 1 while the session plan is such an own-view plan. */
 bool mod_runtime_netplay_view_active();
+/* 1 while that plan holds a [[plugin]] netplay = "input" (a pad transform
+ * applied to this player's own pad at netplay staging). */
+bool mod_runtime_netplay_input_active();
 /* "package/feature" keys of `plan` that qualify as own-view features. */
 std::vector<std::string> mod_runtime_netplay_view_features(const ModResolution& plan);
 const std::string& mod_runtime_fingerprint();
