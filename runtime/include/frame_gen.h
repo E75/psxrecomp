@@ -8,14 +8,38 @@
  * The GL backend (gpu_gl_renderer.c) owns the record lists themselves,
  * drawing and presenting; nothing here touches GL or guest state.
  *
- * A primitive is a triangle of one frame's draw list with a match key (the
- * draw op, texture page, CLUT, texture coordinates, the draw area it was
- * clipped to) and its three screen positions in native pixels relative to
- * that frame's displayed buffer. Matching pairs each primitive of the newer
- * frame with one of the older frame's, in draw order: the same key, every
- * vertex moved at most max_move, and the three vertices moved alike (a
- * rigid-ish motion, at most max_deform apart). A primitive with no partner
- * is drawn where the newer frame has it.
+ * A primitive is a triangle of one frame's draw list with a key (the draw
+ * op, texture page, CLUT, texture coordinates, the draw area it was clipped
+ * to), a view (its draw area: split-screen views have their own cameras), its
+ * three screen positions in native pixels relative to that frame's displayed
+ * buffer and, per vertex, the GTE projection that produced it when one did
+ * (gte_fg_source_lookup): an identity (the projecting function and the
+ * model-space vertex), the camera-space position the GTE divided and the
+ * projection distance H.
+ *
+ * In-between frames are the NEWER frame redrawn from an in-between camera;
+ * no primitive of the older frame is drawn and none is paired by draw order.
+ * Camera motion: per view, vertices of both frames with the same identity
+ * are paired in camera space and a rigid motion old -> new is fitted to them
+ * (RANSAC, then least squares on the inliers: the static world agrees, moving
+ * objects are outliers). A vertex is placed at phase t by
+ *   - camera: the fitted motion's fraction t applied to the older camera,
+ *     i.e. P_t = D^t D^-1 P_new (the static world, and anything new);
+ *   - object: a paired vertex that moved against the world (a car, the
+ *     player's own car under a chase camera) lerps its camera-space position;
+ *   - neighbours: a vertex without a projection (CPU-built), or one new to
+ *     a moving object, in a triangle with placed vertices moves by their
+ *     mean screen motion, per position;
+ *   - unchanged: everything else (HUD, 2D, sprites).
+ * Each is re-projected (H * x / z) and moved by the difference from its own
+ * newer projection, so draw offsets and sub-pixel positions stay the game's.
+ * What the in-between camera uncovers shows the newer frame: the caller
+ * starts from its image and skips the clears before the first draw, and the
+ * strips along a view's edges the picture moved away from (fg_cam_place's
+ * margins) are the newer frame's.
+ * The fit's verdict rejects the whole generated frame (the real frame shows)
+ * when a view with projections has too few pairs, too few inliers, or a
+ * motion no camera makes between two frames.
  */
 #include <stddef.h>
 #include <stdint.h>
@@ -26,8 +50,13 @@ extern "C" {
 
 typedef struct FgPrim {
     uint32_t rec;        /* index of its record in the owner's list */
-    uint32_t key;        /* match key (fg_hash) */
+    uint32_t key;        /* fg_hash of what it draws */
+    uint32_t view;       /* fg_hash of its draw area */
+    float    area[4];    /* that draw area (x1, y1, x2, y2), relative like x/y */
+    uint32_t vid[3];     /* projection identities, 0 = no projection */
     float    x[3], y[3]; /* native px, relative to the list's display origin */
+    float    p[3][3];    /* camera-space positions (GTE units) */
+    float    h[3];       /* projection distance */
 } FgPrim;
 
 typedef struct FgPrimList {
@@ -44,25 +73,56 @@ int  fg_prims_add(FgPrimList *l, const FgPrim *p);
 uint32_t fg_hash(uint32_t h, const int32_t *w, int n);
 #define FG_HASH_INIT 2166136261u
 
-typedef struct FgMatchParams {
-    float max_move;      /* native px a vertex may move between the frames */
-    float max_deform;    /* native px the vertices' moves may differ by */
-    int   window;        /* same-key candidates considered per primitive */
-} FgMatchParams;
-void fg_match_defaults(FgMatchParams *p);
+typedef struct FgCamParams {
+    int      iters;          /* RANSAC samples per view */
+    float    tol_px;         /* inlier: |D a - b| within this many screen px at b's depth */
+    float    min_inliers;    /* share of pairs the camera must explain */
+    uint32_t min_pairs;      /* pairs a view with projections needs */
+    float    max_angle;      /* radians the camera may turn between frames */
+    float    max_shift;      /* camera travel, as a share of the median depth */
+    float    max_obj;        /* object pairing: |b - a| < max_obj * |b.z| */
+} FgCamParams;
+void fg_cam_defaults(FgCamParams *p);
 
-typedef struct FgMatchStats {
-    uint32_t prims, matched, moved, unmatched;
-} FgMatchStats;
+#define FG_MAX_VIEWS 4
+typedef struct FgView {
+    uint32_t view, sources, pairs, inliers;
+    int      ok;
+    float    area[4];        /* the view's draw area */
+    double   q[4], t[3];     /* old -> new: rotation quaternion (w,x,y,z), translation */
+    const char *why;
+} FgView;
 
-/* For every primitive of `newer`, the index of its partner in `older` or -1
- * (match[newer->n]). Each older primitive pairs at most once. Returns the
- * matched count. */
-uint32_t fg_match(const FgPrimList *older, const FgPrimList *newer,
-                  const FgMatchParams *p, int32_t *match, FgMatchStats *st);
+typedef struct FgCamFit {
+    int      ok;
+    const char *why;
+    uint32_t nviews, prims, camera, object, neighbour, unchanged;
+    FgView   v[FG_MAX_VIEWS];
+} FgCamFit;
 
-/* Positions at phase t between a (t = 0) and b (t = 1). */
-void fg_lerp(const FgPrim *a, const FgPrim *b, double t, float x[3], float y[3]);
+/* How each newer vertex is placed (fg_cam_fit fills it, newer->n * 3). */
+typedef struct FgVert {
+    uint8_t  mode;           /* FG_PLACE_* */
+    int8_t   view;           /* index into FgCamFit.v, -1 */
+    uint8_t  paired;         /* the older frame has this vertex */
+    float    a[3];           /* FG_PLACE_OBJECT: the older camera-space position */
+} FgVert;
+enum { FG_PLACE_UNCHANGED = 0, FG_PLACE_CAMERA, FG_PLACE_OBJECT, FG_PLACE_NEIGHBOUR };
+
+/* Fits the camera motion older -> newer per view and decides each newer
+ * vertex's placement; returns fit->ok (the verdict). */
+int fg_cam_fit(const FgPrimList *older, const FgPrimList *newer, const FgCamParams *p,
+               FgCamFit *fit, FgVert *verts);
+
+/* Screen positions of every newer vertex at phase t (0 = the older frame's
+ * camera, 1 = the newer frame exactly): x/y[newer->n * 3], NaN for a vertex
+ * behind the in-between camera (its triangle is not drawn). margin (may be
+ * NULL) receives, per view, how far the picture moved in from each edge of
+ * its draw area (left, top, right, bottom, px): the newer frame drew nothing
+ * beyond its edges, so that strip has no in-between picture and the caller
+ * shows the newer frame there. */
+void fg_cam_place(const FgPrimList *newer, const FgCamFit *fit, const FgVert *verts,
+                  double t, float *x, float *y, float margin[][4]);
 
 /* How many in-between frames to draw per game frame.
  *   flip_s       the game frame's interval (time between flips)

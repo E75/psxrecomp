@@ -111,6 +111,7 @@
 #include <string.h>
 #include <stdatomic.h>
 #include "png_write.h"   /* png_write_rgb — present_shot readback */
+static uint64_t s_fg_flips;   /* frame generation (below): game frames seen */
 
 #ifndef GL_BGRA
 #define GL_BGRA 0x80E1
@@ -446,7 +447,7 @@ enum {
     RTH_WIDE_DISABLE, RTH_WIDE_CLEAR, RTH_WIDE_CLEAR_MARGINS, RTH_PROJ_TRI,
     RTH_WIDE_RECOVERY, RTH_INTERP_SUSPENDED, RTH_PRESENT_VRAM,
     RTH_PRESENT_WIDE, RTH_STATE, RTH_PEEK, RTH_RING_CAPTURE, RTH_DYN_STEP,
-    RTH_FRAME
+    RTH_FRAME, RTH_FG_SRC
 };
 static int  rth_record_mode(void);
 /* Render-thread frame cost (dynamic resolution; defined with GL_RT_BACKEND). */
@@ -8505,7 +8506,70 @@ static void gl_swap_with_osd(void) {
             const char *e = getenv("PSX_PRESENT_SHOT_GENERATED");
             gen_only = (e && *e && *e != '0') ? 1 : 0;
         }
-        if ((!gen_only || s_fg_presenting) &&
+        /* PSX_PRESENT_SHOT_BURST=N (diagnostic): a staged present_shot takes
+         * the next N composed frames, kept in memory and written when the
+         * burst ends as <path>_NN_r.png (real) / _NN_g.png (generated), in
+         * composition order: with frame generation a real frame is composed
+         * before the in-between frames that lead up to it. */
+        static int burst = -1, b_i = 0, b_w = 0, b_h = 0;
+        static uint8_t **b_px = NULL; static char *b_kind = NULL; static uint64_t b_flip[240];
+        static char b_path[512];
+        if (burst < 0) {
+            const char *e = getenv("PSX_PRESENT_SHOT_BURST");
+            burst = e ? atoi(e) : 0;
+            if (burst < 0) burst = 0;
+            if (burst > 240) burst = 240;
+            if (burst) {
+                b_px = (uint8_t **)calloc((size_t)burst, sizeof *b_px);
+                b_kind = (char *)calloc((size_t)burst, 1);
+                if (!b_px || !b_kind) burst = 0;
+            }
+        }
+        if (burst && b_i > 0) {
+            int ww = 0, wh = 0;
+            SDL_GL_GetDrawableSize(s_win, &ww, &wh);
+            if (ww == b_w && wh == b_h && (b_px[b_i] = (uint8_t *)malloc((size_t)ww * wh * 3))) {
+                glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                glReadPixels(0, 0, ww, wh, GL_RGB, GL_UNSIGNED_BYTE, b_px[b_i]);
+                b_kind[b_i] = s_fg_presenting ? 'g' : 'r';
+                b_flip[b_i] = s_fg_flips;
+                b_i++;
+            } else {
+                b_i = burst;   /* resized: end it */
+            }
+            if (b_i >= burst) {
+                int ok = 1;
+                uint8_t *flip = (uint8_t *)malloc((size_t)b_w * b_h * 3);
+                for (int i = 0; i < burst; i++) {
+                    if (!b_px[i] || !flip) { ok = 0; continue; }
+                    for (int y = 0; y < b_h; y++)
+                        memcpy(flip + (size_t)y * b_w * 3, b_px[i] + (size_t)(b_h - 1 - y) * b_w * 3,
+                               (size_t)b_w * 3);
+                    char fn[600];
+                    snprintf(fn, sizeof fn, "%s_%02d_%c_f%llu.png", b_path, i, b_kind[i],
+                             (unsigned long long)b_flip[i]);
+                    FILE *pf = fopen(fn, "wb");
+                    if (!pf || !png_write_rgb(pf, flip, (uint32_t)b_w, (uint32_t)b_h)) ok = 0;
+                    if (pf) fclose(pf);
+                    free(b_px[i]); b_px[i] = NULL;
+                }
+                free(flip);
+                b_i = 0;
+                present_shot_done(ok);
+            }
+        } else if (burst && present_shot_take(shot_path, (int)sizeof(shot_path))) {
+            SDL_GL_GetDrawableSize(s_win, &b_w, &b_h);
+            snprintf(b_path, sizeof b_path, "%s", shot_path);
+            if (b_w > 0 && b_h > 0 && (b_px[0] = (uint8_t *)malloc((size_t)b_w * b_h * 3))) {
+                glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                glReadPixels(0, 0, b_w, b_h, GL_RGB, GL_UNSIGNED_BYTE, b_px[0]);
+                b_kind[0] = s_fg_presenting ? 'g' : 'r';
+                b_flip[0] = s_fg_flips;
+                b_i = 1;
+            } else {
+                present_shot_done(0);
+            }
+        } else if (!burst && (!gen_only || s_fg_presenting) &&
             present_shot_take(shot_path, (int)sizeof(shot_path))) {
             int ww = 0, wh = 0;
             int wrote = 0;
@@ -10011,7 +10075,7 @@ typedef struct {
     int       wide_w, wide_off, scale, linear, force43;
 } FgList;
 /* Raw triangle captured while recording a list (absolute coords). */
-typedef struct { uint32_t rec, key0; float x[3], y[3]; int area[4]; } FgRaw;
+typedef struct { uint32_t rec, key0, vid[3]; float x[3], y[3], p[3][3], h[3]; int area[4]; } FgRaw;
 
 static int       s_fg_on = 0;                 /* configured (any thread reads) */
 static int       s_fg_force = 0;              /* PSX_FRAME_GEN_FORCE: tests */
@@ -10031,8 +10095,24 @@ static int       s_fg_have_last = 0, s_fg_last_dx = 0, s_fg_last_dy = 0;
  * start the next frame, so a flip is not a list boundary). */
 static int       s_fg_buf[4][4], s_fg_nbuf = 0, s_fg_cur_buf = -1;
 static int       s_fg_vblanks = 0, s_fg_flip_vb = 1;   /* presents per flip */
-static int32_t  *s_fg_match = NULL; static uint32_t s_fg_match_cap = 0;
-static FgMatchStats s_fg_mst;
+/* The camera fit of the pair a schedule draws from and each newer vertex's
+ * placement (fg_cam_fit), positions at the current phase, and the pending
+ * vertex sources of the next triangle (RTH_FG_SRC: ids, integer x/y,
+ * camera-space x/y/z, H). */
+static FgVert   *s_fg_verts = NULL; static uint32_t s_fg_verts_cap = 0;
+static float    *s_fg_px = NULL, *s_fg_py = NULL; static uint32_t s_fg_pos_cap = 0;
+static FgCamFit  s_fg_fit;
+static float     s_fg_margin[FG_MAX_VIEWS][4];   /* fg_cam_place, per generated frame */
+static int       s_fg_src_older = 0;          /* the older frame is redrawn (moving forward) */
+static uint32_t fg_main_view(const FgCamFit *f) {
+    uint32_t m = 0;
+    for (uint32_t i = 1; i < f->nviews; i++) if (f->v[i].sources > f->v[m].sources) m = i;
+    return m;
+}
+static int       s_fg_src_valid = 0; static int32_t s_fg_src[21];
+static uint32_t  s_fg_src_seen = 0;
+static uint64_t  s_fg_rejected = 0;           /* flips the verdict refused */
+static const char *s_fg_reject_why = NULL;
 static FgBreaker s_fg_brk;
 static int       s_fg_brk_init = 0;
 static uint64_t  s_fg_bp_seen = 0, s_fg_bp_ns_seen = 0;
@@ -10279,6 +10359,12 @@ static void fg_rotate(void) {
 
 /* Called for every replayed record (gl_rth_exec), before it executes. */
 static void fg_capture(const RtCmd *c, const void *payload) {
+    if (c->op == RTH_FG_SRC) {
+        memcpy(s_fg_src, payload, sizeof s_fg_src);
+        s_fg_src_valid = 1;
+        s_fg_src_seen++;
+        return;
+    }
     if (!fg_op_kept(c->op)) return;
     /* Which buffer a draw goes to: a fill's rect, else the draw area. */
     int tb = -1;
@@ -10317,6 +10403,20 @@ static void fg_capture(const RtCmd *c, const void *payload) {
     FgRaw raw;
     if (fg_tri_geom(c->op, payload, s_fg_pc_valid ? s_fg_pc : NULL, raw.x, raw.y, &raw.key0)) {
         raw.rec = (uint32_t)r;
+        /* The identities belong to this triangle only if it is drawn where
+         * they were looked up (a culled triangle leaves its record behind). */
+        for (int k = 0; k < 3; k++) raw.vid[k] = 0;
+        if (s_fg_src_valid) {
+            int at = 1;
+            for (int k = 0; k < 3; k++)
+                if (fabsf(raw.x[k] - (float)s_fg_src[3 + 2 * k]) > 1.5f ||
+                    fabsf(raw.y[k] - (float)s_fg_src[4 + 2 * k]) > 1.5f) at = 0;
+            if (at) for (int k = 0; k < 3; k++) {
+                raw.vid[k] = (uint32_t)s_fg_src[k];
+                for (int c = 0; c < 3; c++) raw.p[k][c] = (float)s_fg_src[9 + 3 * k + c];
+                raw.h[k] = (float)s_fg_src[18 + k];
+            }
+        }
         raw.area[0] = s_area_x1; raw.area[1] = s_area_y1;
         raw.area[2] = s_area_x2; raw.area[3] = s_area_y2;
         (void)fg_raw_add(&raw);
@@ -10325,6 +10425,7 @@ static void fg_capture(const RtCmd *c, const void *payload) {
     case RTH_FLAT_TRI: case RTH_GOURAUD_TRI: case RTH_TEX_TRI:
     case RTH_SHADED_TEX_TRI: case RTH_PROJ_TRI:
         s_fg_pc_valid = 0;
+        s_fg_src_valid = 0;
         break;
     default: break;
     }
@@ -10355,6 +10456,13 @@ static void fg_list_close(FgList *l, const int disp[4]) {
         const int32_t aw[4] = { r->area[0] - disp[0], r->area[1] - disp[1],
                                 r->area[2] - disp[0], r->area[3] - disp[1] };
         p.key = fg_hash(r->key0, aw, 4);
+        p.view = fg_hash(FG_HASH_INIT, aw, 4);
+        for (int k = 0; k < 4; k++) p.area[k] = (float)aw[k];
+        for (int k = 0; k < 3; k++) {
+            p.vid[k] = r->vid[k];
+            memcpy(p.p[k], r->p[k], sizeof p.p[k]);
+            p.h[k] = r->h[k];
+        }
         for (int k = 0; k < 3; k++) { p.x[k] = r->x[k] - (float)disp[0]; p.y[k] = r->y[k] - (float)disp[1]; }
         if (!fg_prims_add(&l->prims, &p)) { l->valid = 0; return; }
         l->rec2prim[r->rec] = (int32_t)(l->prims.n - 1);
@@ -10367,6 +10475,7 @@ static void fg_list_open(void) {
     fg_state_capture(&l->start);
     s_fg_nraw = 0;
     s_fg_pc_valid = 0;
+    s_fg_src_valid = 0;
 }
 
 static void fg_invalidate(void) {
@@ -10437,6 +10546,14 @@ static void fg_surfaces_free(void) {
  * (most of a generated frame at high levels). The stencil is the mask-bit
  * mirror of alpha; the caller marks it stale and it is rebuilt from the
  * copied alpha only if a generated draw checks the mask. */
+static void fg_blit2(GLuint src, GLuint dst, int sx, int sy, int dx, int dy, int w, int h) {
+    p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, src);
+    p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, dst);
+    glDisable(GL_SCISSOR_TEST);
+    p_glBlitFramebuffer(sx, sy, sx + w, sy + h, dx, dy, dx + w, dy + h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, 0);
+    p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, 0);
+}
 static void fg_blit(GLuint src, GLuint dst, int x, int y, int w, int h) {
     p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, src);
     p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, dst);
@@ -10503,10 +10620,28 @@ static int fg_rect_meets(int x, int y, int w, int h, const int *disp) {
 /* Redraw list b at phase t (0 = a's positions, 1 = b's) into the surfaces
  * currently bound as hr / the displayed wide surface. */
 static void fg_replay(const FgList *a, const FgList *b, double t, GLuint gen_wide) {
+    (void)a;   /* in-between frames redraw the newer frame only */
     const int *disp = b->disp;
+    /* Every vertex's position at this phase (the newer frame from an
+     * in-between camera, frame_gen.h). */
+    int placed = 0;
+    memset(s_fg_margin, 0, sizeof s_fg_margin);
+    if (s_fg_verts && s_fg_verts_cap >= b->prims.n) {
+        if (s_fg_pos_cap < b->prims.n) {
+            float *nx = (float *)realloc(s_fg_px, (size_t)b->prims.n * 3 * sizeof *nx);
+            if (nx) s_fg_px = nx;
+            float *ny = (float *)realloc(s_fg_py, (size_t)b->prims.n * 3 * sizeof *ny);
+            if (ny) s_fg_py = ny;
+            if (nx && ny) s_fg_pos_cap = b->prims.n;
+        }
+        if (s_fg_pos_cap >= b->prims.n) {
+            fg_cam_place(&b->prims, &s_fg_fit, s_fg_verts, t, s_fg_px, s_fg_py, s_fg_margin);
+            placed = 1;
+        }
+    }
     const float ddx = (float)(b->disp[0]), ddy = (float)(b->disp[1]);
     fg_state_apply(&b->start, (b->start.wide_on && b->start.wide_base == disp[0]) ? gen_wide : 0);
-    int pc_pending = 0; int32_t pc[7];
+    int pc_pending = 0, drawn = 0; int32_t pc[7];
     for (uint32_t r = 0; r < b->n; r++) {
         FgRec h;
         memcpy(&h, b->buf + b->off[r], sizeof h);
@@ -10547,24 +10682,34 @@ static void fg_replay(const FgList *a, const FgList *b, double t, GLuint gen_wid
                 glb_wide_clear_margins(v[0], v[1], v[2], (uint16_t)v[3], v[4]);
             break;
         case RTH_FILL:
-            if (fg_rect_meets(v[0], v[1], v[2], v[3], disp))
+            /* The clears before anything is drawn are not redrawn: the
+             * surface starts as the newer real frame, so what the in-between
+             * camera uncovers (the road below the receding near edge) shows
+             * that frame's pixels instead of the clear colour. Fills after
+             * drawing (panels, letterbox bands) are part of the picture. */
+            if (drawn && fg_rect_meets(v[0], v[1], v[2], v[3], disp))
                 glb_fill_rect(v[0], v[1], v[2], v[3], (uint16_t)v[4]);
             break;
         case RTH_FLAT_RECT:
+            drawn |= in;
             if (in) glb_draw_flat_rect(v[0], v[1], v[2], v[3], (uint16_t)v[4]);
             break;
         case RTH_TEX_RECT:
+            drawn |= in;
             if (in) glb_draw_textured_rect(v[0], v[1], v[2], v[3], v[4], v[5],
                                            (uint16_t)v[6], (uint16_t)v[7], (uint16_t)v[8]);
             break;
         case RTH_TEX_RECT_SCALED:
+            drawn |= in;
             if (in) glb_draw_textured_rect_scaled(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7],
                                                   (uint16_t)v[8], (uint16_t)v[9], (uint16_t)v[10]);
             break;
         case RTH_LINE:
+            drawn |= in;
             if (in) glb_draw_line(v[0], v[1], v[2], v[3], (uint16_t)v[4]);
             break;
         case RTH_SHADED_LINE:
+            drawn |= in;
             if (in) glb_draw_shaded_line(v[0], v[1], (uint16_t)v[2], v[3], v[4], (uint16_t)v[5]);
             break;
         case RTH_FLAT_TRI: case RTH_GOURAUD_TRI: case RTH_TEX_TRI:
@@ -10574,15 +10719,23 @@ static void fg_replay(const FgList *a, const FgList *b, double t, GLuint gen_wid
                 pc_pending = 0;
                 break;
             }
-            const int32_t ai = s_fg_match ? s_fg_match[pi] : -1;
             const FgPrim *pb = &b->prims.v[pi];
             float x[3], y[3];
-            if (ai >= 0 && t < 1.0) {
-                fg_lerp(&a->prims.v[ai], pb, t, x, y);
+            if (placed) {
+                int gone = 0;
+                for (int k = 0; k < 3; k++) {
+                    x[k] = s_fg_px[3 * pi + k]; y[k] = s_fg_py[3 * pi + k];
+                    gone |= isnan(x[k]);
+                }
+                if (gone) {   /* crossed the camera plane: not in this frame */
+                    pc_pending = 0;
+                    break;
+                }
             } else {
                 for (int k = 0; k < 3; k++) { x[k] = pb->x[k]; y[k] = pb->y[k]; }
             }
             for (int k = 0; k < 3; k++) { x[k] += ddx; y[k] += ddy; }
+            drawn = 1;
             fg_draw_tri_at(h.op, v, pl, x, y);
             precise_consumed();
             pc_pending = 0;
@@ -10666,8 +10819,16 @@ static int fg_generate(double t, int swap) {
     /* The displayed buffer as the real frame has it, then swap the surfaces. */
     const int dy = b->disp[1] < 0 ? 0 : b->disp[1];
     const int dh = b->disp[1] + b->disp[3] > VRAM_H ? VRAM_H - dy : b->disp[1] + b->disp[3] - dy;
-    fg_blit(s_hr_fbo, s_fg_hr_fbo, b->disp[0] * S, dy * S, b->disp[2] * S, dh * S);
-    if (iw >= 0) fg_blit(s_wide_fbo[iw], s_fg_w_fbo, 0, dy * S, g_wide_w * S, dh * S);
+    /* The redrawn frame (the older one when moving forward) is drawn where
+     * its own buffer is, over the newer real frame's image: what the
+     * in-between camera uncovers shows that. */
+    const FgList *L = s_fg_src_older ? a : b;
+    const double tl = s_fg_src_older ? 1.0 - t : t;
+    const int ly = L->disp[1] < 0 ? 0 : L->disp[1];
+    const int lh = L->disp[1] + L->disp[3] > VRAM_H ? VRAM_H - ly : L->disp[1] + L->disp[3] - ly;
+    if (L->disp[0] != b->disp[0] || lh != dh || L->disp[2] != b->disp[2]) return 0;
+    fg_blit2(s_hr_fbo, s_fg_hr_fbo, b->disp[0] * S, dy * S, L->disp[0] * S, ly * S, b->disp[2] * S, dh * S);
+    if (iw >= 0) fg_blit2(s_wide_fbo[iw], s_fg_w_fbo, 0, dy * S, 0, ly * S, g_wide_w * S, dh * S);
     GLuint t0 = s_hr_tex, f0 = s_hr_fbo, r0 = s_hr_rb;
     s_hr_tex = s_fg_hr_tex; s_hr_fbo = s_fg_hr_fbo; s_hr_rb = s_fg_hr_rb;
     GLuint wt = 0, wf = 0, wr = 0; int was = 0;
@@ -10678,11 +10839,43 @@ static int fg_generate(double t, int swap) {
     }
     /* The copied stencil is stale: rebuilt from alpha if a draw needs it. */
     s_stencil_valid = 0;
-    rect_add(&s_stencil_stale, b->disp[0], dy, b->disp[0] + b->disp[2] - 1, dy + dh - 1);
-    if (iw >= 0) wst_add(iw, 0, dy, g_wide_w, dy + dh);
+    rect_add(&s_stencil_stale, L->disp[0], ly, L->disp[0] + L->disp[2] - 1, ly + lh - 1);
+    if (iw >= 0) wst_add(iw, 0, ly, g_wide_w, ly + lh);
     s_fg_drawing = 1;
-    fg_replay(a, b, t, iw >= 0 ? s_fg_w_fbo : 0);
-    fg_compose(b, iw >= 0 ? s_fg_w_fbo : 0, iw >= 0 ? s_fg_w_tex : 0, b->linear, b->force43);
+    fg_replay(NULL, L, tl, iw >= 0 ? s_fg_w_fbo : 0);
+    flush_line_batch();
+    flush_flat_batch();
+    flush_tex_batch();
+    /* The strips along a view's edges the picture moved away from: the
+     * newer frame drew nothing beyond the edge, so they show it. On the
+     * native-wide surface native x maps to x + wide_off. */
+    {
+        const int ox = iw >= 0 ? L->wide_off : 0, sw = iw >= 0 ? g_wide_w : L->disp[2];
+        const GLuint src = iw >= 0 ? wf : f0, dst = iw >= 0 ? s_fg_w_fbo : s_fg_hr_fbo;
+        const int bx0 = iw >= 0 ? 0 : L->disp[0], sdy = dy - ly;   /* source rows: the newer frame's */
+        for (uint32_t vi = 0; vi < s_fg_fit.nviews; vi++) {
+            const float *ar = s_fg_fit.v[vi].area, *m = s_fg_margin[vi];
+            int x1 = (int)floorf(ar[0]) + ox, x2 = (int)ceilf(ar[2]) + 1 + ox;
+            int y1 = L->disp[1] + (int)ar[1], y2 = L->disp[1] + (int)ar[3] + 1;
+            if (x1 < 0) x1 = 0;
+            if (x2 > sw) x2 = sw;
+            if (y1 < ly) y1 = ly;
+            if (y2 > ly + lh) y2 = ly + lh;
+            if (x2 <= x1 || y2 <= y1) continue;
+            const int w = x2 - x1, h = y2 - y1;
+            int ml = m[0] > 0 ? (int)ceilf(m[0]) + 1 : 0, mt = m[1] > 0 ? (int)ceilf(m[1]) + 1 : 0;
+            int mr = m[2] > 0 ? (int)ceilf(m[2]) + 1 : 0, mb = m[3] > 0 ? (int)ceilf(m[3]) + 1 : 0;
+            if (ml > w) ml = w;
+            if (mr > w) mr = w;
+            if (mt > h) mt = h;
+            if (mb > h) mb = h;
+            if (ml) fg_blit2(src, dst, (bx0 + x1) * S, (y1 + sdy) * S, (bx0 + x1) * S, y1 * S, ml * S, h * S);
+            if (mr) fg_blit2(src, dst, (bx0 + x2 - mr) * S, (y1 + sdy) * S, (bx0 + x2 - mr) * S, y1 * S, mr * S, h * S);
+            if (mt) fg_blit2(src, dst, (bx0 + x1) * S, (y1 + sdy) * S, (bx0 + x1) * S, y1 * S, w * S, mt * S);
+            if (mb) fg_blit2(src, dst, (bx0 + x1) * S, (y2 - mb + sdy) * S, (bx0 + x1) * S, (y2 - mb) * S, w * S, mb * S);
+        }
+    }
+    fg_compose(L, iw >= 0 ? s_fg_w_fbo : 0, iw >= 0 ? s_fg_w_tex : 0, b->linear, b->force43);
     s_fg_drawing = 0;
     if (swap) {
         s_fg_presenting = 1;
@@ -10993,15 +11186,45 @@ static int fg_on_present(uint16_t op, const uint8_t *p, uint32_t bytes, int stal
     if (n <= 0) return 0;
     /* Match the two frames' triangles. */
     const uint64_t m0 = rt_now_ns();
-    if (s_fg_match_cap < B->prims.n) {
-        int32_t *nm = (int32_t *)realloc(s_fg_match, (size_t)B->prims.n * sizeof *nm);
-        if (!nm) return 0;
-        s_fg_match = nm; s_fg_match_cap = B->prims.n;
+    /* Which frame is redrawn: the one the in-between camera sees more of.
+     * Moving forward, the older frame seen from further on spreads past
+     * the screen edges (nothing missing); the newer frame seen from further
+     * back would shrink away from them. Otherwise the newer frame. */
+    const uint32_t nmax = A->prims.n > B->prims.n ? A->prims.n : B->prims.n;
+    if (s_fg_verts_cap < nmax) {
+        FgVert *nv = (FgVert *)realloc(s_fg_verts, (size_t)nmax * 3 * sizeof *nv);
+        if (!nv) return 0;
+        s_fg_verts = nv; s_fg_verts_cap = nmax;
     }
-    FgMatchParams mp;
-    fg_match_defaults(&mp);
-    fg_match(&A->prims, &B->prims, &mp, s_fg_match, &s_fg_mst);
+    FgCamParams cp;
+    fg_cam_defaults(&cp);
+    FgList *src = A;
+    if (!fg_cam_fit(&B->prims, &A->prims, &cp, &s_fg_fit, s_fg_verts) ||
+        s_fg_fit.v[fg_main_view(&s_fg_fit)].t[2] <= 0.0) {
+        src = B;
+        fg_cam_fit(&A->prims, &B->prims, &cp, &s_fg_fit, s_fg_verts);
+    }
+    s_fg_src_older = src == A;
+    /* A full-width view on the native-wide surface reaches its edges, not
+     * the native draw area's. */
+    if (src->wide)
+        for (uint32_t vi = 0; vi < s_fg_fit.nviews; vi++) {
+            float *ar = s_fg_fit.v[vi].area;
+            if (ar[0] <= 0.0f && ar[2] >= (float)(src->disp[2] - 1)) {
+                ar[0] -= (float)src->wide_off;
+                ar[2] += (float)src->wide_off;
+            }
+        }
     s_fg_last_match_ms = (double)(rt_now_ns() - m0) * 1e-6;
+    /* The verdict: a frame whose correspondence is not trustworthy is not
+     * generated; the real frame shows at its own time. A forced run (the
+     * fixture's synthetic scenes carry no GTE identities) skips it. */
+    if (!s_fg_fit.ok && !s_fg_force) {
+        s_fg_rejected++;
+        s_fg_reject_why = s_fg_fit.why;
+        s_fg_last_n = 0;
+        return 0;
+    }
     /* The real frame waits for the generated ones before it. */
     if (s_fg_real_cap < bytes) {
         uint8_t *nb = (uint8_t *)realloc(s_fg_real_p, bytes);
@@ -11041,6 +11264,14 @@ void gl_renderer_set_frame_generation(int on) {
 }
 int gl_renderer_frame_generation(void) { return s_fg_on; }
 
+void gl_renderer_fg_source(const uint32_t id[3], const int32_t pc[9], const int32_t h[3],
+                           const int32_t x[3], const int32_t y[3]) {
+    if (!s_fg_on || !rth_record_mode()) return;
+    RTH_REC(RTH_FG_SRC, 0, (int32_t)id[0], (int32_t)id[1], (int32_t)id[2],
+            x[0], y[0], x[1], y[1], x[2], y[2],
+            pc[0], pc[1], pc[2], pc[3], pc[4], pc[5], pc[6], pc[7], pc[8], h[0], h[1], h[2]);
+}
+
 void gl_renderer_frame_gen_configure(double refresh_hz, double guest_hz) {
     atomic_store(&s_fg_refresh_hz, refresh_hz);
     if (guest_hz > 1.0) atomic_store(&s_fg_guest_hz, guest_hz);
@@ -11077,12 +11308,15 @@ int gl_renderer_frame_gen_json(char *out, int cap) {
         "\"last_n\":%d,\"slots\":%d,\"flip_vblanks\":%d,\"refresh_hz\":%.1f,"
         "\"real_ms\":%.3f,\"gen_ms\":%.3f,\"gen_cpu_ms\":%.3f,\"gen_gpu_ms\":%.3f,\"swap_ms\":%.3f,"
         "\"match_ms\":%.3f,"
-        "\"prims\":%u,\"matched\":%u,\"moved\":%u,\"unmatched\":%u,"
+        "\"prims\":%u,\"views\":%u,\"pairs\":%u,\"inliers\":%u,\"src_triangles\":%u,"
         "\"breaker_s\":%.2f,\"trips\":%u,\"last_trip\":\"%s\",\"held_s\":%.2f,"
         "\"last_hold\":\"%s\",\"swaps\":%llu,\"gen_samples\":%u,\"gen_cold\":%u,"
         "\"gen_probes\":%u,\"ignored_late\":%llu,\"ignored_bp\":%llu,"
         "\"real_cpu_ms\":%.3f,\"real_gpu_ms\":%.3f,\"ceiling\":%d,"
-        "\"trips_late\":%u,\"trips_backed_up\":%u,\"trips_behind\":%u",
+        "\"trips_late\":%u,\"trips_backed_up\":%u,\"trips_behind\":%u,"
+        "\"place_camera\":%u,\"place_object\":%u,\"place_neighbour\":%u,"
+        "\"place_unchanged\":%u,\"cam_angle_deg\":%.3f,\"cam_shift\":%.1f,"
+        "\"verdict_ok\":%d,\"rejected\":%llu,\"reject_why\":\"%s\"",
         s_fg_on, s_fg_on && s_rth_on && open, s_fg_force,
         (unsigned long long)s_fg_generated, (unsigned long long)s_fg_real_presents,
         (unsigned long long)s_fg_flips, (unsigned long long)s_fg_dups,
@@ -11091,7 +11325,7 @@ int gl_renderer_frame_gen_json(char *out, int cap) {
         s_fg_real_ema * 1e3, fg_cost()->ema * 1e3, s_fg_gen_cpu_ms, s_fg_gen_gpu_ms,
         s_fg_swap_ema * 1e3,
         s_fg_last_match_ms,
-        s_fg_mst.prims, s_fg_mst.matched, s_fg_mst.moved, s_fg_mst.unmatched,
+        s_fg_fit.prims, s_fg_fit.nviews, s_fg_fit.v[0].pairs, s_fg_fit.v[0].inliers, s_fg_src_seen,
         open ? 0.0 : s_fg_brk.until - now, s_fg_brk.trips,
         s_fg_brk.reason ? s_fg_brk.reason : "",
         (double)(atomic_load(&s_fg_hold_until) > rt_now_ns()
@@ -11100,7 +11334,13 @@ int gl_renderer_frame_gen_json(char *out, int cap) {
         fg_cost()->samples, fg_cost()->discarded, fg_cost()->probes,
         (unsigned long long)s_fg_ignored_late, (unsigned long long)s_fg_ignored_bp,
         s_fg_real_ema * 1e3, s_fg_real_gpu_ema * 1e3, fg_ceil()->cap,
-        s_fg_trip_late, s_fg_trip_bp, s_fg_trip_behind);
+        s_fg_trip_late, s_fg_trip_bp, s_fg_trip_behind,
+        s_fg_fit.camera, s_fg_fit.object, s_fg_fit.neighbour, s_fg_fit.unchanged,
+        2.0 * acos(fmin(1.0, fabs(s_fg_fit.v[0].q[0]))) * 57.29578,
+        sqrt(s_fg_fit.v[0].t[0] * s_fg_fit.v[0].t[0] + s_fg_fit.v[0].t[1] * s_fg_fit.v[0].t[1] +
+             s_fg_fit.v[0].t[2] * s_fg_fit.v[0].t[2]),
+        s_fg_fit.ok,
+        (unsigned long long)s_fg_rejected, s_fg_reject_why ? s_fg_reject_why : "");
 }
 
 /* ---- the recording vtable ------------------------------------------------ */

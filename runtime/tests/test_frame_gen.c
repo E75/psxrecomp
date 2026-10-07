@@ -15,94 +15,180 @@ static void check(int ok, const char *what) {
     if (!ok) { failures++; fprintf(stderr, "FAIL: %s\n", what); }
 }
 
-static FgPrim tri(uint32_t key, float x, float y, float s) {
-    FgPrim p;
-    memset(&p, 0, sizeof p);
-    p.key = key;
-    p.x[0] = x;     p.y[0] = y;
-    p.x[1] = x + s; p.y[1] = y;
-    p.x[2] = x;     p.y[2] = y + s;
-    return p;
+/* ---- a synthetic 3D scene seen by a moving camera ----
+ * World points on a grandstand facade (one repeated texture: every triangle
+ * has the same key), a camera at eye E with yaw Y (world -> camera: rotate by
+ * -Y about the vertical axis, after subtracting E), projection H / z. */
+#define GW 16
+#define GH 6
+#define HH 300.0
+typedef struct { double eye[3], yaw; } Cam;
+
+static void to_cam(const Cam *c, const double w[3], double o[3]) {
+    const double d[3] = { w[0] - c->eye[0], w[1] - c->eye[1], w[2] - c->eye[2] };
+    const double cs = cos(c->yaw), sn = sin(c->yaw);
+    o[0] = cs * d[0] - sn * d[2];
+    o[1] = d[1];
+    o[2] = sn * d[0] + cs * d[2];
+}
+
+static void wpt(int r, int col, double w[3]) {
+    w[0] = -400.0 + col * 50.0; w[1] = -100.0 + r * 40.0; w[2] = 2000.0 + col * 30.0;
+}
+
+static uint32_t vid_of(int r, int col) { return (uint32_t)(r * (GW + 1) + col) + 1; }
+
+static void vtx(FgPrim *p, int k, const Cam *c, int r, int col, uint32_t id) {
+    double w[3], q[3];
+    wpt(r, col, w);
+    to_cam(c, w, q);
+    p->vid[k] = id;
+    for (int i = 0; i < 3; i++) p->p[k][i] = (float)q[i];
+    p->h[k] = (float)HH;
+    p->x[k] = (float)(160.0 + HH * q[0] / q[2]);
+    p->y[k] = (float)(120.0 + HH * q[1] / q[2]);
 }
 
 static void add(FgPrimList *l, FgPrim p) { p.rec = l->n; check(fg_prims_add(l, &p), "add"); }
 
-static void test_identical_and_moved(void) {
+/* Rows r0..r1-1, bottom first when `reverse`. */
+static void stand(FgPrimList *l, const Cam *c, int r0, int r1, int reverse) {
+    for (int ri = r0; ri < r1; ri++) {
+        const int r = reverse ? r1 - 1 - (ri - r0) : ri;
+        for (int col = 0; col < GW; col++) {
+            FgPrim p;
+            memset(&p, 0, sizeof p);
+            p.key = 7; p.view = 1;
+            vtx(&p, 0, c, r, col, vid_of(r, col));
+            vtx(&p, 1, c, r, col + 1, vid_of(r, col + 1));
+            vtx(&p, 2, c, r + 1, col, vid_of(r + 1, col));
+            add(l, p);
+            vtx(&p, 0, c, r, col + 1, vid_of(r, col + 1));
+            vtx(&p, 1, c, r + 1, col + 1, vid_of(r + 1, col + 1));
+            vtx(&p, 2, c, r + 1, col, vid_of(r + 1, col));
+            add(l, p);
+        }
+    }
+}
+
+/* Worst screen distance between where a newer vertex is placed at phase t
+ * and where camera c shows its world point. */
+static float place_error(const FgPrimList *b, const float *x, const float *y, const Cam *c) {
+    float worst = 0.0f;
+    for (uint32_t j = 0; j < b->n; j++)
+        for (int k = 0; k < 3; k++) {
+            const uint32_t id = b->v[j].vid[k] - 1;
+            double w[3], q[3];
+            wpt((int)(id / (GW + 1)), (int)(id % (GW + 1)), w);
+            to_cam(c, w, q);
+            const float ex = x[3 * j + k] - (float)(160.0 + HH * q[0] / q[2]);
+            const float ey = y[3 * j + k] - (float)(120.0 + HH * q[1] / q[2]);
+            const float e = sqrtf(ex * ex + ey * ey);
+            if (e > worst) worst = e;
+        }
+    return worst;
+}
+
+/* The grandstand regression: the camera pans and travels, the newer frame
+ * draws the rows in another order with the top row culled and a new row in.
+ * In-between frames are the newer frame from an in-between camera: at phase
+ * 0 every vertex lands where the older camera saw it, at 0.5 where the
+ * halfway camera does. */
+static void test_camera_reordered(void) {
+    const Cam co = { { 0, 0, 0 }, 0.00 }, cn = { { 30, 0, 60 }, 0.04 }, cm = { { 15, 0, 30 }, 0.02 };
     FgPrimList a = { 0 }, b = { 0 };
-    for (int i = 0; i < 200; i++) add(&a, tri((uint32_t)(i % 7) + 1, (float)(i % 20) * 16.0f, (float)(i / 20) * 16.0f, 12.0f));
-    for (int i = 0; i < 200; i++) add(&b, tri((uint32_t)(i % 7) + 1, (float)(i % 20) * 16.0f + 3.0f, (float)(i / 20) * 16.0f - 2.0f, 12.0f));
-    FgMatchParams mp;
-    fg_match_defaults(&mp);
-    int32_t *m = (int32_t *)malloc(sizeof(int32_t) * b.n);
-    FgMatchStats st;
-    uint32_t got = fg_match(&a, &b, &mp, m, &st);
-    check(got == 200 && st.matched == 200 && st.unmatched == 0, "a moved scene matches every triangle");
-    int pairs_ok = 1;
-    for (uint32_t i = 0; i < b.n; i++) if (m[i] != (int32_t)i) pairs_ok = 0;
-    check(pairs_ok, "each triangle pairs with itself (draw order, nearest)");
-    /* Same positions: zero moves. */
-    got = fg_match(&a, &a, &mp, m, &st);
-    check(got == 200 && st.moved == 0, "an unchanged scene matches without motion");
-    free(m);
+    stand(&a, &co, 0, GH - 1, 0);
+    stand(&b, &cn, 1, GH, 1);
+    FgCamParams cp;
+    fg_cam_defaults(&cp);
+    FgVert *v = (FgVert *)malloc(sizeof(FgVert) * b.n * 3);
+    float *x = (float *)malloc(sizeof(float) * b.n * 3), *y = (float *)malloc(sizeof(float) * b.n * 3);
+    FgCamFit fit;
+    check(fg_cam_fit(&a, &b, &cp, &fit, v) == 1 && fit.ok, "the reordered stand gets a camera");
+    check(fit.camera == b.n * 3 && fit.v[0].inliers == fit.v[0].pairs, "every vertex placed by the camera");
+    fg_cam_place(&b, &fit, v, 0.0, x, y, NULL);
+    check(place_error(&b, x, y, &co) < 0.1f, "phase 0: where the older camera saw them (new row too)");
+    fg_cam_place(&b, &fit, v, 0.5, x, y, NULL);
+    check(place_error(&b, x, y, &cm) < 0.5f, "phase 0.5: where the halfway camera sees them");
+    fg_cam_place(&b, &fit, v, 1.0, x, y, NULL);
+    check(place_error(&b, x, y, &cn) < 1e-3f, "phase 1: the newer frame exactly");
+    free(v); free(x); free(y);
     fg_prims_free(&a); fg_prims_free(&b);
 }
 
-static void test_keys_limits_and_duplicates(void) {
+/* A car the camera follows (the same camera-space position in both frames)
+ * stays where it is; a HUD triangle (no projection) is not moved; a vertex
+ * without a projection in a world triangle moves with its neighbours. */
+static void test_objects_hud_neighbours(void) {
+    const Cam co = { { 0, 0, 0 }, 0.0 }, cn = { { 0, 0, 80 }, 0.03 };
     FgPrimList a = { 0 }, b = { 0 };
-    FgMatchParams mp;
-    fg_match_defaults(&mp);
-    /* 0: different key never pairs. 1: moved past max_move. 2: deformed.
-     * 3/4: two copies of one key; the newer ones swapped in draw order but
-     * each still nearest its own. */
-    add(&a, tri(10, 0, 0, 10));
-    add(&a, tri(11, 0, 0, 10));
-    add(&a, tri(12, 0, 0, 10));
-    add(&a, tri(13, 100, 100, 10));
-    add(&a, tri(13, 200, 100, 10));
-    add(&b, tri(99, 0, 0, 10));
-    add(&b, tri(11, mp.max_move + 10.0f, 0, 10));
-    FgPrim d = tri(12, 0, 0, 10);
-    d.x[1] += mp.max_deform + 8.0f;   /* one vertex moves alone */
-    add(&b, d);
-    add(&b, tri(13, 204, 101, 10));
-    add(&b, tri(13, 103, 99, 10));
-    int32_t m[5];
-    FgMatchStats st;
-    fg_match(&a, &b, &mp, m, &st);
-    check(m[0] == -1, "a different key does not pair");
-    check(m[1] == -1, "a move past max_move does not pair (placed, not moved)");
-    check(m[2] == -1, "a triangle whose vertices moved apart does not pair");
-    check(m[3] == 4 && m[4] == 3, "duplicate keys pair by distance");
-    check(st.matched == 2 && st.unmatched == 3, "match stats");
+    stand(&a, &co, 0, GH, 0);
+    stand(&b, &cn, 0, GH, 0);
+    FgPrim car;
+    memset(&car, 0, sizeof car);
+    car.key = 9; car.view = 1;
+    const float cpos[3][3] = { { -50, 60, 600 }, { 50, 60, 600 }, { 0, 20, 650 } };
+    for (int k = 0; k < 3; k++) {
+        car.vid[k] = 900000u + (uint32_t)k;
+        memcpy(car.p[k], cpos[k], sizeof car.p[k]);
+        car.h[k] = (float)HH;
+        car.x[k] = (float)(160.0 + HH * cpos[k][0] / cpos[k][2]);
+        car.y[k] = (float)(120.0 + HH * cpos[k][1] / cpos[k][2]);
+    }
+    add(&a, car); add(&b, car);
+    FgPrim hud;
+    memset(&hud, 0, sizeof hud);
+    hud.key = 3; hud.view = 2;
+    hud.x[0] = 10; hud.y[0] = 10; hud.x[1] = 40; hud.y[1] = 10; hud.x[2] = 10; hud.y[2] = 30;
+    add(&b, hud);
+    FgPrim cpu = b.v[0];   /* a CPU-built vertex in a world triangle */
+    cpu.vid[2] = 0;
+    add(&b, cpu);
+    FgCamParams cp;
+    fg_cam_defaults(&cp);
+    FgVert *v = (FgVert *)malloc(sizeof(FgVert) * b.n * 3);
+    float *x = (float *)malloc(sizeof(float) * b.n * 3), *y = (float *)malloc(sizeof(float) * b.n * 3);
+    FgCamFit fit;
+    check(fg_cam_fit(&a, &b, &cp, &fit, v) && fit.object == 3, "the followed car is an object");
+    fg_cam_place(&b, &fit, v, 0.0, x, y, NULL);
+    const uint32_t ic = 3 * (b.n - 3), ih = 3 * (b.n - 2), iu = 3 * (b.n - 1);
+    check(fabsf(x[ic] - car.x[0]) < 1e-3f && fabsf(y[ic + 2] - car.y[2]) < 1e-3f, "the followed car stays put");
+    check(x[ih] == hud.x[0] && y[ih + 2] == hud.y[2], "the HUD is not moved");
+    check(v[iu + 2].mode == FG_PLACE_NEIGHBOUR && fabsf(x[iu + 2] - b.v[b.n - 1].x[2]) > 0.5f,
+          "a CPU-built vertex moves with its triangle");
+    free(v); free(x); free(y);
     fg_prims_free(&a); fg_prims_free(&b);
 }
 
-static void test_each_older_pairs_once(void) {
+static void test_verdict(void) {
+    const Cam co = { { 0, 0, 0 }, 0.0 }, cn = { { 0, 0, 40 }, 0.02 }, far = { { 0, 0, 0 }, 0.9 };
+    FgCamParams cp;
+    fg_cam_defaults(&cp);
     FgPrimList a = { 0 }, b = { 0 };
-    add(&a, tri(5, 0, 0, 10));
-    add(&b, tri(5, 0, 0, 10));
-    add(&b, tri(5, 1, 0, 10));
-    FgMatchParams mp;
-    fg_match_defaults(&mp);
-    int32_t m[2];
-    fg_match(&a, &b, &mp, m, NULL);
-    check(m[0] == 0 && m[1] == -1, "an older triangle pairs at most once");
-    /* Empty older list: nothing pairs. */
-    FgPrimList e = { 0 };
-    fg_match(&e, &b, &mp, m, NULL);
-    check(m[0] == -1 && m[1] == -1, "no history: nothing pairs");
+    FgVert v[3 * GW * 2 * GH + 64];
+    FgCamFit fit;
+    /* No projections (a 2D screen). */
+    for (int i = 0; i < 40; i++) {
+        FgPrim p; memset(&p, 0, sizeof p); p.key = 1; p.x[1] = (float)i; add(&a, p); add(&b, p);
+    }
+    check(!fg_cam_fit(&a, &b, &cp, &fit, v) && fit.why && strstr(fit.why, "no projections"), "no projections: rejected");
+    fg_prims_reset(&a); fg_prims_reset(&b);
+    /* A cut: other geometry entirely. */
+    stand(&a, &co, 0, GH, 0);
+    stand(&b, &cn, 0, GH, 0);
+    for (uint32_t j = 0; j < b.n; j++) for (int k = 0; k < 3; k++) b.v[j].vid[k] += 100000u;
+    check(!fg_cam_fit(&a, &b, &cp, &fit, v) && fit.why && strstr(fit.why, "few pairs"), "a cut: rejected");
+    fg_prims_reset(&b);
+    /* A turn no camera makes between two frames. */
+    stand(&b, &far, 0, GH, 0);
+    check(!fg_cam_fit(&a, &b, &cp, &fit, v), "an implausible turn: rejected");
+    fg_prims_reset(&b);
+    /* Half the identities moved independently (wrong lookups): no consistent camera. */
+    stand(&b, &cn, 0, GH, 0);
+    for (uint32_t j = 0; j < b.n; j += 2)
+        for (int k = 0; k < 3; k++) { b.v[j].p[k][0] += 300.0f * (float)((j * 7 + k) % 5); b.v[j].p[k][2] += 150.0f; }
+    check(!fg_cam_fit(&a, &b, &cp, &fit, v), "inconsistent motion: rejected");
     fg_prims_free(&a); fg_prims_free(&b);
-}
-
-static void test_lerp(void) {
-    FgPrim a = tri(1, 10, 20, 8), b = tri(1, 30, 10, 8);
-    float x[3], y[3];
-    fg_lerp(&a, &b, 0.0, x, y);
-    check(x[0] == a.x[0] && y[2] == a.y[2], "phase 0 is the older frame exactly");
-    fg_lerp(&a, &b, 1.0, x, y);
-    check(x[1] == b.x[1] && y[1] == b.y[1], "phase 1 is the newer frame exactly");
-    fg_lerp(&a, &b, 0.25, x, y);
-    check(fabsf(x[0] - 15.0f) < 1e-5f && fabsf(y[0] - 17.5f) < 1e-5f, "phase 0.25");
 }
 
 static void test_plan(void) {
@@ -231,10 +317,9 @@ int main(void) {
     test_ceiling();
     test_cost();
     test_pace();
-    test_identical_and_moved();
-    test_keys_limits_and_duplicates();
-    test_each_older_pairs_once();
-    test_lerp();
+    test_camera_reordered();
+    test_objects_hud_neighbours();
+    test_verdict();
     test_plan();
     test_breaker();
     printf("frame_gen_test: checks=%d failures=%d\n", checks, failures);
