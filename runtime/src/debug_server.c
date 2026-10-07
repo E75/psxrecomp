@@ -8991,6 +8991,20 @@ static void handle_window_size(int id, const char *json) {
  * path in the chosen mode without a relaunch. 2 = native-wide, 1 = squash. */
 extern void psx_ws_set_native_wide(int on);
 extern int  psx_ws_get_native_wide(void);
+/* Live A/B keys (main.cpp debug_toggle_key): `debug_key key=<0-9>` acts as
+ * if the key was pressed in the game window. */
+extern int psx_debug_toggle_key(int ch, char *out, int cap);
+static void handle_debug_key(int id, const char *json)
+{
+    int k = json_get_int(json, "key", -1);
+    char msg[256] = "";
+    /* key 0-9, or 110-112 for F10-F12 */
+    int ok = (k >= 0 && k <= 9 && psx_debug_toggle_key('0' + k, msg, (int)sizeof msg)) ||
+             (k >= 110 && k <= 112 && psx_debug_toggle_key('a' + (k - 109), msg, (int)sizeof msg));
+    for (char *c = msg; *c; c++) if (*c == '"' || *c == '\\') *c = '\'';
+    send_fmt("{\"id\":%d,\"ok\":%s,\"state\":\"%s\"}", id, ok ? "true" : "false", msg);
+}
+
 static void handle_ws_nw(int id, const char *json)
 {
     int on = json_get_int(json, "on", -1);
@@ -15521,6 +15535,7 @@ static const CmdEntry s_commands[] = {
     { "display_aspect",    handle_display_aspect },
     { "window_size",       handle_window_size },
     { "ws_nw",             handle_ws_nw },
+    { "debug_key",         handle_debug_key },
     { "scanline",          handle_scanline },
     { "ws_backdrop_ring",  handle_ws_backdrop_ring },
     { "ws_ui_groups",      handle_ws_ui_groups },

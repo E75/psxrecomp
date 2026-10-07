@@ -1225,14 +1225,14 @@ vertex depth, `src/core/settings.cpp` defaults). GooseStation
 | Geometry correction (sub-pixel vertices) | dataflow shadows, `GetPreciseVertex` | yes (G1.10/G1.11, hook flavor 99.9% on R4) | same |
 | Culling correction | `PGXPCulling`, default on | yes, mod option (G1.12) | same |
 | Texture correction | perspective UV via w | yes | same |
-| Colour correction | `PGXPColorCorrection`, default off | no (Gouraud affine) | **yes**, `pgxp_color_correction` |
+| Colour correction | `PGXPColorCorrection`, default off | no (Gouraud affine) | **yes**, `pgxp_color_correction`, key F10 |
 | Vertex cache | `PGXPVertexCache`, default off | position cache (`pgxp_position_fallback`) | same |
-| CPU mode | `PGXPCPU`, default off | `pgxp_cpu_mode` (tier-2) | same |
+| CPU mode | `PGXPCPU`, default off | `pgxp_cpu_mode` (tier-2) | same, live key F12 |
 | Preserve projection precision | `PGXPPreserveProjFP` | exact projection (G1.11) | same |
 | Tolerance | `PGXPTolerance` -1 | `pgxp_tolerance` | same |
-| Depth buffer | `PGXPDepthBuffer`: per-vertex w as depth, LEQUAL, only for polygons whose w differ (3D) and opaque unless `PGXPTransparentDepthTest`; cleared on drawing-area change and when average z rises by `PGXPDepthThreshold` (4096) | no | **yes**, `pgxp_depth_buffer` |
+| Depth buffer | `PGXPDepthBuffer`: per-vertex w as depth, LEQUAL, only for polygons whose w differ (3D) and opaque unless `PGXPTransparentDepthTest`; cleared on drawing-area change and when average z rises by `PGXPDepthThreshold` (4096) | no | **yes**, `pgxp_depth_buffer`, key 9 |
 | 2D polygons | sprite mode for non-3D precise polygons; `PGXPDisableOn2DPolygons` draws invalid-w polygons native | unproven vertices native per vertex; precise axis-aligned quads bypass the rect path (G1.11) | same; 2D never tests/writes depth |
-| T-junction / seam handling | none for polygons (line expansion only) | none | **seam expansion**, `pgxp_seam` |
+| T-junction / seam handling | none for polygons (line expansion only) | none | **seam expansion**, `pgxp_seam`, key F11 |
 
 **Depth buffer.** gpu.c passes each triangle's SZ when all three vertices
 are dataflow-precise (`gr_set_depth_triangle`). The GL backend draws an

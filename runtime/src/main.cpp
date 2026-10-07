@@ -7945,6 +7945,10 @@ static void headless_present_image_ring_capture(void) {
 #endif
 // Shared by early and post-pacer sampling: do not PumpEvents without draining
 // ordered motion/control events and the existing hotkeys before folding binds.
+#ifndef PSX_NO_DEBUG_TOOLS
+static int debug_toggles_on(void);
+static int debug_toggle_key(int key, char *out, int cap);
+#endif
 static bool drain_host_events() {
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
@@ -7988,6 +7992,12 @@ static bool drain_host_events() {
                 netplay_soft_exit("netplay_escape");
                 return false;
             }
+#ifndef PSX_NO_DEBUG_TOOLS
+            /* Debug-tools builds: live rendering A/B keys 0-9 (consumed). */
+            if (!key_repeat && !(mod & (KMOD_CTRL | KMOD_ALT | KMOD_GUI)) &&
+                debug_toggles_on() && debug_toggle_key((int)key, nullptr, 0))
+                continue;
+#endif
             if (!key_repeat &&
                 host_keymap_match_event(HOST_KEYMAP_REWIND, (int)key,
                                         (int)scancode, (int)mod)) {
@@ -9343,6 +9353,150 @@ static void dynres_setup(void) {
                  g_dynres.active ? "on" : "inert (floor = ceiling)", floor_s, ceiling,
                  floor_s * g_video_ref_lines, ceiling * g_video_ref_lines);
 }
+
+#ifndef PSX_NO_DEBUG_TOOLS
+/* ---- Live rendering A/B keys (debug-tools builds) --------------------------
+ * PSX_DEBUG_TOGGLES=0 turns them off. Each key flips one rendering feature
+ * while the game runs and shows the new state on the OSD:
+ *   1 internal scale 1x -> 2x -> 4x -> Match display (ceiling) -> 1x
+ *   2 dynamic resolution controller   3 widescreen 16:9 native-wide / 4:3
+ *   4 frame generation (needs the render thread)
+ *   5 texture filter nearest -> bilinear -> stable world
+ *   6 native-wide full mirror / centre splice (wide_fast)
+ *   7 geometry correction (sub-pixel vertices)
+ *   8 perspective-correct texturing   0 summary
+ *   9 PGXP depth buffer   F10 PGXP perspective-correct colour
+ *   F11 PGXP seam expansion off -> fine -> wide   F12 PGXP CPU mode */
+extern "C" void pgxp_set_cpu_mode(int enabled);
+extern "C" int  pgxp_cpu_mode(void);
+extern "C" void gte_geometry_correction_set(int enabled);
+extern "C" int  gte_geometry_correction_enabled(void);
+extern "C" void gpu_texture_correction_set(int enabled);
+extern "C" int  gpu_texture_correction_enabled(void);
+extern "C" int  gl_renderer_get_wide_fast(void);
+static int debug_toggles_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = std::getenv("PSX_DEBUG_TOGGLES"); on = !(e && e[0] == '0'); }
+    return on;
+}
+static int s_dbg_scale_target = 0;
+static const char *dbg_texfilter_name(int f) {
+    return f == 1 ? "bilinear" : f == 2 ? "stable world" : "nearest";
+}
+static void debug_toggle_summary(char *buf, size_t cap) {
+    GlDynresStats st; gl_renderer_dynres_stats(&st);
+    static const char *seam_names[3] = {"off", "fine", "wide"};
+    std::snprintf(buf, cap, "scale %dx/%dx dynres %s ws %d:%d%s fg %s tex %s mirror %s geom %s persp %s"
+                  " | depth %s colour %s seam %s cpu %s",
+                  st.level, st.ceiling, g_dynres.active ? "on" : "off",
+                  g_video_aspect_num, g_video_aspect_den,
+                  g_ws_native_wide ? " nw" : " squash",
+                  gl_renderer_frame_generation() ? (g_render_thread ? "on" : "on(inert:no render thread)") : "off",
+                  dbg_texfilter_name(gr_texture_filter()),
+                  gl_renderer_get_wide_fast() ? "splice" : "full",
+                  gte_geometry_correction_enabled() ? "on" : "off",
+                  gpu_texture_correction_enabled() ? "on" : "off",
+                  gl_renderer_get_pgxp_depth() ? "on" : "off",
+                  gl_renderer_get_pgxp_color_perspective() ? "on" : "off",
+                  seam_names[gl_renderer_get_pgxp_seam()],
+                  pgxp_cpu_mode() ? "on" : "off");
+}
+static int debug_toggle_key(int key, char *out, int cap) {
+    char msg[256];
+    switch (key) {
+    case SDLK_1: {
+        GlDynresStats st; gl_renderer_dynres_stats(&st);
+        if (st.ceiling < 2) { std::snprintf(msg, sizeof msg, "Scale: fixed at %dx (no live steps)", st.level); break; }
+        const int cur = s_dbg_scale_target ? s_dbg_scale_target : st.level;
+        int next = cur < 2 ? 2 : cur < 4 ? 4 : cur < st.ceiling ? st.ceiling : 1;
+        if (next > st.ceiling) next = st.ceiling;
+        if (g_dynres.active) g_dynres.active = false;   /* manual scale wins */
+        s_dbg_scale_target = next;
+        (void)gl_renderer_request_internal_scale(next);
+        std::snprintf(msg, sizeof msg, "Scale: %dx%s (dynres off)", next,
+                      next == st.ceiling ? " = Match display" : next == 1 ? " Native" : "");
+        break; }
+    case SDLK_2:
+        if (g_dynres.active) g_dynres.active = false;
+        else { dynres_setup(); if (!g_dynres.active && gl_renderer_dynamic_resolution_ceiling() >= 2) g_dynres.active = true; }
+        s_dbg_scale_target = 0;
+        std::snprintf(msg, sizeof msg, "Dynamic resolution: %s", g_dynres.active ? "on" : "off");
+        break;
+    case SDLK_3: {
+        const bool wide = g_video_aspect_num * 3 != g_video_aspect_den * 4;
+        if (!wide) psx_ws_set_native_wide(1);
+        const int ok = wide ? psx_debug_display_aspect(4, 3, 0) : psx_debug_display_aspect(16, 9, 0);
+        std::snprintf(msg, sizeof msg, "Widescreen: %s%s", wide ? "off (4:3)" : "16:9 native-wide (engine only)",
+                      ok ? "" : " [refused]");
+        break; }
+    case SDLK_4: {
+        const int on = !gl_renderer_frame_generation();
+        g_frame_generation = on;
+        gl_renderer_set_frame_generation(on);
+        std::snprintf(msg, sizeof msg, "Frame generation: %s%s", on ? "on" : "off",
+                      on && !g_render_thread ? " (inert: render thread off)" : "");
+        break; }
+    case SDLK_5: {
+        const int f = (gr_texture_filter() + 1) % 3;
+        gr_set_texture_filter(f);
+        std::snprintf(msg, sizeof msg, "Texture filter: %s", dbg_texfilter_name(f));
+        break; }
+    case SDLK_6: {
+        const int fast = !gl_renderer_get_wide_fast();
+        gl_renderer_set_wide_fast(fast);
+        std::snprintf(msg, sizeof msg, "Native-wide mirror: %s", fast ? "centre splice (fast)" : "full mirror");
+        break; }
+    case SDLK_7: {
+        const int on = !gte_geometry_correction_enabled();
+        gte_geometry_correction_set(on);
+        std::snprintf(msg, sizeof msg, "Geometry correction (sub-pixel): %s", on ? "on" : "off");
+        break; }
+    case SDLK_8: {
+        const int on = !gpu_texture_correction_enabled();
+        gpu_texture_correction_set(on);
+        std::snprintf(msg, sizeof msg, "Perspective texturing: %s", on ? "on" : "off");
+        break; }
+    case SDLK_9: {
+        const int on = !gl_renderer_get_pgxp_depth();
+        gl_renderer_set_pgxp_depth(on);
+        std::snprintf(msg, sizeof msg, "PGXP depth buffer: %s", on ? "on" : "off");
+        break; }
+    case SDLK_F10: {
+        const int on = !gl_renderer_get_pgxp_color_perspective();
+        gl_renderer_set_pgxp_color_perspective(on);
+        std::snprintf(msg, sizeof msg, "PGXP perspective colour: %s", on ? "on" : "off");
+        break; }
+    case SDLK_F11: {
+        const int m = (gl_renderer_get_pgxp_seam() + 1) % 3;
+        gl_renderer_set_pgxp_seam(m);
+        std::snprintf(msg, sizeof msg, "PGXP seam expansion: %s",
+                      m == 0 ? "off" : m == 1 ? "fine (1 output px)" : "wide (0.5 native px)");
+        break; }
+    case SDLK_F12: {
+        const int on = !pgxp_cpu_mode();
+        pgxp_set_cpu_mode(on);
+        std::snprintf(msg, sizeof msg, "PGXP CPU mode: %s", on ? "on" : "off");
+        break; }
+    case SDLK_0:
+        debug_toggle_summary(msg, sizeof msg);
+        break;
+    default:
+        return 0;
+    }
+    host_osd_push(msg, key == SDLK_0 ? 5000 : 2500);
+    std::fprintf(stdout, "psxrecomp: toggle %s: %s\n", SDL_GetKeyName((SDL_Keycode)key), msg);
+    std::fflush(stdout);
+    if (out && cap > 0) std::snprintf(out, (size_t)cap, "%s", msg);
+    return 1;
+}
+/* Debug server: simulate a toggle key ({"cmd":"debug_key","key":"1"}). */
+extern "C" int psx_debug_toggle_key(int ch, char *out, int cap) {
+    if (ch >= 'b' && ch <= 'd')   /* F10..F12 */
+        return debug_toggle_key((int)(SDLK_F10 + (ch - 'b')), out, cap);
+    if (ch < '0' || ch > '9') return 0;
+    return debug_toggle_key((int)(SDLK_0 + (ch - '0')), out, cap);
+}
+#endif
 
 static void dynres_apply_level(int level) {
     GlDynresStats st;
@@ -18627,10 +18781,34 @@ session_reboot:
         gl_renderer_set_swap_interval(present_effective_swap_interval()); /* applied at context init */
         /* Dynamic resolution: the surfaces are allocated at the scale above
          * (the ceiling) and the level steps under it (dynres_setup). */
+#ifndef PSX_NO_DEBUG_TOOLS
+        /* Live A/B keys: allocate the surfaces at the Match display scale
+         * (the ceiling) so key 1 can step the internal scale at run time,
+         * then start at the configured scale with the controller off. */
+        const bool dbg_live_scale = debug_toggles_on() && g_video_scale_applies;
+        const int dbg_start_scale = g_video_requested_scale > 0 ? g_video_requested_scale : 1;
+        if (dbg_live_scale) {
+            const int ds = psx_resolve_internal_scale(
+                PSX_IR_DISPLAY, g_video_ref_lines,
+                psx_sdl_display_pixel_height(sdl_window), GL_MAX_INTERNAL_SCALE);
+            if (ds > dbg_start_scale) gr_set_scale(ds);
+        }
+#else
+        const bool dbg_live_scale = false;
+        const int dbg_start_scale = 1;
+#endif
         gl_renderer_set_dynamic_resolution(
-            (dynres_requested() && g_video_scale_applies) ? 1 : 0);
+            ((dynres_requested() || dbg_live_scale) && g_video_scale_applies) ? 1 : 0);
         g_gl_active = (gl_renderer_init_context(sdl_window) != 0);
         dynres_setup();
+        if (dbg_live_scale && g_gl_active) {
+            if (!dynres_requested()) g_dynres.active = false;
+            const int ceil_s = gl_renderer_dynamic_resolution_ceiling();
+            if (ceil_s >= 2 && !g_dynres.active)
+                (void)gl_renderer_step_internal_scale_now(dbg_start_scale);
+            std::fprintf(stdout, "psxrecomp: debug toggles: surfaces at %dx, "
+                         "starting at %dx (keys 0-9)\n", ceil_s, dbg_start_scale);
+        }
 
         /* Bezel artwork (Mods): load after the GL context exists. */
         if (!g_bezel_path.empty() && g_gl_active) {
