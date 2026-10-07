@@ -37,6 +37,10 @@ void gpu_hd_textures_set_vram(const uint16_t* v){(void)v;}
 void gpu_hd_textures_track_upload(int x,int y,int w,int h,const uint16_t* words){
     (void)x;(void)y;(void)w;(void)h;(void)words;}
 void gpu_hd_textures_invalidate(int x,int y,int w,int h){(void)x;(void)y;(void)w;(void)h;}
+void gpu_hd_textures_begin_upload(int x,int y,int w,int h){(void)x;(void)y;(void)w;(void)h;}
+void gpu_hd_textures_begin_copy(int sx,int sy,int dx,int dy,int w,int h){
+    (void)sx;(void)sy;(void)dx;(void)dy;(void)w;(void)h;}
+void gpu_hd_textures_end_copy(void){}
 uint32_t psx_mod_gpu_dma_memory_alloc(uint32_t n,uint32_t a){(void)n;(void)a;return 0;}
 uint32_t psx_mod_read_word(uint32_t a){(void)a;return 0;}
 int g_psx_vram_dirty_tracking=0;
