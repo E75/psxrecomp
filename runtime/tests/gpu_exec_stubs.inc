@@ -357,6 +357,7 @@ int gr_render_display_hires(uint32_t *out, int pitch, int dx, int dy, int dw, in
     (void)out; (void)pitch; (void)dx; (void)dy; (void)dw; (void)dh;
     return 0;
 }
+void gr_vram_upload_begin(int x,int y,int w,int h) { (void)x; (void)y; (void)w; (void)h; }
 void gr_vram_write(int x, int y, uint16_t pixel) { (void)x; (void)y; (void)pixel; }
 uint16_t gr_vram_read(int x, int y) { (void)x; (void)y; return 0; }
 void gr_vram_transfer_in(int x, int y, int w, int h, const uint16_t *data) {

@@ -28,6 +28,7 @@ DRIVER_C = r"""
 #include <stdio.h>
 
 extern uint64_t s_frame_count;
+extern int test_upload_begins, test_upload_commits, test_upload_rect[4];
 uint32_t gpu_get_opcode_count(uint8_t op);
 uint64_t gpu_get_gp0_count(void);
 void gpu_get_gp0_stats(uint64_t* nop, uint64_t* fill, uint64_t* draw,
@@ -184,6 +185,28 @@ int main(int argc, char **argv) {
            copy_dumped > 0 ? copy_entries[0].csp : 0u,
            poly_dumped, poly_dumped > 0 ? poly_entries[0].opcode : 0u,
            poly_dumped > 0 ? poly_entries[0].cmd[0] : 0u);
+    /* Native upload identity is invalidated at the header, even when GP1
+     * aborts a partially written payload. Mask rules stay in gpu.c and bulk
+     * commits carry only the final native words. */
+    gpu_write_gp1(0x00000000u);
+    int begins = test_upload_begins, commits = test_upload_commits;
+    gpu_write_gp0(0xA0000000u); gpu_write_gp0((511u<<16)|1023u);
+    gpu_write_gp0((2u<<16)|4u);
+    if (test_upload_begins != begins+1 || test_upload_rect[0]!=1023 ||
+        test_upload_rect[1]!=511 || test_upload_rect[2]!=4 || test_upload_rect[3]!=2) return 3;
+    gpu_write_gp0(0x33332222u);
+    gpu_write_gp1(0x01000000u);
+    if (test_upload_commits!=commits || gpu_vram_peek(1023,511)!=0x2222u ||
+        gpu_vram_peek(0,511)!=0x3333u) return 4;
+    gpu_write_gp0(0xE6000001u);
+    gpu_write_gp0(0xA0000000u); gpu_write_gp0((100u<<16)|32u);
+    gpu_write_gp0((1u<<16)|2u); gpu_write_gp0(0x00020001u);
+    if (gpu_vram_peek(32,100)!=0x8001u || gpu_vram_peek(33,100)!=0x8002u) return 5;
+    gpu_write_gp0(0xE6000002u);
+    gpu_write_gp0(0xA0000000u); gpu_write_gp0((100u<<16)|32u);
+    gpu_write_gp0((1u<<16)|2u); gpu_write_gp0(0x12341234u);
+    if (gpu_vram_peek(32,100)!=0x8001u || gpu_vram_peek(33,100)!=0x8002u ||
+        test_upload_commits!=commits+2 || test_upload_begins!=begins+3) return 6;
     return 0;
 }
 """
@@ -326,9 +349,15 @@ int ws_active(void) { return 0; }
 int ws_engaged(void) { return 0; }
 
 void gr_init(uint16_t *vram) { g_vram = vram; }
+int test_upload_begins, test_upload_commits, test_upload_rect[4];
+void gr_vram_upload_begin(int x,int y,int w,int h) {
+    ++test_upload_begins; test_upload_rect[0]=x; test_upload_rect[1]=y;
+    test_upload_rect[2]=w; test_upload_rect[3]=h;
+}
 uint16_t gr_vram_read(int x, int y) { return g_vram[(y & 511) * 1024 + (x & 1023)]; }
 void gr_vram_transfer_in(int x, int y, int w, int h, const uint16_t *pixels)
 {
+    ++test_upload_commits;
     for (int yy = 0; yy < h; yy++)
         for (int xx = 0; xx < w; xx++)
             g_vram[((y + yy) & 511) * 1024 + ((x + xx) & 1023)] = pixels[yy * w + xx];

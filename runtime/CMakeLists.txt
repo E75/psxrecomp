@@ -203,6 +203,15 @@ if(BUILD_TESTING)
                 --sdl-library "$<TARGET_FILE:SDL3::SDL3-static>"
                 --output "${CMAKE_CURRENT_BINARY_DIR}/gl-filter-results")
         set_tests_properties(gl_texture_filter_test PROPERTIES LABELS "gpu;opengl;hardware" TIMEOUT 180)
+        add_test(NAME gl_hd_texture_pack_test
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_gl_texture_filter.py"
+                --hd-pack --fixture "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gl_hd_texture_pack.c"
+                --cc "${CMAKE_C_COMPILER}" --cxx "${CMAKE_CXX_COMPILER}"
+                --sdl-include "$<TARGET_PROPERTY:SDL3::Headers,INTERFACE_INCLUDE_DIRECTORIES>"
+                --sdl-library "$<TARGET_FILE:SDL3::SDL3-static>"
+                --output "${CMAKE_CURRENT_BINARY_DIR}/gl-hd-texture-results")
+        set_tests_properties(gl_hd_texture_pack_test PROPERTIES LABELS "gpu;opengl;hardware" TIMEOUT 180)
     endif()
     add_executable(launcher_device_roundtrip_test
         tests/test_launcher_device_roundtrip.cpp)
@@ -427,6 +436,12 @@ if(BUILD_TESTING)
     find_package(Threads REQUIRED)
     target_link_libraries(hd_texture_pack_test PRIVATE Threads::Threads)
     add_test(NAME hd_texture_pack_test COMMAND hd_texture_pack_test)
+    add_executable(duckstation_texture_pack_test
+        tests/test_duckstation_texture_pack.cpp
+        src/duckstation_texture_pack.cpp)
+    target_include_directories(duckstation_texture_pack_test PRIVATE include)
+    target_link_libraries(duckstation_texture_pack_test PRIVATE Threads::Threads)
+    add_test(NAME duckstation_texture_pack_test COMMAND duckstation_texture_pack_test)
 
     # Registered since before this change, but it did NOT LINK on origin/master:
     # sio.c had grown psx_read_word / psx_get_cycle_count / i_mask /

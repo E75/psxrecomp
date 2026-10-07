@@ -102,6 +102,9 @@ int gr_render_display_hires(uint32_t *out_pixels, int out_pitch,
                             int disp_x, int disp_y, int disp_w, int disp_h);
 
 /* VRAM transfers */
+/* A0 header invalidation precedes payload writes; an interrupted transfer
+ * cannot leave a prior immutable texture identity resident. */
+void gr_vram_upload_begin(int x, int y, int w, int h);
 void gr_vram_write(int x, int y, uint16_t pixel);
 uint16_t gr_vram_read(int x, int y);
 void gr_vram_transfer_in(int x, int y, int w, int h, const uint16_t *data);
