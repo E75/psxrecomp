@@ -84,6 +84,9 @@ static void test_retagged_canonical_packet(void) {
 }
 
 static void test_pass_only_tags_and_phase(void) {
+    /* No image is consumed: discarded/watchdog-aborted passes use this same
+     * GPU restore. render_pass_abort_test covers the watchdog control flow
+     * separately with a mocked GPU/presenter. */
     start_scene();
     ws_nw_phase_backdrop = 1;
     ws_bg_phase_note(0x28u);
@@ -183,6 +186,11 @@ static void test_scene_evidence(void) {
 
 static void test_sprite_anchor(void) {
     start_scene();
+    /* Sprite-anchor coordinates are consumed by the projection/squash path;
+     * native-wide uses the same table only for packet identity. */
+    ws_mode = 1;
+    ws_xnum = 3;
+    ws_xden = 4;
     const uint32_t anchor_addr = 0x20000u;
     ws_anchor_addr = anchor_addr;
     CPUState cpu = {0};
@@ -201,6 +209,9 @@ static void test_sprite_anchor(void) {
 
 static void test_auto_ui_prepass(void) {
     start_scene();
+    ws_mode = 1;
+    ws_xnum = 3;
+    ws_xden = 4;
     gpu_ws_set_auto_ui_squash(1);
     const uint32_t hud[] = {
         0x28802040u, pack_vertex(20, 20), pack_vertex(40, 20),
@@ -211,14 +222,16 @@ static void test_auto_ui_prepass(void) {
     synthetic[1] = pack_vertex(24, 20);
     synthetic[3] = pack_vertex(24, 32);
     test_ram[(command_addr - 4u) / 4u] = (5u << 24) | 0xFFFFFFu;
+    const uint32_t ot_head = 0xFF00u;
+    test_ram[ot_head / 4u] = command_addr - 4u; /* Empty OT entry establishes rank 0. */
     packet_to_ram(hud, 5);
-    gpu_ws_prepass_linked_list(command_addr - 4u);
+    gpu_ws_prepass_linked_list(ot_head);
     packet_to_gp0(hud, 5);
     int32_t anchor;
     assert(ws_auto_ui_anchor(&anchor));
     assert(gpu_pass_checkpoint_save());
     packet_to_ram(synthetic, 5);
-    gpu_ws_prepass_linked_list(command_addr - 4u);
+    gpu_ws_prepass_linked_list(ot_head);
     gpu_pass_checkpoint_restore();
     packet_to_ram(hud, 5);
     gpu_ws_validate_linked_list_node(command_addr - 4u, 5);
