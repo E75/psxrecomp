@@ -3016,10 +3016,9 @@ bool save_user_settings(const fs::path& path, const UserSettings& s) {
     std::ofstream f(path, std::ios::trunc);
     if (!f.is_open()) return false;
 
-    // TOML strings use forward slashes so backslash escaping is never an issue.
+    // Windows paths use forward slashes so separators need no TOML escaping.
     auto fwd = [](const fs::path& p) {
-        std::string str = p.generic_string();
-        return str;
+        return host_path_forward_slashes(p);
     };
     // Paths inside the game folder are stored relative to it, so a portable
     // folder still finds its disc, BIOS and memory cards after it is moved or

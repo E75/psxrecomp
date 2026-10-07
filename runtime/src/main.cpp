@@ -2610,7 +2610,8 @@ static void write_cached_path(const char* argv0, const char* filename,
     // Relative inside the game folder so a moved portable folder still works;
     // read_cached_path anchors relative paths on the exe directory.
     if (f.is_open())
-        f << PSXRecompV4::relative_to_folder(path, exe_dir_from_argv(argv0)).generic_string() << "\n";
+        f << PSXRecompV4::host_path_forward_slashes(
+                 PSXRecompV4::relative_to_folder(path, exe_dir_from_argv(argv0))) << "\n";
 }
 
 /* Nobody is at the screen: never block on a modal dialog or a file picker. */
