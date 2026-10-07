@@ -21,6 +21,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -647,6 +648,7 @@ struct HdTexturePack {
     std::string asset_root;
     std::string replacement_root;
     std::unordered_map<uint64_t, EntryRecord> entries;
+    std::unordered_set<uint32_t> texture_hashes; /* any palette */
     size_t replacement_file_count = 0;
     size_t ambiguous_key_count = 0;
     size_t logical_mapping_count = 0;
@@ -872,6 +874,7 @@ int hd_texture_pack_create(const char* explicit_root,
             const auto mapping = mappings.find(key);
             if (mapping != mappings.end()) record.logical_path = mapping->second;
             pack->entries.emplace(key, std::move(record));
+            pack->texture_hashes.insert(static_cast<uint32_t>(key >> 32));
         }
 
         *out_pack = pack.release();
@@ -910,6 +913,10 @@ int hd_texture_pack_lookup(const HdTexturePack* pack,
     if (found->second.ambiguous) return HD_TEXTURE_LOOKUP_AMBIGUOUS;
     fill_entry(found->second, out_entry);
     return HD_TEXTURE_LOOKUP_FOUND;
+}
+
+int hd_texture_pack_has_texture(const HdTexturePack* pack, uint32_t texture_hash) {
+    return pack && pack->texture_hashes.count(texture_hash) ? 1 : 0;
 }
 
 uint32_t hd_texture_crc32_words_le(const uint16_t* words, size_t word_count) {

@@ -5663,7 +5663,7 @@ void gl_renderer_invalidate_present(void) {
 
 void gl_renderer_restage_vram_after_savestate(void) {
     GL_RT_SYNC("restage_vram_after_savestate");
-    gpu_hd_textures_reset_tracking();
+    gpu_hd_textures_restage();
     if (!s_raster_ok || !s_vram) return;
     /* Belt-and-suspenders after boot_state VRAM apply: force CPU mirror → FBO
      * even if a depth24 skip swallowed the restore, then re-arm scanout-band

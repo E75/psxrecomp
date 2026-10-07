@@ -459,25 +459,38 @@ int main(int argc,char** argv) {
     gl_renderer_render_thread_stop();
     check(!gl_renderer_render_thread_active(),"thread stops safely after HD transitions");
     check(vram[96*1024+224]==0x5678,"stopping the parked thread preserves final HD native draws");
-    /* Savestate sidecar: residency captured with the VRAM it describes comes
-     * back after a restage of that same VRAM, and only then. */
+    /* Restage (savestate, rewind): an upload rectangle seen this session comes
+     * back only while its restored words still carry the replacement key. */
+    {
+        GpuHdTextureImage img={0};
+        state(); gr_vram_transfer_in(512,0,4,4,source_words);   /* resident */
+        wait_ready(0);   /* the teardown session above decodes afresh */
+        gl_renderer_restage_vram_after_savestate();
+        check(gpu_hd_textures_acquire_draw(texture_page,0,0,bounds,0,0,&img),"restage re-admits an unchanged learned upload");
+        gpu_hd_textures_release_image(&img);
+        vram[512]^=1u; gl_renderer_restage_vram_after_savestate();
+        check(!gpu_hd_textures_acquire_draw(texture_page,0,0,bounds,0,0,&img),"restage refuses a learned rectangle whose words changed");
+        gpu_hd_textures_release_image(&img);
+        vram[512]^=1u; gl_renderer_restage_vram_after_savestate();
+    }
+    /* Savestate sidecar: residency saved with the VRAM it describes restores a
+     * fresh session (a cold load) over exactly that VRAM, and only then. */
     {
         uint8_t* res=NULL; size_t res_len=0; GpuHdTextureImage img={0};
-        state(); gr_vram_transfer_in(512,0,4,4,source_words);   /* resident */
         check(gpu_hd_textures_residency_save(&res,&res_len) && res_len>12,"residency saved");
+        gpu_hd_textures_shutdown();
+        check(gpu_hd_textures_configure(beetle_root,1,0,error,sizeof(error)),"fresh Beetle session");
         gl_renderer_restage_vram_after_savestate();
-        check(!gpu_hd_textures_acquire_draw(texture_page,0,0,bounds,0,0,&img),"restage clears residency");
+        check(!gpu_hd_textures_acquire_draw(texture_page,0,0,bounds,0,0,&img),"a fresh session knows no upload");
         gpu_hd_textures_release_image(&img);
-        check(gpu_hd_textures_residency_load(res,res_len),"residency restored over identical VRAM");
-        check(gpu_hd_textures_acquire_draw(texture_page,0,0,bounds,0,0,&img),"restored residency matches again");
-        gpu_hd_textures_release_image(&img);
-        vram[700*0+300]^=1u;
-        gl_renderer_restage_vram_after_savestate();
-        check(!gpu_hd_textures_residency_load(res,res_len),"residency refused over different VRAM");
-        vram[700*0+300]^=1u;
-        gl_renderer_restage_vram_after_savestate();
         res[12]^=0xffu;
         check(!gpu_hd_textures_residency_load(res,res_len),"corrupt residency refused");
+        res[12]^=0xffu;
+        vram[300]^=1u;
+        check(!gpu_hd_textures_residency_load(res,res_len),"residency refused over different VRAM");
+        vram[300]^=1u;
+        check(gpu_hd_textures_residency_load(res,res_len),"residency restored over identical VRAM");
+        wait_ready(0);
         free(res);
     }
     memcpy(reference,vram,sizeof(vram));

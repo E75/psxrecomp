@@ -11,4 +11,5 @@ void gpu_hd_textures_release_image(GpuHdTextureImage* image) {
 }
 void gpu_hd_textures_note_applied(void) {}
 void gpu_hd_textures_reset_tracking(void) {}
+void gpu_hd_textures_restage(void) {}
 #endif

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <vector>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -41,6 +42,9 @@ struct Session {
     uint64_t composition_clock = 0;
     std::string dump_error;
     std::deque<std::string> diagnostics;
+    /* Rectangles of uploads whose CRC keys a Beetle replacement, kept so a
+     * restage can re-verify them against the restored VRAM (bounded). */
+    std::vector<std::array<uint16_t, 4>> learned;
     GpuHdTextureDiag diag{};
     ~Session() { hd_texture_pack_destroy(beetle); duck_texture_pack_destroy(duck); }
 };
@@ -430,10 +434,36 @@ extern "C" void gpu_hd_textures_track_upload(int x, int y, int width, int height
         for (int col = 0; col < width; ++col)
             applied[static_cast<size_t>(row) * width + col] =
                 native_vram[((y + row) & 511) * 1024 + ((x + col) & 1023)];
+    uint32_t hash = 0;
     hd_texture_pack_track_upload(session->beetle, x & 1023, y & 511, width, height,
-                                 applied.get(), count, nullptr);
+                                 applied.get(), count, &hash);
     duck_texture_pack_track_upload(session->duck, x & 1023, y & 511, width, height,
                                    native_vram, kVramWords);
+    if (session->beetle && hd_texture_pack_has_texture(session->beetle, hash)) {
+        const std::array<uint16_t, 4> rect{uint16_t(x & 1023), uint16_t(y & 511),
+                                           uint16_t(width), uint16_t(height)};
+        if (std::find(session->learned.begin(), session->learned.end(), rect) == session->learned.end()) {
+            if (session->learned.size() >= 256) session->learned.erase(session->learned.begin());
+            session->learned.push_back(rect);
+        }
+    }
+}
+extern "C" void gpu_hd_textures_restage(void) {
+    gpu_hd_textures_reset_tracking();
+    if (!session || !session->beetle || !native_vram) return;
+    /* Only a rectangle whose restored words still hash to a replacement key
+     * becomes resident again: the same words at the same place as an upload
+     * this session saw, so no identity is invented. */
+    std::vector<uint16_t> words;
+    for (const auto& r : session->learned) {
+        const size_t count = size_t(r[2]) * r[3];
+        words.resize(count);
+        for (unsigned row = 0; row < r[3]; ++row)
+            for (unsigned col = 0; col < r[2]; ++col)
+                words[size_t(row) * r[2] + col] = native_vram[((r[1] + row) & 511) * 1024 + ((r[0] + col) & 1023)];
+        if (hd_texture_pack_has_texture(session->beetle, hd_texture_crc32_words_le(words.data(), count)))
+            hd_texture_pack_track_upload(session->beetle, r[0], r[1], r[2], r[3], words.data(), count, nullptr);
+    }
 }
 extern "C" int gpu_hd_textures_acquire_draw(uint16_t tp, uint16_t cx, uint16_t cy,
                                             const int limits[4], uint32_t window,

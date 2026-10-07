@@ -48,6 +48,10 @@ void gpu_hd_textures_begin_copy(int source_x, int source_y, int destination_x,
 void gpu_hd_textures_end_copy(void);
 void gpu_hd_textures_invalidate(int x, int y, int width_words, int height);
 void gpu_hd_textures_reset_tracking(void);
+/* A full VRAM restage (savestate, rewind): reset residency, then re-admit the
+ * Beetle-keyed upload rectangles seen this session whose restored words still
+ * carry the same key. */
+void gpu_hd_textures_restage(void);
 /* Savestate sidecar: the Beetle upload residency at save time, bound to a
  * CRC of the whole native VRAM. Loading it after a restage restores the
  * identities only if the restored VRAM is exactly the VRAM they described,
