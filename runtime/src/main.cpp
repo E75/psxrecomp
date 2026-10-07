@@ -6329,6 +6329,21 @@ static void netplay_transform_local_pad(PsxNetPad* pad, int override_active) {
     }
 }
 
+/* Admit-stall watchdog budget: PSX_NET_ADMIT_STALL_MS (default 20 s, at
+ * least 2 s). The clock measures time without ANY progress, not time spent
+ * waiting: a peer that is merely slow still moves its input tip forward, and
+ * every advance restarts the clock, so only a match where nobody advances is
+ * ended. */
+static uint32_t netplay_admit_stall_ms(void) {
+    static uint32_t ms = 0;
+    if (!ms) {
+        const char *e = std::getenv("PSX_NET_ADMIT_STALL_MS");
+        long v = e ? std::strtol(e, nullptr, 10) : 0;
+        ms = v >= 2000 && v <= 600000 ? (uint32_t)v : 20000u;
+    }
+    return ms;
+}
+
 static void netplay_barrier_admit(int override) {
     if (!psx_netplay_active()) return;
     /* Launcher/game window teardown can leave a queued SDL_QUIT; draining it
@@ -6351,6 +6366,7 @@ static void netplay_barrier_admit(int override) {
         s_np_timing_frames++;
     }
     int liveness_rearamed = 0;
+    int progress_lead = 0, progress_lead_valid = 0;
     freeze_heartbeat_set_paused(1);
     for (;;) {
         uint32_t dt = 0, lh = 0, rh = 0;
@@ -6358,6 +6374,19 @@ static void netplay_barrier_admit(int override) {
         const int running = psx_netplay_is_running();
         if (running && progress_t0 == 0)
             progress_t0 = now_ms;
+        if (running) {
+            /* A remote input tip that moved is progress: some peer is
+             * simulating, however slowly (see netplay_admit_stall_ms). */
+            char tag[8];
+            uint32_t psim = 0;
+            int plead = 0;
+            psx_netplay_admit_wait_info(tag, sizeof(tag), &psim, &plead);
+            if (progress_lead_valid && plead > progress_lead)
+                progress_t0 = now_ms;
+            if (!progress_lead_valid || plead > progress_lead)
+                progress_lead = plead;
+            progress_lead_valid = 1;
+        }
         /* Pump before liveness: free-run between vblanks (and tick-0 dig CRCs)
          * does not call poll_admit, so last_peer_rx can age past 1.5s while
          * peer FRAME_COMMIT/INPUT sit in the UDP socket. Checking disconnect
@@ -6429,7 +6458,8 @@ static void netplay_barrier_admit(int override) {
             netplay_soft_exit("netplay_link_stall");
             if (psx_return_to_lobby_requested()) goto done;
         } else if (!psx_netplay_in_load_barrier() && running &&
-                   progress_t0 != 0 && now_ms - progress_t0 >= 20000u) {
+                   progress_t0 != 0 &&
+                   now_ms - progress_t0 >= netplay_admit_stall_ms()) {
             char stall[64];
             uint32_t sim = 0;
             int lead = 0;

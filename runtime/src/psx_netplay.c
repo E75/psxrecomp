@@ -454,6 +454,7 @@ void psx_netplay_present_local_view(uint32_t x, uint32_t y,
     (void)h;
 }
 void psx_netplay_local_view_clear(void) {}
+int psx_netplay_local_view_shed(void) { return 0; }
 int psx_netplay_local_view(uint32_t display_w, uint32_t display_h,
                            uint32_t *x, uint32_t *y,
                            uint32_t *w, uint32_t *h)
@@ -1051,7 +1052,9 @@ static void np_drain_peer_frame_commits(void)
             continue;
         if (through == 0u)
             psx_netplay_rb_boot_dig0_note_peer(hash);
-        netplay_hc_note_peer(&g_np.hc, through, hash);
+        netplay_hc_note_peer_from(&g_np.hc,
+                                  rnet_session_rb_last_take_from(g_np.session),
+                                  through, hash);
     }
     /* FIRST CORE can stick the watermark forever once that tick ages out of
      * the 128-slot ring — heal so choose_load_tick sees a real frontier. */
@@ -3398,6 +3401,43 @@ void psx_netplay_local_view_clear(void)
     psx_netplay_local_view_reset(&s_local_view);
 }
 
+int psx_netplay_local_view_shed(void)
+{
+    static int s_enabled = -1;
+    static PsxNetplayLocalViewShed s_shed;
+    static uint64_t s_shed_frames;
+    int was, on;
+    if (!psx_netplay_active() || !g_np.session)
+        return 0;
+    if (s_enabled < 0) {
+        const char *e = getenv("PSX_NET_LOCAL_VIEW_SHED");
+        s_enabled = (e && e[0] == '0') ? 0 : 1;
+    }
+    if (!s_enabled)
+        return 0;
+    was = s_shed.on;
+    on = psx_netplay_local_view_shed_step(&s_shed,
+                                          rnet_session_sim_tick(g_np.session),
+                                          psx_netplay_remote_lead(),
+                                          psx_netplay_input_delay());
+    if (on && !was)
+        s_shed_frames = 0;
+    if (on != was) {
+        fprintf(stderr,
+                "psxrecomp: netplay own view %s (sim=%u remote_lead=%d D=%d; "
+                "%llu checks shed)\n",
+                on ? "SHED: this peer is behind, presenting the shared frame"
+                   : "restored: caught up",
+                (unsigned)rnet_session_sim_tick(g_np.session),
+                psx_netplay_remote_lead(), psx_netplay_input_delay(),
+                (unsigned long long)s_shed_frames);
+        fflush(stderr);
+    }
+    if (on)
+        s_shed_frames++;
+    return on;
+}
+
 int psx_netplay_local_view(uint32_t display_w, uint32_t display_h,
                            uint32_t *x, uint32_t *y,
                            uint32_t *w, uint32_t *h)
@@ -3562,6 +3602,21 @@ void psx_netplay_touch_peer_liveness(void)
     rnet_session_touch_peer_liveness(g_np.session);
 }
 
+/* Silence (no datagram from a peer) that counts as a disconnect while
+ * running: PSX_NET_LIVENESS_MS, default 1500, 500..60000. A peer stuck in a
+ * long host-side stall (a heavy frame, a deep resimulation on a slow machine)
+ * still sends nothing for that long, so slower setups can raise it. */
+static uint32_t np_liveness_ms(void)
+{
+    static uint32_t ms;
+    if (!ms) {
+        const char *e = getenv("PSX_NET_LIVENESS_MS");
+        long v = e ? strtol(e, NULL, 10) : 0;
+        ms = (v >= 500 && v <= 60000) ? (uint32_t)v : 1500u;
+    }
+    return ms;
+}
+
 uint32_t psx_netplay_running_liveness_timeout_ms(void)
 {
     uint32_t sim;
@@ -3578,7 +3633,7 @@ uint32_t psx_netplay_running_liveness_timeout_ms(void)
     /* Free-run + tick-0 dig publish no INPUT; rematch dig can exceed 1.5s. */
     if (sim < 48u)
         return 0u;
-    return 1500u;
+    return np_liveness_ms();
 }
 
 static void np_diag_capture(const PsxNetplayConfig *cfg, int slots)
@@ -4040,6 +4095,19 @@ int psx_netplay_start(const PsxNetplayConfig *cfg)
     g_np_slot_count = g_np.slot_count;
     g_np.local_slot = (int)rcfg.local_slot;
     g_np.spectator = cfg->spectator ? 1 : 0;
+    {
+        /* Hash confirm against EVERY peer, not whichever committed last: with
+         * three or more seats, peers that shared one wrong prediction agree
+         * with each other and would confirm a tick the predicted seat never
+         * reached (rnet_hc_set_peer_mask). Two seats keep the one-peer chain. */
+        uint32_t peers = rcfg.occupied_mask;
+        if (rcfg.slot_count < 32u)
+            peers &= (1u << rcfg.slot_count) - 1u;
+        if (rcfg.local_slot < 32u)
+            peers &= ~(1u << rcfg.local_slot);
+        netplay_hc_set_peer_mask(&g_np.hc,
+                                 (peers & (peers - 1u)) ? peers : 0u);
+    }
     if (g_np.host_spectates) {
         fprintf(stderr,
                 "psxrecomp: HOST SPECTATES - slot 0 runs the match with a "
