@@ -6342,6 +6342,7 @@ static uint64_t s_present_ticks_accum = 0, s_present_ticks_last = 0;
 static double   s_present_cost_ema = 0.0;     /* host ticks per present */
 static uint32_t s_intervals_since_plan = 0;
 static int      s_pass_budget_pct = -1;
+static GLRenderPassPlanDiag s_pass_plan_diag;
 
 static int      s_pass_verify = -1;
 static uint8_t *s_pv_hr = NULL, *s_pv_raw = NULL;
@@ -6431,7 +6432,7 @@ uint32_t gl_renderer_pass_plan(uint32_t period_vblanks,
                                uint32_t *alpha_q16, uint32_t max,
                                uint32_t *wanted) {
     RenderPassPlanInput in;
-    double freq, sp;
+    double freq, sp, spare;
     uint32_t cap;
     int live;
 
@@ -6467,8 +6468,8 @@ uint32_t gl_renderer_pass_plan(uint32_t period_vblanks,
     {
         /* Presents beyond two per frame are traded for passes: a shed
          * present is coalesced, a shed pass is a missing motion sample. */
-        double spare = (double)s_idle_ticks_last + (double)s_present_ticks_last -
-                       2.0 * s_present_cost_ema;
+        spare = (double)s_idle_ticks_last + (double)s_present_ticks_last -
+                2.0 * s_present_cost_ema;
         if (spare < 0.0) spare = 0.0;
         in.budget = render_pass_budget(spare, (double)s_pass_ticks_last,
                                        in.frame_length,
@@ -6486,8 +6487,31 @@ uint32_t gl_renderer_pass_plan(uint32_t period_vblanks,
             in.pass_cost = 0.0;
             n = render_pass_plan_phases(&in, alpha_q16, NULL);
         }
+        /* Record the actual input used, including a cost rewarm, without
+         * making a debug query drive admission or reset its history. */
+        {
+            double ms = 1000.0 / freq;
+            s_pass_plan_diag.plans++;
+            s_pass_plan_diag.frame = s_frame_count;
+            s_pass_plan_diag.idle_ms = (double)s_idle_ticks_last * ms;
+            s_pass_plan_diag.present_ms = (double)s_present_ticks_last * ms;
+            s_pass_plan_diag.prior_pass_ms = (double)s_pass_ticks_last * ms;
+            s_pass_plan_diag.present_reserve_ms = 2.0 * s_present_cost_ema * ms;
+            s_pass_plan_diag.spare_ms = spare * ms;
+            s_pass_plan_diag.frame_ms = in.frame_length * ms;
+            s_pass_plan_diag.cost_ms = in.pass_cost * ms;
+            s_pass_plan_diag.budget_ms = in.budget * ms;
+            s_pass_plan_diag.wanted = want;
+            s_pass_plan_diag.planned = n;
+            if (want && !n && !(in.budget > 0.0))
+                s_pass_plan_diag.zero_credit_refusals++;
+        }
         return n;
     }
+}
+
+void gl_renderer_pass_plan_diag(GLRenderPassPlanDiag *out) {
+    if (out) *out = s_pass_plan_diag;
 }
 
 void gl_renderer_pass_note_cost(uint64_t ticks) {

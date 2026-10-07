@@ -1051,6 +1051,18 @@ remain user-owned and outside the bundled package directory.
 
 Register via `mod_register_media_preparer` in mod_packages.h. Ship any worker
 and its runtime dependencies with the title: players should only supply media.
+
+Launcher preparation is synchronous by default. A title may set
+`PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE=ON` only after auditing all its trusted
+preparers and services for serialized worker execution without UI, SDL, GL,
+or main-thread affinity. With a recomp-ui header advertising
+`RECOMP_LAUNCHER_HAS_WORKER_MOD_COMMIT`, preboot offline PLAY then commits on an
+owned worker while the launcher renders an exclusive progress view. The UI
+does not access the provider until that worker has joined; close is queued
+until completion. Verification, preparation, persistence, and failure gates
+are unchanged. Older UI pins, other titles, netplay, and in-session commits
+retain synchronous behavior. Plugin activation remains on the runtime's
+existing post-commit path, not the preparation worker.
 The `prepare_resources` method is separate from read-only `resolve`, so editing
 launcher settings does not trigger conversions. Runtime activation still sees
 only fully verified immutable resources.

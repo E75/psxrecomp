@@ -318,7 +318,14 @@ struct ModPrepareContext {
 using ModMediaPreparer = std::function<bool(const ModPrepareContext&,
     std::map<std::string, std::filesystem::path>&, std::string&)>;
 // Implementations are linked trusted code. A manifest cannot execute a command.
-bool mod_register_media_preparer(const std::string& id, ModMediaPreparer callback);
+// Normally called synchronously during launch preparation. A title enabling
+// PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE also permits preboot offline preparation
+// on a launcher-owned worker. Every registered callback/service used by that
+// title must then support serialized worker calls without SDL/UI/GL or
+// main-thread affinity. Registration must finish before opening the launcher;
+// activation callbacks still run separately, before renderer initialization.
+bool mod_register_media_preparer(const std::string& id, ModMediaPreparer callback,
+                                 ModMediaPreparer cache_probe = {});
 
 struct ModFeatureSelection {
     bool enabled = false;
@@ -453,7 +460,7 @@ public:
     bool prepare_resources(const std::string& game_id,
                            const std::filesystem::path& disc_path,
                            const std::filesystem::path& cache_root,
-                           std::string* error = nullptr);
+                           std::string* error = nullptr, bool cached_only = false);
 
     bool install_archive(const std::filesystem::path& archive,
                          std::string* installed_id = nullptr,

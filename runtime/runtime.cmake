@@ -82,6 +82,11 @@ else()
     option(PSX_DEBUG_TOOLS "Build with TCP debug server + heartbeat + per-block recording" ON)
 endif()
 
+# A title may opt in only after auditing every trusted media preparer used by
+# its mod commit. Older recomp-ui pins ignore this capability and remain sync.
+option(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE
+    "Title certifies preboot mod commit/preparers have no UI or thread affinity" OFF)
+
 # PSX_STATIC_RUNTIME: produce a 100% self-contained MinGW exe.
 #
 # A default MinGW build dynamically imports three NON-system DLLs —
@@ -2084,6 +2089,9 @@ function(psxrecomp_add_runtime_target target)
     endif()
     if(PSX_MOD_DEVELOPER_CHANNEL)
         target_compile_definitions(${target} PRIVATE PSX_MOD_DEVELOPER_CHANNEL=1)
+    endif()
+    if(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
+        target_compile_definitions(${target} PRIVATE PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE=1)
     endif()
     if(has_game_dispatch)
         target_compile_definitions(${target} PRIVATE PSX_HAS_GAME_DISPATCH=1)

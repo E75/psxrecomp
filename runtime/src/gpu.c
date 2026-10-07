@@ -7476,10 +7476,110 @@ int gpu_snapshot_read(const uint8_t *p, uint32_t len) {
 }
 /* ---- Render-pass GPU checkpoint (render_pass.c) ---------------------------
  * The same register set as a savestate (gpu_snap_emit), restored WITHOUT
- * gpu_snapshot_read's side effects (widescreen scene history and HUD anchor
- * tags belong to the live frame, which a pass must not reset). After the
- * restore the renderer's mirrored draw state (area, offset, texture window,
+ * gpu_snapshot_read's side effects. Packet provenance belongs to the RAM it
+ * describes: a synthetic builder can rewrite and retag a canonical packet,
+ * so rolling its RAM back must also restore its original tags, not clear them.
+ * The renderer's mirrored draw state (area, offset, texture window,
  * mask bits, native-wide target) is re-synced exactly as GP0(E2..E6) would. */
+typedef struct {
+    WsTag ws_tags[WS_TAG_BUCKETS];
+    WsHudAnchorTag ws_hud_anchor_tags[WS_HUD_ANCHOR_TABLE_SIZE];
+    WsHudAnchorTag ws_background_tags[WS_HUD_ANCHOR_TABLE_SIZE];
+    WsHudAnchorTag ws_reveal_clear_tags[WS_HUD_ANCHOR_TABLE_SIZE];
+    WsHudAnchorTag ws_screen_mask_tags[WS_HUD_ANCHOR_TABLE_SIZE];
+    WsRadialScreenMaskTag ws_radial_screen_mask_tags[WS_RADIAL_MASK_TAG_COUNT];
+    WsRepeatRectTag ws_repeat_rect_tags[WS_REPEAT_RECT_TAG_TABLE_SIZE];
+    WsPrimitiveRole ws_primitive_roles[WS_ROLE_BUCKETS];
+    WsUiPrepassItem ws_ui_prepass[WS_UI_PREPASS_MAX];
+    WsUiPrepassNode ws_ui_prepass_nodes[WS_UI_PREPASS_NODE_MAX];
+    uint32_t ws_ui_prepass_count, ws_ui_prepass_node_count;
+    uint16_t ws_ui_prepass_rank;
+    int ws_auto_ui_dense, ws_shared_ui_copy;
+    uint32_t ws_background_tag_frame, ws_last_tag_stamp;
+    int ws_background_tags_used;
+    uint32_t s_bg_phase_frame;
+    int s_bg_phase_over;
+    /* Synthetic GTE/GP0 draws update these signals, and native-wide target
+     * selection reads them even though no guest frame has elapsed. */
+    uint32_t ws_gte_frame, ws_gte_count, ws_gte_prev_verts;
+    uint32_t ws_last_gte_stamp, ws_last_world3d_stamp, ws_sust_world3d_stamp;
+    uint32_t ws_ovh_frame, ws_ovh_count, ws_ovh_prev;
+    uint32_t ws_last_ovh_stamp, ws_sust_ovh_stamp;
+    WsSceneLatch ws_scene_latch;
+    WsSceneHold s_ws_scene_hold;
+    uint32_t s_ws_fmv_frame_cache;
+    int s_ws_fmv_cached;
+} GpuPassPresentationState;
+static GpuPassPresentationState s_pass_presentation;
+
+/* One transfer list keeps save and restore symmetric. The prepass arrays are
+ * read only through their counts, so copy just their populated prefixes.
+ * Counters/rings remain cumulative; configuration and callbacks are unchanged. */
+static void gpu_pass_provenance_transfer(int restore) {
+#define PASS_ARRAY(name) do { \
+    if (restore) memcpy(name, s_pass_presentation.name, sizeof(name)); \
+    else memcpy(s_pass_presentation.name, name, sizeof(name)); \
+} while (0)
+#define PASS_VALUE(name) do { \
+    if (restore) name = s_pass_presentation.name; \
+    else s_pass_presentation.name = name; \
+} while (0)
+    PASS_ARRAY(ws_tags);
+    PASS_ARRAY(ws_hud_anchor_tags);
+    PASS_ARRAY(ws_background_tags);
+    PASS_ARRAY(ws_reveal_clear_tags);
+    PASS_ARRAY(ws_screen_mask_tags);
+    PASS_ARRAY(ws_radial_screen_mask_tags);
+    PASS_ARRAY(ws_repeat_rect_tags);
+    PASS_ARRAY(ws_primitive_roles);
+    PASS_VALUE(ws_ui_prepass_count);
+    PASS_VALUE(ws_ui_prepass_node_count);
+    PASS_VALUE(ws_ui_prepass_rank);
+    PASS_VALUE(ws_auto_ui_dense);
+    PASS_VALUE(ws_shared_ui_copy);
+    PASS_VALUE(ws_background_tag_frame);
+    PASS_VALUE(ws_background_tags_used);
+    PASS_VALUE(ws_last_tag_stamp);
+    PASS_VALUE(s_bg_phase_frame);
+    PASS_VALUE(s_bg_phase_over);
+    if (restore) {
+        memcpy(ws_ui_prepass, s_pass_presentation.ws_ui_prepass,
+               ws_ui_prepass_count * sizeof(ws_ui_prepass[0]));
+        memcpy(ws_ui_prepass_nodes, s_pass_presentation.ws_ui_prepass_nodes,
+               ws_ui_prepass_node_count * sizeof(ws_ui_prepass_nodes[0]));
+    } else {
+        memcpy(s_pass_presentation.ws_ui_prepass, ws_ui_prepass,
+               ws_ui_prepass_count * sizeof(ws_ui_prepass[0]));
+        memcpy(s_pass_presentation.ws_ui_prepass_nodes, ws_ui_prepass_nodes,
+               ws_ui_prepass_node_count * sizeof(ws_ui_prepass_nodes[0]));
+    }
+#undef PASS_ARRAY
+#undef PASS_VALUE
+}
+
+static void gpu_pass_scene_transfer(int restore) {
+#define PASS_VALUE(name) do { \
+    if (restore) name = s_pass_presentation.name; \
+    else s_pass_presentation.name = name; \
+} while (0)
+    PASS_VALUE(ws_gte_frame);
+    PASS_VALUE(ws_gte_count);
+    PASS_VALUE(ws_gte_prev_verts);
+    PASS_VALUE(ws_last_gte_stamp);
+    PASS_VALUE(ws_last_world3d_stamp);
+    PASS_VALUE(ws_sust_world3d_stamp);
+    PASS_VALUE(ws_ovh_frame);
+    PASS_VALUE(ws_ovh_count);
+    PASS_VALUE(ws_ovh_prev);
+    PASS_VALUE(ws_last_ovh_stamp);
+    PASS_VALUE(ws_sust_ovh_stamp);
+    PASS_VALUE(ws_scene_latch);
+    PASS_VALUE(s_ws_scene_hold);
+    PASS_VALUE(s_ws_fmv_frame_cache);
+    PASS_VALUE(s_ws_fmv_cached);
+#undef PASS_VALUE
+}
+
 static uint8_t  s_pass_regs[512];
 static uint32_t s_pass_regs_len;
 static uint32_t s_pass_poll_count;
@@ -7499,6 +7599,8 @@ int gpu_pass_checkpoint_save(void) {
     s_pass_doff_max = g_doff_max_this;
     s_pass_doff_cnt = g_doff_cnt_this;
     s_pass_split_this = split_trace_this;
+    gpu_pass_provenance_transfer(0);
+    gpu_pass_scene_transfer(0);
     return 1;
 }
 
@@ -7512,12 +7614,17 @@ void gpu_pass_checkpoint_restore(void) {
     g_doff_max_this = s_pass_doff_max;
     g_doff_cnt_this = s_pass_doff_cnt;
     split_trace_this = s_pass_split_this;
+    gpu_pass_provenance_transfer(1);
+    gpu_pass_scene_transfer(1);
     gr_set_texture_window(texture_window_value);
     gr_set_draw_area((int)draw_area_left, (int)draw_area_top,
                      (int)draw_area_right, (int)draw_area_bottom);
     gr_set_draw_offset(draw_offset_x, draw_offset_y);
     gr_set_mask_bits((int)set_mask_bit, (int)check_mask_bit);
     ws_nw_sync_target();
+    /* Target sync may classify the scene before render_pass.c restores RAM.
+     * Do not retain history learned from the synthetic draw or that query. */
+    gpu_pass_scene_transfer(1);
     s_pass_regs_len = 0;
 }
 

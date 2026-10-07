@@ -23,6 +23,12 @@ psxrecomp_add_runtime_target(psx-runtime
 # (docs/ENHANCEMENTS.md G1.10). Titles get their <exe>_pgxp the same way.
 
 if(BUILD_TESTING)
+    find_package(Threads REQUIRED)
+    add_executable(host_launch_timing_test
+        tests/test_host_launch_timing.cpp tests/host_launch_timing_helper.cpp)
+    target_include_directories(host_launch_timing_test PRIVATE include)
+    target_link_libraries(host_launch_timing_test PRIVATE Threads::Threads)
+    add_test(NAME host_launch_timing_test COMMAND host_launch_timing_test)
     add_executable(disasm_test tests/test_disasm.cpp src/disasm_shim.cpp
         ../recompiler/src/mips_decoder.cpp)
     target_include_directories(disasm_test PRIVATE include ../recompiler/include)
@@ -136,6 +142,12 @@ if(BUILD_TESTING)
     set(PSX_GL_READBACK_COMPILER_BIN "${_gl_test_default_bin}" CACHE PATH "GCC/MinGW bin for GL fixture")
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
+        add_test(NAME host_launch_timings_protocol_test COMMAND ${CMAKE_COMMAND} -E env
+            "CC=${CMAKE_C_COMPILER}" "CXX=${CMAKE_CXX_COMPILER}" "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_host_launch_timings_protocol.py")
+        set_tests_properties(host_launch_timings_protocol_test PROPERTIES SKIP_RETURN_CODE 77)
+        add_test(NAME tcp_command_index_check COMMAND "${Python3_EXECUTABLE}"
+            "${PSXRECOMP_ROOT}/tools/gen_tcp_commands.py" --check)
         add_test(NAME wtrace_dump_test COMMAND ${CMAKE_COMMAND} -E env
             "CC=${CMAKE_C_COMPILER}" "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wtrace_dump.py")
@@ -689,7 +701,12 @@ if(BUILD_TESTING)
     add_executable(native_wide_projection_test tests/test_native_wide_projection.c
         src/psx_video_timing.c
         src/gpu_timeline.c)
-    foreach(_anchor_test ws_view_anchor ws_view_anchor_gpu native_wide_projection)
+    add_executable(gpu_render_pass_provenance_test tests/test_gpu_render_pass_provenance.c
+        src/ws_ui_group.c
+        src/psx_video_timing.c
+        src/gpu_timeline.c)
+    foreach(_anchor_test ws_view_anchor ws_view_anchor_gpu native_wide_projection
+                         gpu_render_pass_provenance)
         target_include_directories(${_anchor_test}_test PRIVATE include src)
         if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
             target_compile_options(${_anchor_test}_test PRIVATE -ffunction-sections -fdata-sections)
@@ -704,6 +721,7 @@ if(BUILD_TESTING)
     add_test(NAME ws_view_anchor_test COMMAND ws_view_anchor_test)
     add_test(NAME ws_view_anchor_gpu_test COMMAND ws_view_anchor_gpu_test)
     add_test(NAME native_wide_projection_test COMMAND native_wide_projection_test)
+    add_test(NAME gpu_render_pass_provenance_test COMMAND gpu_render_pass_provenance_test)
 
     add_executable(ws_repeat_rect_test tests/test_ws_repeat_rect.c)
     target_include_directories(ws_repeat_rect_test PRIVATE include)
@@ -970,6 +988,21 @@ if(BUILD_TESTING)
         endif()
     endif()
     add_test(NAME netplay_view_mods_test COMMAND netplay_view_mods_test)
+    get_target_property(mod_runtime_sources mod_runtime_test SOURCES)
+    add_executable(mod_runtime_cache_test ${mod_runtime_sources})
+    target_include_directories(mod_runtime_cache_test PRIVATE
+        include ../recompiler/include ../recompiler/lib/toml11)
+    target_compile_definitions(mod_runtime_cache_test PRIVATE
+        PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE=1)
+    target_link_libraries(mod_runtime_cache_test PRIVATE chdr-static)
+    if(WIN32)
+        if(MSVC)
+            target_link_options(mod_runtime_cache_test PRIVATE /STACK:16777216)
+        else()
+            target_link_options(mod_runtime_cache_test PRIVATE -Wl,--stack,16777216)
+        endif()
+    endif()
+    add_test(NAME mod_runtime_cache_test COMMAND mod_runtime_cache_test)
 
     add_executable(mod_resident_test
         tests/test_mod_resident.cpp

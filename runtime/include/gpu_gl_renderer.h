@@ -99,6 +99,17 @@ void     gl_renderer_pass_service_presents(void);
  * presents past the frame's planned end (the next flip was late; the newest
  * image held), stale pass-cost estimates measured again. */
 void     gl_renderer_pass_diag(uint64_t out[10]);
+/* Always-on snapshot of the last eligible planner call and lifetime count of
+ * wanted plans refused with zero measured credit. Times are host milliseconds;
+ * reads do not reset counters or invoke the planner. Backend refusals leave
+ * this snapshot unchanged. */
+typedef struct GLRenderPassPlanDiag {
+    uint64_t plans, frame, zero_credit_refusals;
+    double idle_ms, present_ms, prior_pass_ms, present_reserve_ms, spare_ms;
+    double frame_ms, cost_ms, budget_ms;
+    uint32_t wanted, planned;
+} GLRenderPassPlanDiag;
+void gl_renderer_pass_plan_diag(GLRenderPassPlanDiag *out);
 /* Out-of-rect VRAM writes journaled and rolled back (lifetime count). */
 uint64_t gl_renderer_pass_journaled(void);
 /* Passes that reused the previous pass's VRAM backup (lifetime count). */

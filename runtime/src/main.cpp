@@ -106,6 +106,7 @@ extern "C" void psx_event_step_conservative_env_init(void);
 #include "mod_local_input_policy.h"
 #include "mod_session_baseline.h"
 #include "mod_runtime.h"
+#include "host_launch_timing.h"
 #include "mod_packages.h"
 #include "present_image_ring.h"
 #include "gpu_timeline.h"
@@ -2640,7 +2641,8 @@ static void write_cached_path(const char* argv0, const char* filename,
     // Relative inside the game folder so a moved portable folder still works;
     // read_cached_path anchors relative paths on the exe directory.
     if (f.is_open())
-        f << PSXRecompV4::relative_to_folder(path, exe_dir_from_argv(argv0)).generic_string() << "\n";
+        f << PSXRecompV4::host_path_forward_slashes(
+                 PSXRecompV4::relative_to_folder(path, exe_dir_from_argv(argv0))) << "\n";
 }
 
 /* Nobody is at the screen: never block on a modal dialog or a file picker. */
@@ -15991,6 +15993,7 @@ int main(int argc, char** argv) {
     std::thread overlay_init_thread;
     std::exception_ptr overlay_init_exc;
     auto run_deferred_overlay_init = [&]() {
+        PSXRecompV4::HostLaunchTimingScope timing(HOST_LAUNCH_OVERLAY_WORKER);
         std::filesystem::path exe_dir = exe_dir_from_argv(argv[0]);
         std::string cache_dir = (exe_dir / "cache").string();
         std::filesystem::path captures_path =
@@ -16176,6 +16179,7 @@ int main(int argc, char** argv) {
                 captures_path.string().c_str());
         }
         code_provider_init(cfg_backend, gcc_avail);
+        timing.success();
     };
 
     if (deferred_overlay_cache) {
@@ -16686,6 +16690,12 @@ int main(int argc, char** argv) {
                 return qrc;
             }
 #endif
+#if defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
+            // Once per offline preboot: verified receipts make the selected plan
+            // ready before the launcher opens. A miss leaves preparation to UI.
+            if (!net_cfg.enabled && !ls.netplay_launch.enabled && !rui_initial_disc.empty())
+                PSXRecompV4::mod_runtime_try_prepare_cached(rui_initial_disc);
+#endif
             char rui_out_disc[1024] = {0};
             launcher_boot_timing_mark("host:before_run_window");
             int rui_rc = recomp_launcher_run_window(
@@ -17142,6 +17152,7 @@ int main(int argc, char** argv) {
 #endif
 
     if (overlay_init_thread.joinable()) {
+        PSXRecompV4::HostLaunchTimingScope timing(HOST_LAUNCH_OVERLAY_JOIN);
         overlay_init_thread.join();
         if (overlay_init_exc) {
             try {
@@ -17152,6 +17163,7 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
+        timing.success();
     }
 
     if (game_config_path || disc_override_path || !resolved_disc.empty()) {
@@ -17167,6 +17179,7 @@ int main(int argc, char** argv) {
         /* Netplay is vanilla unless the title opted into content negotiation
          * ([netplay] content_negotiation); either way the user's persisted
          * offline mod selection is left untouched. */
+        PSXRecompV4::HostLaunchTimingScope timing(HOST_LAUNCH_RUNTIME_COMMIT);
         std::string mod_error;
         if (net_cfg.enabled) {
             if (!netplay_commit_mods(resolved_disc, &mod_error)) {
@@ -17182,6 +17195,7 @@ int main(int argc, char** argv) {
                          mod_error.c_str());
             return 1;
         }
+        timing.success();
     }
     /* Session start: every session runs this after its mod commit or netplay
      * clear -- the first boot here, and the lobby rematch, which re-enters at
@@ -19311,6 +19325,7 @@ soft_return_lobby:
                 }
             }
             {
+                PSXRecompV4::HostLaunchTimingScope timing(HOST_LAUNCH_RUNTIME_COMMIT);
                 std::string mod_error;
                 if (net_cfg.enabled) {
                     if (!netplay_commit_mods(resolved_disc, &mod_error)) {
@@ -19330,6 +19345,7 @@ soft_return_lobby:
                     SDL_Quit();
                     return 1;
                 }
+                timing.success();
             }
             /* `goto session_reboot` re-enters below the first-boot session
              * block, so run the same session start here, after the
