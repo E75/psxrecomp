@@ -396,69 +396,26 @@ int main(int argc,char** argv) {
           "Beetle image preserves native draw RGB and source STP");
     gr_draw_textured_rect(8,4,4,4,4,0,0,0,texture_page); capture();
     check(sample(44,16)[1]>200,"Beetle native transparent zero still cuts out replacement");
-    /* HD residency stays synchronous: startup refuses the combination, and
-     * live activation parks an existing thread before switching authority. */
-    check(!gl_renderer_render_thread_start(2),"HD replacements refuse render-thread startup");
-    /* Keep the negative-control run safe when checking an unfixed renderer. */
-    if(gl_renderer_render_thread_active()) gl_renderer_render_thread_stop();
-    gpu_hd_textures_shutdown();
-    check(gl_renderer_render_thread_start(2),"render thread starts with HD disabled");
-    gl_renderer_set_frame_generation(1);
-    gl_renderer_render_thread_frame_boundary();
-    state(); gr_fill_rect(96,96,4,1,0x1234);
-    gl_renderer_render_thread_frame_boundary();
-    check(gpu_hd_textures_configure(beetle_root,1,0,error,sizeof(error)),"HD opens while render thread is running");
-    check(rt_held(),"HD activation takes and holds the GL context");
-    check(vram[96*1024+96]==0x1234,"HD activation retains the queued native draw");
-    char fg_diag[4096]; gl_renderer_frame_gen_json(fg_diag,sizeof(fg_diag));
-    check(strstr(fg_diag,"\"active\":0")!=NULL,"Smooth motion is inactive under HD authority");
-    gl_renderer_render_thread_frame_boundary();
-    check(rt_held(),"HD replacement mode remains synchronous across frames");
-    state(); gr_fill_rect(128,96,4,1,0x2345);
-    gr_vram_upload_begin(128,96,4,1);
-    vram[96*1024+128]=0x7c00; /* A partial GP0(A0) payload, as gpu.c writes it. */
-    uint16_t partial_read=0; gr_vram_transfer_out(129,96,1,1,&partial_read);
-    check(vram[96*1024+128]==0x7c00 && partial_read==0x2345,
-          "partial upload preserves payload and preceding native draws");
-    check(gpu_hd_textures_reload(error,sizeof(error)),"HD reload is safe while the thread is parked");
-    check(rt_held() && vram[96*1024+128]==0x7c00 && vram[96*1024+129]==0x2345,
-          "HD reload retains partial-upload VRAM");
-    /* Aborted uploads have no extra private-copy tracking to leave behind. */
-    gr_init(vram); state(); gr_fill_rect(128,96,4,1,0x3456);
-    gr_vram_transfer_out(128,96,1,1,&partial_read);
-    check(partial_read==0x3456,"reset after an incomplete upload keeps native draws visible");
-    gr_set_mask_bits(1,0); gr_draw_flat_rect(192,96,4,1,0x0421);
-    gr_set_mask_bits(0,1); gr_vram_upload_begin(192,96,4,1);
-    check(gr_vram_read(192,96)==0x8421,
-          "A0 mask check sees the preceding masked native draw");
-    state();
-    gpu_hd_textures_shutdown();
-    gl_renderer_render_thread_frame_boundary();
-    check(!rt_held(),"render thread resumes after HD replacements are disabled");
-    state(); gr_fill_rect(160,96,4,1,0x4567);
-    gl_renderer_render_thread_frame_boundary();
-    gr_vram_transfer_out(160,96,1,1,&partial_read);
-    check(partial_read==0x4567 && vram[96*1024+160]==0x4567,
-          "resumed rendering retains native readbacks");
-    gl_renderer_render_thread_frame_boundary();
-    check(gpu_hd_textures_configure(argv[1],0,1,error,sizeof(error)),"dump-only session opens with render thread running");
-    check(rt_held(),"texture dumping also parks the render thread");
-    gl_renderer_render_thread_frame_boundary();
-    check(rt_held(),"dump-only mode remains synchronous across frames");
-    gr_vram_transfer_in(512,0,4,4,source_words);
-    gr_draw_textured_rect(8,8,4,4,0,0,0,0,texture_page); capture();
-    check(vram[8*1024+8]==source_words[0],"dump-only draw retains native VRAM");
-    gpu_hd_textures_set_dump_enabled(0);
-    gl_renderer_render_thread_frame_boundary();
-    check(!rt_held(),"render thread resumes when dumping is disabled");
-    gpu_hd_textures_shutdown();
-    gl_renderer_set_frame_generation(0);
-    check(gpu_hd_textures_configure(beetle_root,1,0,error,sizeof(error)),"HD session restored for teardown checks");
-    state(); gr_fill_rect(224,96,4,1,0x5678);
-    gl_renderer_render_thread_frame_boundary();
+    /* Render thread: residency follows the recorded command stream and the
+     * render thread's VRAM copy. The emulation thread writes its array and
+     * records the overwrite before the first draw has been replayed; that
+     * draw must still see the upload it was recorded after. */
+    check(gl_renderer_render_thread_start(2)==1,"render thread started with an HD session");
+    for(int frame=0;frame<3;++frame) {
+        state(); gr_fill_rect(0,0,16,16,0x03e0);
+        for(int i=0;i<16;++i) vram[i/4*1024+512+i%4]=source_words[i];
+        gr_vram_transfer_in(512,0,4,4,source_words);
+        gr_draw_textured_rect(4,4,4,4,0,0,0,0,texture_page);
+        for(int i=0;i<16;++i) vram[i/4*1024+512+i%4]=overwrite[i];
+        gr_vram_transfer_in(512,0,4,4,overwrite);
+        gr_draw_textured_rect(8,4,4,4,0,0,0,0,texture_page);
+        gl_renderer_render_thread_frame_boundary();
+    }
+    capture();
+    check(sample(16,16)[0]>200 && sample(16,16)[1]<20,"render thread: replacement drawn from the upload recorded before it");
+    check(sample(32,16)[2]>200 && sample(32,16)[0]<20,"render thread: later overwrite draws the new native source");
     gl_renderer_render_thread_stop();
-    check(!gl_renderer_render_thread_active(),"thread stops safely after HD transitions");
-    check(vram[96*1024+224]==0x5678,"stopping the parked thread preserves final HD native draws");
+    check(!gl_renderer_render_thread_active(),"render thread stopped");
     memcpy(reference,vram,sizeof(vram));
     gl_renderer_set_cpu_auth_dual(1);
     gpu_hd_textures_shutdown();

@@ -214,7 +214,14 @@ typedef struct GpuRenderBackend {
      * pixel count, writes width/height to ow/oh. NULL if unsupported. */
     int  (*wide_dump_full)(uint32_t *out, int cap_pixels, int *ow, int *oh,
                            int base_x);
+    /* HD texture-pack residency (gpu_hd_textures.h) in command order with the
+     * backend's own VRAM: op GR_HD_NOTE_*; sx/sy are the copy source for
+     * GR_HD_NOTE_BEGIN_COPY. NULL = apply it immediately. */
+    void (*hd_texture_note)(int op, int x, int y, int w, int h, int sx, int sy);
 } GpuRenderBackend;
+
+enum { GR_HD_NOTE_INVALIDATE = 0, GR_HD_NOTE_TRACK_UPLOAD = 1, GR_HD_NOTE_BEGIN_UPLOAD = 2,
+       GR_HD_NOTE_BEGIN_COPY = 3, GR_HD_NOTE_END_COPY = 4 };
 
 #ifdef __cplusplus
 }

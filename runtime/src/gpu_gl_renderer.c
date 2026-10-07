@@ -447,12 +447,18 @@ enum {
     RTH_WIDE_DISABLE, RTH_WIDE_CLEAR, RTH_WIDE_CLEAR_MARGINS, RTH_PROJ_TRI,
     RTH_WIDE_RECOVERY, RTH_INTERP_SUSPENDED, RTH_PRESENT_VRAM,
     RTH_PRESENT_WIDE, RTH_STATE, RTH_PEEK, RTH_RING_CAPTURE, RTH_DYN_STEP,
-    RTH_FRAME, RTH_FG_SRC
+    RTH_FRAME, RTH_FG_SRC, RTH_HD_NOTE
 };
 static int  rth_record_mode(void);
 /* Render-thread frame cost (dynamic resolution; defined with GL_RT_BACKEND). */
 static uint64_t s_rthf_swap_ns = 0;        /* render thread: time in the swap */
 static uint64_t host_now_ns_rthf(void);
+/* The SW rasterizer and the HD texture residency read the same native VRAM
+ * copy as the GL backend (gpu.c's array, or the render thread's private one). */
+static void rth_rebind_vram(uint16_t *vram) {
+    sw_renderer_rebind_vram(vram);
+    gpu_hd_textures_bind_vram(vram);
+}
 static int  rth_rec_ints(uint16_t op, uint16_t flags, int n, const int32_t *v);
 static uint16_t rth_prim_flags(void);
 static int  rth_record_present(uint16_t op, int n, const int32_t *v);
@@ -2936,6 +2942,8 @@ static size_t s_hd_gl_cache_bytes;
 static uint64_t s_hd_gl_cache_clock;
 
 void gl_renderer_clear_hd_texture_cache(void) {
+    /* Pack (re)configuration: the render thread must be idle before the
+     * session and its replacement textures change. */
     GL_RT_SYNC("clear_hd_texture_cache");
     flush_flat_batch(); flush_tex_batch(); hiw_flush_queue();
     for (int i = 0; i < HD_GL_CACHE_CAP; ++i) {
@@ -5694,9 +5702,7 @@ void gl_renderer_set_cpu_auth_dual(int on) {
 }
 
 void gl_renderer_set_hd_texture_mode(int on) {
-    /* Residency and CPU-authoritative VRAM stay on the emulation thread.
-     * Drain the GPU-authoritative stream before entering that mode; the
-     * eligibility gate below keeps the render thread parked until HD is off. */
+    /* Drain the GPU-authoritative stream before switching authority. */
     GL_RT_SYNC("set_hd_texture_mode");
     on = on ? 1 : 0;
     if (on == s_hd_native_authority) return;
@@ -9783,7 +9789,7 @@ static void gl_rth_acquire(const char *reason) {
     if (!s_rth_on || rt_on_render_thread() || rt_held()) return;
     rt_acquire(reason);
     s_vram = s_rth_vram_pub;
-    sw_renderer_rebind_vram(s_rth_vram_pub);
+    rth_rebind_vram(s_rth_vram_pub);
 }
 
 static void gl_rth_release(void) {
@@ -9792,7 +9798,7 @@ static void gl_rth_release(void) {
      * thread continues from a copy of it. */
     memcpy(s_rth_vram_priv, s_rth_vram_pub, (size_t)VRAM_W * VRAM_H * sizeof(uint16_t));
     s_vram = s_rth_vram_priv;
-    sw_renderer_rebind_vram(s_rth_vram_priv);
+    rth_rebind_vram(s_rth_vram_priv);
     rth_mirror_resync();
     rt_release();
 }
@@ -11378,7 +11384,7 @@ static void rtb_init(uint16_t *vram) {
     GL_RT_SYNC("init");
     if (s_rth_on) s_rth_vram_pub = vram;
     glb_init(vram);
-    if (s_rth_on && !rt_held()) sw_renderer_rebind_vram(s_rth_vram_priv);
+    if (s_rth_on && !rt_held()) rth_rebind_vram(s_rth_vram_priv);
 }
 static void rtb_set_scale(int sc) { GL_RT_SYNC("set_scale"); glb_set_scale(sc); }
 /* The scale changes under a sync point, or by a recorded dynamic-resolution
@@ -11484,6 +11490,18 @@ static void rtb_vram_transfer_in(int x, int y, int w, int h, const uint16_t *d) 
     }
     glb_vram_transfer_in(x, y, w, h, d);
 }
+static void hd_note_exec(int op, int x, int y, int w, int h, int sx, int sy) {
+    switch (op) {
+    case GR_HD_NOTE_TRACK_UPLOAD: gpu_hd_textures_track_upload(x, y, w, h, NULL); break;
+    case GR_HD_NOTE_BEGIN_UPLOAD: gpu_hd_textures_begin_upload(x, y, w, h); break;
+    case GR_HD_NOTE_BEGIN_COPY:   gpu_hd_textures_begin_copy(sx, sy, x, y, w, h); break;
+    case GR_HD_NOTE_END_COPY:     gpu_hd_textures_end_copy(); break;
+    default:                      gpu_hd_textures_invalidate(x, y, w, h); break;
+    }
+}
+/* After the upload/draw it follows, in command order, against s_vram. */
+static void rtb_hd_texture_note(int op, int x, int y, int w, int h, int sx, int sy) {
+    RTH_DIRECT_OR(RTH_REC(RTH_HD_NOTE, 0, op, x, y, w, h, sx, sy)); hd_note_exec(op, x, y, w, h, sx, sy); }
 static void rtb_vram_transfer_out(int x, int y, int w, int h, uint16_t *d) {
     GL_RT_SYNC("vram_transfer_out"); glb_vram_transfer_out(x, y, w, h, d); }
 static void rtb_set_draw_area(int x1, int y1, int x2, int y2) {
@@ -11586,6 +11604,7 @@ static const GpuRenderBackend GL_RT_BACKEND = {
     .wide_clear_margins = rtb_wide_clear_margins,
     .render_wide_display = rtb_render_wide_display,
     .wide_dump_full = rtb_wide_dump_full,
+    .hd_texture_note = rtb_hd_texture_note,
 };
 
 /* ---- replay (render thread) ---------------------------------------------- */
@@ -11644,6 +11663,7 @@ static void gl_rth_exec(void *user, const RtCmd *c, const void *payload) {
         break;
     case RTH_VRAM_WRITE: glb_vram_write(v[0], v[1], (uint16_t)v[2]); break;
     case RTH_XFER_IN:   glb_vram_transfer_in(v[0], v[1], v[2], v[3], (const uint16_t *)(v + 4)); break;
+    case RTH_HD_NOTE:   hd_note_exec(v[0], v[1], v[2], v[3], v[4], v[5], v[6]); break;
     case RTH_AREA:      glb_set_draw_area(v[0], v[1], v[2], v[3]); break;
     case RTH_OFFSET:    glb_set_draw_offset(v[0], v[1]); break;
     case RTH_WIDE_CONFIGURE: glb_wide_configure(v[0], v[1]); break;
@@ -11724,7 +11744,7 @@ int gl_renderer_render_thread_start(int max_frames) {
     s_rthe_flat_bd = s_rthe_vp_w = s_rthe_bg_full = -1;
     rth_mirror_resync();
     s_vram = priv;
-    sw_renderer_rebind_vram(priv);
+    rth_rebind_vram(priv);
     s_rth_on = 1;
     RtConfig cfg;
     cfg.ring_bytes = (size_t)32u << 20;
@@ -11739,7 +11759,7 @@ int gl_renderer_render_thread_start(int max_frames) {
         pt_end();
         s_rth_on = 0;
         s_vram = s_rth_vram_pub;
-        sw_renderer_rebind_vram(s_rth_vram_pub);
+        rth_rebind_vram(s_rth_vram_pub);
         free(priv);
         s_rth_vram_priv = NULL;
         return 0;
@@ -11754,7 +11774,7 @@ void gl_renderer_render_thread_stop(void) {
     pt_end();
     s_rth_on = 0;
     s_vram = s_rth_vram_pub;
-    sw_renderer_rebind_vram(s_rth_vram_pub);
+    rth_rebind_vram(s_rth_vram_pub);
     free(s_rth_vram_priv);
     s_rth_vram_priv = NULL;
     gr_refresh_backend();

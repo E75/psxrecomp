@@ -89,7 +89,7 @@ void gpu_vram_dirty_mark_rect(int x,int y,int w,int h){(void)x;(void)y;(void)w;(
 void gpu_vram_dirty_mark_all(void){}
 int psx_netplay_active(void){return 0;}
 /* The renderer's facade hooks (gpu_render.c) for the render thread, which
- * these fixtures never start. */
+ * these fixtures never start. The HD fixture links the real facade. */
 #ifndef PSX_TEST_HD_TEXTURE_PACK
 GrBackend gr_backend(void){return GR_BACKEND_OPENGL;}
 void gr_refresh_backend(void){}

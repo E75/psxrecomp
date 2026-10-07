@@ -39,6 +39,11 @@ void gpu_hd_textures_observe_draw(uint16_t texpage, uint16_t clut_x,
 /* Native VRAM and residency hooks. A full restage resets identity rather than
  * pretending a savestate is an original texture upload. */
 void gpu_hd_textures_set_vram(const uint16_t* vram);
+/* Move to another copy of the same native VRAM (the GL render thread's
+ * private copy and gpu.c's array match at every hand-off); keeps residency. */
+void gpu_hd_textures_bind_vram(const uint16_t* vram);
+/* Residency is hashed from the bound native VRAM after the write; words may
+ * be NULL (a replayed upload whose payload already reached that VRAM). */
 void gpu_hd_textures_track_upload(int x, int y, int width_words, int height,
                                  const uint16_t* words);
 /* Header-before-payload invalidation and pre/post native copy observations. */

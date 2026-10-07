@@ -267,6 +267,9 @@ extern "C" int gpu_hd_textures_configure(const char* root, int replacements,
                 fail(error, capacity, dump_error); return 0;
             }
         }
+        /* Quiesce renderer users (GL render thread) before reading the old
+         * session's residency; the cache is rebuilt from the new session. */
+        if (session) gl_renderer_clear_hd_texture_cache();
         if (session && (session->replacements || session->dump) && session->root == next->root) {
             if (!duck_texture_pack_copy_tracking(next->duck, session->duck)) {
                 fail(error, capacity, "Could not preserve texture-upload tracking during reload."); return 0;
@@ -353,6 +356,7 @@ extern "C" void gpu_hd_textures_get_diag(GpuHdTextureDiag* out) {
     out->diagnostic = session->diagnostics.back().c_str();
 }
 extern "C" void gpu_hd_textures_note_applied(void) { if (session) ++session->diag.applied_draws; }
+extern "C" void gpu_hd_textures_bind_vram(const uint16_t* vram) { native_vram = vram; }
 extern "C" void gpu_hd_textures_set_vram(const uint16_t* vram) { native_vram = vram; gpu_hd_textures_reset_tracking(); }
 extern "C" void gpu_hd_textures_reset_tracking(void) {
     if (!session) return;
@@ -391,7 +395,8 @@ extern "C" void gpu_hd_textures_invalidate(int x, int y, int width, int height) 
 }
 extern "C" void gpu_hd_textures_track_upload(int x, int y, int width, int height,
                                              const uint16_t* words) {
-    if (!session || !native_vram || !words || width < 1 || width > 1024 || height < 1 || height > 512) return;
+    (void)words;
+    if (!session || !native_vram || width < 1 || width > 1024 || height < 1 || height > 512) return;
     if (width == 1024 && height == 512) { gpu_hd_textures_reset_tracking(); return; }
     /* gpu.c's A0 staging already contains post-mask words. Read the canonical
      * mirror here also for host-initiated transfers which use raw input. */

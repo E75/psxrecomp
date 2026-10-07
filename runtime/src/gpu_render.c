@@ -86,6 +86,16 @@ static void hd_observe_rect(int u0,int v0,int u1,int v1,uint16_t cx,uint16_t cy,
     gpu_hd_textures_observe_draw(tp,cx,cy,limits,g_hd_texture_window,g_hd_semi);
 }
 
+/* A backend that replays commands on another thread (the GL render thread)
+ * owns its VRAM copy there, so residency changes travel with its commands. */
+static void hd_note(int op, int x, int y, int w, int h, const uint16_t *words) {
+    if (!gpu_hd_textures_active()) return;
+    if (g_b->hd_texture_note) { g_b->hd_texture_note(op, x, y, w, h, 0, 0); return; }
+    if (op == GR_HD_NOTE_TRACK_UPLOAD) gpu_hd_textures_track_upload(x, y, w, h, words);
+    else if (op == GR_HD_NOTE_BEGIN_UPLOAD) gpu_hd_textures_begin_upload(x, y, w, h);
+    else gpu_hd_textures_invalidate(x, y, w, h);
+}
+
 /* Residency describes guest native words, so any draw/copy which can touch
  * an upload ends its identity. Run after submission: an overlapping texture
  * draw must resolve its source before the destination invalidates it. */
@@ -98,7 +108,7 @@ static void hd_invalidate_draw(int x0, int y0, int x1, int y1) {
     if (x0 < ax0) x0 = ax0; if (x1 > ax1) x1 = ax1;
     if (y0 < ay0) y0 = ay0; if (y1 > ay1) y1 = ay1;
     if (x0 <= x1 && y0 <= y1)
-        gpu_hd_textures_invalidate(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+        hd_note(GR_HD_NOTE_INVALIDATE, x0, y0, x1 - x0 + 1, y1 - y0 + 1, NULL);
 }
 static void hd_invalidate_triangle(int x0, int y0, int x1, int y1, int x2, int y2) {
     int xmin = x0, xmax = x0, ymin = y0, ymax = y0;
@@ -148,7 +158,7 @@ void gr_refresh_backend(void) {
 }
 
 /* ---- Dispatch wrappers (one line each; forward to the active backend) ---- */
-void gr_init(uint16_t *vram)                         { g_b->init(vram); gpu_hd_textures_set_vram(vram); g_hd_offset_x = g_hd_offset_y = 0; g_hd_texture_window = 0; g_hd_semi = g_hd_perspective = 0; }
+void gr_init(uint16_t *vram)                         { gpu_hd_textures_set_vram(vram); g_b->init(vram); g_hd_offset_x = g_hd_offset_y = 0; g_hd_texture_window = 0; g_hd_semi = g_hd_perspective = 0; }
 void gr_set_scale(int scale)                         { g_b->set_scale(scale); }
 int  gr_scale(void)                                  { return g_b->scale(); }
 void gr_set_texture_filter(int bilinear)             { g_b->set_texture_filter(bilinear); }
@@ -167,9 +177,16 @@ void gr_set_perspective_triangle(int enabled, float q0, float q1, float q2) {
     if (g_b->set_perspective_triangle)
         g_b->set_perspective_triangle(enabled, q0, q1, q2);
 }
-void gr_fill_rect(int x, int y, int w, int h, uint16_t c)  { g_b->fill_rect(x, y, w, h, c); gpu_hd_textures_invalidate(x, y, w, h); }
+void gr_fill_rect(int x, int y, int w, int h, uint16_t c)  { g_b->fill_rect(x, y, w, h, c); hd_note(GR_HD_NOTE_INVALIDATE, x, y, w, h, NULL); }
 void gr_copy_rect(int sx, int sy, int dx, int dy, int w, int h) {
     if (!gpu_hd_textures_active()) { g_b->copy_rect(sx, sy, dx, dy, w, h); return; }
+    if (g_b->hd_texture_note) {
+        /* Pre/post copy observations against the backend's own VRAM. */
+        g_b->hd_texture_note(GR_HD_NOTE_BEGIN_COPY, dx, dy, w, h, sx, sy);
+        g_b->copy_rect(sx, sy, dx, dy, w, h);
+        g_b->hd_texture_note(GR_HD_NOTE_END_COPY, 0, 0, 0, 0, 0, 0);
+        return;
+    }
     if (g_effective == GR_BACKEND_VULKAN) g_b->vram_read(0,0);
     gpu_hd_textures_begin_copy(sx,sy,dx,dy,w,h);
     g_b->copy_rect(sx, sy, dx, dy, w, h);
@@ -231,10 +248,10 @@ int gr_render_display(uint32_t *o, int p, int dx, int dy, int dw, int dh) {
 int gr_render_display_hires(uint32_t *o, int p, int dx, int dy, int dw, int dh) {
     return g_b->render_display_hires(o, p, dx, dy, dw, dh);
 }
-void gr_vram_upload_begin(int x, int y, int w, int h) { gpu_hd_textures_begin_upload(x,y,w,h); }
-void gr_vram_write(int x, int y, uint16_t pixel)     { g_b->vram_write(x, y, pixel); gpu_hd_textures_invalidate(x,y,1,1); }
+void gr_vram_upload_begin(int x, int y, int w, int h) { hd_note(GR_HD_NOTE_BEGIN_UPLOAD, x, y, w, h, NULL); }
+void gr_vram_write(int x, int y, uint16_t pixel)     { g_b->vram_write(x, y, pixel); hd_note(GR_HD_NOTE_INVALIDATE, x, y, 1, 1, NULL); }
 uint16_t gr_vram_read(int x, int y)                  { return g_b->vram_read(x, y); }
-void gr_vram_transfer_in(int x, int y, int w, int h, const uint16_t *d)  { g_b->vram_transfer_in(x, y, w, h, d); gpu_hd_textures_track_upload(x,y,w,h,d); }
+void gr_vram_transfer_in(int x, int y, int w, int h, const uint16_t *d)  { g_b->vram_transfer_in(x, y, w, h, d); hd_note(GR_HD_NOTE_TRACK_UPLOAD, x, y, w, h, d); }
 void gr_vram_transfer_out(int x, int y, int w, int h, uint16_t *d)       { g_b->vram_transfer_out(x, y, w, h, d); }
 void gr_set_draw_area(int x1, int y1, int x2, int y2){ g_b->set_draw_area(x1, y1, x2, y2); }
 void gr_get_draw_area(int *x1, int *y1, int *x2, int *y2) { g_b->get_draw_area(x1, y1, x2, y2); }
