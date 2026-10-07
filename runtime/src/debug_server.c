@@ -9755,11 +9755,13 @@ static void disp_ring_capture(void)
      * just the display rect + one small readback); CPU VRAM otherwise (the
      * software backend's authoritative surface). Runs on the present thread,
      * where the GL context is current. */
-    extern int gl_renderer_fbo_peek(int x, int y, int w_, int h_, uint16_t *out);
+    /* Deferred: with the render thread on, the readback is recorded at this
+     * point of the command stream and filled in by the render thread (ring
+     * readers sync first), instead of a per-frame sync point. */
     int got = 0;
     if (di.display_x + w <= 1024 && di.display_y + h <= 512)
-        got = gl_renderer_fbo_peek((int)di.display_x, (int)di.display_y,
-                                   (int)w, (int)h, e->px);
+        got = gl_renderer_fbo_peek_deferred((int)di.display_x, (int)di.display_y,
+                                            (int)w, (int)h, e->px);
     if (!got) {
         for (uint32_t y = 0; y < h; y++)
             for (uint32_t x = 0; x < w; x++)
@@ -9767,7 +9769,7 @@ static void disp_ring_capture(void)
                     gpu_vram_peek((int)(di.display_x + x), (int)(di.display_y + y));
     }
     /* Full-VRAM aux capture (same GL-truth/CPU-truth split as the display). */
-    if (!gl_renderer_fbo_peek(0, 0, 1024, 512, e->vram)) {
+    if (!gl_renderer_fbo_peek_deferred(0, 0, 1024, 512, e->vram)) {
         const uint16_t *v = gpu_get_vram();
         memcpy(e->vram, v, (size_t)1024 * 512 * sizeof(uint16_t));
     }
@@ -9778,6 +9780,7 @@ static void disp_ring_capture(void)
  * (1024x512 row-major). */
 static void handle_display_ring_aux(int id, const char *json)
 {
+    gl_renderer_render_thread_sync("display_ring");
     int f = json_get_int(json, "frame", -1);
     if (f < 0) { send_err(id, "missing frame"); return; }
     char path[512];
@@ -9799,6 +9802,7 @@ static void handle_display_ring_aux(int id, const char *json)
 
 static void handle_display_ring_stats(int id, const char *json)
 {
+    gl_renderer_render_thread_sync("display_ring");
     (void)json;
     uint32_t oldest = 0, newest = 0;
     int n = 0;
@@ -9816,6 +9820,7 @@ static void handle_display_ring_stats(int id, const char *json)
 
 static void handle_display_ring_get(int id, const char *json)
 {
+    gl_renderer_render_thread_sync("display_ring");
     int f = json_get_int(json, "frame", -1);
     if (f < 0) { send_err(id, "missing frame"); return; }
     char path[512];
@@ -10057,6 +10062,79 @@ static void handle_hd_textures(int id, const char *json)
              (unsigned long long)info.pending_dump_sources, diagnostic_json);
 }
 
+/* Dynamic internal resolution ([video] dynamic_resolution; docs/TCP_COMMANDS.md).
+ * dynres: the controller's state and the last step. */
+static void handle_dynres(int id, const char *json)
+{
+    (void)json;
+    extern int psx_dynres_status_json(char *out, int cap);
+    char body[2048];
+    psx_dynres_status_json(body, (int)sizeof body);
+    send_fmt("{\"id\":%d,\"ok\":true,%s}", id, body);
+}
+
+/* dynres_force {"scale":N}: pin the level (clamped to floor..ceiling);
+ * {"scale":0} releases the pin. */
+static void handle_dynres_force(int id, const char *json)
+{
+    extern int psx_dynres_force(int scale);
+    int s = json_get_int(json, "scale", -1);
+    if (s < 0) { send_err(id, "need scale (0 releases)"); return; }
+    int l = psx_dynres_force(s);
+    if (l < 0) { send_err(id, "dynamic resolution is not on"); return; }
+    send_fmt("{\"id\":%d,\"ok\":true,\"level\":%d,\"forced\":%d}", id, l, s > 0);
+}
+
+/* FNV-1a over the guest-visible VRAM (the CPU array after a GL sync). */
+static uint64_t dynres_vram_hash(void) {
+    gl_renderer_sync_cpu();
+    uint64_t h = 1469598103934665603ull;
+    for (int y = 0; y < 512; y++)
+        for (int x = 0; x < 1024; x++) {
+            uint16_t p = gpu_vram_peek(x, y);
+            h = (h ^ (p & 0xFF)) * 1099511628211ull;
+            h = (h ^ (p >> 8)) * 1099511628211ull;
+        }
+    return h;
+}
+
+/* dynres_check {"seq":"9,8,3,10"}: hash the guest-visible VRAM, step through
+ * seq inside this one handler (no guest code runs in between), hash after
+ * each step, then step back to the level it started at. Any change is a
+ * mismatch. The regression probe for runtime scale steps. */
+static void handle_dynres_check(int id, const char *json)
+{
+    char seq[256];
+    if (!json_get_str(json, "seq", seq, sizeof(seq))) { send_err(id, "need seq"); return; }
+    GlDynresStats st;
+    gl_renderer_dynres_stats(&st);
+    if (st.ceiling < 2) { send_err(id, "runtime scale steps are not available"); return; }
+    const int start = st.level;
+    const uint64_t h0 = dynres_vram_hash();
+    char out[4096];
+    int pos = 0, bad = 0, first = 1;
+    pos += snprintf(out + pos, sizeof(out) - (size_t)pos, "[");
+    char *save = NULL;
+    for (char *t = strtok_r(seq, ",", &save); t && pos < (int)sizeof(out) - 160;
+         t = strtok_r(NULL, ",", &save)) {
+        int s = atoi(t);
+        int ok = gl_renderer_step_internal_scale_now(s);
+        gl_renderer_dynres_stats(&st);
+        uint64_t h = dynres_vram_hash();
+        if (h != h0) bad++;
+        pos += snprintf(out + pos, sizeof(out) - (size_t)pos,
+                        "%s{\"to\":%d,\"ok\":%d,\"level\":%d,\"same\":%d,\"ms\":%.3f,"
+                        "\"rects\":%d}", first ? "" : ",", s, ok, st.level, h == h0,
+                        st.last_ms, st.last_rects);
+        first = 0;
+    }
+    pos += snprintf(out + pos, sizeof(out) - (size_t)pos, "]");
+    (void)gl_renderer_step_internal_scale_now(start);
+    if (dynres_vram_hash() != h0) bad++;
+    send_fmt("{\"id\":%d,\"ok\":true,\"hash0\":\"%016llx\",\"mismatches\":%d,"
+             "\"restored\":%d,\"steps\":%s}", id, (unsigned long long)h0, bad, start, out);
+}
+
 static void handle_video_info(int id, const char *json)
 {
     (void)json;
@@ -10070,7 +10148,11 @@ static void handle_video_info(int id, const char *json)
     GpuDisplayInfo di;
     gpu_get_display_info(&di);
     int eff = gr_scale();
-    send_fmt("{\"id\":%d,\"ok\":true,\"backend\":\"%s\",\"preset\":%d,"
+    extern void psx_dynres_summary(int *enabled, int *level, int *floor_s, int *ceiling);
+    int dyn_on = 0, dyn_level = 0, dyn_floor = 0, dyn_ceiling = 0;
+    psx_dynres_summary(&dyn_on, &dyn_level, &dyn_floor, &dyn_ceiling);
+    send_fmt("{\"id\":%d,\"ok\":true,\"dynamic\":%d,\"level\":%d,\"floor\":%d,"
+             "\"alloc_scale\":%d,\"backend\":\"%s\",\"preset\":%d,"
              "\"reference_lines\":%d,\"requested_scale\":%d,\"effective_scale\":%d,\"texture_filter\":%d,"
              "\"internal_lines\":%u,\"gl\":%d,\"gl_max_dim\":%d,\"gl_max_scale\":%d,"
              "\"gl_swap_interval\":%d,"
@@ -10082,7 +10164,8 @@ static void handle_video_info(int id, const char *json)
              "\"hires_window_x\":%d,\"hires_window_w\":%d,\"hires_fbo_w\":%d,"
              "\"hires_fbo_h\":%d,\"hires_window_grows\":%d,\"hires_window_tiles\":%d,"
              "\"hires_window_mib\":%d}",
-             id, gr_backend() == GR_BACKEND_OPENGL ? "opengl"
+             id, dyn_on, dyn_level, dyn_floor, gl ? si.alloc_scale : 0,
+             gr_backend() == GR_BACKEND_OPENGL ? "opengl"
                  : gr_backend() == GR_BACKEND_VULKAN ? "vulkan" : "software",
              preset, ref, req, eff, gr_texture_filter(), di.height * (unsigned)(eff > 0 ? eff : 1), gl,
              si.max_dim, si.max_scale, gl_renderer_get_swap_interval(), si.clamp_reason, si.alloc_retries, si.budget_mib,
@@ -10323,8 +10406,34 @@ void debug_server_capture_mark(void)
     s_capture_wide_ok = write_wide_png(s_capture_wide_path, NULL, NULL) == NULL;
     s_capture_frozen = 1;
     gpu_gp0_ring_set_frozen(1);
+    gl_renderer_render_thread_sync("capture_mark");
     present_image_ring_set_frozen(1);
     gpu_timeline_set_frozen(1);
+}
+
+/* Render thread ([video] render_thread, docs/RENDER_THREAD.md):
+ *   {"cmd":"render_thread"} -> active, held, frames produced/consumed, presents
+ *   (and stale presents skipped), sync points (acquires) with the most recent
+ *   reasons, backpressure / ring-full waits, render busy/idle time.
+ * Reading it is not a sync point. */
+static void handle_render_thread(int id, const char *json)
+{
+    (void)json;
+    char buf[4096];
+    if (gl_renderer_render_thread_json(buf, sizeof buf) <= 0) buf[0] = 0;
+    send_fmt("{\"id\":%d,\"ok\":true,%s}", id, buf[0] ? buf : "\"active\":0");
+}
+
+/* Smooth motion (frame generation; [video] frame_generation, docs/FRAME_GENERATION.md):
+ *   {"cmd":"frame_gen"} -> enabled, active, generated / real presents, flips,
+ *   the last plan (in-between frames per game frame, display slots), costs,
+ *   match counts, breaker. Not a sync point (render-thread counters, racy). */
+static void handle_frame_gen(int id, const char *json)
+{
+    (void)json;
+    char buf[1024];
+    if (gl_renderer_frame_gen_json(buf, sizeof buf) <= 0) buf[0] = 0;
+    send_fmt("{\"id\":%d,\"ok\":true,%s}", id, buf[0] ? buf : "\"enabled\":0");
 }
 
 /* Presented-image ring (see present_image_ring.h):
@@ -10333,6 +10442,7 @@ void debug_server_capture_mark(void)
 static void handle_present_image_ring_stats(int id, const char *json)
 {
     (void)json;
+    gl_renderer_render_thread_sync("present_image_ring");  /* render thread writes it */
     uint32_t lo = 0, hi = 0, seq_lo = 0, seq_hi = 0; int n = 0;
     present_image_ring_span(&lo, &hi, &n);
     present_image_ring_sequence_span(&seq_lo, &seq_hi);
@@ -10343,6 +10453,7 @@ static void handle_present_image_ring_stats(int id, const char *json)
 }
 static void handle_present_image_ring_get(int id, const char *json)
 {
+    gl_renderer_render_thread_sync("present_image_ring");
     int f = json_get_int(json, "frame", -1);
     int seq = json_get_int(json, "sequence", -1);
     char path[512];
@@ -10384,6 +10495,7 @@ static void handle_capture_mark(int id, const char *json)
     } else if (strcmp(op, "status")) { send_err(id, "op must be status|mark|release"); return; }
     uint32_t oldest = 0, newest = 0;
     gpu_gp0_ring_frame_span(&oldest, &newest);
+    gl_renderer_render_thread_sync("display_ring");
     uint32_t d_old = UINT32_MAX, d_new = 0;
     for (int i = 0; i < DISP_RING_CAP; i++) {
         if (!s_disp_ring[i].valid) continue;
@@ -15397,6 +15509,8 @@ static const CmdEntry s_commands[] = {
     { "resident_events",   handle_resident_events },
     { "capture_mark",      handle_capture_mark },
     { "present_image_ring_stats", handle_present_image_ring_stats },
+    { "render_thread",     handle_render_thread },
+    { "frame_gen",         handle_frame_gen },
     { "present_image_ring_get",   handle_present_image_ring_get },
     { "kernel_bless",      handle_kernel_bless },
     { "ws_aspect",         handle_ws_aspect },
@@ -15627,6 +15741,9 @@ static const CmdEntry s_commands[] = {
     { "wide_full",         handle_wide_full },
     { "video_info",        handle_video_info },
     { "hd_textures",       handle_hd_textures },
+    { "dynres",            handle_dynres },
+    { "dynres_force",      handle_dynres_force },
+    { "dynres_check",      handle_dynres_check },
     { "screenshot_wide_hires", handle_screenshot_wide_hires },
     { "wide_shot",         handle_wide_shot },
     { "gpu_opcodes",       handle_gpu_opcodes },

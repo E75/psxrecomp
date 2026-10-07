@@ -211,6 +211,36 @@ if(BUILD_TESTING)
                 --output "${CMAKE_CURRENT_BINARY_DIR}/gl-scale-results")
         set_tests_properties(gl_scale_invariance_test PROPERTIES
             LABELS "gpu;opengl;hardware" TIMEOUT 300 SKIP_RETURN_CODE 77)
+        # Render thread ([video] render_thread) on vs off: the values the
+        # guest reads back, native VRAM, the frame at S and the native-wide
+        # surface are identical for a scripted stream with readbacks, mask
+        # bits, uploads, ring wraps and per-primitive widescreen tags. A host
+        # with no window/GL 3.3 context (headless, Windows over SSH) exits 77:
+        # reported as skipped.
+        add_test(NAME gl_render_thread_test
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_gl_render_thread.py"
+                --fixture "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gl_render_thread.c"
+                --cc "${CMAKE_C_COMPILER}"
+                --sdl-include "${_gl_scale_sdl_inc}"
+                --sdl-library "$<TARGET_FILE:SDL3::SDL3>"
+                --output "${CMAKE_CURRENT_BINARY_DIR}/gl-render-thread-results")
+        set_tests_properties(gl_render_thread_test PROPERTIES
+            LABELS "gpu;opengl;hardware" TIMEOUT 300 SKIP_RETURN_CODE 77)
+        # Frame generation ([video] frame_generation): the real presented
+        # images are identical with it off and on (VRAM and native-wide
+        # presents), generated frames are presented, and an in-between frame
+        # at phase 1 / 0 equals the newer / older real frame.
+        add_test(NAME gl_frame_gen_test
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_gl_frame_gen.py"
+                --fixture "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gl_frame_gen.c"
+                --cc "${CMAKE_C_COMPILER}"
+                --sdl-include "${_gl_scale_sdl_inc}"
+                --sdl-library "$<TARGET_FILE:SDL3::SDL3>"
+                --output "${CMAKE_CURRENT_BINARY_DIR}/gl-frame-gen-results")
+        set_tests_properties(gl_frame_gen_test PROPERTIES
+            LABELS "gpu;opengl;hardware" TIMEOUT 300 SKIP_RETURN_CODE 77)
         unset(_gl_scale_sdl_inc)
     else()
         message(STATUS "gl_scale_invariance_test: not registered (needs macOS, Linux or MinGW, Python 3 and SDL3)")
@@ -1118,6 +1148,25 @@ if(BUILD_TESTING)
     add_executable(frame_pacing_test tests/test_frame_pacing.c)
     target_include_directories(frame_pacing_test PRIVATE include)
     add_test(NAME frame_pacing_test COMMAND frame_pacing_test)
+    # Render thread core ([video] render_thread, docs/RENDER_THREAD.md):
+    # ordering across ring wraps, the frame bound, stale-frame detection and
+    # the drain + context hand-off sync point, against a fake executor.
+    # The fixture itself uses POSIX threads and nanosleep (MinGW has both;
+    # the core takes its Win32 path there).
+    if(NOT MSVC)
+        add_executable(render_thread_test tests/test_render_thread.c src/render_thread.c)
+        target_include_directories(render_thread_test PRIVATE include)
+        find_package(Threads REQUIRED)
+        target_link_libraries(render_thread_test PRIVATE Threads::Threads)
+        add_test(NAME render_thread_test COMMAND render_thread_test)
+        # Present thread core ([video] present_thread): submission order is
+        # presentation order, slots are never composed while queued or on
+        # screen, done tokens reach the next composer, stop drains.
+        add_executable(present_thread_test tests/test_present_thread.c src/present_thread.c)
+        target_include_directories(present_thread_test PRIVATE include)
+        target_link_libraries(present_thread_test PRIVATE Threads::Threads)
+        add_test(NAME present_thread_test COMMAND present_thread_test)
+    endif()
 
     # Same family of bug as frame_pacing: the starvation watchdog's staleness
     # gap must not wrap when the (cross-thread) heartbeat is newer than the
@@ -1171,6 +1220,32 @@ if(BUILD_TESTING)
         target_link_libraries(render_pass_projection_test PRIVATE m)
     endif()
     add_test(NAME render_pass_projection_test COMMAND render_pass_projection_test)
+    # Dynamic resolution's controller against synthetic load: step rules,
+    # hysteresis, transient spikes, CPU-bound stretches, holds, the floor.
+    add_executable(dynamic_resolution_test
+        tests/test_dynamic_resolution.c
+        src/dynamic_resolution.c)
+    target_include_directories(dynamic_resolution_test PRIVATE include)
+    if(NOT MSVC)
+        target_link_libraries(dynamic_resolution_test PRIVATE m)
+    endif()
+    add_test(NAME dynamic_resolution_test COMMAND dynamic_resolution_test)
+    # The render-thread controller (dynrt_*) against a synthetic pipeline.
+    add_executable(dynamic_resolution_rt_test
+        tests/test_dynamic_resolution_rt.c
+        src/dynamic_resolution.c)
+    target_include_directories(dynamic_resolution_rt_test PRIVATE include)
+    if(NOT MSVC)
+        target_link_libraries(dynamic_resolution_rt_test PRIVATE m)
+    endif()
+    add_test(NAME dynamic_resolution_rt_test COMMAND dynamic_resolution_rt_test)
+    # Frame generation's matching, interpolation, plan and breaker.
+    add_executable(frame_gen_test tests/test_frame_gen.c src/frame_gen.c)
+    target_include_directories(frame_gen_test PRIVATE include)
+    if(NOT MSVC)
+        target_link_libraries(frame_gen_test PRIVATE m)
+    endif()
+    add_test(NAME frame_gen_test COMMAND frame_gen_test)
 
     # Render-pass time freeze against mock devices (psx_cycles.c only).
     add_executable(render_pass_freeze_test

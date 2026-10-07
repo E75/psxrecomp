@@ -137,6 +137,16 @@ void gr_set_backend(GrBackend backend) {
 
 GrBackend gr_backend(void) { return g_effective; }
 
+/* Re-fetch the OpenGL table after the render thread starts or stops
+ * (gl_backend_get then returns the recording table, or the direct one). The
+ * effective backend does not change. */
+void gr_refresh_backend(void) {
+    if (g_effective == GR_BACKEND_OPENGL) {
+        const GpuRenderBackend *gl = gl_backend_get();
+        if (gl) g_b = gl;
+    }
+}
+
 /* ---- Dispatch wrappers (one line each; forward to the active backend) ---- */
 void gr_init(uint16_t *vram)                         { g_b->init(vram); gpu_hd_textures_set_vram(vram); g_hd_offset_x = g_hd_offset_y = 0; g_hd_texture_window = 0; g_hd_semi = g_hd_perspective = 0; }
 void gr_set_scale(int scale)                         { g_b->set_scale(scale); }

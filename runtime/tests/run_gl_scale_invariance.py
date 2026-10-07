@@ -33,6 +33,14 @@ from the VRAM, so a decode error both ways share still fails.
 Pass runs (mode passes, where the renderer has the frame-rate stack's render
 passes) check that the window mode refuses them and the full-VRAM surface
 offers them.
+Step runs (mode steps, dynamic resolution) keep the surfaces at a ceiling and
+change the scale at run time. "fresh" steps before drawing: the native VRAM,
+the frame at S and the wide surface must equal the fixed-scale run at the
+final level. "chain" draws, then steps through a list: each step must leave
+the native VRAM unchanged and rescale the displayed rect, the draw area and
+the wide margins from their own pixels (the fixture checks every pixel); the
+scene drawn again at the final level must equal the fixed-scale run there.
+The window mode refuses steps.
 
 macOS/Linux/Windows (MinGW): pass the SDL3 include directory and static
 library (for example from a runtime build tree's _deps/sdl3-src/include and
@@ -126,6 +134,12 @@ def main():
         sources.append(("rp", framework / "runtime/src/render_pass_plan.c"))
     if (framework / "runtime/src/psx_openxr.c").exists():
         sources.append(("xr", framework / "runtime/src/psx_openxr.c"))
+    if (framework / "runtime/src/render_thread.c").exists():
+        sources.append(("rth", framework / "runtime/src/render_thread.c"))
+    if (framework / "runtime/src/present_thread.c").exists():
+        sources.append(("pth", framework / "runtime/src/present_thread.c"))
+    if (framework / "runtime/src/frame_gen.c").exists():
+        sources.append(("fg", framework / "runtime/src/frame_gen.c"))
     # Unused renderer functions reference the rest of the runtime; the linker
     # drops them (-dead_strip, or per-function sections with --gc-sections).
     # MinGW's PE linker reports undefined references from sections it later
@@ -309,6 +323,37 @@ def main():
         if got[0][3] is None or got[1][3] is None or got[1][3] >= got[0][3]:
             print(f"FAIL twin {label} {s}x: batching on did not draw fewer batches:", got)
             ok = False
+    # Native-wide mirror queue and stale-rect wide stencil rebuild: the same
+    # native VRAM, frame at S and wide surface with each off (the previous
+    # immediate mirrors and whole-surface rebuilds) and on.
+    ab_envs = (("default", {}), ("queue-off", {"PSX_GL_WIDE_QUEUE": "0"}),
+               ("stencil-full", {"PSX_GL_WIDE_STENCIL_FULL": "1"}),
+               ("both-off", {"PSX_GL_WIDE_QUEUE": "0", "PSX_GL_WIDE_STENCIL_FULL": "1"}))
+    ab_runs = [("wmask", s, fast, {}) for s in (1, 3, 9) for fast in ("0", "1")]
+    ab_runs += [("wmask", 9, fast, {"PSX_GL_HIRES_WINDOW": "1"}) for fast in ("0", "1")]
+    ab_runs += [("lines", 9, None, {}), ("twin", 9, "1", {}), ("scene", 3, None, {}),
+                ("scene", 9, None, {})]
+    for mode, s, arg, extra in ab_runs:
+        got = {}
+        for name, ab in ab_envs:
+            e = dict(env)
+            e.update(extra)
+            e.update(ab)
+            cmd = [dest / "probe", s, mode] + ([arg] if arg is not None else [])
+            r = run(cmd, env=e)
+            parsed = parse_run(r.stdout)
+            if r.returncode or not parsed or parsed[1]:
+                print(f"wide a/b {mode} {s} {arg} {name}: exit={r.returncode}",
+                      r.stdout.strip().splitlines()[-3:], r.stderr.strip()[-600:])
+                ok = False
+            got[name] = (parsed[2] if parsed else None, parse_hires(r.stdout),
+                         parse_hires(r.stdout, "wide"))
+        same = len(set(got.values())) == 1 and None not in got["default"][1:]
+        print(f"wide a/b {mode} {s}x {arg or ''}{' window' if extra else ''}:",
+              "same" if same else got)
+        if not same:
+            print(f"FAIL wide a/b {mode} {s}x: queue/stencil change the image:", got)
+            ok = False
     # Render passes: offered on the full-VRAM surface, refused in the window mode.
     if not passes:
         print("passes: skipped (this renderer has no render passes)")
@@ -322,6 +367,38 @@ def main():
               r.stderr.strip()[-600:])
         if r.returncode or not parsed or parsed[1]:
             ok = False
+    # Dynamic resolution steps: (ceiling, levels, kind, env). The final level
+    # must be one of --scales (its fixed-scale run is the reference).
+    step_runs = (
+        (9, "5", "fresh", {}), (9, "3,9", "fresh", {}), (9, "1", "fresh", {}),
+        (5, "2", "fresh", {}),
+        (9, "8,5,9,3,1,2,9", "chain", {}), (5, "3,5,1,2", "chain", {}),
+        (9, "5", "chain", {"PSX_GL_HIRES_WINDOW": "1"}),
+    )
+    for ceiling, levels, kind, extra in step_runs:
+        e = dict(env)
+        e.update(extra)
+        r = run([dest / "probe", ceiling, "steps", levels, kind], env=e)
+        parsed = parse_run(r.stdout)
+        label = f"steps {kind} {ceiling}x [{levels}]" + (" window" if extra else "")
+        print(f"{label}: exit={r.returncode}",
+              [ln for ln in r.stdout.strip().splitlines() if ln.startswith("step ")][-8:],
+              r.stdout.strip().splitlines()[-1:], r.stderr.strip()[-600:])
+        if r.returncode or not parsed or parsed[1]:
+            ok = False
+        if extra:
+            continue   # the window mode only has to refuse
+        final = int(levels.split(",")[-1])
+        if parsed:
+            digests[("steps", ceiling, levels, kind)] = parsed[2]
+        got = (parse_hires(r.stdout), parse_hires(r.stdout, "wide"))
+        if final not in hires_full or None in got or got != hires_full[final]:
+            print(f"FAIL {label}: frame/wide surface differ from the fixed {final}x run:",
+                  got, hires_full.get(final))
+            ok = False
+    if not digests_agree(digests):
+        print("FAIL native VRAM digest differs across steps:", digests)
+        ok = False
     for label, s, budget in (("over-limit", 32, None), ("budget", 12, "40")):
         e = dict(env)
         if budget is not None:

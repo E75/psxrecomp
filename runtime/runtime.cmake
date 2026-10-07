@@ -370,6 +370,9 @@ set(PSXRECOMP_RUNTIME_SOURCES
     ${PSXRECOMP_ROOT}/runtime/src/gpu_sw_renderer.c
     ${PSXRECOMP_ROOT}/runtime/src/gpu_vram_dirty.c
     ${PSXRECOMP_ROOT}/runtime/src/gpu_render.c
+    ${PSXRECOMP_ROOT}/runtime/src/render_thread.c
+    ${PSXRECOMP_ROOT}/runtime/src/present_thread.c
+    ${PSXRECOMP_ROOT}/runtime/src/frame_gen.c
     ${PSXRECOMP_ROOT}/runtime/src/gpu_gl_renderer.c
     ${PSXRECOMP_ROOT}/runtime/src/gpu_hd_textures.cpp
     ${PSXRECOMP_ROOT}/runtime/src/hd_texture_pack.cpp
@@ -393,6 +396,7 @@ set(PSXRECOMP_RUNTIME_SOURCES
     ${PSXRECOMP_ROOT}/runtime/src/render_pass_motion.c
     ${PSXRECOMP_ROOT}/runtime/src/render_pass_projection.cpp
     ${PSXRECOMP_ROOT}/runtime/src/render_pass_frame.c
+    ${PSXRECOMP_ROOT}/runtime/src/dynamic_resolution.c
     ${PSXRECOMP_ROOT}/runtime/src/host_time.c
     ${PSXRECOMP_ROOT}/runtime/src/psx_fiber.c
     ${PSXRECOMP_ROOT}/runtime/src/sio.c
