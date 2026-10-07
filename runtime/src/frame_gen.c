@@ -397,7 +397,7 @@ static int proj(const double v[3], double h, double *sx, double *sy) {
 
 typedef struct { int32_t qx, qy; float dx, dy; uint32_t n; } NAcc;
 
-void fg_cam_place(const FgPrimList *newer, const FgCamFit *fit, const FgVert *verts,
+void fg_cam_place(const FgPrimList *newer, FgCamFit *fit, const FgVert *verts,
                   double t, float *x, float *y, float margin[][4]) {
     const uint32_t n = newer->n;
     if (margin) memset(margin, 0, sizeof(float) * 4 * FG_MAX_VIEWS);
@@ -421,6 +421,7 @@ void fg_cam_place(const FgPrimList *newer, const FgCamFit *fit, const FgVert *ve
         q_to_m(qt, Rt[vi]);
         for (int k = 0; k < 3; k++) { T[vi][k] = v->t[k]; Tt[vi][k] = v->t[k] * t; }
     }
+    uint32_t clamped = 0, guessed = 0;
     float *dxs = (float *)malloc((size_t)n * 3 * sizeof *dxs);
     float *dys = (float *)malloc((size_t)n * 3 * sizeof *dys);
     if (!dxs || !dys) { free(dxs); free(dys); return; }
@@ -446,8 +447,77 @@ void fg_cam_place(const FgPrimList *newer, const FgCamFit *fit, const FgVert *ve
             }
             double ax, ay, bx, by;
             if (!proj(pn, pr->h[k], &bx, &by)) continue;
-            if (!proj(pt, pr->h[k], &ax, &ay)) { dxs[i] = dys[i] = NAN; continue; }   /* behind the camera at t */
+            /* Near geometry the in-between camera is passing: projected at a
+             * clamped depth. A function of the vertex alone, so triangles
+             * sharing it stay closed (no cracks onto what is behind). */
+            const double zmin = fmax(16.0, 0.25 * pn[2]);
+            if (pt[2] < zmin) { pt[2] = zmin; clamped++; }
+            if (!proj(pt, pr->h[k], &ax, &ay)) continue;
             dxs[i] = (float)(ax - bx); dys[i] = (float)(ay - by);
+        }
+    }
+    /* A vertex without a projection lying on an edge between two placed
+     * vertices (the game split a polygon there: near-plane clipping,
+     * subdivision) moves as that point of the edge does, so the T-junction
+     * stays closed. */
+    uint8_t *done = (uint8_t *)calloc((size_t)n * 3, 1);
+    {
+        uint32_t ne = 0;
+        for (uint32_t i = 0; i < n * 3u; i++) ne += verts[i].mode == FG_PLACE_NEIGHBOUR;
+        if (ne && done) {
+            enum { G = 16 };   /* grid cell, native px */
+            int32_t gx0 = INT32_MAX, gy0 = INT32_MAX, gx1 = INT32_MIN, gy1 = INT32_MIN;
+            for (uint32_t i = 0; i < n * 3u; i++) {
+                const int32_t cx = (int32_t)floorf(newer->v[i / 3].x[i % 3] / G), cy = (int32_t)floorf(newer->v[i / 3].y[i % 3] / G);
+                if (cx < gx0) gx0 = cx; if (cx > gx1) gx1 = cx; if (cy < gy0) gy0 = cy; if (cy > gy1) gy1 = cy;
+            }
+            if (gx0 < -64) gx0 = -64; if (gy0 < -64) gy0 = -64; if (gx1 > 128) gx1 = 128; if (gy1 > 128) gy1 = 128;
+            const int32_t gw = gx1 - gx0 + 1, gh = gy1 - gy0 + 1;
+            /* Cells hold neighbour vertices; edges look them up. */
+            int32_t *head = gw > 0 && gh > 0 ? (int32_t *)malloc((size_t)gw * gh * sizeof *head) : NULL;
+            int32_t *nxt = (int32_t *)malloc((size_t)n * 3 * sizeof *nxt);
+            float *best = (float *)malloc((size_t)n * 3 * sizeof *best);
+            if (head && nxt && best) {
+                for (int32_t c = 0; c < gw * gh; c++) head[c] = -1;
+                for (uint32_t i = 0; i < n * 3u; i++) {
+                    best[i] = 0.75f;
+                    if (verts[i].mode != FG_PLACE_NEIGHBOUR) continue;
+                    const int32_t cx = (int32_t)floorf(newer->v[i / 3].x[i % 3] / G) - gx0;
+                    const int32_t cy = (int32_t)floorf(newer->v[i / 3].y[i % 3] / G) - gy0;
+                    if (cx < 0 || cy < 0 || cx >= gw || cy >= gh) continue;
+                    nxt[i] = head[cy * gw + cx]; head[cy * gw + cx] = (int32_t)i;
+                }
+                for (uint32_t j = 0; j < n; j++) {
+                    const FgPrim *pr = &newer->v[j];
+                    for (int e = 0; e < 3; e++) {
+                        const uint32_t i0 = 3 * j + e, i1 = 3 * j + (e + 1) % 3;
+                        const uint8_t m0 = verts[i0].mode, m1 = verts[i1].mode;
+                        if ((m0 != FG_PLACE_CAMERA && m0 != FG_PLACE_OBJECT) ||
+                            (m1 != FG_PLACE_CAMERA && m1 != FG_PLACE_OBJECT)) continue;
+                        const float ax = pr->x[e], ay = pr->y[e], bx = pr->x[(e + 1) % 3], by = pr->y[(e + 1) % 3];
+                        const float ex = bx - ax, ey = by - ay, l2 = ex * ex + ey * ey;
+                        if (l2 < 1.0f) continue;
+                        int32_t cx0 = (int32_t)floorf(fminf(ax, bx) / G) - gx0, cx1 = (int32_t)floorf(fmaxf(ax, bx) / G) - gx0;
+                        int32_t cy0 = (int32_t)floorf(fminf(ay, by) / G) - gy0, cy1 = (int32_t)floorf(fmaxf(ay, by) / G) - gy0;
+                        if (cx0 < 0) cx0 = 0; if (cy0 < 0) cy0 = 0; if (cx1 >= gw) cx1 = gw - 1; if (cy1 >= gh) cy1 = gh - 1;
+                        if ((int64_t)(cx1 - cx0 + 1) * (cy1 - cy0 + 1) > 4096) continue;
+                        for (int32_t cy = cy0; cy <= cy1; cy++)
+                            for (int32_t cx = cx0; cx <= cx1; cx++)
+                                for (int32_t v = head[cy * gw + cx]; v >= 0; v = nxt[v]) {
+                                    const float px = newer->v[v / 3].x[v % 3], py = newer->v[v / 3].y[v % 3];
+                                    const float u = ((px - ax) * ex + (py - ay) * ey) / l2;
+                                    if (u <= 0.0f || u >= 1.0f) continue;
+                                    const float dx = ax + u * ex - px, dy = ay + u * ey - py, d = sqrtf(dx * dx + dy * dy);
+                                    if (d >= best[v]) continue;
+                                    best[v] = d;
+                                    dxs[v] = dxs[i0] + (dxs[i1] - dxs[i0]) * u;
+                                    dys[v] = dys[i0] + (dys[i1] - dys[i0]) * u;
+                                    done[v] = 1;
+                                }
+                    }
+                }
+            }
+            free(head); free(nxt); free(best);
         }
     }
     /* Neighbours: the mean motion of the placed vertices of the triangles
@@ -468,8 +538,19 @@ void fg_cam_place(const FgPrimList *newer, const FgCamFit *fit, const FgVert *ve
                     }
                 }
                 if (!c) continue;
+                /* The mean stands in for a motion that varies across the
+                 * triangle with depth; where it varies by more than a pixel
+                 * the guess opens cracks (near walls split by the game). */
+                float spread = 0;
                 for (int k = 0; k < 3; k++) {
-                    if (verts[3 * j + k].mode != FG_PLACE_NEIGHBOUR) continue;
+                    const uint8_t m = verts[3 * j + k].mode;
+                    if (m != FG_PLACE_CAMERA && m != FG_PLACE_OBJECT) continue;
+                    const float ex = dxs[3 * j + k] - sx / c, ey = dys[3 * j + k] - sy / c;
+                    if (ex * ex + ey * ey > spread) spread = ex * ex + ey * ey;
+                }
+                for (int k = 0; k < 3; k++) {
+                    if (verts[3 * j + k].mode != FG_PLACE_NEIGHBOUR || (done && done[3 * j + k])) continue;
+                    if (spread > 1.0f) guessed++;
                     const int32_t qx = (int32_t)lrintf(newer->v[j].x[k] * 16.0f), qy = (int32_t)lrintf(newer->v[j].y[k] * 16.0f);
                     uint32_t h = ((uint32_t)qx * 73856093u ^ (uint32_t)qy * 19349663u) & (cap - 1);
                     while (tab[h].n && (tab[h].qx != qx || tab[h].qy != qy)) h = (h + 1) & (cap - 1);
@@ -480,7 +561,7 @@ void fg_cam_place(const FgPrimList *newer, const FgCamFit *fit, const FgVert *ve
             for (uint32_t j = 0; j < n; j++)
                 for (int k = 0; k < 3; k++) {
                     const uint32_t i = 3 * j + k;
-                    if (verts[i].mode != FG_PLACE_NEIGHBOUR) continue;
+                    if (verts[i].mode != FG_PLACE_NEIGHBOUR || (done && done[i])) continue;
                     const int32_t qx = (int32_t)lrintf(newer->v[j].x[k] * 16.0f), qy = (int32_t)lrintf(newer->v[j].y[k] * 16.0f);
                     uint32_t h = ((uint32_t)qx * 73856093u ^ (uint32_t)qy * 19349663u) & (cap - 1);
                     while (tab[h].n && (tab[h].qx != qx || tab[h].qy != qy)) h = (h + 1) & (cap - 1);
@@ -489,6 +570,40 @@ void fg_cam_place(const FgPrimList *newer, const FgCamFit *fit, const FgVert *ve
             free(tab);
         }
     }
+    /* Weld: every placed vertex at one screen position (1/16 px) of one view
+     * moves alike. The same corner reaches the GPU from several projections
+     * (another function, another model vertex, an object and the world); if
+     * they moved apart, the shared edge would crack open onto whatever was
+     * drawn behind it (sky through a tunnel ceiling). */
+    {
+        uint32_t cap = 64;
+        while (cap < n * 6u) cap <<= 1;
+        NAcc *tab = (NAcc *)calloc(cap, sizeof *tab);
+        uint32_t *slot = (uint32_t *)malloc((size_t)n * 3 * sizeof *slot);
+        if (tab && slot) {
+            for (uint32_t i = 0; i < n * 3u; i++) {
+                slot[i] = UINT32_MAX;
+                if (verts[i].mode == FG_PLACE_UNCHANGED) continue;
+                const FgPrim *pr = &newer->v[i / 3];
+                const int32_t qx = (int32_t)lrintf(pr->x[i % 3] * 16.0f) ^ (verts[i].view << 24);
+                const int32_t qy = (int32_t)lrintf(pr->y[i % 3] * 16.0f);
+                uint32_t h = ((uint32_t)qx * 73856093u ^ (uint32_t)qy * 19349663u) & (cap - 1);
+                while (tab[h].n && (tab[h].qx != qx || tab[h].qy != qy)) h = (h + 1) & (cap - 1);
+                tab[h].qx = qx; tab[h].qy = qy;
+                tab[h].dx += dxs[i]; tab[h].dy += dys[i]; tab[h].n++;
+                slot[i] = h;
+            }
+            for (uint32_t i = 0; i < n * 3u; i++)
+                if (slot[i] != UINT32_MAX) {
+                    dxs[i] = tab[slot[i]].dx / tab[slot[i]].n;
+                    dys[i] = tab[slot[i]].dy / tab[slot[i]].n;
+                }
+        }
+        free(tab); free(slot);
+    }
+    free(done);
+    fit->clamped = clamped;
+    fit->guessed = guessed;
     /* Motion to 1/8 px: the fit's rounding error must not move an edge off
      * a pixel boundary (a whole-pixel move stays whole). */
     for (uint32_t i = 0; i < n * 3u; i++) {
