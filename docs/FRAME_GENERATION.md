@@ -1,4 +1,4 @@
-# Frame generation (`[video] frame_generation`)
+# Smooth motion (frame generation, `[video] frame_generation`)
 
 Opt-in, OpenGL with the render thread only, off by default
 (`PSX_FRAME_GEN=0/1` overrides for one run). Off, nothing in this document

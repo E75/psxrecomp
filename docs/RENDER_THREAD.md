@@ -15,7 +15,7 @@ render_thread = true   # game.toml; PSX_RENDER_THREAD=0/1 overrides
 are also read from the player's `settings.toml` `[video]`, which wins over the
 game.toml default; the `PSX_*` env vars override both for one run and are
 never saved. The launcher shows them as Settings → Display rows (Render
-thread, Present thread, Frame generation; recomp-ui
+thread, Present thread, Smooth motion (frame generation); recomp-ui
 `RECOMP_LAUNCHER_HAS_RENDER_PIPELINE`, OpenGL only, the latter two disabled
 while Render thread is off). The pipeline starts once at boot, so a change
 from the in-game launcher is saved and applies at next launch.
@@ -176,7 +176,7 @@ resolution (below), not of this layer.
 | render passes | first `gl_renderer_pass_*` call in a frame is a sync point; the rest of that frame is synchronous. Recommended: leave `render_thread` off with the frame-rate mod |
 | frame interpolation | ineligible (held) while enabled; not started when it is on at boot |
 | OpenXR | ineligible while a session is active |
-| frame generation | `[video] frame_generation`: in-between frames drawn by the render thread from recorded lists, docs/FRAME_GENERATION.md |
+| Smooth motion (frame generation) | `[video] frame_generation`: in-between frames drawn by the render thread from recorded lists, docs/FRAME_GENERATION.md |
 | native-wide / widescreen | recorded; tags, latch and wide-surface mirror as above |
 | internal resolution changes | `gr_set_scale` and every resolution entry point are sync points; dynamic-resolution level steps are recorded (below) |
 | screenshots / debug captures | `screenshot*` sync; `present_shot` is fulfilled on the render thread |
