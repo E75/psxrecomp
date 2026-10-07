@@ -4470,6 +4470,18 @@ static void prepare_precise_triangle(int i0, int i1, int i2,
             ws_native_wide_active() &&
             psx_gpu_triangle_oversize(raw_x,raw_y,0,1,2));
     }
+    if (gr_backend() == GR_BACKEND_OPENGL &&
+        gl_renderer_frame_generation() != gte_fg_source_enabled())
+        gte_fg_source_set(gl_renderer_frame_generation());   /* from the next projection */
+    if (gr_backend() == GR_BACKEND_OPENGL && gte_fg_source_enabled()) {
+        /* Frame generation re-projects vertices from their camera-space source. */
+        uint32_t id[3] = { 0, 0, 0 };
+        int32_t pc[9] = { 0 }, hd[3] = { 0, 0, 0 };
+        const int ix[3] = { i0, i1, i2 };
+        for (int k = 0; k < 3; k++)
+            if (!gte_fg_source_lookup(gp0_cmd_buf[ix[k]], &id[k], &pc[3 * k], &hd[k])) id[k] = 0;
+        gl_renderer_fg_source(id, pc, hd, vx, vy);
+    }
     gr_set_perspective_triangle(0, 0.0f, 0.0f, 0.0f);
     const int geometry = gte_geometry_correction_enabled();
     if (!geometry && !s_native_wide_projection_correction) {

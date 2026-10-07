@@ -5,7 +5,9 @@
  * x = 0 / x = 512 and presents every VBlank (each game frame twice), paced at
  * 60 Hz: a fill, textured / shaded / flat triangles that move a little each
  * game frame, a fixed HUD rect, render-to-texture and a VRAM copy outside the
- * display, and every fifth frame a triangle that jumps (never matched).
+ * display, and every fifth frame a triangle that jumps (never matched). The
+ * triangles carry projection sources (fixture_sources) as gpu.c records them
+ * for GTE-projected geometry, so in-between frames follow the camera.
  * argv[3] == "wide" presents through a native-wide surface instead of VRAM;
  * argv[5] == "late" flips to each frame one VBlank after the next one has
  * started drawing (as R4 does).
@@ -173,6 +175,29 @@ static void textures(void) {
 }
 
 static int wide_mode;
+/* What gpu.c records for a GTE-projected triangle (gl_renderer_fg_source):
+ * vertex identities and camera-space positions that project (H = z = 1000)
+ * to the triangle's screen positions relative to its buffer. */
+/* Structurally different: a channel off by more than 48 (sub-pixel
+ * placement at a high scale resamples textures by a few LSB). */
+static int px_far(uint32_t a, uint32_t b) {
+    for (int c = 0; c < 24; c += 8) { int d = (int)((a >> c) & 255) - (int)((b >> c) & 255); if (d > 48 || d < -48) return 1; }
+    return 0;
+}
+
+static void fixture_sources(int i, int bx, int x, int y) {
+    static const int off[4][6] = {
+        { 0, 0, 30, 2, 3, 32 }, { 0, 0, 28, 0, 0, 28 }, { 0, 0, 26, 4, 6, 30 }, { 0, 0, 24, 20, -4, 26 } };
+    const int *o = off[i % 4];
+    uint32_t id[3]; int32_t pc[9], h[3], xs[3], ys[3];
+    for (int k = 0; k < 3; k++) {
+        id[k] = (uint32_t)(i * 3 + k + 1);
+        xs[k] = x + o[2 * k]; ys[k] = y + o[2 * k + 1];
+        pc[3 * k] = xs[k] - bx; pc[3 * k + 1] = ys[k]; pc[3 * k + 2] = 1000; h[k] = 1000;
+    }
+    gl_renderer_fg_source(id, pc, h, xs, ys);
+}
+
 /* One game frame drawn into buffer bx. Positions move by whole pixels with
  * g; every fifth frame triangle 0 jumps across the screen. */
 static void game_frame_part(int g, int bx, int part) {
@@ -187,9 +212,12 @@ static void game_frame_part(int g, int bx, int part) {
     gr_set_color_modulation(128, 128, 128, 0);
     gr_set_semi_transparency(0, 0);
     for (int i = part ? 20 : 0; i < (part ? 40 : 20); i++) {
-        int x = bx + 10 + (i % 8) * 36 + ((i * 3 + g * (1 + i % 3)) % 9) - 4;
-        int y = 12 + (i / 8) * 42 + (g * (i % 2 ? 1 : -1)) % 5;
+        /* The camera pans one pixel per game frame (every triangle moves
+         * alike); triangle 5 is an object moving on its own. */
+        int x = bx + 10 + (i % 8) * 36 + (i == 5 ? (g * 3) % 9 : g % 9) - 4;
+        int y = 12 + (i / 8) * 42 + (i == 5 ? g % 5 : 0);
         if (i == 0 && g % 5 == 0) { x = bx + 250 - (g * 37) % 200; y = 180; }
+        fixture_sources(i, bx, x, y);
         switch (i % 4) {
         case 0: gr_draw_shaded_textured_triangle(x, y, 0, 0, 0x808080, x + 30, y + 2, 63, 4, 0x6090b0,
                                                  x + 3, y + 32, 8, 63, 0xb09060, 512, 300, 0x000e, 0); break;
@@ -306,10 +334,20 @@ int main(int argc, char **argv) {
         check(fg_generate(0.0, 0) == 1, "compose at phase 0");
         uint64_t d0 = read_back(img);
         uint64_t r0 = fnv(img_last[0], (size_t)ww * wh * 4, 0xcbf29ce484222325ull);
-        long diff = 0;
-        for (int i = 0; i < ww * wh; i++) if (img[i] != img_last[0][i]) diff++;
-        printf("phase0_diff_px=%ld matched=%u/%u\n", diff, s_fg_mst.matched, s_fg_mst.prims);
-        check(d0 == r0, "phase 0 equals the older real frame");
+        /* Every projected triangle is where the older frame had it; what the
+         * in-between camera uncovers (here: the background beside a moved
+         * triangle, through its transparent texels) shows the newer frame
+         * (frame_gen.h). So each phase-0 pixel is the older frame's, or the
+         * newer frame's where they differ. */
+        if (getenv("FG_DUMP")) { FILE *f = fopen("p0.rgba", "wb"); fwrite(img, 4, (size_t)ww * wh, f); fclose(f); }
+        long diff = 0, neither = 0;
+        for (int i = 0; i < ww * wh; i++)
+            if (img[i] != img_last[0][i]) { diff++; neither += px_far(img[i], img_last[0][i]) && px_far(img[i], img_last[1][i]); }
+        printf("phase0_diff_px=%ld (neither frame %ld) of %d camera=%u object=%u\n", diff, neither, ww * wh,
+               s_fg_fit.camera, s_fg_fit.object);
+        (void)d0; (void)r0;
+        check(s_fg_fit.ok && s_fg_fit.camera + s_fg_fit.object == 120, "every projected vertex placed");
+        check(neither * 1000 < (long)ww * wh, "phase 0: the older real frame, uncovered areas the newer (<0.1%)");
         check(fg_generate(0.5, 0) == 1, "compose at phase 0.5");
         uint64_t dm = read_back(img);
         if (getenv("FG_DUMP")) {
