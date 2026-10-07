@@ -1545,6 +1545,7 @@ static const char *GEO_VS =
     "uniform float u_xhalf;  /* x clip half-extent (px); 512 canonical */\n"
     "uniform float u_xscale; /* native-wide 2D-backdrop x-stretch; 1 canonical */\n"
     "uniform float u_xcenter;/* stretch centre in VRAM px; 0 canonical */\n"
+    "uniform float u_zbias;  /* PGXP depth: relative near bias of the colour pass */\n"
     "noperspective out vec4 v_col;\n"
     "void main(){\n"
     "  /* a_col.a carries the mask bit (0/1) and, for a PGXP 3D vertex, its\n"
@@ -1554,7 +1555,7 @@ static const char *GEO_VS =
     "  float m = a - 2.0 * code;\n"
     "  float sz = code;\n"
     "  if (a < 0.0) { m = 0.0; zn = 0.9999; sz = 0.0; }  /* inside the far plane: never clipped */\n"
-    "  else if (sz > 0.5) { zn = 1.0 - 512.0 / (sz + 256.0); }\n"
+    "  else if (sz > 0.5) { zn = 1.0 - 512.0 / (sz * (1.0 - u_zbias) + 256.0); }\n"
     "  v_col = vec4(a_col.rgb, m);\n"
     "  float xb = a_pos.x;\n"
     "  if (u_xscale < 0.0) {\n"
@@ -1601,6 +1602,7 @@ static const char *TEX_VS =
     "uniform float u_xhalf;  /* x clip half-extent (px); 512 canonical */\n"
     "uniform float u_xscale; /* native-wide 2D-backdrop x-stretch; 1 canonical */\n"
     "uniform float u_xcenter;/* stretch centre in VRAM px; 0 canonical */\n"
+    "uniform float u_zbias;  /* PGXP depth: relative near bias of the colour pass */\n"
     "noperspective out vec2 v_uv; noperspective out vec4 v_col;\n"
     "smooth out vec2 v_uv_p;  /* perspective-correct UV (used when v_persp!=0) */\n"
     "flat out int v_persp;\n"
@@ -1630,7 +1632,7 @@ static const char *TEX_VS =
     "   * a_q == 0 (feature off) w is exactly 1.0 and this is the old expression. */\n"
     "  float w = (a_q > 0.0) ? (1.0 / a_q) : 1.0;\n"
     "  float sz = a_pz, zn = 0.0;\n"
-    "  if (sz > 0.5) { zn = 1.0 - 512.0 / (sz + 256.0); }\n"
+    "  if (sz > 0.5) { zn = 1.0 - 512.0 / (sz * (1.0 - u_zbias) + 256.0); }\n"
     "  vec2 ndc = vec2((xb+u_shift+u_xoff)/u_xhalf - 1.0, (a_pos.y+u_shift)/256.0 - 1.0);\n"
     "  gl_Position = vec4(ndc * w, zn * w, w); }\n";
 static const char *TEX_FS =
@@ -1985,23 +1987,62 @@ static void hr_end(void) {
 }
 
 /* PGXP depth state for one draw (G1.14). 0: no depth (the default GL state
- * everywhere else), 1: opaque 3D polygon, LEQUAL test and write, 2: depth
- * clear draw (always pass, write the far clear depth, no colour or stencil).
- * Every caller that applies 1 or 2 calls depth_restore after its draw. */
-static void depth_apply(int mode) {
+ * everywhere else), 1: opaque 3D polygon, 2: depth clear draw (always pass,
+ * write the far clear depth, no colour or stencil).
+ *
+ * Mode 1 is two passes so that near-coplanar surfaces keep the PS1's
+ * painter order (R4's lane markings and decals are separate polygons drawn
+ * after the road, a hair off its plane once SZ is quantised per vertex): the
+ * colour pass tests LEQUAL with its depth pulled toward the camera by a
+ * relative tolerance (u_zbias, s_pgxp_depth_tol of the distance) and writes
+ * no depth; depth_restore then lays down the true depth in a colourless
+ * pass. A later polygon within the tolerance of what is already there wins,
+ * as in painter order; anything clearly behind is still occluded.
+ * DuckStation's depth buffer is a plain LEQUAL with no bias and has this
+ * decal problem; this tolerance is our own. Every caller that applies 1 or 2
+ * calls depth_restore after its draw (tex: textured program bound). */
+static GLint s_geo_uZbias = -1, s_tex_uZbias = -1;
+static float s_pgxp_depth_tol = -1.0f;
+static float pgxp_depth_tol(void) {
+    if (s_pgxp_depth_tol < 0.0f) {
+        const char *e = getenv("PSX_PGXP_DEPTH_TOL");
+        s_pgxp_depth_tol = e && *e ? (float)atof(e) : 0.02f;
+        if (s_pgxp_depth_tol < 0.0f) s_pgxp_depth_tol = 0.0f;
+        if (s_pgxp_depth_tol > 0.5f) s_pgxp_depth_tol = 0.5f;
+    }
+    return s_pgxp_depth_tol;
+}
+static void depth_apply_ex(int mode, int tex) {
     if (mode == 0) return;
     glEnable(GL_DEPTH_TEST);
-    glDepthMask(GL_TRUE);
     if (mode == 2) {
+        glDepthMask(GL_TRUE);
         glDepthFunc(GL_ALWAYS);
         glDisable(GL_STENCIL_TEST);
         glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
     } else {
+        glDepthMask(GL_FALSE);
         glDepthFunc(GL_LEQUAL);
+        p_glUniform1f(tex ? s_tex_uZbias : s_geo_uZbias, pgxp_depth_tol());
     }
 }
-static void depth_restore(int mode) {
+/* After the colour pass of mode 1: the depth-only pass (n vertices of the
+ * bound buffer), then back to the default state. */
+static void depth_restore_ex(int mode, int tex, int n) {
     if (mode == 0) return;
+    if (mode == 1) {
+        p_glUniform1f(tex ? s_tex_uZbias : s_geo_uZbias, 0.0f);
+        GLboolean st = glIsEnabled(GL_STENCIL_TEST), bl = glIsEnabled(GL_BLEND);
+        glDisable(GL_STENCIL_TEST); glDisable(GL_BLEND);
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        glDepthMask(GL_TRUE);
+        if (tex) p_glUniform1i(s_uSemipass, 0);
+        glDrawArrays(GL_TRIANGLES, 0, n);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        if (st) glEnable(GL_STENCIL_TEST);
+        if (bl) glEnable(GL_BLEND);
+    }
+    glDepthMask(GL_TRUE);
     glDisable(GL_DEPTH_TEST);
     if (mode == 2) glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 }
@@ -3384,9 +3425,9 @@ static void hiw_replay_wide(void) {
             p_glUniform1i(s_uFilter, c->filter);
             p_glBufferData(PSXGL_ARRAY_BUFFER, (ptrdiff_t)((size_t)c->vcount * TEXV * sizeof(float)),
                            s_hq_v + c->vfirst, PSXGL_STREAM_DRAW);
-            depth_apply(c->depth);
+            depth_apply_ex(c->depth, 1);
             tex_draw_passes_ex(c->vcount, c->semi, c->mask, c->check, 0);
-            depth_restore(c->depth);
+            depth_restore_ex(c->depth, 1, c->vcount);
         } else {
             if (cur != HQ_GEO) {
                 p_glUseProgram(s_geo_prog);
@@ -3401,9 +3442,9 @@ static void hiw_replay_wide(void) {
             mask_stencil_ex(c->mask, c->check);
             p_glBufferData(PSXGL_ARRAY_BUFFER, (ptrdiff_t)((size_t)c->vcount * 6 * sizeof(float)),
                            s_hq_v + c->vfirst, PSXGL_STREAM_DRAW);
-            depth_apply(c->depth);
+            depth_apply_ex(c->depth, 0);
             glDrawArrays(GL_TRIANGLES, 0, c->vcount);
-            depth_restore(c->depth);
+            depth_restore_ex(c->depth, 0, c->vcount);
         }
     }
     if (!any) return;
@@ -3469,9 +3510,9 @@ static void hiw_flush_queue(void) {
                 p_glUniform1i(s_uFilter, c->filter);
                 p_glBufferData(PSXGL_ARRAY_BUFFER, (ptrdiff_t)((size_t)c->vcount * TEXV * sizeof(float)),
                                s_hq_v + c->vfirst, PSXGL_STREAM_DRAW);
-                depth_apply(c->depth);
+                depth_apply_ex(c->depth, 1);
                 tex_draw_passes_ex(c->vcount, c->semi, c->mask, c->check, 0);
-                depth_restore(c->depth);
+                depth_restore_ex(c->depth, 1, c->vcount);
             } else {
                 if (cur != HQ_GEO) {
                     p_glUseProgram(s_geo_prog);
@@ -3483,9 +3524,9 @@ static void hiw_flush_queue(void) {
                 mask_stencil_ex(c->mask, c->check);
                 p_glBufferData(PSXGL_ARRAY_BUFFER, (ptrdiff_t)((size_t)c->vcount * 6 * sizeof(float)),
                                s_hq_v + c->vfirst, PSXGL_STREAM_DRAW);
-                depth_apply(c->depth);
+                depth_apply_ex(c->depth, 0);
                 glDrawArrays(GL_TRIANGLES, 0, c->vcount);
-                depth_restore(c->depth);
+                depth_restore_ex(c->depth, 0, c->vcount);
             }
         }
     }
@@ -3531,9 +3572,9 @@ static void flush_tex_batch(void) {
     p_glBindBuffer(PSXGL_ARRAY_BUFFER, s_tex_vbo);
     p_glBufferData(PSXGL_ARRAY_BUFFER, (ptrdiff_t)(nverts * TEXV * sizeof(float)), s_tb, PSXGL_STREAM_DRAW);
 
-    depth_apply(dmode);
+    depth_apply_ex(dmode, 1);
     tex_batch_draw_passes(nverts, semi);
-    depth_restore(dmode);
+    depth_restore_ex(dmode, 1, nverts);
 
     /* Native-wide mirror — skipped for a batch fully inside the 4:3 frame (its
      * centre content comes from the present-time canonical blit; nothing to add
@@ -3560,9 +3601,9 @@ static void flush_tex_batch(void) {
         gl_perf_mirror_begin();
         wide_target_begin(dx, s_tex_uXoff, s_tex_uXhalf);
         wide_set_bd_scale(s_tex_uXscale, s_tex_uXcenter);
-        depth_apply(dmode);
+        depth_apply_ex(dmode, 1);
         if (s_ws_ablate != 2) tex_batch_draw_passes(nverts, semi);
-        depth_restore(dmode);
+        depth_restore_ex(dmode, 1, nverts);
         wide_clear_bd_scale(s_tex_uXscale, s_tex_uXcenter);
         wide_target_end(s_tex_uXoff, s_tex_uXhalf);
         gl_perf_mirror_end();
@@ -3647,10 +3688,10 @@ static void flush_flat_batch(void) {
     if (nl) memcpy(&s_fb[nverts * 6], s_fbl, (size_t)nl * 2 * 6 * sizeof(float));
     p_glBufferData(PSXGL_ARRAY_BUFFER, (ptrdiff_t)((nverts + 2 * nl) * 6 * sizeof(float)),
                    s_fb, PSXGL_STREAM_DRAW);
-    depth_apply(dmode);
+    depth_apply_ex(dmode, 0);
     if (nl) flat_batch_draw_hr_lines(nverts, nl);
     else glDrawArrays(fmode, 0, nverts);
-    depth_restore(dmode);
+    depth_restore_ex(dmode, 0, nverts);
     int mirror = g_wide_cur && !s_wide_suppress && s_ws_ablate != 1 &&
                  !(!g_ws_bd_stretch_on && mirror_flat_batch_center_only(nverts));
     if (mirror) {
@@ -3669,9 +3710,9 @@ static void flush_flat_batch(void) {
         gl_perf_mirror_begin();
         wide_target_begin(dx, s_geo_uXoff, s_geo_uXhalf);
         wide_set_bd_scale(s_geo_uXscale, s_geo_uXcenter);
-        depth_apply(dmode);
+        depth_apply_ex(dmode, 0);
         if (s_ws_ablate != 2) glDrawArrays(fmode, 0, nverts);
-        depth_restore(dmode);
+        depth_restore_ex(dmode, 0, nverts);
         wide_clear_bd_scale(s_geo_uXscale, s_geo_uXcenter);
         wide_target_end(s_geo_uXoff, s_geo_uXhalf);
         gl_perf_mirror_end();
@@ -5307,6 +5348,8 @@ static int init_gpu_raster(void) {
         s_shift_hi = 0.5f / (float)s_out_scale - 1.0f / 64.0f;
         s_geo_uShift = p_glGetUniformLocation(s_geo_prog, "u_shift");
         s_tex_uShift = p_glGetUniformLocation(s_tex_prog, "u_shift");
+        s_geo_uZbias = p_glGetUniformLocation(s_geo_prog, "u_zbias");
+        s_tex_uZbias = p_glGetUniformLocation(s_tex_prog, "u_zbias");
         p_glUseProgram(s_geo_prog);
         p_glUniform1f(s_geo_uShift, shift);
         /* Native-wide projection defaults: x translation 0, clip half-extent

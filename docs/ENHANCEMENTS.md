@@ -1250,6 +1250,16 @@ line quads joined a depth batch and wrote near depth along every road and
 wall edge (lines now always break the batch). On R4 the threshold clears ~25
 times a frame; without it far beams vanish behind the previous view's depth.
 
+**Decals keep painter order.** A plain LEQUAL depth (DuckStation's choice,
+no bias) cut R4's lane markings into the road: they are separate polygons
+drawn after it, a hair off its plane once SZ is quantised per vertex. A 3D
+batch is now two passes: the colour pass tests with its depth pulled toward
+the camera by 2% of the distance (`PSX_PGXP_DEPTH_TOL`) and writes no depth;
+a colourless pass then writes the true depth. A later surface within the
+tolerance wins as in painter order; anything clearly behind stays occluded.
+Inside one batch the order is painter's. On slots 1-3 at 10x the image
+matches depth-off within 96 / 36 px (tunnel) and the markings are whole.
+
 Diagnostic: `PSX_PGXP_TRI_LOG=<file>` logs every triangle (depth mode, x y
 SZ) while `<file>.on` exists.
 
