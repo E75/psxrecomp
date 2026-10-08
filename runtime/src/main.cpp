@@ -7146,6 +7146,7 @@ static PresRingEntry* present_ring_commit(uint8_t path, uint16_t disp_w,
     e->tag_delta     = (d > INT32_MAX || d < INT32_MIN) ? INT32_MAX : (int32_t)d;
     e->gte_verts     = (uint16_t)(ws.gte_verts > 0xFFFF ? 0xFFFF : ws.gte_verts);
     e->ovh_prims     = (uint16_t)(ws.ovh_prims > 0xFFFF ? 0xFFFF : ws.ovh_prims);
+    e->bd_veto       = (uint8_t)(ws.bd_veto != 0);
     return e;
 }
 

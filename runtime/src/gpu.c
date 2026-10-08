@@ -40,6 +40,7 @@
 #include "ws_ui_group.h"
 #include "ws_primitive_roles.h"
 #include "ws_scene_latch.h"
+#include "ws_backdrop_extent.h"
 #include "ws_prepass_guard.h"
 #include "ws_hud_anchor.h"
 #include "ws_repeat_rect.h"
@@ -435,11 +436,21 @@ static int ws_game_mode(void) {
  * scene with neither signal crosses the grace period in ~0.1 s. */
 #define WS_2D_SCENE_HYSTERESIS 6u
 static WsSceneLatch ws_scene_latch;
+/* Finite 2D backdrop (ws_backdrop_extent.h): a full-screen pre-rendered image
+ * that ends inside the native-wide reveal outranks polygon overhang. Widened
+ * 2D actor culls place sprite quads past the canonical edge, so such a scene
+ * passes the overhang test while its ground stops at the image edge (Tomba's
+ * overhead village: a 384px image, fence/sign quads out to x=428). */
+static WsBackdropExtent ws_bdx;
 static int ws_2d_only_scene(void) {
     if (ws_mod_world_scene()) return 0;
     if (ws_local_native_split()) return 0;
     if (ws_full_2d_mode() || ws_gte_game_mode_cfg) return 0;
     uint32_t f = (uint32_t)s_frame_count;
+    if (ws_bdx_veto(&ws_bdx, f, WS_2D_SCENE_HYSTERESIS)) {
+        ws_scene_latch.confirmed = 0;   /* affirmatively 2D: relearn on exit */
+        return 1;
+    }
     return ws_scene_is_2d(&ws_scene_latch, f,
         f - ws_sust_ovh_stamp <= WS_2D_SCENE_HYSTERESIS,
         f - ws_last_world3d_stamp <= 2u, WS_2D_SCENE_HYSTERESIS);
@@ -450,6 +461,7 @@ static int ws_2d_only_scene(void) {
 static void ws_reset_scene_history(void) {
     uint32_t expired = (uint32_t)s_frame_count - 1000u;
     memset(&ws_scene_latch, 0, sizeof ws_scene_latch);
+    ws_bdx_reset(&ws_bdx);
     ws_last_tag_stamp = ws_last_3d_stamp = ws_last_gte_stamp = expired;
     ws_last_world3d_stamp = ws_sust_world3d_stamp = expired;
     ws_last_ovh_stamp = ws_sust_ovh_stamp = expired;
@@ -2319,6 +2331,21 @@ void gpu_ws_get_debug(GpuWsDebug* out) {
     out->angle_43_identity = ws_angle_43_identity;
     out->angle_max_vanilla = ws_angle_max_vanilla;
     out->angle_max_widened = ws_angle_max_widened;
+    out->bd_veto = ws_bdx_veto(&ws_bdx, (uint32_t)s_frame_count,
+                               WS_2D_SCENE_HYSTERESIS);
+    out->bd_eval_frame = ws_bdx.eval_frame;
+    out->bd_rects = ws_bdx.eval_rects;
+    out->bd_last_short = ws_bdx.last_short;
+    out->bd_full = ws_bdx.eval_full;
+    out->bd_short = ws_bdx.eval_short;
+    out->bd_min_x = ws_bdx.eval_rects ? ws_bdx.eval_min_x : 0;
+    out->bd_max_x = ws_bdx.eval_rects ? ws_bdx.eval_max_x : 0;
+    out->bd_reveal = ws_bdx.eval_reveal;
+    out->bd_canon_pct = ws_bdx.canon_pct;
+    out->bd_left_pct = ws_bdx.left_pct;
+    out->bd_right_pct = ws_bdx.right_pct;
+    out->bd_evaluations = ws_bdx.evaluations;
+    out->bd_short_frames = ws_bdx.short_frames;
 }
 
 int gpu_ws_get_aspect_cone_site_debug(
@@ -6791,6 +6818,36 @@ static void ws_note_overhang(uint8_t op) {
     }
 }
 
+/* Finite-backdrop noter (ws_backdrop_extent.h). Called for every draw prim in
+ * submission order. The frame's leading run of rectangles is its back-most
+ * layer; the first polygon or line closes it. Only untagged textured rects
+ * that the renderer leaves at their authored position contribute: sprite-
+ * funnel prims (actors, HUD, a tagged far backdrop), stretched backdrop prims
+ * and host-extended backdrop packets already reach past the canonical edge, so
+ * they are neutral, as are untextured rects (full-width fades are extended).
+ * Measured against the CONFIGURED reveal, not the active one, so the verdict
+ * cannot feed back through its own 4:3 present. */
+static void ws_note_backdrop(uint8_t op) {
+    if (ws_mode != 2) return;
+    int32_t reveal = ws_nw_configured_offset();
+    if (reveal <= 0) return;
+    ws_bdx_frame(&ws_bdx, (uint32_t)s_frame_count, ws_disp_w(), ws_disp_h(), reveal);
+    if (op < 0x60) { ws_bdx_close(&ws_bdx); return; }
+    if (!(op & 0x04)) return;
+    if (psx_ws_prim_is_tagged() || psx_ws_prim_in_backdrop() || ws_bg2d_host_packet())
+        return;
+    int32_t x, y, w, h;
+    parse_vertex(gp0_cmd_buf[1], &x, &y);
+    switch ((op >> 3) & 3u) {
+    case 0: w = (int32_t)(gp0_cmd_buf[3] & 0x3FFu);
+            h = (int32_t)((gp0_cmd_buf[3] >> 16) & 0x1FFu); break;
+    case 1: w = h = 1; break;
+    case 2: w = h = 8; break;
+    default: w = h = 16; break;
+    }
+    ws_bdx_rect(&ws_bdx, x, y, x + w, y + h);
+}
+
 static void ws_census_record(uint8_t opcode, int32_t x, int32_t y) {
     if (!ws_census_on) return;
     if (!ws_census) {
@@ -6883,6 +6940,7 @@ static void gp0_execute_command(void) {
         parse_vertex(gp0_cmd_buf[1], &cvx, &cvy);
         ws_census_record(opcode, cvx, cvy);
         ws_note_overhang(opcode);   /* 2D-only-scene classifier world signal */
+        ws_note_backdrop(opcode);   /* ...and its finite-backdrop veto */
     }
 
     /* Categorize for diagnostics */
@@ -7688,6 +7746,7 @@ typedef struct {
     uint32_t ws_ovh_frame, ws_ovh_count, ws_ovh_prev;
     uint32_t ws_last_ovh_stamp, ws_sust_ovh_stamp;
     WsSceneLatch ws_scene_latch;
+    WsBackdropExtent ws_bdx;
     WsSceneHold s_ws_scene_hold;
     uint32_t s_ws_fmv_frame_cache;
     int s_ws_fmv_cached;
@@ -7756,6 +7815,7 @@ static void gpu_pass_scene_transfer(int restore) {
     PASS_VALUE(ws_last_ovh_stamp);
     PASS_VALUE(ws_sust_ovh_stamp);
     PASS_VALUE(ws_scene_latch);
+    PASS_VALUE(ws_bdx);
     PASS_VALUE(s_ws_scene_hold);
     PASS_VALUE(s_ws_fmv_frame_cache);
     PASS_VALUE(s_ws_fmv_cached);
