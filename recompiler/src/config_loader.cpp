@@ -613,6 +613,60 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
             rt.parappa_timing_extra_late = parse_window("extra_late");
     }
 
+    // Optional [timing] block — title constants, never player settings.
+    // guest_cycle_scale: no CPU is emulated; recompiled code charges the
+    // guest clock a fixed cost per instruction, and scale N charges 1/N of
+    // it, so N times as much game code fits between two VBlanks while
+    // VBlank, timers, CD, SPU and DMA keep hardware time. 1 = faithful;
+    // values outside 1..64 are rejected. guest_cycle_scale_gated: the scale applies only
+    // while the mod gate is open (psx_mod_set_guest_cycle_scale_gate); see
+    // guest_cycle_scale_gate below for the declarative RAM gate.
+    if (cfg.contains("timing")) {
+        const toml::value& tm = toml::find(cfg, "timing");
+        if (tm.contains("guest_cycle_scale")) {
+            const long long n = toml::find<long long>(tm, "guest_cycle_scale");
+            if (n < 1 || n > 64)
+                throw std::runtime_error("[timing] guest_cycle_scale must be 1..64");
+            rt.guest_cycle_scale = static_cast<int>(n);
+        }
+        if (tm.contains("guest_cycle_scale_gated"))
+            rt.guest_cycle_scale_gated = toml::find<bool>(tm, "guest_cycle_scale_gated");
+        // guest_cycle_scale_gate: one inline table or an array of them,
+        // { addr, value, size = 4, mask = 0xFFFFFFFF }; all must hold.
+        if (tm.contains("guest_cycle_scale_gate")) {
+            const toml::value& g = toml::find(tm, "guest_cycle_scale_gate");
+            std::vector<toml::value> preds;
+            if (g.is_array()) preds = g.as_array();
+            else preds.push_back(g);
+            if (preds.size() > 8)
+                throw std::runtime_error("[timing] guest_cycle_scale_gate: at most 8 predicates");
+            // Range-check the signed TOML integer before narrowing, so an
+            // oversized or negative value cannot wrap into a valid one.
+            auto u32_field = [](const toml::value& pv, const char* key) -> uint32_t {
+                const long long v = toml::find<long long>(pv, key);
+                if (v < 0 || v > 0xFFFFFFFFLL)
+                    throw std::runtime_error(
+                        std::string("[timing] guest_cycle_scale_gate: ") + key +
+                        " must be 0..0xFFFFFFFF");
+                return static_cast<uint32_t>(v);
+            };
+            for (const toml::value& pv : preds) {
+                RuntimeConfig::GuestCycleScaleGatePred p;
+                p.addr  = u32_field(pv, "addr");
+                p.value = u32_field(pv, "value");
+                if (pv.contains("size")) p.size = u32_field(pv, "size");
+                if (pv.contains("mask")) p.mask = u32_field(pv, "mask");
+                const uint32_t phys = p.addr & 0x1FFFFFFFu;
+                if ((p.size != 1 && p.size != 2 && p.size != 4) ||
+                    (phys & (p.size - 1u)) != 0 || phys >= 0x00800000u)
+                    throw std::runtime_error(
+                        "[timing] guest_cycle_scale_gate: addr must be an aligned "
+                        "main-RAM address and size 1, 2 or 4");
+                rt.guest_cycle_scale_gate.push_back(p);
+            }
+        }
+    }
+
     // Optional [video] block — visual enhancement options. Kept on the same
     // RuntimeConfig so main.cpp consumes them alongside the other knobs.
     if (cfg.contains("video")) {
