@@ -5690,7 +5690,11 @@ static void handle_gpu_state(int id, const char *json)
              "\"outside_reject\":%llu,\"queue_reject\":%llu,"
              "\"queue_highwater\":[%u,%u,%u]},"
              "\"terrain_angle\":{\"calls\":%llu,\"identity_43\":%llu,"
-             "\"max_vanilla\":%u,\"max_widened\":%u}}}",
+             "\"max_vanilla\":%u,\"max_widened\":%u},"
+             "\"backdrop\":{\"veto\":%d,\"eval_frame\":%u,\"rects\":%u,"
+             "\"full\":%d,\"short\":%d,\"x\":[%d,%d],\"reveal\":%d,"
+             "\"canon_pct\":%u,\"left_pct\":%u,\"right_pct\":%u,"
+             "\"last_short\":%u,\"evaluations\":%llu,\"short_frames\":%llu}}}",
              id, di.display_x, di.display_y,
              di.width, di.height,
              di.screen_offset_y,
@@ -5732,7 +5736,12 @@ static void handle_gpu_state(int id, const char *json)
              ws.aspect_cone_queue_highwater[2],
              (unsigned long long)ws.angle_calls,
              (unsigned long long)ws.angle_43_identity,
-             ws.angle_max_vanilla, ws.angle_max_widened);
+             ws.angle_max_vanilla, ws.angle_max_widened,
+             ws.bd_veto, ws.bd_eval_frame, ws.bd_rects,
+             ws.bd_full, ws.bd_short, ws.bd_min_x, ws.bd_max_x, ws.bd_reveal,
+             ws.bd_canon_pct, ws.bd_left_pct, ws.bd_right_pct,
+             ws.bd_last_short, (unsigned long long)ws.bd_evaluations,
+             (unsigned long long)ws.bd_short_frames);
 }
 
 static void handle_ws_aspect_cone_site(int id, const char *json)
@@ -10759,7 +10768,7 @@ static void handle_gl_present_ring(int id, const char *json)
  *   {"cmd":"present_ring","n":600}
  * -> events: [seq, frame, path, present_w, disp_w, disp_h, game_mode,
  *             native_43, fellback, tag_delta, nw_extra, gte_verts,
- *             ovh_prims] */
+ *             ovh_prims, bd_veto] */
 static void handle_present_ring(int id, const char *json)
 {
     static const char *pres_path_name[4] =
@@ -10769,7 +10778,7 @@ static void handle_present_ring(int id, const char *json)
     if (n > 4096) n = 4096;
     uint64_t total = present_ring_total();
     uint64_t start = total > (uint64_t)n ? total - (uint64_t)n : 0;
-    int bufsz = 96 + n * 112;
+    int bufsz = 96 + n * 128;
     char *buf = (char *)malloc((size_t)bufsz);
     if (!buf) { send_err(id, "alloc failed"); return; }
     int pos = snprintf(buf, bufsz,
@@ -10780,13 +10789,13 @@ static void handle_present_ring(int id, const char *json)
         PresRingEntry e;
         if (!present_ring_get(s, &e)) continue;
         pos += snprintf(buf + pos, bufsz - pos,
-                        "%s[%llu,%u,\"%s\",%u,%u,%u,%u,%u,%u,%ld,%u,%u,%u]",
+                        "%s[%llu,%u,\"%s\",%u,%u,%u,%u,%u,%u,%ld,%u,%u,%u,%u]",
                         first ? "" : ",", (unsigned long long)s, e.frame,
                         e.path < 4 ? pres_path_name[e.path] : "?",
                         e.present_w, e.disp_w, e.disp_h,
                         e.game_mode, e.native_43, e.wide_fellback,
                         (long)e.tag_delta, e.nw_extra,
-                        e.gte_verts, e.ovh_prims);
+                        e.gte_verts, e.ovh_prims, e.bd_veto);
         first = 0;
     }
     pos += snprintf(buf + pos, bufsz - pos, "]}");

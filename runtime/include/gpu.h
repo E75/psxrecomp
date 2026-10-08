@@ -649,6 +649,13 @@ typedef struct {
     uint64_t angle_43_identity;
     uint32_t angle_max_vanilla;
     uint32_t angle_max_widened;
+    /* Finite 2D backdrop verdict (ws_backdrop_extent.h), newest evaluation. */
+    int      bd_veto;           /* scene presented 4:3: backdrop stops short */
+    uint32_t bd_eval_frame, bd_rects, bd_last_short;
+    int      bd_full, bd_short;
+    int32_t  bd_min_x, bd_max_x, bd_reveal;
+    uint32_t bd_canon_pct, bd_left_pct, bd_right_pct;
+    uint64_t bd_evaluations, bd_short_frames;
 } GpuWsDebug;
 void gpu_ws_get_debug(GpuWsDebug* out);
 
