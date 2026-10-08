@@ -1460,6 +1460,23 @@ FunctionAnalysisResult FunctionAnalyzer::analyze_exact_entries(
         // separately proven implementation or fall back to the interpreter.
         if (!word_opt.has_value() || !exact_is_valid_mips_word(*word_opt))
             return false;
+        // Every straight-line word up to the first transfer (and its delay
+        // slot) must decode too: a target that is data in THIS image (another
+        // image's function is resident there at runtime, e.g. WE2002 ENDING.BIN
+        // calling 0x800C7EE4) would otherwise fail the audit of the whole image.
+        for (uint32_t i = 0; i < 16u; i++) {
+            auto w = exe_.read_word(addr + i * 4u);
+            if (!w.has_value() || !exact_is_valid_mips_word(*w)) return false;
+            const uint32_t op = *w >> 26, fn = *w & 0x3Fu;
+            const bool transfer = op == 1u || (op >= 2u && op <= 7u) ||
+                                  (op >= 0x14u && op <= 0x17u) ||
+                                  (op == 0u && (fn == 8u || fn == 9u));
+            if (transfer) {
+                auto slot = exe_.read_word(addr + i * 4u + 4u);
+                if (!slot.has_value() || !exact_is_valid_mips_word(*slot)) return false;
+                break;
+            }
+        }
         bool dense_local_pointer_table = true;
         for (uint32_t i = 0; i < 3u; i++) {
             auto value = exe_.read_word(addr + i * 4u);
