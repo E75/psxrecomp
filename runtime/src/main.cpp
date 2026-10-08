@@ -97,6 +97,7 @@ extern "C" void psx_event_step_conservative_env_init(void);
 #include "recomp_audio_drc.h"
 #include "memcard.h"
 #include "debug_server.h"
+#include "host_sampler.h"
 #include "crash_trace.h"
 #include "freeze_heartbeat.h"
 #include "config_loader.h"
@@ -1604,6 +1605,15 @@ static bool netplay_local_viewport_native_wide(void) {
     return g_netplay_local_viewport == 1 && !g_netplay_local_viewport_projection;
 }
 
+/* [widescreen] auto_ui_size from game.toml; a mod may override it per session
+ * (psx_mod_set_widescreen_hud_size), reset_mod_owned_presentation restores. */
+static bool g_ws_auto_ui_proportional_cfg = false;
+extern "C" int psx_mod_set_widescreen_hud_size(int proportional) {
+    if (proportional != 0 && proportional != 1) return 0;
+    gpu_ws_set_auto_ui_proportional(proportional);
+    return 1;
+}
+
 extern "C" int psx_mod_set_fixed_display_aspect(
     uint32_t numerator, uint32_t denominator) {
     if (numerator == 0 || denominator == 0 ||
@@ -1712,6 +1722,7 @@ static void reset_mod_owned_presentation(void) {
     g_ws_adaptive_view = false;
     g_ws_adaptive_max_num = 16;
     g_ws_adaptive_max_den = 9;
+    gpu_ws_set_auto_ui_proportional(g_ws_auto_ui_proportional_cfg ? 1 : 0);
     psx_mod_set_world_scene_predicate(nullptr);
     gpu_ws_set_native_scene_predicate(nullptr);
     psx_mod_set_retained_scene_predicate(nullptr);
@@ -6878,6 +6889,27 @@ static PadExtHooks pad_ext_main_hooks(void) {
     return h;
 }
 
+/* TCP port-2 injection (set_input/press "port":2): a digital pad plugged
+ * into port 2 for as long as a test drives it, so headless runs can reach and
+ * play two-player modes. Applied after the normal sampling so it wins. */
+static void apply_input_override_port2(int override_word) {
+    static int s_was_driven;
+    if (override_word < 0) {
+        /* Ending an injection releases its buttons: with no device in the
+         * port, nothing else would write the word again. A real device in
+         * port 2 is resampled each frame anyway. */
+        if (s_was_driven) sio_set_pad_state_slot(1, 0xFFFFu);
+        s_was_driven = 0;
+        return;
+    }
+    s_was_driven = 1;
+    if (!sio_get_pad_connected(1)) {
+        sio_set_pad_connected(1, 1);
+        sio_set_pad_analog(1, 0, 0x80, 0x80, 0x80, 0x80);
+    }
+    sio_set_pad_state_slot(1, (uint16_t)override_word);
+}
+
 static void sample_pad_into_sio(int override) {
     /* Selfcheck fighter mash owns P1 when enabled (headless-safe). */
     if (override < 0) {
@@ -8098,12 +8130,14 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
 
     /* Check debug server input override. */
     int override = debug_server_get_input_override();
+    int override_p2 = debug_server_get_input_override_port2();
 #else
     /* Production: skip debug server. Still need to advance frame counter
      * locally so anything else that reads it continues to work. */
     extern uint64_t s_frame_count;
     s_frame_count++;
     int override = -1;
+    int override_p2 = -1;
 #endif
 
     psx_local_mouse_begin(sdl_window, local_mouse_live(override));
@@ -8299,6 +8333,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                 sample_headless_pad_into_sio(override);
             else
                 sample_pad_into_sio(override);
+            apply_input_override_port2(override_p2);
         }
         /* Offline vblank boundary: record/replay/compare (PSX_RB_SELFCHECK).
          * Defer opening a window while multitap arming is still pending —
@@ -8629,6 +8664,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                 SDL_PumpEvents(); // retain native timing when no policy exists
             }
             sample_pad_into_sio(override);
+            apply_input_override_port2(override_p2);
             latency_ring_restamp_input();
         }
     }
@@ -15758,6 +15794,8 @@ int main(int argc, char** argv) {
             g_ws_hud_sprt      = gc.ws_hud_sprt_squash;
             gpu_ws_set_auto_ui_squash(gc.ws_auto_ui_squash ? 1 : 0);
             gpu_ws_set_auto_ui_in_place(gc.ws_auto_ui_in_place ? 1 : 0);
+            g_ws_auto_ui_proportional_cfg = gc.ws_auto_ui_proportional;
+            gpu_ws_set_auto_ui_proportional(g_ws_auto_ui_proportional_cfg ? 1 : 0);
             /* [widescreen] full_2d — opt a pure-2D sprite game (MMX6) into the
              * widescreen present path. Applied to the GPU layer up front so the
              * ws engage at game entry classifies every frame as gameplay. */
@@ -18331,6 +18369,7 @@ session_reboot:
         std::atexit(game_options_save_now);
 #ifndef PSX_NO_DEBUG_TOOLS
         debug_server_init(debug_port);
+        host_sampler_start();   /* this is the emulation thread */
 #else
         (void)debug_port;
 #endif

@@ -11,6 +11,10 @@ uint64_t s_frame_count;
 uint32_t g_psx_ram_mask = 0x1FFFFFu;
 uint32_t psx_read_word(uint32_t address) { (void)address; return 0; }
 int mdec_recently_active(uint32_t frames) { (void)frames; return 0; }
+/* memory.c: the packet key gpu.c uses (no GPU-DMA aperture in this test). */
+uint32_t psx_gpu_packet_key(uint32_t address) {
+    return psx_gpu_packet_key_for(address, 0);
+}
 
 static void sprite(int x, int y, int w, int h) {   /* GP0 0x65 */
     gp0_cmd_buf[0] = 0x65808080u;
