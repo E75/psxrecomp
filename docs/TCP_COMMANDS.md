@@ -76,8 +76,8 @@ Columns: **N** = native, **D** = DuckStation oracle.
 | `cdrom_sector_history_clear` | ✓ |   | — | Reset the CD-ROM sector history ring |
 | `watch` | ✓ | ✓ | `addr` | Set byte-level memory watchpoint (fires per-frame on change) |
 | `unwatch` | ✓ | ✓ | `addr` | Remove memory watchpoint |
-| `set_input` | ✓ | ✓ | `buttons`, optional `frames`, optional `lx`, `ly`, `rx`, `ry`, `pad_type` | Override pad1 buttons and optional analog axes (PS1 inverted bitmask, 0 = pressed; axes 0-255). Debug builds also accept `pad_type` (0 digital, 1 DualShock, 2 JogCon) to test an emulated device identity. Holds until `clear_input` on both backends; pass `frames=N` (beetle) to auto-release after N frames. Runtime: `layer="host"` instead arms a virtual P1 gamepad (`buttons`, `lx`..`ry`, `lt`/`rt` 0-255) that feeds the normal offline input path (controller source, title pad transform, trigger values) and host shortcut polling, also headless; a plain override still wins while armed; `clear_input` disarms it |
-| `clear_input` | ✓ | ✓ | — | Remove input and analog axis overrides |
+| `set_input` | ✓ | ✓ | `buttons`, optional `frames`, optional `lx`, `ly`, `rx`, `ry`, `pad_type`, optional `port` | Override pad1 buttons and optional analog axes (PS1 inverted bitmask, 0 = pressed; axes 0-255). Debug builds also accept `pad_type` (0 digital, 1 DualShock, 2 JogCon) to test an emulated device identity. Holds until `clear_input` on both backends; pass `frames=N` (beetle) to auto-release after N frames. Runtime: `layer="host"` instead arms a virtual P1 gamepad (`buttons`, `lx`..`ry`, `lt`/`rt` 0-255) that feeds the normal offline input path (controller source, title pad transform, trigger values) and host shortcut polling, also headless; a plain override still wins while armed; `clear_input` disarms it. `port=2` (psx-runtime) drives pad 2 instead (digital buttons; plugs a digital pad into port 2 while driven) for headless two-player modes; `press` takes `port` too |
+| `clear_input` | ✓ | ✓ | optional `port` | Remove input and analog axis overrides (`port` 1 or 2 clears one port; default both) |
 | `rewind_status` | ✓ |   | — | Local Rewind: `enabled`, `open`, `title_blocked` (`psx_mod_set_rewind_blocked`) and `snaps` held in the ring |
 | `turbo` | ✓ |   | `enabled` | Enable/disable TCP-controlled frontend turbo for fast-forward validation |
 | `turbo_state` | ✓ |   | — | Query TCP-controlled turbo state |
@@ -479,9 +479,9 @@ between Play and TCP availability.
 
 ## Complete command index (generated)
 
-**359 commands registered** — 346 on the native server (`runtime/src/debug_server.c`), 61 on the Beetle server (`runtime/src/beetle_debug_server.c`).
+**360 commands registered** — 347 on the native server (`runtime/src/debug_server.c`), 61 on the Beetle server (`runtime/src/beetle_debug_server.c`).
 
-72 of 359 have prose above; **287 are index-only**. An index-only command still works — it just has no description here yet. Send it `{"cmd":"<name>"}` and read the reply, or find its `handle_*` function in the server source.
+73 of 360 have prose above; **287 are index-only**. An index-only command still works — it just has no description here yet. Send it `{"cmd":"<name>"}` and read the reply, or find its `handle_*` function in the server source.
 
 Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this block has drifted from the code.
 
@@ -637,6 +637,7 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `history` | ✓ | ✓ | ✓ |
 | `hle_dump` | ✓ |  | ✓ |
 | `host_launch_timings` | ✓ |  | ✓ |
+| `host_profile` | ✓ |  |  |
 | `idle_skip` | ✓ |  |  |
 | `imask_trace` | ✓ |  |  |
 | `input_route_append` | ✓ |  |  |
@@ -715,7 +716,7 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `present_ring` | ✓ |  |  |
 | `present_shot` | ✓ |  | ✓ |
 | `present_shot_seq` | ✓ |  | ✓ |
-| `press` | ✓ | ✓ |  |
+| `press` | ✓ | ✓ | ✓ |
 | `probe_clear` | ✓ |  |  |
 | `probe_trace` | ✓ |  |  |
 | `quit` | ✓ |  | ✓ |

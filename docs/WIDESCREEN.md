@@ -1,5 +1,28 @@
 # Widescreen support (`feat/widescreen`)
 
+## Finite 2D backdrop falls back to 4:3 (2026-10-07)
+
+Pre-rendered 2D scenes draw their background as a few large textured
+rectangles before any polygon. Rects are screen-space blits, so the image is
+exactly as wide as those rects. Polygon overhang alone cannot see that: widened
+2D actor culls put sprite quads past the canonical edge, and Tomba's overhead
+village (384x256 ground image, fence/sign quads out to x=428) presented wide
+with black margins and props floating over them (`beads-eio.4.28`).
+
+`ws_backdrop_extent.h` takes each frame's leading run of rectangles (closed by
+the first polygon or line), keeps the untagged, unstretched textured ones and
+grids them over `[-reveal, W + reveal)` using the configured reveal. If they
+cover at least 90% of the canonical display but leave any reveal cell empty in
+the rows they occupy, the frame is short. Two short frames within six frames
+veto native-wide in the 2D-only-scene classifier until short frames stop for
+`WS_2D_SCENE_HYSTERESIS` frames. Tagged, stretched or host-extended backdrops,
+untextured rects and everything after the first polygon are neutral. The veto
+uses the same scope as the 2D-only classifier (sprite-tag titles; not
+`full_2d` or `gte_game_mode`), and an explicit title world-scene predicate
+still wins. Observability: `gpu_state.ws.backdrop` and the last field
+(`bd_veto`) of each `present_ring` event. Tests: `ws_backdrop_extent_test`,
+`ws_backdrop_scene_test`.
+
 ## Opt-in native-wide view anchoring (2026-09-12)
 
 `gpu_ws_set_view_anchor(camera, min, max, active)` reads a game's signed
@@ -140,6 +163,10 @@ auto_ui_anchor     = "edges"           # "edges" (default): each run pins to
                                        # its left/centre/right third.
                                        # "in_place": each run squashes about
                                        # its own centre.
+auto_ui_size       = "proportional"    # "original" (default): the HUD keeps
+                                       # the display height's scale.
+                                       # "proportional": beyond 16:9 it shrinks
+                                       # by sqrt((16:9) / aspect).
 clear_reveal       = true              # clear synthetic native-wide side margins
                                        # at opted-in scene/map boundaries (default false).
 nw_left_hud_packet_lo = "0x000E3400"  # optional targeted left-HUD packet range
@@ -203,6 +230,16 @@ off its arrow at 32:9. `auto_ui_anchor = "in_place"` squashes each run about
 its own centre instead, which corrects its proportions and leaves it where the
 stretched 4:3 layout places it. `gpu_state` reports the mode as
 `ws.auto_ui.in_place`.
+
+The HUD is proportion-corrected horizontally but keeps the display height's
+scale, so on a very wide window it reads large against the much wider view.
+`auto_ui_size = "proportional"` leaves it unchanged up to 16:9 and shrinks it
+by sqrt((16:9) / aspect) beyond (0.87 at 21:9, 0.71 at 32:9), on both axes:
+each run about its horizontal anchor and its vertical anchor (its top edge in
+the upper half of the display, its bottom edge in the lower half), scaling
+both edges of rectangles and sprites so neighbouring parts stay butted. A mod
+may switch it per session with `psx_mod_set_widescreen_hud_size()`.
+Projection widescreen only (native-wide does not squash the HUD).
 
 **Changing `sprite_tag_funcs` requires a game regen** (the tag callback is
 emitted into the generated C). `widescreen.cull.keep` is consumed by both the

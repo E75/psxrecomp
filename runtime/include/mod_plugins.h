@@ -93,6 +93,16 @@ void psx_mod_set_texture_filter(int mode);
  * Save/load and rewind must wait until that host context has returned. */
 int psx_mod_function_entry_active(void);
 
+/* [timing] guest_cycle_scale mod gate (docs/config_schema.md, Timing block).
+ * With guest_cycle_scale_gated = true in game.toml the scale applies only
+ * while a trusted plugin holds this gate open (and any declarative
+ * guest_cycle_scale_gate RAM predicates hold). Every mod session reset
+ * shuts it; open it from the activation callback. Mod plans are cleared
+ * online, so this gate keeps a scale that depends on a mod out of netplay.
+ * The gate state is part of savestates and the netplay rollback snapshot. */
+void psx_mod_set_guest_cycle_scale_gate(int open);
+/* Live scale: the configured one while every gate is open, else 1. */
+uint32_t psx_mod_guest_cycle_scale(void);
 /* Narrow guest services available to trusted plugin callbacks. */
 int psx_mod_game_started(void);
 /* Read an original mounted-disc file without changing guest CD state/timing.
@@ -412,6 +422,15 @@ int psx_mod_set_fixed_display_aspect(uint32_t numerator,
  */
 int psx_mod_set_adaptive_display_aspect(uint32_t max_numerator,
                                         uint32_t max_denominator);
+/*
+ * HUD size for the auto-UI widescreen HUD ([widescreen] auto_ui_squash):
+ * 0 keeps it at the display height's scale ("original"), 1 makes it
+ * proportional (unchanged up to 16:9, shrinking by sqrt((16:9) / aspect)
+ * beyond, about each widget's anchors). Overrides game.toml
+ * [widescreen] auto_ui_size for the session; every session start restores the
+ * title's setting before activation.
+ */
+int psx_mod_set_widescreen_hud_size(int proportional);
 /*
  * Set the wall-clock cadence of simulated guest VBlanks. A value of zero
  * removes frontend pacing; 60 and higher request that many native guest

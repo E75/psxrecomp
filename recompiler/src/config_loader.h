@@ -583,6 +583,20 @@ struct RuntimeConfig {
     // PSX_FRAME_GEN=0/1 overrides.
     bool                  video_frame_generation = false;
 
+    // [timing] guest_cycle_scale (1 = faithful, 1..64) and its gate; title
+    // constants from game.toml only. See config_loader.cpp.
+    int                   guest_cycle_scale = 1;
+    bool                  guest_cycle_scale_gated = false;
+    // guest_cycle_scale_gate: declarative RAM gate, judged at every VBlank;
+    // the scale applies only while every predicate holds.
+    struct GuestCycleScaleGatePred {
+        uint32_t addr  = 0;           // guest main-RAM address (any segment)
+        uint32_t size  = 4;           // 1, 2 or 4 bytes, aligned
+        uint32_t mask  = 0xFFFFFFFFu;
+        uint32_t value = 0;           // open while (word & mask) == value
+    };
+    std::vector<GuestCycleScaleGatePred> guest_cycle_scale_gate;
+
     // present_thread: with render_thread, composed frames go to offscreen
     // slots and a present thread (second, shared GL context on the window)
     // does the copy and the swap, so the window compositor's wait does not
@@ -1012,6 +1026,11 @@ struct GameConfig {
     // For HUD widgets that combine flat quads with GTE-projected parts the
     // correction cannot move (Spider-Man's compass ring and 3D arrow).
     bool                  ws_auto_ui_in_place = false;
+    // auto_ui_size = "proportional": beyond 16:9 the auto-UI HUD shrinks by
+    // sqrt((16:9) / aspect) about each widget's anchor, so a wide window
+    // does not show a 4:3-height HUD across a much wider view. "original"
+    // (default) keeps the HUD at the display height's scale.
+    bool                  ws_auto_ui_proportional = false;
 
     // [data_shards] funcs: functions that get the memoized pure-function
     // replay entry/return hooks (psx_datashard_enter/psx_datashard_ret).

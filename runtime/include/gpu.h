@@ -212,6 +212,9 @@ void gpu_ws_set_auto_ui_squash(int on);
 /* [widescreen] auto_ui_anchor = "in_place": each UI run squashes about its own
  * centre rather than an edge/centre third (default "edges"). */
 void gpu_ws_set_auto_ui_in_place(int on);
+/* [widescreen] auto_ui_size: 1 = proportional (the auto-UI HUD shrinks by
+ * sqrt((16:9) / aspect) beyond 16:9), 0 = original. */
+void gpu_ws_set_auto_ui_proportional(int on);
 /* [widescreen.bg2d] Capcom 2D background tile-loop widen — hooked at the renderer's
  * column-count / start-tile-col / start-screen-x instructions. Identity at 4:3
  * and in the engine's 512 hi-res mode. */
@@ -649,6 +652,13 @@ typedef struct {
     uint64_t angle_43_identity;
     uint32_t angle_max_vanilla;
     uint32_t angle_max_widened;
+    /* Finite 2D backdrop verdict (ws_backdrop_extent.h), newest evaluation. */
+    int      bd_veto;           /* scene presented 4:3: backdrop stops short */
+    uint32_t bd_eval_frame, bd_rects, bd_last_short;
+    int      bd_full, bd_short;
+    int32_t  bd_min_x, bd_max_x, bd_reveal;
+    uint32_t bd_canon_pct, bd_left_pct, bd_right_pct;
+    uint64_t bd_evaluations, bd_short_frames;
 } GpuWsDebug;
 void gpu_ws_get_debug(GpuWsDebug* out);
 

@@ -97,6 +97,7 @@ extern "C" void psx_event_step_conservative_env_init(void);
 #include "recomp_audio_drc.h"
 #include "memcard.h"
 #include "debug_server.h"
+#include "host_sampler.h"
 #include "crash_trace.h"
 #include "freeze_heartbeat.h"
 #include "config_loader.h"
@@ -1604,6 +1605,15 @@ static bool netplay_local_viewport_native_wide(void) {
     return g_netplay_local_viewport == 1 && !g_netplay_local_viewport_projection;
 }
 
+/* [widescreen] auto_ui_size from game.toml; a mod may override it per session
+ * (psx_mod_set_widescreen_hud_size), reset_mod_owned_presentation restores. */
+static bool g_ws_auto_ui_proportional_cfg = false;
+extern "C" int psx_mod_set_widescreen_hud_size(int proportional) {
+    if (proportional != 0 && proportional != 1) return 0;
+    gpu_ws_set_auto_ui_proportional(proportional);
+    return 1;
+}
+
 extern "C" int psx_mod_set_fixed_display_aspect(
     uint32_t numerator, uint32_t denominator) {
     if (numerator == 0 || denominator == 0 ||
@@ -1712,11 +1722,16 @@ static void reset_mod_owned_presentation(void) {
     g_ws_adaptive_view = false;
     g_ws_adaptive_max_num = 16;
     g_ws_adaptive_max_den = 9;
+    gpu_ws_set_auto_ui_proportional(g_ws_auto_ui_proportional_cfg ? 1 : 0);
     psx_mod_set_world_scene_predicate(nullptr);
     gpu_ws_set_native_scene_predicate(nullptr);
     psx_mod_set_retained_scene_predicate(nullptr);
     psx_mod_set_adaptive_backdrop_preload(0);
     (void)psx_mod_set_draw_distance_clamp(0);
+    /* [timing] guest_cycle_scale mod gate: shut until this session's
+     * activation opens it (an online match clears the plan, so a mod-gated
+     * scale never carries into netplay). */
+    psx_mod_set_guest_cycle_scale_gate(0);
     g_bezel_path.clear();
     g_frame_interpolation_blend = g_frame_interpolation_blend_default;
     g_frame_interpolation_source = PSX_MOD_FRAME_SOURCE_VBLANK;
@@ -6878,6 +6893,27 @@ static PadExtHooks pad_ext_main_hooks(void) {
     return h;
 }
 
+/* TCP port-2 injection (set_input/press "port":2): a digital pad plugged
+ * into port 2 for as long as a test drives it, so headless runs can reach and
+ * play two-player modes. Applied after the normal sampling so it wins. */
+static void apply_input_override_port2(int override_word) {
+    static int s_was_driven;
+    if (override_word < 0) {
+        /* Ending an injection releases its buttons: with no device in the
+         * port, nothing else would write the word again. A real device in
+         * port 2 is resampled each frame anyway. */
+        if (s_was_driven) sio_set_pad_state_slot(1, 0xFFFFu);
+        s_was_driven = 0;
+        return;
+    }
+    s_was_driven = 1;
+    if (!sio_get_pad_connected(1)) {
+        sio_set_pad_connected(1, 1);
+        sio_set_pad_analog(1, 0, 0x80, 0x80, 0x80, 0x80);
+    }
+    sio_set_pad_state_slot(1, (uint16_t)override_word);
+}
+
 static void sample_pad_into_sio(int override) {
     /* Selfcheck fighter mash owns P1 when enabled (headless-safe). */
     if (override < 0) {
@@ -7146,6 +7182,7 @@ static PresRingEntry* present_ring_commit(uint8_t path, uint16_t disp_w,
     e->tag_delta     = (d > INT32_MAX || d < INT32_MIN) ? INT32_MAX : (int32_t)d;
     e->gte_verts     = (uint16_t)(ws.gte_verts > 0xFFFF ? 0xFFFF : ws.gte_verts);
     e->ovh_prims     = (uint16_t)(ws.ovh_prims > 0xFFFF ? 0xFFFF : ws.ovh_prims);
+    e->bd_veto       = (uint8_t)(ws.bd_veto != 0);
     return e;
 }
 
@@ -8097,12 +8134,14 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
 
     /* Check debug server input override. */
     int override = debug_server_get_input_override();
+    int override_p2 = debug_server_get_input_override_port2();
 #else
     /* Production: skip debug server. Still need to advance frame counter
      * locally so anything else that reads it continues to work. */
     extern uint64_t s_frame_count;
     s_frame_count++;
     int override = -1;
+    int override_p2 = -1;
 #endif
 
     psx_local_mouse_begin(sdl_window, local_mouse_live(override));
@@ -8298,6 +8337,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                 sample_headless_pad_into_sio(override);
             else
                 sample_pad_into_sio(override);
+            apply_input_override_port2(override_p2);
         }
         /* Offline vblank boundary: record/replay/compare (PSX_RB_SELFCHECK).
          * Defer opening a window while multitap arming is still pending —
@@ -8628,6 +8668,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                 SDL_PumpEvents(); // retain native timing when no policy exists
             }
             sample_pad_into_sio(override);
+            apply_input_override_port2(override_p2);
             latency_ring_restamp_input();
         }
     }
@@ -15267,6 +15308,19 @@ namespace {
 }  // namespace
 #endif
 
+/* [timing] guest_cycle_scale_gate reader: main RAM only, side-effect free
+ * (aligned little-endian word of the given size). */
+extern "C" uint8_t* memory_get_ram_ptr(void);
+static uint32_t gcs_gate_read_ram(uint32_t phys, uint32_t size) {
+    const uint8_t* ram = (const uint8_t*)memory_get_ram_ptr();
+    const uint32_t bytes = (uint32_t)memory_get_ram_bytes();
+    if (!ram || !bytes) return 0;
+    const uint32_t a = phys & (bytes - 1u);
+    uint32_t v = 0;
+    for (uint32_t i = 0; i < size; ++i) v |= (uint32_t)ram[a + i] << (8u * i);
+    return v;
+}
+
 int main(int argc, char** argv) {
     /* Force line-buffered output so messages appear even if killed. */
     std::setvbuf(stdout, nullptr, _IOLBF, BUFSIZ);
@@ -15544,6 +15598,7 @@ int main(int argc, char** argv) {
     bool vulkan_offered = false; /* game.toml [video] offer_vulkan; developer opt-in for launcher visibility */
     /* Legacy single deadzone (<0 => keep per-slot / input.ini defaults). */
     int  resolved_deadzone = -1;
+    int  resolved_audio_buffer_ms = 180;
     /* Localization: the effective language (game.toml default -> settings.toml ->
      * launcher choice), applied to the translation layer AFTER the launcher runs.
      * lang_menu_options drives the launcher's "Localization" dropdown (empty =>
@@ -15606,6 +15661,7 @@ int main(int argc, char** argv) {
             apply_offline_pad_count(game_players, multitap_enabled);
             game_has_disc_crc = gc.has_disc_crc;
             game_disc_crc     = gc.disc_crc;
+            resolved_audio_buffer_ms = gc.runtime.audio_buffer_ms;
             g_netplay_disc_expect.require_cue = gc.netplay_require_cue;
             g_netplay_disc_expect.required_tracks = gc.netplay_required_tracks;
             g_netplay_disc_expect.has_required_leadout =
@@ -15743,6 +15799,26 @@ int main(int argc, char** argv) {
                 gc.runtime.video_texture_window_batching ? 1 : 0);
             g_render_thread = gc.runtime.video_render_thread ? 1 : 0;
             g_frame_generation = gc.runtime.video_frame_generation ? 1 : 0;
+            /* [timing] guest_cycle_scale is a title constant from game.toml
+             * (no player setting). PSX_GUEST_CYCLE_SCALE overrides it for
+             * testing only. */
+            psx_guest_cycle_scale_set_gated(gc.runtime.guest_cycle_scale_gated ? 1 : 0);
+            psx_guest_cycle_scale_ram_gate_clear();
+            psx_guest_cycle_scale_set_ram_reader(gcs_gate_read_ram);
+            for (const auto& gp : gc.runtime.guest_cycle_scale_gate)
+                (void)psx_guest_cycle_scale_ram_gate_add(gp.addr, gp.size, gp.mask, gp.value);
+            psx_guest_cycle_scale_set((uint32_t)gc.runtime.guest_cycle_scale);
+            if (const char* gcs = getenv("PSX_GUEST_CYCLE_SCALE")) {
+                const int v = atoi(gcs);
+                if (v > 0) psx_guest_cycle_scale_set((uint32_t)v);
+            }
+            if (psx_guest_cycle_scale_config() != 1u)
+                fprintf(stderr, "[timing] guest_cycle_scale %u%s%s (instructions charge 1/%u "
+                        "of their guest cycles; VBlank/timers/CD/SPU/DMA unchanged)\n",
+                        psx_guest_cycle_scale_config(),
+                        gc.runtime.guest_cycle_scale_gate.empty() ? "" : ", RAM gate",
+                        gc.runtime.guest_cycle_scale_gated ? ", mod gate" : "",
+                        psx_guest_cycle_scale_config());
             g_present_thread = gc.runtime.video_present_thread ? 1 : 0;
             g_video_vsync       = gc.runtime.video_vsync;
             g_frame_interpolation = gc.runtime.video_frame_interpolation ? 1 : 0;
@@ -15757,6 +15833,8 @@ int main(int argc, char** argv) {
             g_ws_hud_sprt      = gc.ws_hud_sprt_squash;
             gpu_ws_set_auto_ui_squash(gc.ws_auto_ui_squash ? 1 : 0);
             gpu_ws_set_auto_ui_in_place(gc.ws_auto_ui_in_place ? 1 : 0);
+            g_ws_auto_ui_proportional_cfg = gc.ws_auto_ui_proportional;
+            gpu_ws_set_auto_ui_proportional(g_ws_auto_ui_proportional_cfg ? 1 : 0);
             /* [widescreen] full_2d — opt a pure-2D sprite game (MMX6) into the
              * widescreen present path. Applied to the GPU layer up front so the
              * ws engage at game entry classifies every frame as gameplay. */
@@ -18330,6 +18408,7 @@ session_reboot:
         std::atexit(game_options_save_now);
 #ifndef PSX_NO_DEBUG_TOOLS
         debug_server_init(debug_port);
+        host_sampler_start();   /* this is the emulation thread */
 #else
         (void)debug_port;
 #endif
@@ -18480,6 +18559,7 @@ session_reboot:
                 cfg.channels    = 2;
                 cfg.source_rate = 44100.0;            /* SPU render rate */
                 cfg.host_rate   = (double)have.freq;  /* actual device rate */
+                cfg.target_ms   = (double)resolved_audio_buffer_ms;
                 if (rab_init(&s_drc, &cfg) == 0) s_drc_ready = true;
             }
             g_audio_host_rate = have.freq;
@@ -18835,6 +18915,26 @@ session_reboot:
             (net_cfg.transport == 2 || !psx_lobby_match_caps() || !psx_lobby_match_caps()->valid))
             std::snprintf(net_cfg.content_fingerprint, sizeof(net_cfg.content_fingerprint),
                           "%s", PSXRecompV4::mod_runtime_session_plan_fp().c_str());
+        // [timing] guest_cycle_scale changes guest timing, so every peer must
+        // run the same one. It is a title constant, but fold it into the
+        // content gate as a safety net (a peer that differs, e.g. through
+        // the test env override, never matches and the session does not
+        // start). 1 (faithful) leaves the fingerprint, and vanilla sessions,
+        // exactly as before.
+        if (psx_guest_cycle_scale_config() != 1u) {
+            char tag[9];
+            std::snprintf(tag, sizeof tag, "%08x", 0x6C000000u | psx_guest_cycle_scale_config());
+            if (std::strlen(net_cfg.content_fingerprint) != 64)
+                std::snprintf(net_cfg.content_fingerprint, sizeof(net_cfg.content_fingerprint),
+                              "%s", "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c00000000");
+            for (int i = 0; i < 8; ++i) {
+                char* d = &net_cfg.content_fingerprint[56 + i];
+                auto hv = [](char c) { return c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10; };
+                *d = "0123456789abcdef"[hv(*d) ^ hv(tag[i])];
+            }
+            std::printf("psxrecomp: netplay requires guest_cycle_scale %u on every peer\n",
+                        psx_guest_cycle_scale_config());
+        }
         const int nrc = psx_netplay_start(&net_cfg);
         if (nrc != 0) {
             const char* const why = netplay_start_failure(nrc, net_cfg);

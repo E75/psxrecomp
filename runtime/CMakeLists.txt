@@ -59,6 +59,9 @@ if(BUILD_TESTING)
     add_executable(ws_scene_hold_test tests/test_ws_scene_hold.c)
     target_include_directories(ws_scene_hold_test PRIVATE include)
     add_test(NAME ws_scene_hold_test COMMAND ws_scene_hold_test)
+    add_executable(ws_backdrop_extent_test tests/test_ws_backdrop_extent.c)
+    target_include_directories(ws_backdrop_extent_test PRIVATE include)
+    add_test(NAME ws_backdrop_extent_test COMMAND ws_backdrop_extent_test)
     add_executable(mdec_snapshot_activity_test tests/test_mdec_snapshot_activity.c)
     target_include_directories(mdec_snapshot_activity_test PRIVATE include src)
     add_test(NAME mdec_snapshot_activity_test COMMAND mdec_snapshot_activity_test)
@@ -102,6 +105,12 @@ if(BUILD_TESTING)
         target_compile_options(ws_world_scene_test PRIVATE -O2 -flto -ffunction-sections -fdata-sections)
         target_link_options(ws_world_scene_test PRIVATE -flto -Wl,--gc-sections)
         add_test(NAME ws_world_scene_test COMMAND ws_world_scene_test)
+        add_executable(ws_backdrop_scene_test tests/test_ws_backdrop_scene.c
+            src/psx_video_timing.c)
+        target_include_directories(ws_backdrop_scene_test PRIVATE include src)
+        target_compile_options(ws_backdrop_scene_test PRIVATE -O2 -flto -ffunction-sections -fdata-sections)
+        target_link_options(ws_backdrop_scene_test PRIVATE -flto -Wl,--gc-sections)
+        add_test(NAME ws_backdrop_scene_test COMMAND ws_backdrop_scene_test)
         add_executable(boot_state_handoff_test tests/test_boot_state_handoff.c)
         target_include_directories(boot_state_handoff_test PRIVATE include src)
         target_compile_definitions(boot_state_handoff_test PRIVATE PSX_COSIM=1)
@@ -303,6 +312,23 @@ if(BUILD_TESTING)
     target_compile_definitions(psx_cyc_batch_test PRIVATE
         PSX_ENABLE_BLOCK_CYCLES=1)
     add_test(NAME psx_cyc_batch_test COMMAND psx_cyc_batch_test)
+
+    # [timing] guest_cycle_scale divides instruction charges only (1 = faithful).
+    add_executable(psx_guest_cycle_scale_test tests/test_psx_guest_cycle_scale.c)
+    target_include_directories(psx_guest_cycle_scale_test PRIVATE include)
+    target_compile_definitions(psx_guest_cycle_scale_test PRIVATE
+        PSX_ENABLE_BLOCK_CYCLES=1)
+    add_test(NAME psx_guest_cycle_scale_test COMMAND psx_guest_cycle_scale_test)
+
+    # One CPU charge for every tier, the declarative RAM gate and the mod gate,
+    # and rollback re-simulation, against the real psx_cycles.c.
+    add_executable(psx_guest_cycle_scale_gate_test
+        tests/test_psx_guest_cycle_scale_gate.c
+        src/psx_cycles.c)
+    target_include_directories(psx_guest_cycle_scale_gate_test PRIVATE include)
+    target_compile_definitions(psx_guest_cycle_scale_gate_test PRIVATE
+        PSX_ENABLE_BLOCK_CYCLES=1)
+    add_test(NAME psx_guest_cycle_scale_gate_test COMMAND psx_guest_cycle_scale_gate_test)
 
     # Segment misses in static game code (docs/SEGMENT_AWARE_CODE.md §5.5):
     # classification against the dispatch rows, the ring and the per-PC

@@ -145,6 +145,10 @@ uint32_t psx_mod_gpu_dma_resolve_address(uint32_t address) {
         address, mod_gpu_dma_memory_used);
 }
 
+uint32_t psx_gpu_packet_key(uint32_t address) {
+    return psx_gpu_packet_key_for(address, mod_gpu_dma_memory_used);
+}
+
 /* Exposed for inlined main-RAM load helpers in psx_cyc.h (VLC/decode hot path). */
 uint8_t *g_psx_ram = ram;
 /* PSX_LOAD_DELAY gate (default on). −1 = unread; 0/1 after first resolve. */
@@ -1352,9 +1356,9 @@ static void mmio_write32(uint32_t addr, uint32_t val) {
          * 0x80030000, so ROM 0xBFC38B1C executes at 0x80050B1C
          * (scph1001_relocated_store). */
         if (debug_cpu_ptr && scph1001_relocated_store(0x80050B1Cu, 0xBFC38B1Cu)) {
-            /* Word-aligned RAM key through the live geometry (retail: the
-             * 0x1FFFFC fold, identical to the DMA/GPU source keys). */
-            src = psx_ram_canonical_offset(debug_cpu_ptr->gpr[4] - 4u) & ~3u;
+            /* The same packet key as the DMA/GPU source keys (retail: the
+             * 0x1FFFFC fold). */
+            src = psx_gpu_packet_key(debug_cpu_ptr->gpr[4] - 4u);
         }
         gpu_set_gp0_source(src);
         gpu_write_gp0(val);
@@ -2297,6 +2301,10 @@ extern int g_event_step_conservative;
 extern int g_ls_replay_active;
 static inline void psx_load_charge_cycles(uint32_t cycles) {
     if (g_ls_replay_active || cycles == 0u) return;
+    if (PSX_GCS_ACTIVE()) {
+        psx_cpu_charge(cycles);
+        return;
+    }
     uint64_t next = psx_cycle_count + (uint64_t)cycles;
     if (!g_event_step_conservative && g_psx_cycle_fast_limit != 0u &&
         next >= psx_cycle_count && next <= g_psx_cycle_fast_limit) {
@@ -2307,7 +2315,7 @@ static inline void psx_load_charge_cycles(uint32_t cycles) {
 }
 #else
 static inline void psx_load_charge_cycles(uint32_t cycles) {
-    psx_advance_cycles(cycles);
+    psx_cpu_charge(cycles);
 }
 #endif
 
@@ -2367,7 +2375,7 @@ static inline void psx_cyc_readmem(CPUState* cpu, uint32_t phys, uint32_t size,
     uint32_t cost = region + compl_cost;               /* LDAbsorb = region + completion */
     uint32_t fudge = (uint32_t)((cpu->read_fudge >> 4) & 2u);
     cpu->ld_absorb = cost;
-    psx_advance_cycles(fudge + cost);
+    psx_cpu_charge(fudge + cost);   /* CPU charge: [timing] guest_cycle_scale */
     cpu->ld_which_t = (uint8_t)arm_rt;
     /* PROOF GATE (PSX_POLL_PROOF=N, default 0/off): a FLAT, non-absorbed extra N
      * cycles per main-RAM data read — replicates the historical "+6 cyc/main-RAM
