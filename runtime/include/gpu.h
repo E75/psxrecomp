@@ -528,6 +528,10 @@ void gpu_ws_tag_radial_screen_mask_quad(uint32_t prim, float scale);
  * Nonzero forces native 4:3; zero defers. No GPU calls or guest writes inside.
  * Host configuration survives reset/load; classification reads live state. */
 void gpu_ws_set_native_scene_predicate(int (*predicate)(void));
+/* Present 2D menu frames (no recent GTE world, not FMV) wide instead of 4:3: every
+ * screen-space primitive squashes about the display centre (the authored layout stays
+ * whole), primitives spanning the display width stretch into the margins. Off by default. */
+void gpu_ws_set_menu_wide(int on);
 /* Targeted alternative for sprite-heavy 2D games: corner-anchor only primitives
  * whose ordering-table packet lives in the configured half-open RAM range. */
 void gpu_ws_set_nw_left_hud_packet_range(uint32_t lo, uint32_t hi);

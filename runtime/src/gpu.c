@@ -514,6 +514,24 @@ void gpu_ws_set_native_scene_predicate(int (*predicate)(void)) {
     s_ws_native_scene_predicate = predicate;
 }
 
+static int ws_menu_wide_cfg = 0;
+void gpu_ws_set_menu_wide(int on) { ws_menu_wide_cfg = on ? 1 : 0; }
+
+static int ws_fmv_frame(void) {
+    uint32_t f = (uint32_t)s_frame_count;
+    if (f != s_ws_fmv_frame_cache) {
+        s_ws_fmv_frame_cache = f;
+        GpuDisplayInfo di; gpu_get_display_info(&di);
+        s_ws_fmv_cached = di.depth24 || mdec_recently_active(WS_FMV_HYSTERESIS);
+    }
+    return s_ws_fmv_cached;
+}
+
+/* A 2D menu frame shown wide (gpu_ws_set_menu_wide). */
+static int ws_menu_wide_frame(void) {
+    return ws_menu_wide_cfg && ws_engaged() && !ws_game_mode() && !ws_fmv_frame();
+}
+
 int gpu_ws_present_native_43(void) {
     if (!ws_engaged()) return 0;
     if (s_ws_native_scene_predicate && s_ws_native_scene_predicate())
@@ -521,19 +539,14 @@ int gpu_ws_present_native_43(void) {
     int game_mode = ws_game_mode();
     if (!game_mode) ws_scene_latch.confirmed = 0;
     int native_43 = !game_mode || ws_2d_only_scene();
+    if (!game_mode && ws_menu_wide_cfg && !ws_fmv_frame()) return 0;
     int hold_enabled = ws_mode == 2 && s_ws_retained_scene_predicate != NULL;
     if (!hold_enabled && native_43) return 1;      /* unchanged default */
-    uint32_t f = (uint32_t)s_frame_count;
-    if (f != s_ws_fmv_frame_cache) {
-        s_ws_fmv_frame_cache = f;
-        GpuDisplayInfo di; gpu_get_display_info(&di);
-        s_ws_fmv_cached = di.depth24 || mdec_recently_active(WS_FMV_HYSTERESIS);
-    }
     if (hold_enabled)
         return ws_scene_hold_classify(&s_ws_scene_hold,
-            s_ws_retained_scene_predicate(), native_43, s_ws_fmv_cached,
+            s_ws_retained_scene_predicate(), native_43, ws_fmv_frame(),
             ws_display_origin());
-    return s_ws_fmv_cached;
+    return ws_fmv_frame();
 }
 
 /* Squash applies only when configured AND the frame is being stretched. */
@@ -2973,6 +2986,29 @@ static int32_t ws_hud_pivot(int32_t x, int32_t w) {
     return X + W / 2;
 }
 
+/* Menu-wide frames: one pivot for every primitive keeps dense 2D layouts whole (per-run
+ * auto-UI split flags and glyph runs); a primitive spanning the display is a backdrop or
+ * rule and stretches. Coordinates are pre-draw-offset. Returns 1 when the frame is menu-wide. */
+static int ws_menu_squash(int32_t *vx, int n) {
+    if (!ws_menu_wide_frame()) return 0;
+    int32_t min_x = vx[0], max_x = vx[0];
+    for (int i = 1; i < n; i++) {
+        if (vx[i] < min_x) min_x = vx[i];
+        if (vx[i] > max_x) max_x = vx[i];
+    }
+    int32_t X = ws_disp_x() - draw_offset_x, W = ws_disp_w();
+    if (min_x <= X + W / 64 && max_x >= X + W - W / 64) return 1;
+    for (int i = 0; i < n; i++) vx[i] = ws_scale_about(vx[i], X + W / 2);
+    return 1;
+}
+static int ws_menu_squash_rect(int32_t *x, int *w) {
+    int32_t vx[2] = { *x, *x + *w };
+    if (!ws_menu_squash(vx, 2)) return 0;
+    *x = vx[0];
+    *w = vx[1] - vx[0] < 1 ? 1 : (int)(vx[1] - vx[0]);
+    return 1;
+}
+
 /* Automatic UI correction is deliberately tied to draw provenance, not to
  * primitive size or "does this look 2D?" guesses. Ape's ordering table submits
  * HUD/font/icon packets in the final layer, after every depth-sorted world
@@ -3102,6 +3138,7 @@ static int ws_axis_aligned_quad(const int32_t vx[4], const int32_t vy[4]) {
  * quad): squashed with its widget when the prepass admitted it as lying
  * inside that widget (ws_ui_prepass_finish). */
 static int ws_auto_ui_transform_part(int32_t *vx, int32_t *vy, int n) {
+    if (ws_menu_squash(vx, n)) return 1;
     if (ws_nw_explicit_hud_delta(NULL) || psx_ws_prim_is_tagged()) return 0;
     const WsUiPrepassItem *it = ws_auto_ui_item();
     if (!it) return 0;
@@ -3115,6 +3152,7 @@ static int ws_auto_ui_transform_part(int32_t *vx, int32_t *vy, int n) {
 }
 
 static int ws_auto_ui_transform_quad(int32_t vx[4], int32_t vy[4]) {
+    if (ws_menu_squash(vx, 4)) return 1;
     if (ws_nw_explicit_hud_delta(NULL) || psx_ws_prim_is_tagged()) return 0;
     if (!ws_axis_aligned_quad(vx, vy)) return ws_auto_ui_transform_part(vx, vy, 4);
 
@@ -3145,6 +3183,7 @@ static int ws_auto_ui_transform_quad(int32_t vx[4], int32_t vy[4]) {
 static int ws_auto_ui_transform_rect(int32_t *x, int32_t *y, int *w, int *h) {
     if (!x || !y || !w || !h || *w <= 0 || ws_nw_explicit_hud_delta(NULL) || psx_ws_prim_is_tagged())
         return 0;
+    if (ws_menu_squash_rect(x, w)) return 1;
     int32_t X = ws_disp_x(), W = ws_disp_w(), H = ws_disp_h();
     if ((*x <= X && *x + *w >= X + W && *y <= 0 && *y + *h >= H) ||
         (*w > W / 2 && *h > H / 4))
@@ -5514,6 +5553,7 @@ static void gp0_exec_mono_line(void) {
         return;
     }
     int32_t vx[2] = { x0, x1 };
+    ws_menu_squash(vx, 2);
     ws_nw_hud_shift_vertices(vx, 2);
     x0 = vx[0]; x1 = vx[1];
     x0 += draw_offset_x; y0 += draw_offset_y;
@@ -5536,6 +5576,7 @@ static void gp0_exec_shaded_line(void) {
     parse_vertex(gp0_cmd_buf[3], &x1, &y1);
     if (psx_gpu_line_oversize(x0, y0, x1, y1)) return;
     int32_t vx[2] = { x0, x1 };
+    ws_menu_squash(vx, 2);
     ws_nw_hud_shift_vertices(vx, 2);
     x0 = vx[0]; x1 = vx[1];
     x0 += draw_offset_x; y0 += draw_offset_y;
@@ -6222,7 +6263,7 @@ static int gp0_command_word_count(uint8_t opcode) {
 
 static void ws_ui_prepass_add(const uint32_t *words, uint32_t word_count,
                               uint32_t source_addr, uint16_t rank,
-                              int full_draw_area) {
+                              int full_draw_area, int32_t offset_x) {
     if (rank == 0xFFFFu) return;
     if (ws_ui_prepass_count >= WS_UI_PREPASS_MAX) { ws_ui_reject.cap++; return; }
     uint32_t op = words[0] >> 24;
@@ -6319,11 +6360,11 @@ static void ws_ui_prepass_add(const uint32_t *words, uint32_t word_count,
         return;
     }
 
-    /* Vertices are relative to the GP0(E5) draw offset, while grouping and the
+    /* Vertices are relative to the GP0(E5) draw offset in force for this packet, while grouping and the
      * thirds split work in display columns. Titles that draw their HUD around a
      * centred offset (WE2002: offset 256) otherwise anchor left groups mid-screen. */
-    min_x += draw_offset_x;
-    max_x += draw_offset_x;
+    min_x += offset_x;
+    max_x += offset_x;
 
     int32_t width = max_x - min_x, height = max_y - min_y;
     int32_t X = ws_disp_x(), W = ws_disp_w(), H = ws_disp_h();
@@ -6403,6 +6444,8 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
     uint16_t max_rank = 0xFFFFu;
     const uint32_t max_nodes = 0x40000u;
     int area_left = (int)draw_area_left, area_right = (int)draw_area_right;
+    /* The list may change the offset mid-walk (WE2002 pause menu: HUD at 0, menu at 256). */
+    int32_t offset_x = draw_offset_x;
     GpuDisplayInfo di;
     gpu_get_display_info(&di);
 
@@ -6466,9 +6509,10 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
                 ws_ui_prepass_add(words, (uint32_t)count,
                     psx_mod_gpu_dma_resolve_address(
                         word_addr + offset * 4u), rank,
-                    area_right - area_left + 1 >= (int)di.width);
+                    area_right - area_left + 1 >= (int)di.width, offset_x);
                 if (op == 0xE3u) area_left = (int)(words[0] & 0x3FFu);
                 if (op == 0xE4u) area_right = (int)(words[0] & 0x3FFu);
+                if (op == 0xE5u) offset_x = sign_extend(words[0] & 0x7FFu, 11);
                 offset += (uint32_t)count;
             }
         }
