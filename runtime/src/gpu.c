@@ -427,7 +427,10 @@ void psx_mod_set_world_scene_predicate(PSXModWorldScenePredicate predicate) {
 static int ws_mod_world_scene(void) {
     return ws_mode == 2 && s_ws_world_scene_predicate && s_ws_world_scene_predicate();
 }
+static int ws_world3d_game_mode_cfg = 0;
+void gpu_ws_set_world3d_game_mode(int on) { ws_world3d_game_mode_cfg = on ? 1 : 0; }
 static int ws_game_mode(void) {
+    if (ws_world3d_game_mode_cfg && (uint32_t)s_frame_count - ws_last_world3d_stamp > 2u) return 0;
     if (ws_mod_world_scene()) return 1;
     if (ws_local_native_split()) return 1;
     int state_match = ws_gameplay_state_matches();

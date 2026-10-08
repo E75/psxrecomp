@@ -532,6 +532,10 @@ void gpu_ws_set_native_scene_predicate(int (*predicate)(void));
  * screen-space primitive squashes about the display centre (the authored layout stays
  * whole), primitives spanning the display width stretch into the margins. Off by default. */
 void gpu_ws_set_menu_wide(int on);
+/* A frame is a game frame only while world 3D was drawn in the last 2 frames, instead of for
+ * the GTE hysteresis after it: a menu opened over a frozen 3D frame keeps one layout from its
+ * first frame (no second copy left in a never-cleared framebuffer). Off by default. */
+void gpu_ws_set_world3d_game_mode(int on);
 /* Targeted alternative for sprite-heavy 2D games: corner-anchor only primitives
  * whose ordering-table packet lives in the configured half-open RAM range. */
 void gpu_ws_set_nw_left_hud_packet_range(uint32_t lo, uint32_t hi);
