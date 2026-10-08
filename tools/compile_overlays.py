@@ -1099,6 +1099,22 @@ def _jump_target(pc: int, word: int) -> int:
     return ((pc + 4) & 0xF0000000) | ((word & 0x03FFFFFF) << 2)
 
 
+def _valid_code_prefix(data: bytes, load_addr: int, target: int,
+                       max_words: int = 16) -> bool:
+    """True when the straight-line words at ``target`` decode as MIPS up to the
+    first control transfer (and its delay slot). A jal into bytes that are data
+    in THIS image (another image's function is resident there at runtime, e.g.
+    WE2002 ENDING.BIN calling 0x800C7EE4) must not become a compiled entry: one
+    undecodable word fails the generated-C audit for the whole image."""
+    for i in range(max_words):
+        word = _word_at(data, load_addr, target + 4 * i)
+        if not _is_valid_mips_word(word):
+            return False
+        if _classify_cf(target + 4 * i, word)[0] != 'normal':
+            return _is_valid_mips_word(_word_at(data, load_addr, target + 4 * i + 4))
+    return True
+
+
 def _branch_target(pc: int, word: int) -> int:
     imm = word & 0xFFFF
     if imm & 0x8000:
@@ -1734,7 +1750,7 @@ def _walk_overlay_function(data: bytes, load_addr: int, size: int,
                 branch_targets.add(pc + 8)
                 call_continuations.add(pc + 8)
             if (lo <= target < hi and (target & 3) == 0 and
-                    _is_valid_mips_word(_word_at(data, load_addr, target)) and
+                    _valid_code_prefix(data, load_addr, target) and
                     callable_transfer_target(pc, target)):
                 direct_jals.add(target)
         elif kind == 'jalr':
