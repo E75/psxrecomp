@@ -2960,9 +2960,12 @@ static void ws_expand_fullscreen_rect(int32_t *x, int32_t y, int *w, int h) {
  * screen edge (keeping the wide-screen corner position at native proportions),
  * the middle third to centre. A composite (counter box + digits) sits inside
  * one zone, so its pieces share a pivot and stay aligned. (Full-2D menu
- * screens never reach here — they get zero squash + 4:3 pillarbox instead.) */
+ * screens never reach here — they get zero squash + 4:3 pillarbox instead.)
+ * x is pre-draw-offset: zones are judged on screen and the pivot is returned in
+ * the same pre-offset space (WE2002 redraws its HUD centre-relative, offset 256). */
+static int32_t draw_offset_x, draw_offset_y;   /* set by GP0(E5h) */
 static int32_t ws_hud_pivot(int32_t x, int32_t w) {
-    int32_t X = ws_disp_x();
+    int32_t X = ws_disp_x() - draw_offset_x;
     int32_t W = ws_disp_w();
     int32_t cx = 2 * (x - X) + w;      /* 2*centre, avoids losing the half */
     if (3 * cx < 2 * W) return X;
@@ -3464,8 +3467,6 @@ static uint8_t split_recent_right_age = 255;
 static uint16_t split_recent_display_w = 0;
 static uint16_t split_recent_display_h = 0;
 
-/* Draw offset (set by GP0(E5h)) */
-static int32_t draw_offset_x, draw_offset_y;
 /* Instrumentation: per-vblank range/count of GP0(E5) draw-offset-Y sets. If a
  * single frame sets offsets in BOTH the top (y<128) and bottom (y>=128) buffer
  * bands, the game is drawing different parts of the scene into different display
