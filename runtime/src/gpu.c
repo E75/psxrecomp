@@ -5734,7 +5734,9 @@ static void gp0_exec_textured_rect(void) {
             int corrected_w = w;
             if (ws_auto_ui_transform_rect(&x0, &y0, &corrected_w, &ws_h))
                 ws_w = corrected_w;
-            else if (ws_hud_sprt) {
+            else if (ws_hud_sprt && !(semi_trans && w >= 128 && h >= 128)) {
+                /* A semi-transparent 128x128 tile is one cell of a full-screen overlay (rain). Each tile
+                 * squashing around its own third left gaps between them, so they stay put and stretch. */
                 x0 = ws_scale_about(x0, ws_hud_pivot(x0, w));
                 ws_w = (int)ws_scale_len(w);
             }
