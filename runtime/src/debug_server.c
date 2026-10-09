@@ -9234,6 +9234,23 @@ static void handle_ws_dbg_stretch(int id, const char *json)
              g_dbg_lo, g_dbg_hi, g_dbg_clut, g_dbg_match_n, g_dbg_match_tagged, g_bdg_applied);
 }
 
+/* gte_flag_hist [reset=1] — histogram of guest functions ($ra) that read a GTE FLAG with the error bit set,
+ * with the FLAG value and count: {"cmd":"gte_flag_hist"}. Games drop a quad on that read, so this lists where a
+ * wider view loses geometry. reset=1 clears it first (read, wait a few frames, read again). */
+extern int  gte_flag_hist_get(int index, uint32_t* ra, uint32_t* flag, uint32_t* count);
+extern void gte_flag_hist_reset(void);
+static void handle_gte_flag_hist(int id, const char *json)
+{
+    if (json_get_int(json, "reset", 0)) gte_flag_hist_reset();
+    char buf[16384]; int p = snprintf(buf, sizeof buf, "{\"id\":%d,\"ok\":true,\"entries\":[", id);
+    uint32_t ra, flag, count;
+    for (int i = 0; gte_flag_hist_get(i, &ra, &flag, &count) && p < (int)sizeof buf - 96; i++)
+        p += snprintf(buf + p, sizeof buf - p, "%s{\"ra\":\"0x%08X\",\"flag\":\"0x%08X\",\"count\":%u}",
+                      i ? "," : "", ra, flag, count);
+    snprintf(buf + p, sizeof buf - p, "]}");
+    debug_server_send_line(buf);
+}
+
 /* 8C far-backdrop depth split. ws_far_threshold [t=<SZ>] sets the SZ cutoff
  * above which backdrop-driver geometry is un-squashed (near props stay
  * squashed). With no t=, just reports the observed SZ stats since last read so
@@ -15620,6 +15637,7 @@ static const CmdEntry s_commands[] = {
     { "ws_backdrop_stretch", handle_ws_backdrop_stretch },
     { "ws_dbg_stretch",    handle_ws_dbg_stretch },
     { "ws_far_threshold",  handle_ws_far_threshold },
+    { "gte_flag_hist",     handle_gte_flag_hist },
     { "ws_dome",           handle_ws_dome },
     { "ws_dome_probe",     handle_ws_dome_probe },
     { "ws_census",         handle_ws_census },

@@ -2578,8 +2578,32 @@ extern "C" uint32_t gte_read_data(CPUState* cpu, uint8_t reg) {
     }
 }
 
+// FLAG error histogram: which guest function (by $ra) reads an error FLAG, and with which bits.
+// Games drop a quad on that read, so this shows where a wider view loses geometry (TCP gte_flag_hist).
+#define GTE_FLAG_HIST_CAP 128
+static struct { uint32_t ra, flag, count; } s_flag_hist[GTE_FLAG_HIST_CAP];
+static int s_flag_hist_n = 0;
+
+static void gte_flag_hist_note(uint32_t ra, uint32_t flag) {
+    for (int i = 0; i < s_flag_hist_n; i++) {
+        if (s_flag_hist[i].ra == ra && s_flag_hist[i].flag == flag) { s_flag_hist[i].count++; return; }
+    }
+    if (s_flag_hist_n < GTE_FLAG_HIST_CAP) s_flag_hist[s_flag_hist_n++] = { ra, flag, 1 };
+}
+
+extern "C" int gte_flag_hist_get(int index, uint32_t* ra, uint32_t* flag, uint32_t* count) {
+    if (index < 0 || index >= s_flag_hist_n) return 0;
+    *ra = s_flag_hist[index].ra; *flag = s_flag_hist[index].flag; *count = s_flag_hist[index].count;
+    return 1;
+}
+
+extern "C" void gte_flag_hist_reset(void) { s_flag_hist_n = 0; }
+
 extern "C" uint32_t gte_read_ctrl(CPUState* cpu, uint8_t reg) {
     if (reg >= 32) return 0;
+    if (reg == 31 && (cpu->gte_ctrl[31] & 0x80000000u) &&
+        !PSXRecomp::GTE::s_gte_replay_sandbox)
+        gte_flag_hist_note(cpu->gpr[31], cpu->gte_ctrl[31]);
     switch (reg) {
         case 4: case 12: case 20: case 26: case 27: case 29: case 30:
             return gte_sign_extend_16(cpu->gte_ctrl[reg]);
