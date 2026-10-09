@@ -1088,6 +1088,18 @@ to the rounded exact doubled area, at least 1. FLAG keeps the integer
 result's overflow bits; matching signs leave MAC0 untouched. This is
 DuckStation's "PGXP culling" with a minimal footprint.
 
+**Only a flat row is corrected (fork, 2026-10-09).** WE2002 lost visible
+quads with culling on: a light notch in the hair and on faces of the player
+models (exact-sign flips of nonzero MAC0; likely a quad culled on 3 of its
+4 corners). A thin
+corner triangle whose integer MAC0 is positive can have a negative exact
+determinant, and the whole quad, mostly front-facing, was dropped. The
+correction now applies only when the integer MAC0 is 0 — R4's case, a row
+the hardware rounds flat. A nonzero integer sign is never flipped, so
+precise culling can only keep faces the hardware would have culled as flat,
+never drop one the hardware draws. Disagreements are still counted
+(`nclip_disagree`); `nclip_corrected` counts the flat rows only.
+
 This changes guest-visible MAC0, and so the game's control flow, which is
 why it is opt-in at three levels:
 - only the mod arms it, and there is deliberately no `[video]` key for it;

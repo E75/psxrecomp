@@ -840,8 +840,9 @@ int test_pgxp_culling() {
             return fail_value("culling keeps the reversed sign", 0, 0x06u, 0,
                               (uint32_t)-area, (uint32_t)m);
     }
-    /* A native-positive sliver whose exact winding is reversed: the game
-     * now sees it back-facing. Native (0,0),(10,0),(5,1): MAC0 +10; exact
+    /* A native-positive sliver whose exact winding is reversed keeps the
+     * hardware sign: a quad culled on 3 of its corners must not lose a face
+     * the hardware draws. Native (0,0),(10,0),(5,1): MAC0 +10; exact
      * y2 = -0.25 (inside the window). */
     {
         const uint32_t w[3] = {0u, 10u, (1u << 16) | 5u};
@@ -851,9 +852,9 @@ int test_pgxp_culling() {
         if (int32_t m = nclip(w, xs, ys, nullptr); m != 10)
             return fail_value("native sliver MAC0", 0, 0x06u, 0, 10u, (uint32_t)m);
         pgxp_set_culling(1);
-        if (int32_t m = nclip(w, xs, ys, nullptr); m != -3)
-            return fail_value("reversed sliver MAC0", 0, 0x06u, 0,
-                              (uint32_t)-3, (uint32_t)m);
+        if (int32_t m = nclip(w, xs, ys, nullptr); m != 10)
+            return fail_value("reversed sliver keeps MAC0", 0, 0x06u, 0, 10u,
+                              (uint32_t)m);
     }
     /* Signs that agree keep the integer MAC0 exactly. */
     {

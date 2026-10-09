@@ -1410,7 +1410,10 @@ void gte_nclip(GTEState* gte, uint32_t instr) {
      * armed, compare the sign of the exact determinant of the three vertices
      * PGXP will draw with the integer one; a disagreement is a face the game
      * culls (or keeps) on a winding the drawn face does not have. Counted
-     * always; with precise culling on, MAC0 takes the exact sign. Never in a
+     * always; with precise culling on, MAC0 takes the exact sign only where
+     * the integer MAC0 is 0 (a row rounded flat). A nonzero integer sign is
+     * kept: games that test 3 corners of a quad would lose a visible face to
+     * an exact sliver flip (WE2002 hair/faces, G1.12). Never in a
      * pass that is compared against another execution of the same code: the
      * speculative and replay passes record no shadows, so the overlay shadow
      * diff holds it off for its interpreter pass too and both passes see the
@@ -1424,7 +1427,7 @@ void gte_nclip(GTEState* gte, uint32_t instr) {
             const int sp = (cross > 0) - (cross < 0);
             const int sn = (out > 0) - (out < 0);
             if (sp != 0 && sp != sn) {
-                const int corrected = pgxp_culling();
+                const int corrected = pgxp_culling() && sn == 0;
                 if (corrected) {
                     const uint64_t mag = cross < 0 ? (uint64_t)(-cross)
                                                    : (uint64_t)cross;
