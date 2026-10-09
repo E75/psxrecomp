@@ -2712,6 +2712,39 @@ def namespace_generated_static(src: str, namespace: str,
     return src, symbols
 
 
+def load_overlay_notes(path) -> dict:
+    """--annotations CSV, one `LOAD[/CRC32],0xPC,text` per line ('#' = comment).
+    Overlays share load addresses, so a note names one image: by physical load
+    address, narrowed to one image's bytes by its CRC32 when two files load
+    there. Returns {(phys_load, crc32 or None): {pc: text}}."""
+    notes = {}
+    if not path:
+        return notes
+    with open(path, encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            image, pc, text = line.split(',', 2)
+            load, _, crc = image.partition('/')
+            key = (int(load, 16) & 0x1FFFFFFF, int(crc, 16) if crc else None)
+            notes.setdefault(key, {})[int(pc, 16) & 0x1FFFFFFF] = text.replace('*/', '* /')
+    return notes
+
+
+def annotate_overlay_functions(src: str, symbols: dict, notes: dict,
+                               phys_addr: int, crc32: int) -> str:
+    """Write `/* [NOTE] text */` above each named function's definition, the
+    same line the recompiler writes for the boot EXE (annotations CSV)."""
+    by_pc = {**notes.get((phys_addr, None), {}), **notes.get((phys_addr, crc32), {})}
+    for va, sym in symbols.items():
+        text = by_pc.get(va & 0x1FFFFFFF)
+        if text:
+            definition = f'\nvoid {sym}(CPUState* cpu)\n'
+            src = src.replace(definition, f'\n/* [NOTE] {text} */{definition}', 1)
+    return src
+
+
 def parse_cps_continuation_owners(src: str) -> dict:
     """Return compiled block entry -> owning function for generated CPS C.
 
@@ -3978,6 +4011,8 @@ def generate_interior_fragment_static(interior: int, data: bytes,
                      f'{entry:08X}')
         continuation_owners = parse_cps_continuation_owners(src)
         src, symbols = namespace_generated_static(src, namespace, func_addrs)
+        src = annotate_overlay_functions(src, symbols, getattr(args, 'overlay_notes', {}),
+                                         phys_addr, image_crc)
         variants = []
         for ev in sorted(func_addrs):
             for code_crc, ranges in ids_by_addr[ev]:
@@ -6435,6 +6470,8 @@ def _static_capture_job_in_segment(cap, args, toml, forced_interiors,
                    else f's{segment_of(load_addr) >> 29}_')
         namespace = f'ov_{seg_tag}{phys_addr:08X}_{crc32:08X}_{cov_crc:08X}'
         src, symbols = namespace_generated_static(src, namespace, func_addrs)
+        src = annotate_overlay_functions(src, symbols, getattr(args, 'overlay_notes', {}),
+                                         phys_addr, crc32)
         variants = []
         for ev in sorted(func_addrs):
             for code_crc, ranges in ids_by_addr[ev]:
@@ -6649,7 +6686,11 @@ def main():
                          '(e.g. macos-x64). The spawning runtime injects '
                          'PSX_OVERLAY_ARCH_ABI, which wins. Default: this '
                          "interpreter's architecture.")
+    ap.add_argument('--annotations', default=None,
+                    help='overlay function notes CSV (`LOAD[/CRC32],0xPC,text` per '
+                         'line): written as /* [NOTE] */ above the named functions')
     args = ap.parse_args()
+    args.overlay_notes = load_overlay_notes(args.annotations)
     target_os = args.target_os
     if target_os == 'auto':
         if 'mingw' in args.gcc.lower() or 'w64' in args.gcc.lower() or args.gcc.lower().endswith('.exe'):
