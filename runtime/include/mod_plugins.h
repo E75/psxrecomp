@@ -483,6 +483,16 @@ enum {
     PSX_MOD_FRAME_SOURCE_FLIP = 1
 };
 int psx_mod_set_frame_interpolation_source(uint32_t source);
+/* Switch the presented frame rate while the game runs (e.g. from a hotkey): 0 = stock cadence, 60..1000 =
+ * temporal blending to that rate from the guest's flips (select the FLIP source first). Returns 0 when the
+ * renderer is not OpenGL, in netplay, or on a bad rate. */
+int psx_mod_set_frame_rate_live(uint32_t fps);
+/* Claim a lowercase key 'a'..'z' (no Ctrl/Alt/Win): the host stops handling it as a hotkey and
+ * psx_mod_take_key() reports each press once. Claim from the activation callback (cleared per session). */
+void psx_mod_claim_key(int key);
+int psx_mod_take_key(int key);
+/* Top-left toast message, like the host's own hotkey notices. */
+void psx_mod_osd_push(const char* message, int duration_ms);
 
 /*
  * Host-timed render passes: true in-between frames for a game whose logic

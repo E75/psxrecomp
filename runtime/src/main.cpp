@@ -1508,6 +1508,10 @@ static double        g_host_refresh_hz = 0.0;
 static constexpr double PSX_FRAME_PERIOD_MS = 1000.0 / 59.94;
 static double        g_guest_frame_period_ms = PSX_FRAME_PERIOD_MS;
 static double        g_frame_period_ms = PSX_FRAME_PERIOD_MS;
+/* Keys (ASCII a-z, bit = key - 'a') a mod claimed with psx_mod_claim_key(), and the claimed presses not yet
+ * taken by psx_mod_take_key(). The SDL event loop sets them, the emulation thread polls. */
+static std::atomic<uint32_t> g_mod_claimed_keys{0};
+static std::atomic<uint32_t> g_mod_pressed_keys{0};
 static int           g_host_refresh_display_idx = -2;
 static uint64_t      g_host_refresh_last_probe_ms = 0;
 static bool          g_mod_native_vblank_rate = false;
@@ -1710,6 +1714,8 @@ static void reset_mod_owned_presentation(void) {
     g_frame_period_ms = live.frame_period_ms;
     g_mod_native_vblank_rate = false;
     g_mod_native_vblank_fps = 0;
+    g_mod_claimed_keys = 0;
+    g_mod_pressed_keys = 0;
     g_mod_texfilter = -1;
     gr_set_texture_filter(g_video_texfilter);
     if (!first) {
@@ -3631,6 +3637,41 @@ static void apply_present_cadence(void) {
         (void)SDL_RenderSetVSync(sdl_renderer, interval != 0 ? 1 : 0);
     latency_ring_set_present_mode(interval);
 #endif
+}
+
+/* Live frame-rate switch for a mod hotkey: 0 = the guest's own flips at stock cadence, >= 60 = the presenter
+ * blends the guest's flips up to that rate. OpenGL only; the activation-time psx_mod_set_frame_interpolation()
+ * cannot be used after the window exists. */
+extern "C" int psx_mod_set_frame_rate_live(uint32_t fps) {
+#ifndef PSX_SDL_NO_RENDER
+    if ((fps != 0 && (fps < 60 || fps > 1000)) || !g_gl_active || psx_netplay_active()) return 0;
+    g_frame_interpolation = fps ? 1 : 0;
+    g_frame_interpolation_fps = (int)fps;
+    if (fps) g_video_vsync = 0;
+    apply_present_cadence();
+    gl_renderer_set_interpolation(g_frame_interpolation, g_host_refresh_hz, (double)fps,
+                                  g_frame_period_ms > 0.0 ? 1000.0 / g_frame_period_ms : 59.94,
+                                  g_frame_interpolation_blend);
+    gl_renderer_set_interpolation_source(g_frame_interpolation_source);
+    return 1;
+#else
+    (void)fps;
+    return 0;
+#endif
+}
+
+extern "C" void psx_mod_claim_key(int key) {
+    if (key >= 'a' && key <= 'z') g_mod_claimed_keys |= 1u << (key - 'a');
+}
+
+extern "C" int psx_mod_take_key(int key) {
+    if (key < 'a' || key > 'z') return 0;
+    const uint32_t bit = 1u << (key - 'a');
+    return (g_mod_pressed_keys.fetch_and(~bit) & bit) ? 1 : 0;
+}
+
+extern "C" void psx_mod_osd_push(const char* message, int duration_ms) {
+    if (message) host_osd_push(message, duration_ms);
 }
 
 static void log_present_cadence(void) {
@@ -8004,7 +8045,12 @@ static bool drain_host_events() {
                 netplay_soft_exit("netplay_escape");
                 return false;
             }
-            if (!key_repeat &&
+            const uint32_t mod_key_bit = (key >= 'a' && key <= 'z' && !(mod & (KMOD_CTRL | KMOD_ALT)))
+                ? 1u << (key - 'a') : 0u;
+            if (mod_key_bit && (g_mod_claimed_keys.load() & mod_key_bit)) {
+                if (!key_repeat) g_mod_pressed_keys |= mod_key_bit;
+            }
+            else if (!key_repeat &&
                 host_keymap_match_event(HOST_KEYMAP_REWIND, (int)key,
                                         (int)scancode, (int)mod)) {
                 psx_local_mouse_reset();
