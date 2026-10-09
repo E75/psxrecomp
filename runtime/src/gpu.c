@@ -5311,6 +5311,20 @@ static void gp0_exec_textured_tri(void) {
                               clut_x, clut_y, tpage);
 }
 
+/* Diagnostic (TCP gpu_hide): skip textured quads of one texpage whose CLUT, first-vertex U and V match,
+ * to find which quad draws a visible artefact. -1 = any. */
+static struct { int on, tpage, clut, umin, umax, vmin, vmax; } s_dbg_hide;
+void gpu_dbg_set_hide(int on, int tpage, int clut, int umin, int umax, int vmin, int vmax) {
+    s_dbg_hide.on = on; s_dbg_hide.tpage = tpage; s_dbg_hide.clut = clut;
+    s_dbg_hide.umin = umin; s_dbg_hide.umax = umax; s_dbg_hide.vmin = vmin; s_dbg_hide.vmax = vmax;
+}
+static int gpu_dbg_hide_quad(uint16_t tpage_word, uint16_t clut, int u, int v) {
+    return s_dbg_hide.on &&
+           (s_dbg_hide.tpage < 0 || (tpage_word & 0x1FF) == s_dbg_hide.tpage) &&
+           (s_dbg_hide.clut < 0 || clut == s_dbg_hide.clut) &&
+           u >= s_dbg_hide.umin && u <= s_dbg_hide.umax && v >= s_dbg_hide.vmin && v <= s_dbg_hide.vmax;
+}
+
 /* Execute textured quad (GP0 0x2C-0x2F) */
 static void gp0_exec_textured_quad(void) {
     if (native_wide_projective_draw()) return;
@@ -5334,6 +5348,7 @@ static void gp0_exec_textured_quad(void) {
     uint16_t tpage_word = (uint16_t)(gp0_cmd_buf[4] >> 16);
     uint16_t tpage = tpage_word & 0x1FF;
     set_tpage_from_poly(tpage_word);   /* latches even for size-rejected polys */
+    if (gpu_dbg_hide_quad(tpage_word, clut, u[0], v[0])) return;
     int rej_a = gpu_triangle_rejected(vx, vy, 0, 1, 2);
     int rej_b = gpu_triangle_rejected(vx, vy, 2, 1, 3);
     if (rej_a && rej_b) return;

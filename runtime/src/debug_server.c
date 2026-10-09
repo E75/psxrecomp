@@ -9234,6 +9234,18 @@ static void handle_ws_dbg_stretch(int id, const char *json)
              g_dbg_lo, g_dbg_hi, g_dbg_clut, g_dbg_match_n, g_dbg_match_tagged, g_bdg_applied);
 }
 
+/* gpu_hide — skip textured quads (GP0 0x2C-0x2F) of one texpage by CLUT and first-vertex U/V range, to find which
+ * quad draws an artefact: {"cmd":"gpu_hide","on":1,"tp":24,"clut":30728,"umin":0,"umax":255,"vmin":0,"vmax":255}
+ * (tp and clut -1 = any, ranges default to all); {"cmd":"gpu_hide","on":0} turns it off. */
+extern void gpu_dbg_set_hide(int on, int tpage, int clut, int umin, int umax, int vmin, int vmax);
+static void handle_gpu_hide(int id, const char *json)
+{
+    gpu_dbg_set_hide(json_get_int(json, "on", 0), json_get_int(json, "tp", -1), json_get_int(json, "clut", -1),
+                     json_get_int(json, "umin", 0), json_get_int(json, "umax", 255),
+                     json_get_int(json, "vmin", 0), json_get_int(json, "vmax", 255));
+    send_ok(id);
+}
+
 /* 8C far-backdrop depth split. ws_far_threshold [t=<SZ>] sets the SZ cutoff
  * above which backdrop-driver geometry is un-squashed (near props stay
  * squashed). With no t=, just reports the observed SZ stats since last read so
@@ -15620,6 +15632,7 @@ static const CmdEntry s_commands[] = {
     { "ws_backdrop_stretch", handle_ws_backdrop_stretch },
     { "ws_dbg_stretch",    handle_ws_dbg_stretch },
     { "ws_far_threshold",  handle_ws_far_threshold },
+    { "gpu_hide",          handle_gpu_hide },
     { "ws_dome",           handle_ws_dome },
     { "ws_dome_probe",     handle_ws_dome_probe },
     { "ws_census",         handle_ws_census },
