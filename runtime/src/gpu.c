@@ -2979,6 +2979,8 @@ static void ws_expand_fullscreen_rect(int32_t *x, int32_t y, int *w, int h) {
  * screens never reach here — they get zero squash + 4:3 pillarbox instead.)
  * x is pre-draw-offset: zones are judged on screen and the pivot is returned in
  * the same pre-offset space (WE2002 redraws its HUD centre-relative, offset 256). */
+static GpuWsSpriteAnchorFn ws_sprite_anchor_hook;
+void gpu_ws_set_sprite_anchor_hook(GpuWsSpriteAnchorFn fn) { ws_sprite_anchor_hook = fn; }
 static int32_t draw_offset_x, draw_offset_y;   /* set by GP0(E5h) */
 static int32_t ws_hud_pivot(int32_t x, int32_t w) {
     int32_t X = ws_disp_x() - draw_offset_x;
@@ -5732,8 +5734,14 @@ static void gp0_exec_textured_rect(void) {
             ws_w = (int)ws_scale_len(w);
         } else {
             int corrected_w = w;
+            int32_t hook_ax;
             if (ws_auto_ui_transform_rect(&x0, &y0, &corrected_w, &ws_h))
                 ws_w = corrected_w;
+            else if (ws_sprite_anchor_hook &&
+                     ws_sprite_anchor_hook(x0, y0, w, h, u0, v0, clut, current_texpage(), &hook_ax)) {
+                x0 = ws_scale_about(x0, hook_ax);
+                ws_w = (int)ws_scale_len(w);
+            }
             else if (ws_hud_sprt && !(semi_trans && w >= 128 && h >= 128)) {
                 /* A semi-transparent 128x128 tile is one cell of a full-screen overlay (rain). Each tile
                  * squashing around its own third left gaps between them, so they stay put and stretch. */

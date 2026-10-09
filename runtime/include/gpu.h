@@ -479,6 +479,14 @@ void gpu_ws_set_adaptive_backdrop_preload(int enabled);
  * `prim` is the address of the PsyQ P_TAG word; the drawn command starts at
  * prim+4. anchor: -1 = left, 0 = center, +1 = right. */
 void gpu_ws_tag_hud_prim(uint32_t prim, int anchor);
+/* Squash mode: a screen-space sprite whose position was already derived from the GTE-squashed
+ * projection (a cursor drawn on a projected player) must not be squashed about the HUD pivot a
+ * second time. The hook sees an untagged variable-size sprite (x, y, w, h, texel u, v, clut,
+ * texpage) and returns 1 with the x to squash it around (its own anchor keeps the position).
+ * Pass NULL to remove it. Runs per sprite, keep it cheap. */
+typedef int (*GpuWsSpriteAnchorFn)(int32_t x, int32_t y, int w, int h, int u, int v,
+                                   uint16_t clut, uint16_t texpage, int32_t *anchor_x);
+void gpu_ws_set_sprite_anchor_hook(GpuWsSpriteAnchorFn fn);
 /* Stretch a trusted authored background polygon about the display center in
  * the native-wide output only (GL/SW). prim+4 is the command address, including
  * for a command embedded inside a longer DMA packet. Only opaque polygons are
