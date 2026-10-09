@@ -5559,10 +5559,11 @@ static void gp0_exec_mono_line(void) {
         ws_nw_sync_target();
         return;
     }
-    int32_t vx[2] = { x0, x1 };
-    ws_menu_squash(vx, 2);
+    int32_t vx[2] = { x0, x1 }, vy[2] = { y0, y1 };
+    ws_auto_ui_transform_part(vx, vy, 2);   /* menu pivot, else the panel's group (box frames) */
     ws_nw_hud_shift_vertices(vx, 2);
     x0 = vx[0]; x1 = vx[1];
+    y0 = vy[0]; y1 = vy[1];
     x0 += draw_offset_x; y0 += draw_offset_y;
     x1 += draw_offset_x; y1 += draw_offset_y;
     {
@@ -5582,10 +5583,11 @@ static void gp0_exec_shaded_line(void) {
     parse_vertex(gp0_cmd_buf[1], &x0, &y0);
     parse_vertex(gp0_cmd_buf[3], &x1, &y1);
     if (psx_gpu_line_oversize(x0, y0, x1, y1)) return;
-    int32_t vx[2] = { x0, x1 };
-    ws_menu_squash(vx, 2);
+    int32_t vx[2] = { x0, x1 }, vy[2] = { y0, y1 };
+    ws_auto_ui_transform_part(vx, vy, 2);
     ws_nw_hud_shift_vertices(vx, 2);
     x0 = vx[0]; x1 = vx[1];
+    y0 = vy[0]; y1 = vy[1];
     x0 += draw_offset_x; y0 += draw_offset_y;
     x1 += draw_offset_x; y1 += draw_offset_y;
     {
@@ -6268,6 +6270,11 @@ static int gp0_command_word_count(uint8_t opcode) {
     }
 }
 
+/* GP0 2-point line, mono (0x40-0x43) or shaded (0x50-0x53). */
+static int ws_ui_line_op(uint32_t op) {
+    return (op >= 0x40u && op <= 0x43u) || (op >= 0x50u && op <= 0x53u);
+}
+
 static void ws_ui_prepass_add(const uint32_t *words, uint32_t word_count,
                               uint32_t source_addr, uint16_t rank,
                               int full_draw_area, int32_t offset_x) {
@@ -6362,6 +6369,21 @@ static void ws_ui_prepass_add(const uint32_t *words, uint32_t word_count,
         if (width <= 0 || height <= 0) { ws_ui_reject.degenerate++; return; }
         max_x = min_x + width;
         max_y = min_y + height;
+    } else if (ws_ui_line_op(op)) {
+        /* A box frame (help box, sub-menu): drawn as four lines around a filled panel. Like a rotated
+         * piece it joins only when it lies inside an admitted panel, so backdrop rules never do. A
+         * zero-extent side gets one pixel so the box has an area. */
+        const int shaded = (op & 0x10u) != 0;
+        int32_t x1, y1;
+        parse_vertex(words[1], &min_x, &min_y);
+        parse_vertex(words[shaded ? 3 : 2], &x1, &y1);
+        max_x = min_x > x1 ? min_x : x1;
+        max_y = min_y > y1 ? min_y : y1;
+        if (x1 < min_x) min_x = x1;
+        if (y1 < min_y) min_y = y1;
+        if (max_x == min_x) max_x++;
+        if (max_y == min_y) max_y++;
+        enclosed_only = 1;
     } else {
         ws_ui_reject.opcode++;
         return;
@@ -6595,9 +6617,13 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
      * with the wide image while the frame around them squashes. */
     for (uint32_t i = 0; i < ws_ui_prepass_count; i++) {
         const WsUiPrepassItem *it = &ws_ui_prepass[i];
-        if (!it->enclosed_only || it->ot_rank != max_rank) continue;
+        /* A box frame is drawn in its panel's layer, one back from the text when the panel is a backing. */
+        const int frame_line = ws_ui_line_op(it->op) && it->ot_rank == backing_rank;
+        if (!it->enclosed_only || (it->ot_rank != max_rank && !frame_line)) continue;
         const int32_t x0 = it->group.x, x1 = it->group.x + it->group.width;
         const int32_t y0 = it->y, y1 = it->y + it->h;
+        /* A frame line sits on the panel's edge: touching counts as overlap, one pixel outside as inside. */
+        const int32_t slack = ws_ui_line_op(it->op) ? 1 : 0;
         int32_t ux0 = 0, ux1 = 0, uy0 = 0, uy1 = 0;
         int any = 0;
         for (uint32_t j = 0; j < ws_ui_prepass_count; j++) {
@@ -6605,7 +6631,7 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
             if (!keep[j] || ui->enclosed_only) continue;
             const int32_t a0 = ui->group.x, a1 = ui->group.x + ui->group.width;
             const int32_t b0 = ui->y, b1 = ui->y + ui->h;
-            if (a0 >= x1 || x0 >= a1 || b0 >= y1 || y0 >= b1) continue;
+            if (a0 >= x1 + slack || x0 >= a1 + slack || b0 >= y1 + slack || y0 >= b1 + slack) continue;
             if (!any) { ux0 = a0; ux1 = a1; uy0 = b0; uy1 = b1; any = 1; }
             else {
                 if (a0 < ux0) ux0 = a0;
@@ -6614,7 +6640,7 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
                 if (b1 > uy1) uy1 = b1;
             }
         }
-        if (any && ux0 <= x0 && x1 <= ux1 && uy0 <= y0 && y1 <= uy1) {
+        if (any && ux0 <= x0 + slack && x1 <= ux1 + slack && uy0 <= y0 + slack && y1 <= uy1 + slack) {
             keep[i] = 1;
             ws_ui_reject.enclosed++;
         }
