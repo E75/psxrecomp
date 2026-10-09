@@ -3195,8 +3195,12 @@ static int ws_auto_ui_transform_rect(int32_t *x, int32_t *y, int *w, int *h) {
     if (!it) return 0;
     const double s = ws_auto_ui_size();
     if (s >= 1.0) {
-        *x = ws_scale_about(*x, it->group.anchor) + ws_shared_ui_delta();
-        *w = (int)ws_scale_len(*w);
+        /* Both edges, not position + scaled length: those round apart and open 1 px gaps
+         * between the glyph sprites of a text row. */
+        const int32_t x0 = ws_scale_about(*x, it->group.anchor);
+        const int32_t x1 = ws_scale_about(*x + *w, it->group.anchor);
+        *x = x0 + ws_shared_ui_delta();
+        *w = x1 - x0 < 1 ? 1 : (int)(x1 - x0);
     } else {
         /* Scale both edges so neighbouring parts of a widget stay butted. */
         const int32_t x0 = ws_ui_x(*x, it->group.anchor, s);
