@@ -1261,7 +1261,7 @@ static inline int cfg_fmv_filter_to_launcher(int cfg_value) {
 static int           g_video_texfilter = 0; /* 0=nearest, 1=bilinear */
 static int           g_mod_texfilter = -1;
 extern "C" void psx_mod_set_texture_filter(int mode) {
-    if(mode < 0 || mode > 2) return;
+    if(mode < 0 || mode > 3) return;
     g_mod_texfilter = mode;
     gr_set_texture_filter(mode);
 }

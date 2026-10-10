@@ -3856,7 +3856,15 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
                                   int semi, const int *lim) {
     // Mode 2 needs proven world geometry. Sprites, HUD and untracked packets
     // retain point sampling; their cutout pixels must stay sharp.
-    const int filter=s_tex_filter==2 && ((lim && !s_projected_uv_valid) || (!s_pc_valid && !s_pq_valid)) ? 0 : s_tex_filter;
+    int filter=s_tex_filter==2 && ((lim && !s_projected_uv_valid) || (!s_pc_valid && !s_pq_valid)) ? 0 : s_tex_filter;
+    if (s_tex_filter==3) {
+        // Mode 3 (smooth 2D, sharp 3D): sprites and screen-aligned polygons (both uv axes follow a screen axis) are bilinear,
+        // everything with a diagonal mapping keeps point sampling.
+        long du=0, dv=0;
+        int flat=lim && !s_projected_uv_valid;
+        if (!lim && !s_pq_valid) { psx_uv_tri_dirs(xs, ys, us, vs, &du, &dv); flat=du!=0 && dv!=0; }
+        filter=flat?1:0;
+    }
     int lim_buf[4];
     int uv_buf[6];
     if (!lim) {
@@ -4222,7 +4230,7 @@ static int  glb_scale(void) { return s_out_scale; }   /* real internal SSAA scal
                                                       native-wide CPU present path + gr_scale() callers
                                                       need the true scale — the FBO-direct present is
                                                       unaffected since it never reads gr_scale()) */
-static void glb_set_texture_filter(int b) { s_tex_filter = b >= 0 && b <= 2 ? b : 0; sw_set_texture_filter(b != 0); }
+static void glb_set_texture_filter(int b) { s_tex_filter = b >= 0 && b <= 3 ? b : 0; sw_set_texture_filter(b != 0); }
 static int  glb_texture_filter(void) { return s_tex_filter; }
 
 static void glb_set_semi_transparency(int e, int m) { s_semi_en = e; s_semi_mode = m & 3; sw_set_semi_transparency(e, m); }
