@@ -56,6 +56,23 @@ static void test_counts_per_rate(void) {
     }
 }
 
+/* A deadline within a hair of the next frame repeats that frame's own image: with room for one pass the
+ * shed subset must be the mid-frame one, not the one at phase ~1. */
+static void test_no_phase_at_next_frame(void) {
+    RenderPassPlanInput in = {0};
+    uint32_t a[RENDER_PASS_MAX_PHASES], wanted = 0, n;
+    in.frame_start = 1e9;
+    in.target_period = 1.0e7;
+    in.next_deadline = in.frame_start + 1.0e7;
+    in.frame_length = 2.0e7 + 100.0;   /* grid point 1e7 later falls 100 ticks short of the frame end */
+    in.max = RENDER_PASS_MAX_PHASES;
+    in.pass_cost = 1.0e6;
+    in.budget = 1.5e6;
+    n = render_pass_plan_phases(&in, a, &wanted);
+    CHECK(wanted == 1, "a deadline at the next frame is not a phase");
+    CHECK(n == 1 && a[0] > 16384u && a[0] < 49152u, "the one pass sits mid-frame");
+}
+
 static void test_shedding(void) {
     RenderPassPlanInput in = {0};
     uint32_t a[RENDER_PASS_MAX_PHASES], wanted = 0, n;
@@ -418,6 +435,7 @@ int main(void) {
     test_store_policy();
     test_counts_per_rate();
     test_shedding();
+    test_no_phase_at_next_frame();
     test_select();
     test_gen_select_late();
     test_gen_flip_matches();

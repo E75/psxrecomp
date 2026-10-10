@@ -40,7 +40,8 @@ uint32_t render_pass_plan_phases(const RenderPassPlanInput *in,
         for (; d < end && count < cap; d += in->target_period) {
             double p = (d - in->frame_start) / in->frame_length;
             if (p < 1.0 / 64.0) continue;
-            if (p >= 1.0) break;
+            /* Within 1/64 of the next frame the pass would repeat that frame's own image. */
+            if (p >= 1.0 - 1.0 / 64.0) break;
             phases[count++] = p;
         }
     }
