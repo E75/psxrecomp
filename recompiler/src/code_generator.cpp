@@ -3680,9 +3680,6 @@ void CodeGenerator::emit_fast_load_helpers(std::ostream& ss) const {
     if (config_.fast_cycle_funcs.empty()) return;
     ss << "/* fast_cycle_funcs loads: main RAM straight from the array (no load interlock or timing model), everything else\n"
           " * through the generic reader (MMIO, scratchpad, lockstep and data-shard modes). */\n"
-          "extern uint32_t psx_read_word(uint32_t a);\n"
-          "extern uint16_t psx_read_half(uint32_t a);\n"
-          "extern uint8_t psx_read_byte(uint32_t a);\n"
           "#ifdef PSX_ENABLE_BLOCK_CYCLES\n"
           "static inline uint32_t psx_fl_word(uint32_t a) {\n"
           "    const uint32_t p = a & 0x1FFFFFFFu;\n"
