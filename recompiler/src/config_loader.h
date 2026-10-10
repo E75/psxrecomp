@@ -1056,6 +1056,11 @@ struct GameConfig {
     bool                  load_charge_batch = false;
     std::vector<uint32_t> load_charge_batch_funcs;
 
+    // [recompiler] fast_cycle_funcs: these functions charge their cycles once per basic block
+    // (static block cost) instead of per instruction with the interlock and I-cache model. Host
+    // speed for hot, timing-insensitive code; guest timing inside them becomes approximate.
+    std::vector<uint32_t> fast_cycle_funcs;
+
     // [load_accel.vsync_query] opt-in for a byte-verified PsyQ VSync(mode)
     // implementation.  mode=-1 returns vsync_counter_addr while bypassing two
     // unused MMIO reads; every other mode executes the original function.

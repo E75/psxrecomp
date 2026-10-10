@@ -232,6 +232,13 @@ uint32_t overlay_codegen_config_hash(const GameConfig& c) {
         h.u32((uint32_t)lcb.size());
         for (uint32_t pc : lcb) h.u32(pc);
     }
+    h.tag("fast_cycle_funcs");
+    {
+        std::vector<uint32_t> fc = c.fast_cycle_funcs;
+        std::sort(fc.begin(), fc.end());
+        h.u32((uint32_t)fc.size());
+        for (uint32_t pc : fc) h.u32(pc);
+    }
     return h.value;
 }
 
@@ -1853,6 +1860,12 @@ GameConfig load_game_config(const fs::path& config_path_in) {
     }
     if (load_charge_batch && load_charge_batch_funcs.empty())
         load_charge_batch_funcs = hot_funcs;
+    std::vector<uint32_t> fast_cycle_funcs;
+    if (recomp.contains("fast_cycle_funcs")) {
+        const auto& arr = toml::find<std::vector<std::string>>(recomp, "fast_cycle_funcs");
+        for (const auto& a : arr)
+            fast_cycle_funcs.push_back(parse_hex(a, "recompiler.fast_cycle_funcs"));
+    }
     uint32_t vsync_query_func = 0;
     uint32_t vsync_counter_addr = 0;
     uint32_t vsync_gpustat_ptr_addr = 0;
@@ -2602,6 +2615,7 @@ GameConfig load_game_config(const fs::path& config_path_in) {
         /*hot_funcs*/             hot_funcs,
         /*load_charge_batch*/     load_charge_batch,
         /*load_charge_batch_funcs*/ load_charge_batch_funcs,
+        /*fast_cycle_funcs*/      fast_cycle_funcs,
         /*vsync_query_func*/      vsync_query_func,
         /*vsync_counter_addr*/    vsync_counter_addr,
         /*vsync_gpustat_ptr_addr*/ vsync_gpustat_ptr_addr,

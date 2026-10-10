@@ -154,7 +154,7 @@ uint32_t CodeGenerator::partial_block_cycle_count(uint32_t addr,
 std::string CodeGenerator::emit_mid_block_cycle_charge(uint32_t addr,
                                                        const ControlFlowGraph& cfg,
                                                        const std::string& indent) const {
-    if (codegen_cycle_per_insn()) {
+    if (codegen_cycle_per_insn() && !config_.fast_cycle_funcs.count(cfg.function_start)) {
         return "";
     }
 
@@ -2042,7 +2042,7 @@ std::string CodeGenerator::translate_basic_block(
         ss << "#endif\n";
     }
 
-    const bool cycle_per_insn = codegen_cycle_per_insn();
+    const bool cycle_per_insn = codegen_cycle_per_insn() && !config_.fast_cycle_funcs.count(cfg.function_start);
     // Per-instruction R3000A load-delay interlock (cycle_per_insn mode): §1 base +
     // GPR_DEPRES + DO_LDS, emitted BEFORE the instruction body so §1 precedes any
     // muldiv/GTE deadline stall the body applies (Beetle order). CPU loads (op

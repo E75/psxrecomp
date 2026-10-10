@@ -156,6 +156,7 @@ CodeGenConfig move_exact_config_sites(const CodeGenConfig& cfg, At at) {
     move_set(v.mod_function_entry_funcs);
     move_set(v.hot_funcs);
     move_set(v.load_charge_batch_funcs);
+    move_set(v.fast_cycle_funcs);
     move_set(v.ws_backdrop_unsquash_funcs);
     move_set(v.ws_cull_bias_sites);
     move_set(v.ws_cull_range_sites);

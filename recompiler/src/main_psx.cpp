@@ -224,6 +224,7 @@ static int psxrecomp_game_main(int argc, char** argv) {
     std::vector<PSXRecompV4::WidescreenMaskedRejectSite> ws_cull_masked_reject;
     std::set<uint32_t>    hot_funcs;            // [recompiler] hot_funcs
     std::set<uint32_t>    load_charge_batch_funcs; // [recompiler] load_charge_batch*
+    std::set<uint32_t>    fast_cycle_funcs;        // [recompiler] fast_cycle_funcs
     std::map<uint32_t, std::array<uint32_t, 4>> vsync_query_hle_funcs;
     std::set<uint32_t>    ws_cull_bias, ws_cull_range, ws_cull_a1; // [widescreen.cull]
     std::set<uint32_t>    ws_cull_bias_lower;
@@ -294,6 +295,7 @@ static int psxrecomp_game_main(int argc, char** argv) {
             load_charge_batch_funcs.insert(cfg.load_charge_batch_funcs.begin(),
                                            cfg.load_charge_batch_funcs.end());
         }
+        fast_cycle_funcs.insert(cfg.fast_cycle_funcs.begin(), cfg.fast_cycle_funcs.end());
         if (cfg.vsync_query_func)
             vsync_query_hle_funcs[cfg.vsync_query_func] = {
                 cfg.vsync_counter_addr, cfg.vsync_gpustat_ptr_addr,
@@ -621,6 +623,7 @@ static int psxrecomp_game_main(int argc, char** argv) {
         check_set("recompiler.mod_function_entry_funcs", mod_entry_funcs);
         check_set("recompiler.hot_funcs", hot_funcs);
         check_set("recompiler.load_charge_batch_funcs", load_charge_batch_funcs);
+        check_set("recompiler.fast_cycle_funcs", fast_cycle_funcs);
         for (const auto& [func, addrs] : vsync_query_hle_funcs) {
             (void)addrs;
             check("load_accel.vsync_query.func", func);
@@ -1476,6 +1479,7 @@ static int psxrecomp_game_main(int argc, char** argv) {
     codegen_config.mod_instruction_sites = mod_instruction_sites;
     codegen_config.hot_funcs = hot_funcs;
     codegen_config.load_charge_batch_funcs = load_charge_batch_funcs;
+    codegen_config.fast_cycle_funcs = fast_cycle_funcs;
     codegen_config.vsync_query_hle_funcs = vsync_query_hle_funcs;
     codegen_config.ws_bg2d_init_func = ws_bg2d_init_func;
     codegen_config.ws_cull_bias_sites  = ws_cull_bias;
