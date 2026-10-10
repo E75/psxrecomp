@@ -742,7 +742,7 @@ static GLint s_uVram = -1, s_uTpage = -1, s_uClut = -1, s_uDepth = -1;
 static GLint s_uHdTexture = -1;
 static GLint s_uPalette = -1;
 static GLint s_uRaw = -1, s_uSemipass = -1, s_uSemimode = -1;
-static GLint s_uMaskset = -1, s_uFilter = -1;
+static GLint s_uMaskset = -1, s_uFilter = -1, s_uPcolor = -1;
 static GLint s_uLimits = -1;
 /* Native-wide x-projection uniforms (per program). u_xoff = x translation in
  * native px (0 canonical), u_xhalf = x clip half-extent in native px (512
@@ -846,6 +846,7 @@ static int s_mod_r = 128, s_mod_g = 128, s_mod_b = 128, s_mod_raw = 0;
 static int s_mask_set = 0, s_mask_check = 0;
 static int s_tw_mask_x = 0, s_tw_mask_y = 0, s_tw_off_x = 0, s_tw_off_y = 0;
 static int s_tex_filter = 0;
+static int s_persp_color = 0;   /* filter bit 4: gouraud colour follows the perspective weight */
 /* Opaque textured draws carry the exact mask bit in FBO alpha. Keeping the
  * duplicate stencil copy current is deferred until mask checking is requested. */
 static int s_stencil_valid = 1;
@@ -1581,13 +1582,14 @@ static const char *TEX_VS =
     "uniform float u_xscale; /* native-wide 2D-backdrop x-stretch; 1 canonical */\n"
     "uniform float u_xcenter;/* stretch centre in VRAM px; 0 canonical */\n"
     "noperspective out vec2 v_uv; noperspective out vec4 v_col;\n"
+    "smooth out vec4 v_col_p; /* perspective-correct colour (u_pcolor) */\n"
     "smooth out vec2 v_uv_p;  /* perspective-correct UV (used when v_persp!=0) */\n"
     "flat out int v_persp;\n"
     "flat out ivec2 v_tpage; flat out ivec2 v_clut; flat out int v_depth;\n"
     "flat out int v_raw; flat out ivec4 v_limits; flat out int v_semi;\n"
     "flat out int v_twin;\n"
     "flat out vec4 v_hd_source; flat out int v_hd_mode;\n"
-    "void main(){ v_uv = a_uv; v_uv_p = a_uv; v_col = a_col;\n"
+    "void main(){ v_uv = a_uv; v_uv_p = a_uv; v_col = a_col; v_col_p = a_col;\n"
     "  v_persp = (a_q > 0.0) ? 1 : 0;\n"
     "  v_tpage = ivec2(a_tpage + 0.5); v_clut = ivec2(a_clut + 0.5);\n"
     "  v_depth = int(a_depth + 0.5); v_raw = int(a_raw + 0.5);\n"
@@ -1613,6 +1615,7 @@ static const char *TEX_VS =
 static const char *TEX_FS =
     "#version 330\n"
     "noperspective in vec2 v_uv; noperspective in vec4 v_col;\n"
+    "smooth in vec4 v_col_p; uniform int u_pcolor;\n"
     "smooth in vec2 v_uv_p; flat in int v_persp;\n"
     "out vec4 frag; out vec4 blend_factor;\n"
     "flat in ivec2 v_tpage;   /* texture page base, VRAM px */\n"
@@ -1761,7 +1764,7 @@ static const char *TEX_FS =
     "  }\n"
     "  if (u_semipass == 1 && stp == 1) discard;\n"
     "  if (u_semipass == 2 && stp == 0) discard;\n"
-    "  if (v_raw == 0) rgb = clamp(rgb * v_col.rgb * 2.0, 0.0, 1.0);\n"
+    "  if (v_raw == 0) rgb = clamp(rgb * ((u_pcolor != 0 && v_persp != 0) ? v_col_p.rgb : v_col.rgb) * 2.0, 0.0, 1.0);\n"
     "  float dst_factor = 0.0;\n"
     "  if (u_semimode == 4 && v_semi != 0 && stp != 0) {\n"
     "    dst_factor = v_semi == 1 ? 0.5 : 1.0;\n"
@@ -3457,6 +3460,7 @@ static void flush_tex_batch(void) {
         s_tb_bank_tex && !s_tb_bank_live_clut ? s_tb_bank_tex : s_raw_tex, s_tb_hd_tex);
     p_glUniform1i(s_uMaskset, s_tb_mask);
     p_glUniform1i(s_uFilter, s_tb_filter);
+    p_glUniform1i(s_uPcolor, s_persp_color);
     p_glBindVertexArray(s_tex_vao);
     p_glBindBuffer(PSXGL_ARRAY_BUFFER, s_tex_vbo);
     p_glBufferData(PSXGL_ARRAY_BUFFER, (ptrdiff_t)(nverts * TEXV * sizeof(float)), s_tb, PSXGL_STREAM_DRAW);
@@ -3856,8 +3860,8 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
                                   int semi, const int *lim) {
     // Mode 2 needs proven world geometry. Sprites, HUD and untracked packets
     // retain point sampling; their cutout pixels must stay sharp.
-    int filter=s_tex_filter==2 && ((lim && !s_projected_uv_valid) || (!s_pc_valid && !s_pq_valid)) ? 0 : s_tex_filter;
-    if (s_tex_filter==3) {
+    int filter=(s_tex_filter&3)==2 && ((lim && !s_projected_uv_valid) || (!s_pc_valid && !s_pq_valid)) ? 0 : (s_tex_filter&3);
+    if ((s_tex_filter&3)==3) {
         // Mode 3 (smooth 2D, sharp 3D): sprites and screen-aligned polygons (both uv axes follow a screen axis) are bilinear,
         // everything with a diagonal mapping keeps point sampling.
         long du=0, dv=0;
@@ -4230,7 +4234,7 @@ static int  glb_scale(void) { return s_out_scale; }   /* real internal SSAA scal
                                                       native-wide CPU present path + gr_scale() callers
                                                       need the true scale — the FBO-direct present is
                                                       unaffected since it never reads gr_scale()) */
-static void glb_set_texture_filter(int b) { s_tex_filter = b >= 0 && b <= 3 ? b : 0; sw_set_texture_filter(b != 0); }
+static void glb_set_texture_filter(int b) { s_tex_filter = b >= 0 && b <= 7 ? b : 0; s_persp_color = (s_tex_filter & 4) != 0; sw_set_texture_filter((s_tex_filter & 3) != 0); }
 static int  glb_texture_filter(void) { return s_tex_filter; }
 
 static void glb_set_semi_transparency(int e, int m) { s_semi_en = e; s_semi_mode = m & 3; sw_set_semi_transparency(e, m); }
@@ -5074,6 +5078,7 @@ static int init_gpu_raster(void) {
     s_uSemimode = p_glGetUniformLocation(s_tex_prog, "u_semimode");
     s_uMaskset  = p_glGetUniformLocation(s_tex_prog, "u_maskset");
     s_uFilter   = p_glGetUniformLocation(s_tex_prog, "u_filter");
+    s_uPcolor   = p_glGetUniformLocation(s_tex_prog, "u_pcolor");
     s_uLimits   = p_glGetUniformLocation(s_tex_prog, "u_limits");
     s_uHdTexture = p_glGetUniformLocation(s_tex_prog, "u_hd_texture");
     s_uBlitSrc     = p_glGetUniformLocation(s_blit_prog, "u_src");

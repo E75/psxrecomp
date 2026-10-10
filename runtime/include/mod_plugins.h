@@ -87,7 +87,8 @@ void psx_mod_counter_add(const char* name, uint32_t delta);
 /* Presentation-only filtering: 0 nearest, 1 bilinear, 2 stable minification.
  * Mode 2 uses a bounded palette-aware footprint for proven 3D polygons on
  * OpenGL; untracked UI stays nearest. Mode 3 (smooth 2D, sharp 3D) filters sprites
- * and screen-aligned polygons bilinearly and keeps 3D point sampled. Other backends use bilinear. A session
+ * and screen-aligned polygons bilinearly and keeps 3D point sampled. Other backends use bilinear. Add 4 to any
+ * mode for perspective-correct gouraud colours on polygons with a perspective weight (OpenGL). A session
  * reset restores the player's configured filter. */
 void psx_mod_set_texture_filter(int mode);
 /* Entry callbacks can make nested guest calls while retaining host registers.
