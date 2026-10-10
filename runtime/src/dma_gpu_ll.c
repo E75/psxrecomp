@@ -44,6 +44,21 @@ uint32_t dma_gpu_ll_cycles_to_event(const DMAGPULinkedList *state) {
     return state->cycles_remaining ? state->cycles_remaining : 1u;
 }
 
+uint32_t dma_gpu_ll_total_cycles(const DMAGPULinkedList *state, const DMAGPULinkedListOps *ops, void *opaque) {
+    if (!state->active || state->phase != DMA_GPU_LL_PHASE_HEADER || state->nodes_processed != 0 ||
+        !ops || !ops->read_word)
+        return 0;
+    uint32_t total = 0, address = state->current_addr;
+    for (uint32_t nodes = 0; nodes < state->max_nodes; nodes++) {
+        address = resolve_address(ops, opaque, address);
+        const uint32_t header = ops->read_word(opaque, address);
+        total += 1u + (header >> 24);
+        if ((header & 0x00FFFFFFu) == 0x00FFFFFFu) break;
+        address = header & 0x00FFFFFFu;
+    }
+    return total;
+}
+
 void dma_gpu_ll_advance(DMAGPULinkedList *state, uint32_t cycles,
                         const DMAGPULinkedListOps *ops, void *opaque) {
     if (!state->active || cycles == 0 || !ops || !ops->read_word) return;

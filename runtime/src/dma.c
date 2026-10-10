@@ -843,6 +843,19 @@ static uint64_t hold_host_ticks_per_sec(void) {
 #endif
 }
 
+/* Words (= cycles) of the list a CPU hold is walking; 0 = one device event per word. While the CPU is held nothing can
+ * observe the walk between its first and last word, so the walk is one event bounded by the other devices' events and by
+ * its own end, which keeps the completion cycle exact. */
+static uint32_t s_gpu_ll_hold_total;
+
+static uint32_t gpu_ll_cycles_to_event(void) {
+    if (s_gpu_ll_hold_total) {
+        const uint32_t done = gpu_linked_list.total_words;
+        return s_gpu_ll_hold_total > done ? s_gpu_ll_hold_total - done : 1u;
+    }
+    return dma_gpu_ll_cycles_to_event(&gpu_linked_list);
+}
+
 static void hold_cpu_for_gpu_linked_list(void) {
     if (psx_in_device_service || g_ls_replay_active || g_psx_guest_time_frozen)
         return;
@@ -850,14 +863,16 @@ static void hold_cpu_for_gpu_linked_list(void) {
     const uint64_t host0 = hold_host_ticks();
     const uint32_t words0 = gpu_linked_list.total_words;
     uint32_t steps = 0;
+    s_gpu_ll_hold_total = dma_gpu_ll_total_cycles(&gpu_linked_list, &gpu_ll_ops, NULL);
     while (gpu_linked_list.active && ((channels[2].chcr >> 24) & 1u) &&
            channel_enabled(2)) {
         const uint32_t moved = gpu_linked_list.total_words;
-        psx_advance_cycles(dma_gpu_ll_cycles_to_event(&gpu_linked_list));
+        psx_advance_cycles(gpu_ll_cycles_to_event());
         psx_devices_service_to_now();
         steps++;
         if (gpu_linked_list.active && gpu_linked_list.total_words == moved) break;
     }
+    s_gpu_ll_hold_total = 0;
     const uint64_t host_us = (hold_host_ticks() - host0) * 1000000ull /
                              hold_host_ticks_per_sec();
     const int in_exc = psx_get_in_exception() != 0;
@@ -1221,7 +1236,7 @@ uint32_t dma_cycles_to_internal_event(void) {
 
     if (gpu_linked_list.active && ((channels[2].chcr >> 24) & 1u) &&
         channel_enabled(2)) {
-        uint32_t d = dma_gpu_ll_cycles_to_event(&gpu_linked_list);
+        uint32_t d = gpu_ll_cycles_to_event();
         if (d < best) best = d;
     }
 
