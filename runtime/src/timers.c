@@ -270,6 +270,20 @@ uint32_t timers_cycles_to_irq(uint32_t i_mask) {
     return best;
 }
 
+/* Cycles until timer t's counter reads `value` (a poll loop waiting on a counter threshold). Returns 0
+ * when that is not predictable: sync mode gates the clock, and reset-on-target wraps before `value`. */
+uint32_t timers_cycles_until_counter(int t, uint32_t value) {
+    if (t < 0 || t > 2) return 0;
+    const Timer* tm = &timers[t];
+    if (tm->mode & MODE_SYNC_EN) return 0;
+    if ((tm->mode & MODE_RESET_TARGET) && value > tm->target) return 0;
+    uint32_t ticks = (value - (uint32_t)tm->counter) & 0xFFFFu;
+    uint64_t cyc = (uint64_t)ticks * (uint64_t)timer_divisor(t);
+    if (cyc > (uint64_t)timer_frac[t]) cyc -= (uint64_t)timer_frac[t];
+    else cyc = 0;
+    return cyc > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)cyc;
+}
+
 uint32_t timers_read(uint32_t addr) {
     int timer = (addr - TIMER_BASE) >> 4;
     int reg   = (addr - TIMER_BASE) & 0x0F;

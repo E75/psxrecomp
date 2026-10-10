@@ -29,6 +29,10 @@ void timers_advance(uint32_t cycles);
  * DELIVERABLE IRQ (unmasked in i_mask + mode-armed). UINT32_MAX if none. */
 uint32_t timers_cycles_to_irq(uint32_t i_mask);
 
+/* Guest cycles until timer t's counter reads `value`; 0 when not predictable (sync mode, reset-on-target
+ * below `value`). Call psx_devices_mmio_sync() first so the timer is current. */
+uint32_t timers_cycles_until_counter(int t, uint32_t value);
+
 /* Legacy coarse tick used by interpreter/oracle builds. */
 void timers_tick(int cycles);
 
