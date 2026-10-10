@@ -458,6 +458,10 @@ void psx_mod_set_fast_forward(int enabled);
  * Call from a vblank callback; the request ends at every session start.
  */
 void psx_mod_block_load_turbo(int blocked);
+/* Mute or unmute the host audio output (the game keeps running and the audio clock is unchanged).
+ * Cleared at every session start; call from a vblank or activation callback. */
+void psx_mod_set_audio_mute(int muted);
+int psx_mod_get_audio_mute(void);
 
 /*
  * Keep the given buttons pressed on a player's pad (bit n of buttons = PSX button bit n, e.g. 13 = circle) on top of the

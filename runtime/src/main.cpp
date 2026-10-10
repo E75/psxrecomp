@@ -1519,6 +1519,7 @@ static uint32_t      g_mod_native_vblank_fps = 0;
 /* A mod asked for the guest to run at host speed (a wait screen); reset at session start. */
 static bool          g_mod_fast_forward = false;
 static bool          g_mod_block_load_turbo = false;
+static bool          g_mod_audio_mute = false;
 /* Pad buttons (PSX bit numbers, 1 = held down) a mod keeps pressed on top of the resolved pad, per player. */
 static uint16_t      g_mod_pad_press[PSX_MAX_PLAYERS] = {};
 /* Activation-time request. -1 means no enabled mod owns load acceleration. */
@@ -1721,6 +1722,7 @@ static void reset_mod_owned_presentation(void) {
     g_mod_native_vblank_fps = 0;
     g_mod_fast_forward = false;
     g_mod_block_load_turbo = false;
+    g_mod_audio_mute = false;
     for (uint16_t& press : g_mod_pad_press) press = 0;
     g_mod_claimed_keys = 0;
     g_mod_pressed_keys = 0;
@@ -1811,6 +1813,14 @@ extern "C" void psx_mod_set_fast_forward(int enabled) {
 
 extern "C" void psx_mod_block_load_turbo(int blocked) {
     g_mod_block_load_turbo = blocked != 0;
+}
+
+extern "C" void psx_mod_set_audio_mute(int muted) {
+    g_mod_audio_mute = muted != 0;
+}
+
+extern "C" int psx_mod_get_audio_mute(void) {
+    return g_mod_audio_mute ? 1 : 0;
 }
 
 extern "C" void psx_mod_press_pad_buttons(uint32_t player, uint16_t buttons) {
@@ -4143,6 +4153,9 @@ static void sdl_audio_pump(bool discard_output = false) {
             sdl_audio_gain_ramp(sdl_audio_buf, frames, g, g);
         }
     }
+    /* Mod mute: silence the output but keep the stream running, so the SPU and the audio
+     * timing stay unchanged and unmuting needs no resync. */
+    if (g_mod_audio_mute) std::memset(sdl_audio_buf, 0, (size_t)frames * bytes_per_frame);
     if (legacy) {
         /* T3 tap: the exact post-fade bytes handed to the host audio queue. */
         audio_trace_pcm(AUDIO_TAP_HOST, sdl_audio_buf, frames);
