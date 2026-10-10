@@ -148,10 +148,6 @@ void psx_icache_isc_store(uint32_t biu, uint32_t addr, uint32_t value) {
 #endif
 }
 
-void psx_icache_fetch(CPUState* cpu, uint32_t addr) {
-    psx_icache_fetch_miss(cpu, addr);
-}
-
 void psx_icache_fetch_fn(CPUState* cpu, uint32_t addr) {
     psx_icache_fetch(cpu, addr);
 }

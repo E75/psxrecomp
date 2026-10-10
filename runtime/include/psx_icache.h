@@ -11,8 +11,16 @@ extern uint32_t g_psx_icache_tv[1024];
 extern int g_psx_icache_active;
 extern int g_ls_replay_active;
 void psx_icache_reset(void);
-void psx_icache_fetch(CPUState *cpu, uint32_t addr);
 void psx_icache_fetch_miss(CPUState *cpu, uint32_t addr);
+
+/* Per-instruction fetch of generated code: the tag HIT stays inline (no call, state unchanged, same as the
+ * early-outs of the miss path); a miss, an inactive cache or an uninitialised model take the shared slow path. */
+static inline void psx_icache_fetch(CPUState *cpu, uint32_t addr) {
+#ifdef PSX_ENABLE_BLOCK_CYCLES
+    if (g_psx_icache_tv[(addr & 0xFFCu) >> 2] == addr) return;
+#endif
+    psx_icache_fetch_miss(cpu, addr);
+}
 
 /* BIU / cache control (0xFFFE0130) bits the cache model reads; names and values
  * as Beetle's cpu.cpp BIU_* defines. */
