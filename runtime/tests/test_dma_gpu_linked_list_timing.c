@@ -139,6 +139,35 @@ int main(void) {
         CHECK(spent == NODES);                     /* nodes + 0 payload words */
     }
 
+    /* A CPU hold walks the list as one event bounded by its own end: the total found from the headers is exactly the
+     * cycle the walk completes on, whatever chunk sizes it is advanced with. */
+    {
+        memset(ram, 0, sizeof(ram));
+        ram[0x00 / 4] = 0x03000010u;               /* 3 payload words -> node at 0x10 */
+        ram[0x10 / 4] = 0x00000020u;               /* empty node -> node at 0x20 */
+        ram[0x20 / 4] = 0x01FFFFFFu;               /* 1 payload word, terminator */
+        memset(emitted, 0, sizeof(emitted));
+        completed = hit_limit = emitted_count = 0u;
+        dma_gpu_ll_start(&state, 0x00u, 64u);
+        const uint32_t total = dma_gpu_ll_total_cycles(&state, &ops, NULL);
+        CHECK(total == (1u + 3u) + (1u + 0u) + (1u + 1u));
+        dma_gpu_ll_advance(&state, total - 1u, &ops, NULL);
+        CHECK(completed == 0u && state.active);
+        dma_gpu_ll_advance(&state, 1u, &ops, NULL);
+        CHECK(completed == 1u && hit_limit == 0u && !state.active);
+        CHECK(emitted_count == 4u && state.total_words == total);
+
+        /* Only a list at its first header can be measured. */
+        dma_gpu_ll_start(&state, 0x00u, 64u);
+        dma_gpu_ll_advance(&state, 1u, &ops, NULL);
+        CHECK(dma_gpu_ll_total_cycles(&state, &ops, NULL) == 0u);
+
+        /* A cycle is measured up to the node limit like the walk. */
+        memset(ram, 0, sizeof(ram));
+        dma_gpu_ll_start(&state, 0x00u, 5u);
+        CHECK(dma_gpu_ll_total_cycles(&state, &ops, NULL) == 5u);
+    }
+
     /* A malformed cycle is bounded and reports the safety stop. */
     memset(ram, 0, sizeof(ram));
     completed = hit_limit = 0u;
