@@ -436,6 +436,9 @@ private:
     // Continuations (return points) collected during the CURRENT function's
     // block translation; consumed by generate_function to emit the entry-switch.
     std::vector<uint32_t> cps_cur_continuations_;
+    // fast_cycle_funcs: the interrupt check at an edge to a later address is skipped (loops, returns and calls keep theirs).
+    mutable bool fast_irq_forward_skip_ = false;
+    mutable uint32_t cur_block_start_ = 0;
     // Global map: continuation address -> owning function entry, for the game
     // dispatch table (psx_dispatch_game_compiled) to route a returned-to
     // continuation into its function's entry-switch.

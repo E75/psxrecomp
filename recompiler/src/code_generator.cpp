@@ -174,6 +174,7 @@ std::string CodeGenerator::emit_mid_block_cycle_charge(uint32_t addr,
 
 std::string CodeGenerator::emit_interrupt_check(uint32_t resume_pc,
                                                 const std::string& indent) const {
+    if (fast_irq_forward_skip_ && resume_pc > cur_block_start_) return std::string();
     return std::string("#ifdef PSX_ENABLE_BLOCK_CYCLES\n") + indent +
            "psx_cyc_bb_defer_flush();\n#endif\n" + indent +
            fmt::format("psx_check_interrupts_at(cpu, 0x{:08X}u);\n", runtime_pc(resume_pc));
@@ -2043,6 +2044,8 @@ std::string CodeGenerator::translate_basic_block(
     }
 
     const bool cycle_per_insn = codegen_cycle_per_insn() && !config_.fast_cycle_funcs.count(cfg.function_start);
+    fast_irq_forward_skip_ = config_.fast_cycle_funcs.count(cfg.function_start) != 0;
+    cur_block_start_ = block.start_addr;
     // Per-instruction R3000A load-delay interlock (cycle_per_insn mode): §1 base +
     // GPR_DEPRES + DO_LDS, emitted BEFORE the instruction body so §1 precedes any
     // muldiv/GTE deadline stall the body applies (Beetle order). CPU loads (op
