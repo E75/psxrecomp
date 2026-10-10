@@ -422,6 +422,7 @@ private:
     // TUs) vs `static` (monolith, single TU) linkage for the 4 helper
     // function definitions; everything else is identical.
     void emit_unaligned_helpers(std::ostream& ss, bool as_inline) const;
+    void emit_fast_load_helpers(std::ostream& ss) const;
 
     // RECURSION_BUG.md §25 — continuation-passing call/return (the universal fix
     // for the idle-freeze host-stack leak). When set (gen-time env PSX_CPS),
@@ -436,8 +437,9 @@ private:
     // Continuations (return points) collected during the CURRENT function's
     // block translation; consumed by generate_function to emit the entry-switch.
     std::vector<uint32_t> cps_cur_continuations_;
-    // fast_cycle_funcs: the interrupt check at an edge to a later address is skipped (loops, returns and calls keep theirs).
-    mutable bool fast_irq_forward_skip_ = false;
+    // Set while a fast_cycle_funcs function is generated: the interrupt check at an edge to a later address is skipped
+    // (loops, returns and calls keep theirs) and loads skip the interlock/timing model.
+    mutable bool fast_cycle_active_ = false;
     mutable uint32_t cur_block_start_ = 0;
     // Global map: continuation address -> owning function entry, for the game
     // dispatch table (psx_dispatch_game_compiled) to route a returned-to

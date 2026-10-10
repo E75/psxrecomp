@@ -174,7 +174,7 @@ std::string CodeGenerator::emit_mid_block_cycle_charge(uint32_t addr,
 
 std::string CodeGenerator::emit_interrupt_check(uint32_t resume_pc,
                                                 const std::string& indent) const {
-    if (fast_irq_forward_skip_ && resume_pc > cur_block_start_) return std::string();
+    if (fast_cycle_active_ && resume_pc > cur_block_start_) return std::string();
     return std::string("#ifdef PSX_ENABLE_BLOCK_CYCLES\n") + indent +
            "psx_cyc_bb_defer_flush();\n#endif\n" + indent +
            fmt::format("psx_check_interrupts_at(cpu, 0x{:08X}u);\n", runtime_pc(resume_pc));
@@ -232,6 +232,10 @@ std::string CodeGenerator::translate_lw(uint32_t instr) {
                                      : fmt::format("{} + {}", reg_name(rs), offset);
     uint32_t mask = 1u << rs;   /* GPR_DEP rs (load: dest rt armed via LDWhich) */
 
+    if (fast_cycle_active_) {
+        if (config_.optimize_zero_reg && rt == 0) return fmt::format("(void)psx_fl_word({});", addr);
+        return fmt::format("{} = psx_fl_word({});", reg_name(rt), addr);
+    }
     if (config_.optimize_zero_reg && rt == 0) {
         /* load to $zero: no GPR write, but the data access + R3000A interlock still run */
         return fmt::format("(void)psx_cyc_load_word(cpu, {}, 0, 0x{:X}u);", addr, mask);
@@ -394,6 +398,10 @@ std::string CodeGenerator::translate_lb(uint32_t instr) {
                                      : fmt::format("{} + {}", reg_name(rs), offset);
     uint32_t mask = 1u << rs;
 
+    if (fast_cycle_active_) {
+        if (config_.optimize_zero_reg && rt == 0) return fmt::format("(void)psx_fl_byte({});", addr);
+        return fmt::format("{} = (int32_t)(int8_t)psx_fl_byte({});", reg_name(rt), addr);
+    }
     if (config_.optimize_zero_reg && rt == 0) {
         return fmt::format("(void)psx_cyc_load_byte(cpu, {}, 0, 0x{:X}u);", addr, mask);
     }
@@ -409,6 +417,10 @@ std::string CodeGenerator::translate_lbu(uint32_t instr) {
                                      : fmt::format("{} + {}", reg_name(rs), offset);
     uint32_t mask = 1u << rs;
 
+    if (fast_cycle_active_) {
+        if (config_.optimize_zero_reg && rt == 0) return fmt::format("(void)psx_fl_byte({});", addr);
+        return fmt::format("{} = psx_fl_byte({});", reg_name(rt), addr);
+    }
     if (config_.optimize_zero_reg && rt == 0) {
         return fmt::format("(void)psx_cyc_load_byte(cpu, {}, 0, 0x{:X}u);", addr, mask);
     }
@@ -424,6 +436,10 @@ std::string CodeGenerator::translate_lh(uint32_t instr) {
                                      : fmt::format("{} + {}", reg_name(rs), offset);
     uint32_t mask = 1u << rs;
 
+    if (fast_cycle_active_) {
+        if (config_.optimize_zero_reg && rt == 0) return fmt::format("(void)psx_fl_half({});", addr);
+        return fmt::format("{} = (int32_t)(int16_t)psx_fl_half({});", reg_name(rt), addr);
+    }
     if (config_.optimize_zero_reg && rt == 0) {
         return fmt::format("(void)psx_cyc_load_half(cpu, {}, 0, 0x{:X}u);", addr, mask);
     }
@@ -439,6 +455,10 @@ std::string CodeGenerator::translate_lhu(uint32_t instr) {
                                      : fmt::format("{} + {}", reg_name(rs), offset);
     uint32_t mask = 1u << rs;
 
+    if (fast_cycle_active_) {
+        if (config_.optimize_zero_reg && rt == 0) return fmt::format("(void)psx_fl_half({});", addr);
+        return fmt::format("{} = psx_fl_half({});", reg_name(rt), addr);
+    }
     if (config_.optimize_zero_reg && rt == 0) {
         return fmt::format("(void)psx_cyc_load_half(cpu, {}, 0, 0x{:X}u);", addr, mask);
     }
@@ -1891,16 +1911,17 @@ std::string CodeGenerator::translate_instruction_core(uint32_t addr, uint32_t in
                     /* The raw loaded word is captured for the PGXP hook: the
                      * register may hold a MASKED value (write helper), and
                      * the shadow must validate against the word as loaded. */
+                    const char* lwc2_read = fast_cycle_active_ ? "psx_fl_word(_pgxa)" : "psx_cyc_lwc2_read(cpu, _pgxa)";
                     if (special) {
                         code = gte_stall + fmt::format(
-                            "{{ uint32_t _pgxa = {}; uint32_t _pgxv = psx_cyc_lwc2_read(cpu, _pgxa); "
+                            "{{ uint32_t _pgxa = {}; uint32_t _pgxv = {}; "
                             "gte_write_data(cpu, {}, _pgxv); PGXP_COP2(0x{:08X}u, _pgxv, _pgxa); }}  /* lwc2 gte[{}] */",
-                            addr, rt, instr, rt);
+                            addr, lwc2_read, rt, instr, rt);
                     } else {
                         code = gte_stall + fmt::format(
-                            "{{ uint32_t _pgxa = {}; uint32_t _pgxv = psx_cyc_lwc2_read(cpu, _pgxa); "
+                            "{{ uint32_t _pgxa = {}; uint32_t _pgxv = {}; "
                             "cpu->gte_data[{}] = _pgxv; PGXP_COP2(0x{:08X}u, _pgxv, _pgxa); }}  /* lwc2 gte[{}], ({}) */",
-                            addr, rt, instr, rt, addr);
+                            addr, lwc2_read, rt, instr, rt, addr);
                     }
                 }
                 break;
@@ -2044,7 +2065,7 @@ std::string CodeGenerator::translate_basic_block(
     }
 
     const bool cycle_per_insn = codegen_cycle_per_insn() && !config_.fast_cycle_funcs.count(cfg.function_start);
-    fast_irq_forward_skip_ = config_.fast_cycle_funcs.count(cfg.function_start) != 0;
+    fast_cycle_active_ = config_.fast_cycle_funcs.count(cfg.function_start) != 0;
     cur_block_start_ = block.start_addr;
     // Per-instruction R3000A load-delay interlock (cycle_per_insn mode): §1 base +
     // GPR_DEPRES + DO_LDS, emitted BEFORE the instruction body so §1 precedes any
@@ -3655,6 +3676,33 @@ void CodeGenerator::emit_runtime_externs(std::ostream& ss) const {
     ss << "extern uint32_t g_debug_last_store_pc;  /* exact PC of the executing SW/SH/SB — wtrace/readtrace producer attribution (debug_server.c) */\n\n";
 }
 
+void CodeGenerator::emit_fast_load_helpers(std::ostream& ss) const {
+    if (config_.fast_cycle_funcs.empty()) return;
+    ss << "/* fast_cycle_funcs loads: main RAM straight from the array (no load interlock or timing model), everything else\n"
+          " * through the generic reader (MMIO, scratchpad, lockstep and data-shard modes). */\n"
+          "#ifdef PSX_ENABLE_BLOCK_CYCLES\n"
+          "static inline uint32_t psx_fl_word(uint32_t a) {\n"
+          "    const uint32_t p = a & 0x1FFFFFFFu;\n"
+          "    if (p < 0x00800000u && g_ls_mode == 0 && !g_ds_recording) { uint32_t v; memcpy(&v, g_psx_ram + (p & g_psx_ram_mask), 4); return v; }\n"
+          "    return psx_read_word(a);\n"
+          "}\n"
+          "static inline uint16_t psx_fl_half(uint32_t a) {\n"
+          "    const uint32_t p = a & 0x1FFFFFFFu;\n"
+          "    if (p < 0x00800000u && g_ls_mode == 0 && !g_ds_recording) { uint16_t v; memcpy(&v, g_psx_ram + (p & g_psx_ram_mask), 2); return v; }\n"
+          "    return psx_read_half(a);\n"
+          "}\n"
+          "static inline uint8_t psx_fl_byte(uint32_t a) {\n"
+          "    const uint32_t p = a & 0x1FFFFFFFu;\n"
+          "    if (p < 0x00800000u && g_ls_mode == 0 && !g_ds_recording) return g_psx_ram[p & g_psx_ram_mask];\n"
+          "    return psx_read_byte(a);\n"
+          "}\n"
+          "#else\n"
+          "#define psx_fl_word(a) psx_read_word(a)\n"
+          "#define psx_fl_half(a) psx_read_half(a)\n"
+          "#define psx_fl_byte(a) psx_read_byte(a)\n"
+          "#endif\n\n";
+}
+
 void CodeGenerator::emit_unaligned_helpers(std::ostream& ss, bool as_inline) const {
     const char* kw = as_inline ? "static inline " : "static ";
 
@@ -3741,6 +3789,7 @@ std::string CodeGenerator::build_shared_decls_header(const std::vector<Generated
     h << "#include \"psx_runtime.h\"\n\n";
     emit_runtime_externs(h);
     emit_unaligned_helpers(h, /*as_inline=*/true);
+    emit_fast_load_helpers(h);
     if (!gen_funcs.empty()) {
         h << "/* Forward declarations for all recompiled functions */\n";
         for (const auto& gf : gen_funcs) h << gf.signature << ";\n";
@@ -3765,6 +3814,7 @@ std::string CodeGenerator::generate_file(
     ss << "#include \"psx_runtime.h\"\n\n";
     emit_runtime_externs(ss);
     emit_unaligned_helpers(ss, /*as_inline=*/false);
+    emit_fast_load_helpers(ss);
 
     // Make mutable copies for potential function splitting
     std::vector<Function> functions_mut(functions);
