@@ -1518,6 +1518,7 @@ static bool          g_mod_native_vblank_rate = false;
 static uint32_t      g_mod_native_vblank_fps = 0;
 /* A mod asked for the guest to run at host speed (a wait screen); reset at session start. */
 static bool          g_mod_fast_forward = false;
+static bool          g_mod_block_load_turbo = false;
 /* Pad buttons (PSX bit numbers, 1 = held down) a mod keeps pressed on top of the resolved pad, per player. */
 static uint16_t      g_mod_pad_press[PSX_MAX_PLAYERS] = {};
 /* Activation-time request. -1 means no enabled mod owns load acceleration. */
@@ -1719,6 +1720,7 @@ static void reset_mod_owned_presentation(void) {
     g_mod_native_vblank_rate = false;
     g_mod_native_vblank_fps = 0;
     g_mod_fast_forward = false;
+    g_mod_block_load_turbo = false;
     for (uint16_t& press : g_mod_pad_press) press = 0;
     g_mod_claimed_keys = 0;
     g_mod_pressed_keys = 0;
@@ -1805,6 +1807,10 @@ extern "C" int psx_mod_set_native_vblank_rate(
 
 extern "C" void psx_mod_set_fast_forward(int enabled) {
     g_mod_fast_forward = enabled != 0;
+}
+
+extern "C" void psx_mod_block_load_turbo(int blocked) {
+    g_mod_block_load_turbo = blocked != 0;
 }
 
 extern "C" void psx_mod_press_pad_buttons(uint32_t player, uint16_t buttons) {
@@ -8419,7 +8425,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
 
     /* Turbo-active test shared by the pacing/present gate below. */
     int turbo_loads_active = 0;
-    int logical_load_active = fntrace_is_game_started() &&
+    int logical_load_active = fntrace_is_game_started() && !g_mod_block_load_turbo &&
         (cdrom_load_in_progress() || cdrom_savestate_cd_wait_active());
     int load_run_value = 0;
     static int load_run = 0;

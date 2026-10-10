@@ -452,6 +452,12 @@ int psx_mod_set_native_vblank_rate(uint32_t frames_per_second);
  * Call from a vblank callback; the request ends at every session start and is ignored in netplay and resim.
  */
 void psx_mod_set_fast_forward(int enabled);
+/*
+ * While blocked, CD reads never start the unpaced, present-skipping load mode. For a title that streams from disc
+ * during play (reads of a few sectors every few frames look like a load but must keep the frame pacing).
+ * Call from a vblank callback; the request ends at every session start.
+ */
+void psx_mod_block_load_turbo(int blocked);
 
 /*
  * Keep the given buttons pressed on a player's pad (bit n of buttons = PSX button bit n, e.g. 13 = circle) on top of the
