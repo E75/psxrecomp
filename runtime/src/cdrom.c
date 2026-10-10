@@ -608,6 +608,7 @@ static int apply_read_speed(int delay) {
  * effect), queried via the cdrom_bursts TCP command. */
 #define CD_BURST_CAP        128
 #define CD_BURST_GAP_FRAMES 30
+#define CD_LOAD_MIN_SECTORS 32
 typedef CdBurstRecord CdBurst;       /* layout shared with cdrom.h consumers */
 static CdBurst  s_bursts[CD_BURST_CAP];
 static uint32_t s_burst_count = 0;   /* monotonic; slot = (count-1) % CAP */
@@ -3249,10 +3250,13 @@ uint32_t cdrom_debug_copy_last_sector(uint32_t offset, uint32_t len,
  * must stay authentic. */
 int cdrom_load_in_progress(void) {
     if (xa_stream_active) return 0;
-    if (reading) return 1;
+    /* A load is a burst of at least CD_LOAD_MIN_SECTORS sectors. A game that reads one or two sectors in the middle of
+     * play (WE2002 does at every set piece) must not drop into the unpaced, present-skipping load mode: that froze the
+     * picture for ~300 ms each time. */
     if (s_burst_count > 0) {
         const CdBurst *b = &s_bursts[(s_burst_count - 1u) % CD_BURST_CAP];
-        if ((uint32_t)s_frame_count <= b->end_frame + CD_BURST_GAP_FRAMES)
+        if (b->sectors >= CD_LOAD_MIN_SECTORS &&
+            (reading || (uint32_t)s_frame_count <= b->end_frame + CD_BURST_GAP_FRAMES))
             return 1;
     }
     return 0;
