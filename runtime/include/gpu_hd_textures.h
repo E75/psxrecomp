@@ -17,6 +17,9 @@ int gpu_hd_textures_configure(const char* root, int replacements_enabled,
 void gpu_hd_textures_shutdown(void);
 int gpu_hd_textures_reload(char* error, size_t capacity);
 void gpu_hd_textures_set_dump_enabled(int enabled);
+/* Park the session (CPU raster authority and pack lookups off) and bring it
+ * back later from the same root. Meant for screens that need no replacement. */
+void gpu_hd_textures_set_paused(int paused);
 int gpu_hd_textures_replacements_enabled(void);
 int gpu_hd_textures_dump_enabled(void);
 int gpu_hd_textures_active(void);

@@ -2741,6 +2741,10 @@ extern "C" int psx_mod_set_hd_texture_dump(int enabled) {
     return 1;
 }
 
+extern "C" void psx_mod_set_hd_textures_paused(int paused) {
+    gpu_hd_textures_set_paused(paused);
+}
+
 extern "C" int psx_mod_reload_hd_texture_pack(void) {
     char error[512] = "";
     const int ok = gpu_hd_textures_reload(error, sizeof(error));

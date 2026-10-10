@@ -370,6 +370,11 @@ int psx_mod_set_hd_texture_pack(const char* resource_id,
 /* Emulation-thread controls for an already configured pack. */
 int psx_mod_set_hd_texture_dump(int enabled);
 int psx_mod_reload_hd_texture_pack(void);
+/* Pause (1) / resume (0) the configured pack. While paused the GL renderer drops
+ * its CPU raster authority and lookups (about a quarter of a frame on a busy
+ * scene); resume reloads the pack from disk, so switch on screen changes only.
+ * Emulation thread only; a no-op without an active pack. */
+void psx_mod_set_hd_textures_paused(int paused);
 /* Read-only canonical media verified by the engine for this plugin's owning
  * package/feature. The pointer lives until the committed plan is replaced or
  * cleared. Available only during that plugin's callbacks; returns 0 for an

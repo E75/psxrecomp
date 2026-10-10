@@ -328,6 +328,19 @@ extern "C" void gpu_hd_textures_set_dump_enabled(int enabled) {
     session->dump = enabled != 0;
     session->dump_failed = false;
 }
+namespace { struct Parked { std::string root; bool replacements = false, dump = false; } parked; }
+extern "C" void gpu_hd_textures_set_paused(int paused) {
+    if (paused) {
+        if (!session || !gpu_hd_textures_active()) return;
+        parked.root = session->root; parked.replacements = session->replacements; parked.dump = session->dump;
+        gpu_hd_textures_shutdown();
+    } else if (!parked.root.empty()) {
+        char error[256]{};
+        if (!gpu_hd_textures_configure(parked.root.c_str(), parked.replacements, parked.dump, error, sizeof(error)))
+            std::fprintf(stderr, "psxrecomp: HD textures resume: %s\n", error);
+        parked.root.clear();
+    }
+}
 extern "C" int gpu_hd_textures_replacements_enabled(void) { return session && session->replacements; }
 extern "C" int gpu_hd_textures_dump_enabled(void) { return session && session->dump; }
 extern "C" int gpu_hd_textures_active(void) { return session && (session->replacements || session->dump); }
