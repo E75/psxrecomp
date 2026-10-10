@@ -429,8 +429,11 @@ static int ws_mod_world_scene(void) {
 }
 static int ws_world3d_game_mode_cfg = 0;
 void gpu_ws_set_world3d_game_mode(int on) { ws_world3d_game_mode_cfg = on ? 1 : 0; }
+/* A game that flips every 2nd vblank draws its world every 2-3 vblanks (4 in a heavy frame), and a presenter that
+ * shows in-between frames asks at every vblank: a hold of 2 dropped game mode (wide -> 4:3 -> wide) on each slow frame. */
+#define WS_WORLD3D_GAME_MODE_HOLD 4u
 static int ws_game_mode(void) {
-    if (ws_world3d_game_mode_cfg && (uint32_t)s_frame_count - ws_last_world3d_stamp > 2u) return 0;
+    if (ws_world3d_game_mode_cfg && (uint32_t)s_frame_count - ws_last_world3d_stamp > WS_WORLD3D_GAME_MODE_HOLD) return 0;
     if (ws_mod_world_scene()) return 1;
     if (ws_local_native_split()) return 1;
     int state_match = ws_gameplay_state_matches();
