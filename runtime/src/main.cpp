@@ -1516,6 +1516,10 @@ static int           g_host_refresh_display_idx = -2;
 static uint64_t      g_host_refresh_last_probe_ms = 0;
 static bool          g_mod_native_vblank_rate = false;
 static uint32_t      g_mod_native_vblank_fps = 0;
+/* A mod asked for the guest to run at host speed (a wait screen); reset at session start. */
+static bool          g_mod_fast_forward = false;
+/* Pad buttons (PSX bit numbers, 1 = held down) a mod keeps pressed on top of the resolved pad, per player. */
+static uint16_t      g_mod_pad_press[PSX_MAX_PLAYERS] = {};
 /* Activation-time request. -1 means no enabled mod owns load acceleration. */
 static int           g_mod_load_wall_multiplier = -1;
 static int           g_mod_load_release_frames = -1;
@@ -1714,6 +1718,8 @@ static void reset_mod_owned_presentation(void) {
     g_frame_period_ms = live.frame_period_ms;
     g_mod_native_vblank_rate = false;
     g_mod_native_vblank_fps = 0;
+    g_mod_fast_forward = false;
+    for (uint16_t& press : g_mod_pad_press) press = 0;
     g_mod_claimed_keys = 0;
     g_mod_pressed_keys = 0;
     g_mod_texfilter = -1;
@@ -1795,6 +1801,14 @@ extern "C" int psx_mod_set_native_vblank_rate(
             "psxrecomp: mod selected uncapped native guest VBlank pacing\n");
     }
     return 1;
+}
+
+extern "C" void psx_mod_set_fast_forward(int enabled) {
+    g_mod_fast_forward = enabled != 0;
+}
+
+extern "C" void psx_mod_press_pad_buttons(uint32_t player, uint16_t buttons) {
+    if (player < PSX_MAX_PLAYERS) g_mod_pad_press[player] = buttons;
 }
 
 extern "C" int psx_mod_set_frame_interpolation(
@@ -6976,6 +6990,7 @@ static void sample_pad_into_sio(int override) {
     for (int s = 0; s < n; s++) {
         PsxNetPad pad;
         if (!pad_ext_resolve(&hooks, s, &pad)) continue;  /* no device in this port */
+        pad.buttons = (uint16_t)(pad.buttons & ~g_mod_pad_press[s]);
         /* Push sticks every frame; request the pad type (digital/analog) through
          * the coherent channel so a policy switch is applied only at an idle,
          * non-config bus boundary (never mid-poll / mid-handshake). This is the
@@ -8438,6 +8453,9 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
      * SYSTEM.CNF + game EXE load compress to host speed. This replaces the
      * old fast_boot snapshot restore; all guest timing is authentic. */
     if (psx_bios_hle_boot_turbo_active())
+        turbo_loads_active = 1;
+    /* A mod wait screen (psx_mod_set_fast_forward): same unpaced run as a load, never in netplay or resim. */
+    if (g_mod_fast_forward && !psx_netplay_active() && !psx_selfcheck_resim_active())
         turbo_loads_active = 1;
     probe_turbo = turbo_loads_active;
 

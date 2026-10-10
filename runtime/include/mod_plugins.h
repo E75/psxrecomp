@@ -440,6 +440,20 @@ int psx_mod_set_widescreen_hud_size(int proportional);
 int psx_mod_set_native_vblank_rate(uint32_t frames_per_second);
 
 /*
+ * Run the guest unpaced (like a detected load) while enabled, for a title screen that only waits: every guest
+ * VBlank, timer and interrupt still happens on schedule, only the wall-clock pacing and presentation are skipped.
+ * Call from a vblank callback; the request ends at every session start and is ignored in netplay and resim.
+ */
+void psx_mod_set_fast_forward(int enabled);
+
+/*
+ * Keep the given buttons pressed on a player's pad (bit n of buttons = PSX button bit n, e.g. 13 = circle) on top of the
+ * resolved pad, until called again with 0. For a title screen that only needs a confirm. Offline play only; ends at every
+ * session start.
+ */
+void psx_mod_press_pad_buttons(uint32_t player, uint16_t buttons);
+
+/*
  * Enable presentation-only frame interpolation while leaving guest VBlank,
  * game logic, timers, and audio at their stock cadence. The OpenGL presenter
  * temporally blends completed guest frames at the requested output rate on its
