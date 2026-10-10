@@ -615,6 +615,11 @@ static double        s_interp_host_hz = 0.0;
 static double        s_interp_target_hz = 0.0;
 static double        s_interp_source_hz = 0.0;
 static FrameInterpolationSchedule s_interp_schedule;
+/* Presenter schedule diagnostics (gl_interp): calls, calls with no present, begin refusals,
+ * re-anchors, interp_present refusals; lead = next present deadline minus frame end, in ms. */
+static uint64_t      s_interp_dbg_calls, s_interp_dbg_empty, s_interp_dbg_begin_fail,
+                     s_interp_dbg_anchors, s_interp_dbg_present_fail;
+static double        s_interp_dbg_lead_ms, s_interp_dbg_lead_max_ms;
 /* Blend source (psx_mod_set_frame_interpolation_source). VBLANK (0, the
  * default) treats every guest VBlank present as a new frame, exactly as
  * before. FLIP (1) rotates history only on a real flip -- the display origin
@@ -6522,6 +6527,15 @@ void gl_renderer_set_interpolation_source(int source) {
                 "flips (flip-aware source)\n");
 }
 
+void gl_renderer_interpolation_sched_diag(uint64_t out[5], double lead_ms[2]) {
+    GL_RT_SYNC("interpolation_sched_diag");
+    out[0] = s_interp_dbg_calls;      out[1] = s_interp_dbg_empty;
+    out[2] = s_interp_dbg_begin_fail; out[3] = s_interp_dbg_anchors;
+    out[4] = s_interp_dbg_present_fail;
+    lead_ms[0] = s_interp_dbg_lead_ms; lead_ms[1] = s_interp_dbg_lead_max_ms;
+    s_interp_dbg_lead_max_ms = -1e9;
+}
+
 void gl_renderer_interpolation_source_diag(int *source, uint32_t *flip_period,
                                            uint64_t *captures,
                                            uint64_t *duplicates) {
@@ -6736,12 +6750,17 @@ static void interp_present_source_interval(void) {
     uint64_t now = SDL_GetPerformanceCounter();
     uint64_t deadline;
     float alpha;
+    int presented = 0;
 
+    s_interp_dbg_calls++;
     if (!frame_interpolation_schedule_begin_phase(
             &s_interp_schedule, now, frequency,
             s_interp_source_hz, s_interp_target_hz,
-            s_interp_phase_lo, s_interp_phase_hi))
+            s_interp_phase_lo, s_interp_phase_hi)) {
+        s_interp_dbg_begin_fail++;
         return;
+    }
+    if (s_interp_schedule.frame_start == (double)now) s_interp_dbg_anchors++;
     pass_apply_promotion();
 
     while (frame_interpolation_schedule_next(
@@ -6749,10 +6768,15 @@ static void interp_present_source_interval(void) {
                &deadline, &alpha)) {
         interp_wait_until(deadline, frequency);
         latency_ring_mark(LAT_SWAP_BEGIN);
-        if (!pass_gen_present(deadline))
-            (void)interp_present(alpha);
+        if (!pass_gen_present(deadline) && !interp_present(alpha))
+            s_interp_dbg_present_fail++;
+        presented++;
         latency_ring_mark(LAT_SWAP_END);
     }
+    if (!presented) s_interp_dbg_empty++;
+    s_interp_dbg_lead_ms = (s_interp_schedule.next_present_deadline -
+                            s_interp_schedule.frame_end) * 1000.0 / (double)frequency;
+    if (s_interp_dbg_lead_ms > s_interp_dbg_lead_max_ms) s_interp_dbg_lead_max_ms = s_interp_dbg_lead_ms;
     interp_wait_until(frame_interpolation_schedule_end(&s_interp_schedule),
                       frequency);
 

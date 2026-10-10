@@ -8630,14 +8630,19 @@ static void handle_gl_interp(int id, const char *json)
                                    &host_hz, &target_hz, &swaps);
     gl_renderer_interpolation_source_diag(&source, &flip_period, &captures,
                                           &duplicates);
+    uint64_t sc[5]; double lead[2];
+    gl_renderer_interpolation_sched_diag(sc, lead);
     send_fmt("{\"id\":%d,\"ok\":true,\"enabled\":%d,\"suspended\":%d,\"history\":%d,"
              "\"host_hz\":%.3f,\"target_hz\":%.3f,\"swaps\":%llu,"
              "\"source\":\"%s\",\"flip_period\":%u,\"captures\":%llu,"
-             "\"duplicates\":%llu}",
+             "\"duplicates\":%llu,\"sched\":{\"calls\":%llu,\"empty\":%llu,\"begin_fail\":%llu,"
+             "\"anchors\":%llu,\"present_fail\":%llu,\"lead_ms\":%.2f,\"lead_max_ms\":%.2f}}",
              id, enabled, suspended, history, host_hz, target_hz,
              (unsigned long long)swaps, source ? "flip" : "vblank",
              (unsigned)flip_period, (unsigned long long)captures,
-             (unsigned long long)duplicates);
+             (unsigned long long)duplicates, (unsigned long long)sc[0],
+             (unsigned long long)sc[1], (unsigned long long)sc[2], (unsigned long long)sc[3],
+             (unsigned long long)sc[4], lead[0], lead[1]);
 }
 
 /* render_pass_stats: host-timed render passes (docs/RENDER_PASSES.md).

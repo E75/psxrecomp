@@ -66,6 +66,11 @@ int frame_interpolation_schedule_begin_phase(FrameInterpolationSchedule *schedul
      * over-budget guest frame can update the window once, then resume cadence. */
     while (schedule->next_present_deadline + target_period <= now_d)
         schedule->next_present_deadline += target_period;
+    /* A call that lands more than one period behind its own deadline (a slow guest
+     * frame) must still present once; a deadline past frame_end would make every
+     * following call empty until the lag grows past the re-anchor limit. */
+    if (schedule->next_present_deadline > schedule->frame_end)
+        schedule->next_present_deadline = schedule->frame_end;
     return 1;
 }
 

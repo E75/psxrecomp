@@ -240,7 +240,31 @@ static void test_flip_rates(void) {
     }
 }
 
+static void test_late_calls_present(void) {
+    FrameInterpolationSchedule schedule = {0};
+    const uint64_t period = 1000000u / 60u;
+    uint64_t now = 5000000u;
+    int i;
+
+    CHECK(run_interval(&schedule, now, 60.0, 60.0, NULL, NULL) == 1,
+          "an on-time call presents once");
+    /* Every later call lands 2.5 periods after its deadline, at the source rate. */
+    now = frame_interpolation_schedule_end(&schedule) + period * 5u / 2u;
+    for (i = 0; i < 8; i++) {
+        uint64_t deadline;
+        float alpha;
+        int count = 0;
+        CHECK(frame_interpolation_schedule_begin(
+                  &schedule, now, 1000000u, 60.0, 60.0), "late call begins");
+        while (frame_interpolation_schedule_next(&schedule, now, &deadline, &alpha))
+            count++;
+        CHECK(count >= 1, "a late call must still present once");
+        now += period;
+    }
+}
+
 int main(void) {
+    test_late_calls_present();
     test_flip_tracker_table();
     test_flip_new_frame();
     test_phase_windows();

@@ -48,6 +48,9 @@ void gl_renderer_set_interpolation_blend(int blend_mode);
 /* Blend source: 0 = every guest VBlank is a source frame (default),
  * 1 = only real display flips are (psx_mod_set_frame_interpolation_source). */
 void gl_renderer_set_interpolation_source(int source);
+/* Presenter schedule counters: calls, empty calls, begin refusals, re-anchors, present refusals;
+ * lead_ms = {last, max since previous read} of next present deadline - frame end. */
+void gl_renderer_interpolation_sched_diag(uint64_t out[5], double lead_ms[2]);
 void gl_renderer_interpolation_source_diag(int *source, uint32_t *flip_period,
                                            uint64_t *captures,
                                            uint64_t *duplicates);
