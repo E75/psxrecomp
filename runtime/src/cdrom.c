@@ -2689,15 +2689,26 @@ static int authentic_sector_period(void) {
 }
 
 static int accelerated_read_active(void) {
-    if (xa_stream_active || (mode_reg & 0x68u)) return 0;
+    /* 0x48 like apply_read_speed: bit 0x20 (whole sector) is plain data for most games, and with 0x68 the flow control
+     * was off for every game that reads in mode 0xA0 while the drive itself still ran accelerated. */
+    if (xa_stream_active || (mode_reg & 0x48u)) return 0;
     return g_disc_speed_divisor != 1;   /* 0 = instant, >1 = divided */
+}
+
+/* The slot the next sector would fill still holds a sector the guest never touched: the ring is full. Waiting for the
+ * guest here is what keeps a fast drive from overwriting data libcd is about to fetch (it then times out and re-reads
+ * the same sectors forever: CD speed 12 and up used to hang the first load that way). A slot the guest opened but did
+ * not drain (pos > 0) counts as consumed: games read 2048 of the 2340 bytes. */
+static int accelerated_ring_full(void) {
+    const CdSectorBuf *next = &s_sector_ring[(s_ring_write + 1) % CDROM_NUM_SECTOR_BUFFERS];
+    return next->size > 0 && next->pos == 0;
 }
 
 static int accelerated_consumer_blocked(void) {
     if (!accelerated_read_active()) return 0;
     if (pending_dataready) return 1;
     if (irq_flag != 0 && !dma_cdrom_transfer_active()) return 1;
-    return 0;
+    return accelerated_ring_full();
 }
 
 static void process_read_stream(uint32_t cycles) {
