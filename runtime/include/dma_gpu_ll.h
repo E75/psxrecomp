@@ -44,6 +44,9 @@ void dma_gpu_ll_start(DMAGPULinkedList *state, uint32_t start_addr,
                       uint32_t max_nodes);
 void dma_gpu_ll_cancel(DMAGPULinkedList *state);
 uint32_t dma_gpu_ll_cycles_to_event(const DMAGPULinkedList *state);
+/* Cycles a walk of a just-started list takes (one per word read: header and payload), found by following the
+ * headers only. Stops at max_nodes like the walk. 0 when the list is not at its first header. */
+uint32_t dma_gpu_ll_total_cycles(const DMAGPULinkedList *state, const DMAGPULinkedListOps *ops, void *opaque);
 void dma_gpu_ll_advance(DMAGPULinkedList *state, uint32_t cycles,
                         const DMAGPULinkedListOps *ops, void *opaque);
 
