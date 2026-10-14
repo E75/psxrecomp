@@ -510,6 +510,9 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
     if (runtime.contains("bios_hle_keep_intro")) {
         rt.bios_hle_keep_intro = toml::find<bool>(runtime, "bios_hle_keep_intro");
     }
+    if (runtime.contains("interpreter_fatal")) {
+        rt.interpreter_fatal = toml::find<bool>(runtime, "interpreter_fatal");
+    }
     if (runtime.contains("hide_hidden_mod_features")) {
         rt.hide_hidden_mod_features = toml::find<bool>(runtime, "hide_hidden_mod_features");
     }

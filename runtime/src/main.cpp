@@ -264,6 +264,7 @@ extern "C" uint32_t memory_get_bios_checksum(void);
 extern "C" void     dirty_ram_register_text_image(uint32_t phys_lo,
                                                   const uint8_t *bytes,
                                                   uint32_t len);
+extern "C" void     dirty_ram_set_interp_fatal(int on);
 
 /* Arm the dirty-RAM text-image guard with the boot EXE bytes. The guard is
  * load-bearing: dispatch native-safety (dirty_ram_text_native_ok) and the
@@ -15713,6 +15714,7 @@ int main(int argc, char** argv) {
     bool       fast_boot     = false;  /* DEPRECATED alias: HLE boot-skip only */
     bool       bios_hle      = false;  /* HLE kernel-service tier (bios_hle.c) */
     bool       bios_hle_keep_intro = false;
+    bool       interpreter_fatal = false;  /* [runtime] interpreter_fatal */
     /* Text-image guard source, captured at config load; armed after the disc
      * path is resolved (arm_text_image_guard). */
     std::string text_guard_exe_path;
@@ -16182,6 +16184,7 @@ int main(int argc, char** argv) {
             fast_boot     = gc.runtime.fast_boot;
             bios_hle      = gc.runtime.bios_hle;
             bios_hle_keep_intro = gc.runtime.bios_hle_keep_intro;
+            interpreter_fatal = gc.runtime.interpreter_fatal;
 #if defined(RECOMP_LAUNCHER)
             PSXRecompV4::mod_runtime_set_hide_hidden_features(
                 gc.runtime.hide_hidden_mod_features);
@@ -19078,6 +19081,9 @@ session_reboot:
             bios_hle = (e[0] && e[0] != '0');
         if (const char* e = std::getenv("PSX_BIOS_HLE_KEEP_INTRO"))
             bios_hle_keep_intro = (e[0] && e[0] != '0');
+        if (const char* e = std::getenv("PSX_INTERPRETER_FATAL"))
+            interpreter_fatal = (e[0] && e[0] != '0');
+        dirty_ram_set_interp_fatal(interpreter_fatal ? 1 : 0);
         /* The two axes (kernel-call HLE, boot-skip) have DIFFERENT per-image
          * requirements, so they are decided in ONE pure place —
          * psx_bios_hle_plan(), runtime/src/bios_hle_plan.c. Conflating them

@@ -38,6 +38,7 @@
 #include "fntrace.h"  /* fntrace_is_game_started / fntrace_mark_game_started */
 #include "psx_segment_miss.h"  /* segment misses in static game code (§5.5) */
 #include "draw_distance.h"    /* [[draw_distance.clamp]] sites */
+#include "crash_trace.h"      /* psx_fatal_halt ([runtime] interpreter_fatal) */
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -1492,8 +1493,22 @@ static void exec_delay_slot(CPUState *cpu, uint32_t pc) {
 static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
                                   uint32_t *next_pc_out);
 
+static int s_interp_fatal = 0;
+
+void dirty_ram_set_interp_fatal(int on) { s_interp_fatal = on; }
+
+static void interp_coverage_fatal(uint32_t pc) {
+    static char reason[96];
+    snprintf(reason, sizeof(reason),
+             "interpreted guest code at 0x%08X (native coverage gap)", pc);
+    psx_fatal_halt(reason);
+}
+
 static int exec_one_fetched(CPUState *cpu, uint32_t pc, uint32_t insn,
                             uint32_t *next_pc_out) {
+    /* Every interpreter path (dispatch, span, precise slice, delay slots, and
+     * the debug-only ls replay) retires its instructions here: one gate. */
+    if (s_interp_fatal) interp_coverage_fatal(pc);
     /* A load's writeback becomes visible to the instruction AFTER its delay
      * slot: load at N, hidden from N+1, visible from N+2. s_ld_pend_age tracks
      * that: 0 = armed by the instruction just executed, 1 = the delay slot has

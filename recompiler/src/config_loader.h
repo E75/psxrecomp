@@ -282,6 +282,11 @@ struct RuntimeConfig {
     bool                  bios_hle = true;
     bool                  bios_hle_keep_intro = false;
 
+    // interpreter_fatal: for a build whose guest code is fully compiled, any
+    // interpreted instruction is a coverage gap -> halt with its PC instead of
+    // running on silently. Env PSX_INTERPRETER_FATAL overrides.
+    bool                  interpreter_fatal = false;
+
     // hide_hidden_mod_features: the launcher never presents a mod feature its
     // package marks `hidden` -- not even while enabled -- nor a package whose
     // every feature is hidden, and Enable/Disable all leave such features alone

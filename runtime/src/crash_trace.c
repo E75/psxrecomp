@@ -430,6 +430,34 @@ void psx_crash_trace_dump(const char *reason, void *seh_info) {
         g_dirty_ram_last_unsupported_entry_sp,
         g_dirty_ram_last_unsupported_insns);
 
+    /* Native coverage: in a fully compiled build every interpreted PC is a gap
+     * in the baked overlays; the heaviest ones say what to capture next. */
+    {
+        const DirtyRamPcEntry *top[8] = {0};
+        for (uint32_t i = 0; i < DIRTY_RAM_PC_TABLE_SIZE; i++) {
+            const DirtyRamPcEntry *e = &g_dirty_ram_pc_table[i];
+            if (e->pc == 0 || e->hits == 0) continue;
+            for (int k = 0; k < 8; k++) {
+                if (!top[k] || e->insns > top[k]->insns) {
+                    memmove(&top[k + 1], &top[k], (size_t)(7 - k) * sizeof(top[0]));
+                    top[k] = e;
+                    break;
+                }
+            }
+        }
+        append_fmt(buf, sizeof(buf), &pos,
+            "  \"interp_coverage\": {\"insns_run\": %llu, \"top\": [",
+            (unsigned long long)g_dirty_ram_insns_run);
+        for (int k = 0; k < 8 && top[k]; k++) {
+            append_fmt(buf, sizeof(buf), &pos,
+                "%s{\"pc\":\"0x%08X\",\"hits\":%llu,\"insns\":%llu}",
+                k == 0 ? "" : ",", top[k]->pc,
+                (unsigned long long)top[k]->hits,
+                (unsigned long long)top[k]->insns);
+        }
+        append_str(buf, sizeof(buf), &pos, "]},\n");
+    }
+
 #ifdef _WIN32
     if (seh_info) {
         EXCEPTION_POINTERS *info = (EXCEPTION_POINTERS *)seh_info;

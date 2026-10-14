@@ -237,6 +237,10 @@ uint32_t dirty_ram_text_diverged_pages(void);
  * via debug_server.c if helpful. */
 extern uint64_t g_dirty_ram_blocks_run;     /* basic blocks interpreted */
 extern uint64_t g_dirty_ram_insns_run;      /* instructions interpreted */
+
+/* Fully native builds: 1 = the first interpreted instruction halts
+ * (psx_fatal_halt) with its PC as the reason. */
+void dirty_ram_set_interp_fatal(int on);
 extern uint64_t g_dirty_window_dispatches;  /* interp dispatches inside a
                                              * capture window (autocapture
                                              * pressure signal, step 2.8) */
