@@ -10,12 +10,39 @@
  * vkGetInstanceProcAddr), so the exe never link-depends on vulkan-1 and falls
  * back to software when no ICD is present.
  *
- * BUILD STATUS: instance/device/swapchain + VRAM image + fills + CPU<->VRAM
- * transfers + present are implemented; geometry pipelines (triangles/rects/
- * lines), texturing/CLUT, mask-bit, semi-transparency, SSAA and the native-wide
- * compositor are added in later phases — those vtable entries currently abort
- * via psx_fatal_halt rather than silently no-op (no stubs).
- */
+ * ---- PHASE PLAN / BUILD STATUS -----------------------------------------
+ * The port from gpu_gl_renderer.c is COMPLETE. Nothing in this file aborts
+ * via psx_fatal_halt; the plan below is the order the phases were built in
+ * and doubles as the map for anyone touching one of them.
+ *
+ *   phase 0  context      runtime loader, instance, device, swapchain,
+ *                         per-frame sync — create_instance..create_sync   done
+ *   phase 1  targets      RGBA8 hr VRAM image + D24S8/D32S8 (stencil bit0
+ *                         mirrors VRAM bit15) + pack compute mirror       done
+ *   phase 2  geometry     batched flat/gouraud triangles, flat rects,
+ *                         lines as quads; GEO program, dynamic viewport,
+ *                         scissor, no dithering (col555 /31.0f)          done
+ *   phase 3  texturing    TEX program: raw R16 VRAM mirror sampled with
+ *                         texelFetch, 4/8-bit CLUT, texture window,
+ *                         per-vertex modulation, gpu_uv.h limits          done
+ *   phase 4  masking      stencil SET / CHECK-keep / CHECK-invert as
+ *                         pipeline cache keys (bind_masked*)              done
+ *   phase 5  semi-transp  PS1 modes 0..3 as Vulkan blend states (constant
+ *                         alpha 1/2, 1/4) + STP two-pass split            done
+ *   phase 6  SSAA         s_scale 1..4 on every target; present reads the
+ *                         hr image directly (no downscale blit)           done
+ *   phase 7  native-wide  per-base_x mirror surfaces with their own
+ *                         depth-stencil + framebuffers, mirrored in the
+ *                         SAME command buffer as the canonical pass       done
+ *   phase 8  present      opaque present shader pass, FMV CPU present,
+ *                         OSD/rewind/savestate overlays, wide present     done
+ *
+ * Known gap: the optional vtable member wide_dump_full (debug server
+ * "wide_full" PNG dump) has no Vulkan twin — gr_wide_dump_full() returns 0
+ * here while software/OpenGL implement it. It is a diagnostic-only readback,
+ * not part of the per-frame path. Keep the rule: implement it, or leave the
+ * entry NULL / abort — never add a silent no-op stub.
+ * ------------------------------------------------------------------------ */
 
 #include "gpu.h"
 #include "gpu_render.h"
