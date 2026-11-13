@@ -18,6 +18,7 @@
 #include "device_trace.h"    /* general two-process device-event cycle ring */
 #include "psx_interpreter.h"
 #include "cdrom.h"
+#include "asset_provider.h"
 #include "fntrace.h"
 #include "render_pass_projection.h"
 #include "text_xlate.h"
@@ -1528,6 +1529,8 @@ static uint16_t      g_mod_pad_press[PSX_MAX_PLAYERS] = {};
 static int           g_mod_load_wall_multiplier = -1;
 static int           g_mod_load_release_frames = -1;
 static int           g_mod_disc_speed_divisor = -1;
+/* [saves] auto_create_cards override from a trusted mod (-1 = use config). */
+static int           g_mod_memcard_auto_create = -1;
 static int           g_mod_disc_instant_rate = -1;
 
 static int present_vsync_owns_cadence(void);
@@ -1966,6 +1969,20 @@ extern "C" int psx_mod_set_disc_speed(
     g_mod_disc_speed_divisor = (int)divisor;
     g_mod_disc_instant_rate =
         divisor == 0 ? (int)instant_max_per_frame : -1;
+    return 1;
+}
+
+extern "C" int psx_mod_set_memcard_auto_create(uint32_t enable) {
+    /* Trusted-mod switch for the card lifetime policy: 0 reproduces the old
+     * "no card file -> slot absent" behaviour, 1 guarantees a valid image.
+     * Values above 1 are rejected rather than treated as truthy. */
+    if (enable > 1) {
+        std::fprintf(stderr,
+            "psxrecomp: mod rejected memcard auto-create value %u\n",
+            (unsigned)enable);
+        return 0;
+    }
+    g_mod_memcard_auto_create = (int)enable;
     return 1;
 }
 
@@ -15642,6 +15659,15 @@ int main(int argc, char** argv) {
     std::filesystem::path memcard2_path;   /* explicit slot-2 .mcd (empty => dir/card2.mcd) */
     bool memcard1_enabled = true;
     bool memcard2_enabled = true;
+    /* [saves] memory-card policy (docs/SAVES_AND_PRELOAD.md section 3). */
+    bool saves_auto_create_cards = true;
+    bool saves_format_on_corrupt = true;
+    bool saves_slot2             = true;
+    /* [assets] native disc sector source. */
+    std::string assets_disc_dir;
+    bool        assets_preload         = true;
+    int         assets_preload_max_mib = 400;
+    std::vector<std::string> assets_preload_exclude;
     bool multitap_enabled = true; /* [controller] multitap; 3+ seats offline */
     bool multitap_analog = true;  /* DualShock-on-tap hack; game.toml/settings */
     /* [controller] device routing (defaults: P1 keyboard/digital, P2 none). */
@@ -15808,6 +15834,15 @@ int main(int argc, char** argv) {
             if (gc.runtime.has_instant_max_per_frame)
                 instant_rate = gc.runtime.instant_max_per_frame;
             warm_cd_routes = gc.runtime.warm_cd_routes;
+            /* [saves] / [assets] (docs/SAVES_AND_PRELOAD.md). Defaults are the
+             * always-valid-card policy and the extracted-tree sector source. */
+            saves_auto_create_cards = gc.runtime.saves.auto_create_cards;
+            saves_format_on_corrupt = gc.runtime.saves.format_on_corrupt;
+            saves_slot2             = gc.runtime.saves.slot2;
+            assets_disc_dir         = gc.runtime.assets.disc_dir.string();
+            assets_preload          = gc.runtime.assets.preload;
+            assets_preload_max_mib  = gc.runtime.assets.preload_max_mib;
+            assets_preload_exclude  = gc.runtime.assets.preload_exclude;
             /* turbo_loads / offer_turbo_loads are deprecated and ignored. Load
              * acceleration is owned by the Mods catalog (Fast Loading / CD
              * Speed), which ships with every title and defaults off, so the
@@ -17937,6 +17972,7 @@ int main(int argc, char** argv) {
         g_mod_load_release_frames = -1;
         g_mod_disc_speed_divisor = -1;
         g_mod_disc_instant_rate = -1;
+        g_mod_memcard_auto_create = -1;
         g_turbo_audio_sink_enabled = g_turbo_audio_sink_config_enabled;
         g_turbo_load_wall_multiplier = 0;
         g_turbo_load_release_frames = TURBO_LOADS_RELEASE_FRAMES;
@@ -18362,6 +18398,39 @@ session_reboot:
     if (g_audio_spu_hq)
         std::fprintf(stdout, "psxrecomp: SPU float-shadow enabled (verified-enhancement)\n");
     spu_init();
+    /* Native asset provider: serve data sectors from the extracted tree
+     * (runs/iso_full + manifest.json) before cdrom_init() mounts the image, so
+     * the very first boot sectors already come from RAM. A missing manifest or
+     * an uncovered LBA silently keeps the emulated drive path. */
+    {
+        std::string dir = assets_disc_dir;
+        if (dir.empty()) {
+            std::filesystem::path cfg_dir =
+                game_config_path ? std::filesystem::path(game_config_path).parent_path()
+                                 : std::filesystem::path(".");
+            dir = (cfg_dir / "runs" / "iso_full").string();
+        }
+        std::vector<const char*> excl;
+        excl.reserve(assets_preload_exclude.size());
+        for (const auto& e : assets_preload_exclude) excl.push_back(e.c_str());
+        AssetProviderStats st;
+        if (asset_provider_init(dir.c_str(), assets_preload ? 1 : 0,
+                                assets_preload_max_mib, excl.data(),
+                                (int)excl.size())) {
+            asset_provider_get_stats(&st);
+            std::fprintf(stdout,
+                "psxrecomp: asset provider %s: %d files, %d preloaded (%.1f MiB,"
+                " %d front-end)\n",
+                st.disc_dir, st.files, st.preloaded_files,
+                (double)st.preloaded_bytes / (1024.0 * 1024.0), st.frontend_files);
+        } else {
+            asset_provider_get_stats(&st);
+            std::fprintf(stdout,
+                "psxrecomp: asset provider off (%s: %s); disc reads use the "
+                "mounted image\n",
+                st.disc_dir[0] ? st.disc_dir : dir.c_str(), st.error);
+        }
+    }
     cdrom_init(disc_path_str.empty() ? NULL : disc_path_str.c_str());
 
     /* A disc was requested but nothing mounted. cdrom_init() is non-fatal here
@@ -18481,11 +18550,51 @@ session_reboot:
     {
         std::string mc1 = memcard1_path.string();
         std::string mc2 = memcard2_path.string();
+        /* [saves] slot2 gates slot 2 on top of the settings.toml insert flag;
+         * auto_create / format_on_corrupt decide whether an absent or corrupt
+         * image is repaired instead of leaving the slot answering 0xFF. A
+         * trusted mod may override auto_create for the session. */
+        const int auto_create =
+            (g_mod_memcard_auto_create >= 0) ? g_mod_memcard_auto_create
+                                             : (saves_auto_create_cards ? 1 : 0);
         const MemcardSlotConfig slots[2] = {
-            { mc1.empty() ? nullptr : mc1.c_str(), memcard1_enabled ? 1 : 0 },
-            { mc2.empty() ? nullptr : mc2.c_str(), memcard2_enabled ? 1 : 0 },
+            { mc1.empty() ? nullptr : mc1.c_str(), memcard1_enabled ? 1 : 0,
+              auto_create, saves_format_on_corrupt ? 1 : 0 },
+            { mc2.empty() ? nullptr : mc2.c_str(),
+              (memcard2_enabled && saves_slot2) ? 1 : 0,
+              auto_create, saves_format_on_corrupt ? 1 : 0 },
         };
         memcard_init_slots(memcard_dir_str.c_str(), slots);
+        /* One line per card that was created/repaired (or left empty on
+         * purpose), so a card problem is visible without a debug client. */
+        for (int i = 0; i < 2; ++i) {
+            const char* path = nullptr;
+            uint8_t magic[2] = { 0, 0 };
+            int present = 0, dirty = 0;
+            memcard_debug_info(i, &path, magic, &present, &dirty);
+            switch (memcard_slot_event(i)) {
+            case MEMCARD_SLOT_CREATED:
+                std::fprintf(stdout, "psxrecomp: memcard slot %d created (%s)\n",
+                             i + 1, path ? path : "-");
+                break;
+            case MEMCARD_SLOT_RECREATED:
+                std::fprintf(stdout, "psxrecomp: memcard slot %d recreated: image "
+                             "was short or corrupt (%s)\n", i + 1, path ? path : "-");
+                break;
+            case MEMCARD_SLOT_CORRUPT:
+                std::fprintf(stderr, "psxrecomp: memcard slot %d image is not a "
+                             "valid card and [saves] format_on_corrupt is off; "
+                             "slot left empty (%s)\n", i + 1, path ? path : "-");
+                break;
+            case MEMCARD_SLOT_IO_ERROR:
+                std::fprintf(stderr, "psxrecomp: memcard slot %d could not be "
+                             "written (%s); slot left empty\n",
+                             i + 1, path ? path : "-");
+                break;
+            default:
+                break;
+            }
+        }
     }
     if (!rematch_session) {
         std::atexit(memcard_flush_all);

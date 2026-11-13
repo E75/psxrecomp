@@ -11,6 +11,7 @@
  */
 
 #include "cdrom.h"
+#include "asset_provider.h"
 #include "cdrom_irq.h"
 #include "cdrom_lid.h"
 #include "dma.h"
@@ -1447,13 +1448,23 @@ static int read_sector_at(int min, int sec, int sect) {
     int history_size = SECTOR_SIZE;
 
     if (iso_handle) {
-        have_raw = iso_read_raw_sector(iso_handle, lba, raw_data, RAW_SECTOR_SIZE);
-        if (have_raw) {
-            memcpy(user_data, raw_data + RAW_USER_DATA_OFFSET, SECTOR_SIZE);
-        } else if (!iso_read_sector(iso_handle, lba, user_data, SECTOR_SIZE)) {
-            memset(user_data, 0, sizeof(user_data));
+        /* The extracted tree answers first when it covers this LBA. It is a
+         * pure 2048-byte sector source: on a hit the ISO is not touched and
+         * `have_raw` stays 0 (no XA classification, no 2352-byte read). Every
+         * miss -- streamed XA/STR/CD-DA, a partial trailing sector, a missing
+         * manifest -- runs the original path below unchanged. */
+        if (asset_provider_read_sector((uint32_t)lba, user_data)) {
+            have_raw = 0;
+            if (subq_replacements_active) update_last_valid_subq((uint32_t)lba);
+        } else {
+            have_raw = iso_read_raw_sector(iso_handle, lba, raw_data, RAW_SECTOR_SIZE);
+            if (have_raw) {
+                memcpy(user_data, raw_data + RAW_USER_DATA_OFFSET, SECTOR_SIZE);
+            } else if (!iso_read_sector(iso_handle, lba, user_data, SECTOR_SIZE)) {
+                memset(user_data, 0, sizeof(user_data));
+            }
+            if (subq_replacements_active) update_last_valid_subq((uint32_t)lba);
         }
-        if (subq_replacements_active) update_last_valid_subq((uint32_t)lba);
     } else {
         memset(user_data, 0, sizeof(user_data));
     }

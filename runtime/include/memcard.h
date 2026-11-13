@@ -19,13 +19,41 @@ void memcard_init(const char* dir);
 typedef struct {
     const char* path;     /* explicit .mcd path; NULL => derive <dir>/card<N>.mcd */
     int         enabled;  /* 0 => slot is empty (no card inserted, never present) */
+    /* [saves] auto_create_cards: create the .mcd when the file is absent.
+     * 0 leaves the slot empty (a card that was never inserted). */
+    int         auto_create;
+    /* [saves] format_on_corrupt: rewrite a present-but-invalid image with a
+     * freshly formatted card. 0 leaves the slot empty (the pre-2026-11-13
+     * behaviour that made the REPLAY screen spin on a missing card). */
+    int         format_on_corrupt;
 } MemcardSlotConfig;
+
+/* What memcard_init_slots() did with a slot. Exposed so main.cpp can print one
+ * line per card it created/recreated without memcard.c logging (CLAUDE.md #3). */
+typedef enum {
+    MEMCARD_SLOT_ABSENT = 0,   /* not configured, or an enabled slot with no card */
+    MEMCARD_SLOT_LOADED,       /* existing image loaded and validated */
+    MEMCARD_SLOT_CREATED,      /* file was missing; blank card written */
+    MEMCARD_SLOT_RECREATED,    /* image was short/corrupt; blank card written */
+    MEMCARD_SLOT_CORRUPT,      /* invalid image, format_on_corrupt off -> empty */
+    MEMCARD_SLOT_IO_ERROR      /* format/create attempted, write failed */
+} MemcardSlotEvent;
 
 /* Initialize memcard subsystem with per-slot paths + enable flags. A disabled
  * slot is left absent (memcard_is_present() returns 0, SIO reports no device).
- * An enabled slot loads its file, or formats+creates it if missing. `dir` is
- * only used to derive default paths for slots whose path is NULL. */
+ * An enabled slot loads and validates its file, or formats+creates it if
+ * missing (auto_create) or corrupt (format_on_corrupt). `dir` is only used to
+ * derive default paths for slots whose path is NULL. */
 void memcard_init_slots(const char* dir, const MemcardSlotConfig slots[2]);
+
+/* Result of the last memcard_init_slots() call for `card` (bad index =>
+ * MEMCARD_SLOT_ABSENT). */
+MemcardSlotEvent memcard_slot_event(int card);
+
+/* Validate a raw 128 KiB card image: size, "MC" magic in frame 0, frame 0
+ * checksum, the 15 directory frames (status byte + checksum) and the 20
+ * broken-sector-list frames. Returns 1 when the image is a usable card. */
+int memcard_validate_image(const uint8_t* data, int size);
 
 /* Stateless on-disk introspection (used by the launcher before boot). Parses a
  * .mcd file's directory frames without touching the live card array. */

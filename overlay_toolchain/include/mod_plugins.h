@@ -560,6 +560,16 @@ int psx_mod_set_disc_speed(uint32_t divisor,
                            uint32_t instant_max_per_frame);
 
 /*
+ * Memory-card lifetime policy (docs/SAVES_AND_PRELOAD.md section 3).
+ * enable = 1 guarantees every enabled slot holds a valid 128 KiB image (a
+ * missing file is created, a short/corrupt one is rewritten); enable = 0
+ * restores the old "absent file -> slot empty" behaviour. The [saves]
+ * auto_create_cards key is the file default; this is the session override for
+ * a trusted mod. Returns 1 on success, 0 when the value is rejected.
+ */
+int psx_mod_set_memcard_auto_create(uint32_t enable);
+
+/*
  * Turn the title's [[draw_distance.clamp]] sites on or off for this session
  * (draw_distance.h): a far primitive the game would drop past the end of its
  * ordering table is kept in the farthest slot instead. Returns 1 when the

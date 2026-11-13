@@ -48,7 +48,13 @@ extern uint32_t g_psx_mod_guest_functions;
  * Callbacks may update registers/data but cannot redirect PC, finish a guest
  * function, or re-enter guest execution (pending load/branch state is live).
  * Native emits opt in with [recompiler] mod_instruction_sites; dirty-RAM
- * execution uses the same guarded table. Inactive plans are inert. */
+ * execution uses the same guarded table. Inactive plans are inert.
+ *
+ * This is scaffolding that only exists while guest code is recompiled: the
+ * fire points are emitted into generated code, so a game-owned mod must not
+ * depend on one for a feature it keeps. Re-anchor such a feature at a runtime
+ * boundary (vblank, a GPU primitive rule, a call/argument boundary) or in the
+ * decompiled C, and treat the instruction hook as a temporary bridge. */
 int psx_mod_register_instruction_plugin(const char* id, uint32_t address,
                                          uint32_t expected, PSXModFunctionEntryCallback callback);
 void psx_mod_instruction(struct CPUState* cpu, uint32_t address, uint32_t instruction);
@@ -852,6 +858,16 @@ int psx_mod_set_load_acceleration(uint32_t wall_clock_multiplier,
  */
 int psx_mod_set_disc_speed(uint32_t divisor,
                            uint32_t instant_max_per_frame);
+
+/*
+ * Memory-card lifetime policy (docs/SAVES_AND_PRELOAD.md section 3).
+ * enable = 1 guarantees every enabled slot holds a valid 128 KiB image (a
+ * missing file is created, a short/corrupt one is rewritten); enable = 0
+ * restores the old "absent file -> slot empty" behaviour. The [saves]
+ * auto_create_cards key is the file default; this is the session override for
+ * a trusted mod. Returns 1 on success, 0 when the value is rejected.
+ */
+int psx_mod_set_memcard_auto_create(uint32_t enable);
 
 /*
  * Turn the title's [[draw_distance.clamp]] sites on or off for this session

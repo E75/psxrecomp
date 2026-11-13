@@ -382,6 +382,37 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
             }
         }
     }
+    if (cfg.contains("saves")) {
+        const toml::value& sv = toml::find(cfg, "saves");
+        if (sv.contains("auto_create_cards"))
+            rt.saves.auto_create_cards = toml::find<bool>(sv, "auto_create_cards");
+        if (sv.contains("format_on_corrupt"))
+            rt.saves.format_on_corrupt = toml::find<bool>(sv, "format_on_corrupt");
+        if (sv.contains("slot2"))
+            rt.saves.slot2 = toml::find<bool>(sv, "slot2");
+    }
+    if (cfg.contains("assets")) {
+        const toml::value& av = toml::find(cfg, "assets");
+        if (av.contains("disc_dir")) {
+            const auto rel = toml::find<std::string>(av, "disc_dir");
+            if (!rel.empty()) rt.assets.disc_dir = PSXRecompV4::host_resolve(root, rel);
+        }
+        if (av.contains("preload"))
+            rt.assets.preload = toml::find<bool>(av, "preload");
+        if (av.contains("preload_max_mib")) {
+            const auto n = toml::find<int64_t>(av, "preload_max_mib");
+            if (n < 0 || n > 65536) {
+                throw std::runtime_error(fmt::format(
+                    "[assets] preload_max_mib out of range (0..65536): {}", n));
+            }
+            rt.assets.preload_max_mib = static_cast<int>(n);
+        }
+        if (av.contains("preload_exclude")) {
+            for (const auto& e :
+                 toml::find<std::vector<std::string>>(av, "preload_exclude"))
+                if (!e.empty()) rt.assets.preload_exclude.push_back(e);
+        }
+    }
     if (cfg.contains("runtime")) {
         const toml::value& runtime = toml::find(cfg, "runtime");
         if (runtime.contains("language"))  // [runtime].language convenience alias

@@ -184,6 +184,26 @@ const char* pad_mode_to_string(int mode);
 
 // [runtime] block — consumed by runtime/src/main.cpp. All fields optional;
 // callers that need them check has_* flags or use the supplied defaults.
+// [saves] -- memory-card lifetime policy. Defaults are the "a card is always
+// there" behaviour: a missing image is created and a corrupt one is rewritten,
+// so no screen can be reached with an enabled slot that answers 0xFF.
+struct SavesConfig {
+    bool auto_create_cards = true;   // create <memcard_dir>/cardN.mcd when absent
+    bool format_on_corrupt = true;   // rewrite a short/corrupt image
+    bool slot2             = true;   // keep slot 2 inserted
+};
+
+// [assets] -- native disc asset provider (runtime/src/asset_provider.c). Serves
+// CD sectors from the extracted tree instead of the emulated drive. Every key
+// is optional; an absent/missing manifest falls back to the ISO path unchanged.
+struct AssetsConfig {
+    std::filesystem::path disc_dir;  // e.g. "runs/iso_full" (contains manifest.json)
+    bool                  preload = true;
+    int                   preload_max_mib = 400;
+    // Path prefixes never held in RAM (the .RA/.DA streams stay on the ISO).
+    std::vector<std::string> preload_exclude;
+};
+
 struct RuntimeConfig {
     bool                  has_debug_port = false;
     uint16_t              debug_port     = 0;
@@ -210,6 +230,10 @@ struct RuntimeConfig {
 
     bool                  has_memcard_dir = false;
     std::filesystem::path memcard_dir;     // absolute path (resolved against project root)
+
+    // [saves] / [assets] blocks (see SavesConfig / AssetsConfig above).
+    SavesConfig           saves;
+    AssetsConfig          assets;
 
     // disc_speed: "1x" (default) | "2x" | "4x" | "instant"
     // Controls how quickly CD-ROM timing delays fire. "instant" collapses all

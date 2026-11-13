@@ -378,11 +378,12 @@ typedef struct {
     int      data_idx;
     uint8_t  checksum;
     uint8_t  flag;  /* 0x08=new data, 0x00=normal */
+    uint8_t  read_failed; /* last 0x52 sector read could not be served */
 } McSlotState;
 
 static McSlotState mc_slots[2] = {
-    { MC_IDLE, 0, 0, 0, 0, {0}, 0, 0, 0x08 },
-    { MC_IDLE, 0, 0, 0, 0, {0}, 0, 0, 0x08 },
+    { MC_IDLE, 0, 0, 0, 0, {0}, 0, 0, 0x08, 0 },
+    { MC_IDLE, 0, 0, 0, 0, {0}, 0, 0, 0x08, 0 },
 };
 
 /* Active slot's state — copied from mc_slots[selected_slot] before each
@@ -398,6 +399,10 @@ static uint8_t mc_data[128];
 static int mc_data_idx = 0;
 static uint8_t mc_checksum = 0;
 static uint8_t mc_flag = 0x08; /* 0x08=new data, 0x00=normal */
+/* Set when the 0x52 address phase could not obtain the sector (slot empty,
+ * card pulled mid-transaction, I/O error). The read then answers the protocol
+ * error end code 0xFF instead of a stale/garbage sector. */
+static uint8_t mc_read_failed = 0;
 
 typedef enum {
     DEV_NONE,
@@ -420,6 +425,7 @@ static void mc_save_slot(int slot) {
     s->data_idx   = mc_data_idx;
     s->checksum   = mc_checksum;
     s->flag       = mc_flag;
+    s->read_failed = mc_read_failed;
 }
 
 /* Load slot state into working mc_ vars. */
@@ -435,6 +441,7 @@ static void mc_load_slot(int slot) {
     mc_data_idx   = s->data_idx;
     mc_checksum   = s->checksum;
     mc_flag       = s->flag;
+    mc_read_failed = s->read_failed;
 }
 
 /* Card probe diagnostic counters */
@@ -1779,15 +1786,24 @@ static void mc_process_byte(uint8_t tx_byte) {
         mc_sector = ((uint16_t)mc_sector_msb << 8) | mc_sector_lsb;
 
         if (mc_cmd == 0x52) {
-            if (mc_sector < MEMCARD_SECTORS) {
-                memcard_read_sector(mc_slot, mc_sector, mc_data);
-            } else {
+            int rc = -1;
+            mc_read_failed = 0;
+            if (mc_sector < MEMCARD_SECTORS)
+                rc = memcard_read_sector(mc_slot, mc_sector, mc_data);
+            if (rc != 0) {
+                /* No card / card pulled / I/O error: answer the protocol error
+                 * instead of whatever the previous transaction left in
+                 * mc_data. 0xFF payload + 0xFF checksum + 0xFF end code is what
+                 * a real card does for an unreadable sector, and it is what the
+                 * BIOS card driver reports upward. */
                 memset(mc_data, 0xFF, 128);
+                mc_read_failed = 1;
             }
             mc_data_idx = 0;
             mc_checksum = mc_sector_msb ^ mc_sector_lsb;
             for (int i = 0; i < 128; i++)
                 mc_checksum ^= mc_data[i];
+            if (mc_read_failed) mc_checksum = 0xFF;
             mc_state = MC_READ_ACK1;
             sio_rx_data = 0x00;
         } else {
@@ -1855,10 +1871,10 @@ static void mc_process_byte(uint8_t tx_byte) {
                                              const uint8_t *data128);
         card_read_summary_record(mc_slot, mc_cmd, mc_sector,
                                  mc_checksum, mc_data_idx, mc_data);
-        if (mc_sector < MEMCARD_SECTORS) {
-            sio_rx_data = 0x47; /* 'G' = Good */
-        } else {
+        if (mc_read_failed || mc_sector >= MEMCARD_SECTORS) {
             sio_rx_data = 0xFF;
+        } else {
+            sio_rx_data = 0x47; /* 'G' = Good */
         }
         break;
     }

@@ -487,6 +487,17 @@ void gpu_ws_tag_hud_prim(uint32_t prim, int anchor);
 typedef int (*GpuWsSpriteAnchorFn)(int32_t x, int32_t y, int w, int h, int u, int v,
                                    uint16_t clut, uint16_t texpage, int32_t *anchor_x);
 void gpu_ws_set_sprite_anchor_hook(GpuWsSpriteAnchorFn fn);
+/* Per-quad modulation-colour rule. The GPU calls this for every textured quad
+ * with the packet's texpage/clut, its four texcoords and a pointer to the
+ * 24-bit modulation colour (command bits 24-31 are not part of it). Return
+ * nonzero when the colour changed. This replaces title instruction hooks that
+ * rewrote a quad's colour at its store site: the rule runs on the primitive the
+ * renderer actually draws, so it survives dropping the recompiler and applies
+ * to the same packets. Pass NULL to remove it. Runs per textured quad; keep it
+ * cheap and stateless. */
+typedef int (*GpuWsQuadShadeFn)(uint16_t tpage, uint16_t clut,
+                                const int u[4], const int v[4], uint32_t *color24);
+void gpu_ws_set_quad_shade_hook(GpuWsQuadShadeFn fn);
 /* Stretch a trusted authored background polygon about the display center in
  * the native-wide output only (GL/SW). prim+4 is the command address, including
  * for a command embedded inside a longer DMA packet. Only opaque polygons are

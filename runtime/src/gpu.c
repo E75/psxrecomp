@@ -2984,6 +2984,8 @@ static void ws_expand_fullscreen_rect(int32_t *x, int32_t y, int *w, int h) {
  * the same pre-offset space (WE2002 redraws its HUD centre-relative, offset 256). */
 static GpuWsSpriteAnchorFn ws_sprite_anchor_hook;
 void gpu_ws_set_sprite_anchor_hook(GpuWsSpriteAnchorFn fn) { ws_sprite_anchor_hook = fn; }
+static GpuWsQuadShadeFn ws_quad_shade_hook;
+void gpu_ws_set_quad_shade_hook(GpuWsQuadShadeFn fn) { ws_quad_shade_hook = fn; }
 static int32_t draw_offset_x, draw_offset_y;   /* set by GP0(E5h) */
 static int32_t ws_hud_pivot(int32_t x, int32_t w) {
     int32_t X = ws_disp_x() - draw_offset_x;
@@ -5350,6 +5352,10 @@ static void gp0_exec_textured_quad(void) {
     uint16_t clut_y = (clut >> 6) & 0x1FF;
     uint16_t tpage_word = (uint16_t)(gp0_cmd_buf[4] >> 16);
     uint16_t tpage = tpage_word & 0x1FF;
+    /* Title colour rule (e.g. WE2002's head-block tone): the modulation colour
+     * of this exact packet, before the renderer splits it into triangles. */
+    if (ws_quad_shade_hook)
+        (void)ws_quad_shade_hook(tpage, clut, u, v, &color24);
     set_tpage_from_poly(tpage_word);   /* latches even for size-rejected polys */
     if (gpu_dbg_hide_quad(tpage_word, clut, u[0], v[0])) return;
     int rej_a = gpu_triangle_rejected(vx, vy, 0, 1, 2);

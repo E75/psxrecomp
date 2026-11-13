@@ -31,6 +31,7 @@ typedef struct {
 } MemCard;
 
 static MemCard cards[MAX_CARDS];
+static MemcardSlotEvent slot_events[MAX_CARDS];
 
 /* XOR checksum of bytes 0x00-0x7E, stored at 0x7F. */
 static uint8_t frame_checksum(const uint8_t *frame) {
@@ -83,6 +84,35 @@ static void memcard_format(uint8_t *data) {
     memcpy(&data[63 * 128], &data[0], 128);
 }
 
+/* Frame status byte of a directory frame: 0xA0 free, 0xA1/0xA2/0xA3 deleted
+ * (first/middle/last), 0x51/0x52/0x53 used (first/middle/last). Anything else
+ * means the image was not written by a card formatter. */
+static int dir_status_ok(uint8_t status) {
+    const uint8_t hi = (uint8_t)(status & 0xF0);
+    return hi == 0xA0 || hi == 0x50;
+}
+
+int memcard_validate_image(const uint8_t* data, int size) {
+    if (!data || size != MEMCARD_SIZE) return 0;
+    if (data[0] != 'M' || data[1] != 'C') return 0;
+    if (frame_checksum(&data[0]) != data[0x7F]) return 0;
+
+    /* Directory frames 1-15: status byte + XOR checksum. */
+    for (int s = 1; s <= 15; s++) {
+        const uint8_t* f = &data[s * 128];
+        if (!dir_status_ok(f[0])) return 0;
+        if (frame_checksum(f) != f[0x7F]) return 0;
+    }
+    /* Broken-sector list 16-35: the checksum still has to hold. Frames 36-62
+     * (replacement data) are deliberately not checked - their content is the
+     * guest's, and a card with a replacement sector is still a valid card. */
+    for (int s = 16; s <= 35; s++) {
+        const uint8_t* f = &data[s * 128];
+        if (frame_checksum(f) != f[0x7F]) return 0;
+    }
+    return 1;
+}
+
 /* mkdir -p: create each path component (guest sandbox is <memcard>/netplay). */
 static void memcard_ensure_dir(const char* dir) {
     char tmp[512];
@@ -117,16 +147,31 @@ static void memcard_ensure_dir(const char* dir) {
 #endif
 }
 
+/* Write a freshly formatted image to `path`. Returns 1 on success. */
+static int memcard_write_file(const char* path, const uint8_t* data) {
+    FILE* f = fopen(path, "wb");
+    if (!f) return 0;
+    size_t n = fwrite(data, 1, MEMCARD_SIZE, f);
+    int flush_ok = (fflush(f) == 0);
+    int close_ok = (fclose(f) == 0);
+    return n == MEMCARD_SIZE && flush_ok && close_ok;
+}
+
 void memcard_init_slots(const char* dir, const MemcardSlotConfig slots[2]) {
     memset(cards, 0, sizeof(cards));
+    memset(slot_events, 0, sizeof(slot_events));
     memcard_ensure_dir(dir);
 
     for (int i = 0; i < MAX_CARDS; i++) {
         cards[i].present = 0;
         cards[i].dirty = 0;
+        slot_events[i] = MEMCARD_SLOT_ABSENT;
 
         const int enabled = slots ? slots[i].enabled : 1;
         const char* path  = slots ? slots[i].path : NULL;
+        /* Absent keys keep the documented defaults (create + repair). */
+        const int auto_create = slots ? slots[i].auto_create : 1;
+        const int format_on_corrupt = slots ? slots[i].format_on_corrupt : 1;
         if (!enabled) continue;  /* slot empty: no card inserted */
 
         if (path && path[0]) {
@@ -138,30 +183,52 @@ void memcard_init_slots(const char* dir, const MemcardSlotConfig slots[2]) {
             continue;  /* no path and no dir: cannot resolve a file */
         }
 
+        /* A card file may be shorter than 128 KiB (truncated copy, a crash
+         * mid-write, a 0-byte placeholder). `n` is the bytes read, not a
+         * success flag: a short read leaves the tail of `data` untouched, so
+         * validate the image itself, never the read length alone. */
         FILE* f = fopen(cards[i].filepath, "rb");
         if (f) {
+            memset(cards[i].data, 0, MEMCARD_SIZE);
             size_t n = fread(cards[i].data, 1, MEMCARD_SIZE, f);
             fclose(f);
-            if (n == MEMCARD_SIZE) {
+            if (memcard_validate_image(cards[i].data, (int)n)) {
                 cards[i].present = 1;
+                slot_events[i] = MEMCARD_SLOT_LOADED;
+                continue;
             }
-        } else {
+            if (!format_on_corrupt) {
+                /* Reproduce the old behaviour on purpose: leave the slot
+                 * empty so the SIO answers 0xFF like a pulled card. */
+                slot_events[i] = MEMCARD_SLOT_CORRUPT;
+                continue;
+            }
             memcard_format(cards[i].data);
-            f = fopen(cards[i].filepath, "wb");
-            if (f) {
-                size_t n = fwrite(cards[i].data, 1, MEMCARD_SIZE, f);
-                int flush_ok = (fflush(f) == 0);
-                int close_ok = (fclose(f) == 0);
-                if (n == MEMCARD_SIZE && flush_ok && close_ok) {
-                    cards[i].present = 1;
-                }
+            if (memcard_write_file(cards[i].filepath, cards[i].data)) {
+                cards[i].present = 1;
+                slot_events[i] = MEMCARD_SLOT_RECREATED;
+            } else {
+                slot_events[i] = MEMCARD_SLOT_IO_ERROR;
+            }
+        } else if (auto_create) {
+            memcard_format(cards[i].data);
+            if (memcard_write_file(cards[i].filepath, cards[i].data)) {
+                cards[i].present = 1;
+                slot_events[i] = MEMCARD_SLOT_CREATED;
+            } else {
+                slot_events[i] = MEMCARD_SLOT_IO_ERROR;
             }
         }
     }
 }
 
+MemcardSlotEvent memcard_slot_event(int card) {
+    if (card < 0 || card >= MAX_CARDS) return MEMCARD_SLOT_ABSENT;
+    return slot_events[card];
+}
+
 void memcard_init(const char* dir) {
-    const MemcardSlotConfig both[2] = { { NULL, 1 }, { NULL, 1 } };
+    const MemcardSlotConfig both[2] = { { NULL, 1, 1, 1 }, { NULL, 1, 1, 1 } };
     memcard_init_slots(dir, both);
 }
 
@@ -375,12 +442,15 @@ int memcard_reload_bound(void) {
             cards[i].dirty = 0;
             continue;
         }
-        if (fread(cards[i].data, 1, MEMCARD_SIZE, f) == MEMCARD_SIZE) {
-            cards[i].present = 1;
-            cards[i].dirty = 0;
-        } else {
-            cards[i].present = 0;
-            cards[i].dirty = 0;
+        {
+            size_t n = fread(cards[i].data, 1, MEMCARD_SIZE, f);
+            if (memcard_validate_image(cards[i].data, (int)n)) {
+                cards[i].present = 1;
+                cards[i].dirty = 0;
+            } else {
+                cards[i].present = 0;
+                cards[i].dirty = 0;
+            }
         }
         fclose(f);
     }
