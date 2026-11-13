@@ -15,6 +15,14 @@
 
 struct SDL_Window;
 
+/* Compile-time ceiling for the Vulkan internal-resolution scale. The render
+ * target covers only the displayed window (VRAM_W x VRAM_H is the fallback),
+ * so the 4K target is ~512x480 native x S instead of 1024x512 x S. 16 keeps
+ * 8K (S=18 on a 240-line title) reachable through the "match display" preset
+ * once the window is small enough; the real limit is the device's
+ * maxImageDimension2D, applied at target creation. */
+#define VK_MAX_INTERNAL_SCALE 16
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -53,6 +61,12 @@ void vk_renderer_restage_vram_after_savestate(void);
  * frames; unsupported modes fall back to FIFO (always available). */
 void vk_renderer_set_present_mode(int mode);
 void vk_renderer_set_display_aspect(int num, int den);
+
+/* Per-frame GPU/CPU timing + op counters (debug server "vk_frame_perf"): a JSON
+ * array of up to `count` samples, oldest..newest, each with the frame index,
+ * CPU frame time, GPU scene/present time from timestamp queries, allocs,
+ * submits and draw calls. */
+int  vk_frame_perf_json(char *out, int cap, int count);
 
 #ifdef __cplusplus
 }

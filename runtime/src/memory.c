@@ -36,15 +36,48 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#else
+#  include <sys/mman.h>
+#endif
+
+/* Guest-address memory placement.
+ *
+ * Decompiled C keeps the original address space: pointer-typed locals hold
+ * guest addresses and dereference them directly. Mapping the real backing
+ * stores at the guest addresses makes that C semantically valid without a
+ * per-access translation layer. Fall back to ordinary storage when the fixed
+ * mapping is unavailable (then only the generated PSX_ADDR accessors work). */
+#define PSX_RAM_BASE      0x80000000u
+#define PSX_SCRATCH_BASE  0x1F800000u
+
+static void* psx_map_fixed(uintptr_t addr, size_t size) {
+#ifdef _WIN32
+    void* p = VirtualAlloc((void*)addr, size, MEM_RESERVE | MEM_COMMIT,
+                           PAGE_READWRITE);
+    return p;
+#else
+    void* p = mmap((void*)addr, size, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS
+#  ifdef MAP_FIXED_NOREPLACE
+                   | MAP_FIXED_NOREPLACE
+#  endif
+                   , -1, 0);
+    return p == MAP_FAILED ? NULL : p;
+#endif
+}
+
 #define RAM_SIZE        PSX_MAIN_RAM_BACKING_BYTES
 #define SCRATCHPAD_SIZE 1024
 #define BIOS_ROM_SIZE   (512 * 1024)
 #define MOD_MEMORY_BASE 0x1F000000u
 #define MOD_MEMORY_SIZE (1u * 1024u * 1024u)
 
-static uint8_t ram[RAM_SIZE];
-static uint8_t scratchpad[SCRATCHPAD_SIZE];
-static uint8_t bios_rom[BIOS_ROM_SIZE];
+static uint8_t* ram;
+static uint8_t* scratchpad;
+static uint8_t* bios_rom;
 static uint8_t mod_memory[MOD_MEMORY_SIZE];
 static uint32_t mod_memory_used;
 static uint8_t mod_gpu_dma_memory[PSX_MOD_GPU_DMA_APERTURE_SIZE];
@@ -150,7 +183,7 @@ uint32_t psx_gpu_packet_key(uint32_t address) {
 }
 
 /* Exposed for inlined main-RAM load helpers in psx_cyc.h (VLC/decode hot path). */
-uint8_t *g_psx_ram = ram;
+uint8_t *g_psx_ram = NULL;
 /* PSX_LOAD_DELAY gate (default on). −1 = unread; 0/1 after first resolve. */
 int g_psx_load_delay = -1;
 
@@ -169,6 +202,7 @@ static inline uint32_t psx_phys_addr_store(uint32_t addr) {
 /* Expose RAM pointer for oracle comparison (find_first_divergence). */
 uint8_t *memory_get_ram_ptr(void) { return ram; }
 uint8_t *memory_get_scratchpad_ptr(void) { return scratchpad; }
+uint8_t *memory_get_bios_ptr(void) { return bios_rom; }
 
 /* Side-effect-FREE aligned word peek for the debug/observability path ONLY:
  * main RAM (every KUSEG/KSEG0/KSEG1 mirror), scratchpad and BIOS ROM. Never
@@ -1184,8 +1218,27 @@ uint32_t memory_get_bios_checksum(void) { return s_bios_checksum; }
 
 void memory_init(const char* bios_path) {
     psx_ram_apply_size_request();
-    memset(ram, 0, sizeof(ram));
-    memset(scratchpad, 0, sizeof(scratchpad));
+    if (!ram) {
+        ram = (uint8_t*)psx_map_fixed(PSX_RAM_BASE, RAM_SIZE);
+        if (!ram) {
+            fprintf(stderr,
+                    "WARNING: could not map RAM at 0x%08X; falling back to heap "
+                    "(decompiled pointer-typed C will not be address-correct)\n",
+                    PSX_RAM_BASE);
+            ram = (uint8_t*)malloc(RAM_SIZE);
+        }
+    }
+    if (!scratchpad) {
+        scratchpad = (uint8_t*)psx_map_fixed(PSX_SCRATCH_BASE, SCRATCHPAD_SIZE);
+        if (!scratchpad) scratchpad = (uint8_t*)malloc(SCRATCHPAD_SIZE);
+    }
+    if (!bios_rom) {
+        bios_rom = (uint8_t*)psx_map_fixed(0x1FC00000u, BIOS_ROM_SIZE);
+        if (!bios_rom) bios_rom = (uint8_t*)malloc(BIOS_ROM_SIZE);
+    }
+    g_psx_ram = ram;
+    memset(ram, 0, RAM_SIZE);
+    memset(scratchpad, 0, SCRATCHPAD_SIZE);
     /* Rematch re-enters without process exit — wipe sticky I/O regs that
      * live outside device *_init (I_STAT/I_MASK cleared in interrupts_init). */
     memset(mem_ctrl, 0, sizeof(mem_ctrl));

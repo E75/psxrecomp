@@ -35,7 +35,8 @@ int  gr_scale(void);
 /* Compile-time ceiling for the OpenGL backend's internal-resolution scale. The
  * effective scale is decided at GL context init from the driver's size limits
  * and a memory budget (gl_scale_limits.h), so this is only an upper bound.
- * Software and Vulkan stay at SW_MAX_INTERNAL_SCALE (4). */
+ * Software stays at SW_MAX_INTERNAL_SCALE (4); Vulkan at VK_MAX_INTERNAL_SCALE
+ * (16, grown past its old 4x cap now that its target is window-sized). */
 #define GL_MAX_INTERNAL_SCALE 32
 void gr_set_texture_filter(int bilinear);
 int  gr_texture_filter(void);

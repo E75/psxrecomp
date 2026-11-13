@@ -15199,6 +15199,19 @@ static void handle_vk_perf(int id, const char *json)
     send_fmt("{\"id\":%d,\"ok\":true,\"vk_perf\":%s}", id, buf);
 }
 
+/* "vk_frame_perf": per-frame Vulkan timing + counters (vk_frame_perf_json).
+ * Same three figures as the GL "frame_perf" (CPU frame, scene GPU, present
+ * GPU) plus allocs/submits/draws, so tools/we/perf.py can query both backends.
+ * arg count=N (default 240). */
+static void handle_vk_frame_perf(int id, const char *json)
+{
+    extern int vk_frame_perf_json(char *out, int cap, int count);
+    int count = json_get_int(json, "count", 240);
+    static char buf[98304];
+    vk_frame_perf_json(buf, (int)sizeof(buf), count);
+    send_fmt("{\"id\":%d,\"ok\":true,\"vk_frame_perf\":%s}", id, buf);
+}
+
 static void handle_lockstep(int id, const char *json) {
     /* #2 lockstep comparator. {"lo":N,"hi":M} arms the frame window; the reply
      * reports the first compiled-vs-interp block divergence (if any) so far. */
@@ -15649,6 +15662,7 @@ static const CmdEntry s_commands[] = {
     { "gpu_timeline",      handle_gpu_timeline },
     { "nclip_stats",       handle_nclip_stats },
     { "frame_perf",        handle_frame_perf },
+    { "vk_frame_perf",     handle_vk_frame_perf },
     { "gl_ws_ablate",      handle_gl_ws_ablate },
     { "gl_interp",         handle_gl_interp },
     { "render_pass_stats", handle_render_pass_stats },

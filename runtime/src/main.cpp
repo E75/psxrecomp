@@ -1349,7 +1349,9 @@ static_assert(PSX_IR_LEGACY_SS_MAX == SW_MAX_INTERNAL_SCALE,
               "settings.toml supersampling for an older runtime is the software ceiling");
 
 static int video_scale_ceiling(void) {
-    return g_video_renderer == 1 ? GL_MAX_INTERNAL_SCALE : SW_MAX_INTERNAL_SCALE;
+    if (g_video_renderer == 1) return GL_MAX_INTERNAL_SCALE;
+    if (g_video_renderer == 2) return VK_MAX_INTERNAL_SCALE;
+    return SW_MAX_INTERNAL_SCALE;
 }
 
 /* The preset in effect this run: the environment override, else the
@@ -18158,8 +18160,11 @@ session_reboot:
         /* Per-backend ceiling. OpenGL allocates its hr surface at context init
          * and clamps there to the driver's texture limits and a memory budget
          * (gl_scale_limits.h), so only its compile-time bound applies here.
-         * Software keeps a CPU mirror of 1 MiB*S^2 and Vulkan accepts 1..4. */
+         * Software keeps a CPU mirror of 1 MiB*S^2; Vulkan accepts
+         * 1..VK_MAX_INTERNAL_SCALE and clamps to the device's image-size limit
+         * when it creates the window-sized target. */
         const int ceiling = (g_video_renderer == 1) ? GL_MAX_INTERNAL_SCALE
+                          : (g_video_renderer == 2) ? VK_MAX_INTERNAL_SCALE
                                                     : SW_MAX_INTERNAL_SCALE;
         if (g_video_scale > ceiling) {
             std::fprintf(stdout, "psxrecomp: supersampling %dx clamped to %dx "
@@ -19841,7 +19846,9 @@ soft_return_lobby:
                 kLauncherHasInternalResolution, ir_preset_seeded, ir_ss_seeded,
                 ls.supersampling, ir_row_result, g_video_ref_lines,
                 psx_sdl_display_pixel_height(nullptr),
-                ls.renderer == 1 ? GL_MAX_INTERNAL_SCALE : SW_MAX_INTERNAL_SCALE);
+                ls.renderer == 1 ? GL_MAX_INTERNAL_SCALE
+                    : ls.renderer == 2 ? VK_MAX_INTERNAL_SCALE
+                                       : SW_MAX_INTERNAL_SCALE);
             /* Persist controller (and rematch video) choices without wiping
              * the rest of settings.toml — merge into the on-disk file. */
             {
