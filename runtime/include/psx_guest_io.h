@@ -61,8 +61,14 @@ void     psx_guest_write_byte(uint32_t addr, uint8_t value);
  * when disabled by PSX_IO_FAULT_OFF. */
 int psx_guest_io_install(void);
 
-/* Observability: how many host dereferences of the window were serviced. */
+/* Observability: how many host dereferences of the window were serviced, and
+ * how many were refused (a refusal is passed on to the crash tracer). */
 void psx_guest_io_stats(uint64_t* reads, uint64_t* writes, uint64_t* refused);
+
+/* The last refused instruction: its rip as an image RVA, the faulting address,
+ * and the 16 bytes at rip (zeroed when nothing was refused yet). The same
+ * values are printed to stderr for the first 8 refusals. */
+void psx_guest_io_last_refusal(uint32_t* rip_rva, uint32_t* fault, uint8_t out[16]);
 
 #ifdef __cplusplus
 }
