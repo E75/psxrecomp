@@ -103,6 +103,10 @@ extern "C" void psx_event_step_conservative_env_init(void);
 #include "crash_trace.h"
 #include "freeze_heartbeat.h"
 #include "config_loader.h"
+#include "host_path_resolve.h"   /* docs/ASSET_PATHS.md: one rule for every path */
+#include "resolved_paths.h"      /* `resolved_paths` debug command + startup log */
+#include "audio_native.h"        /* audio_native_set_path_roots */
+#include "gpu_hd_textures.h"     /* gpu_hd_textures_configure: the resolved HD pack */
 #include "bios_rom_alias.h"
 #include "host_path.h"
 #include "launcher_device.h"
@@ -3443,6 +3447,99 @@ static bool resolve_match_session_bios_path(
 static std::filesystem::path default_memcard_dir(const char* argv0) {
     return exe_dir_from_argv(argv0);
 }
+
+/* ---------------------------------------------------------------------------
+ * Deterministic asset/config path resolution — docs/ASSET_PATHS.md.
+ *
+ * Absolute values are used as written. A relative one is tried against the
+ * game.toml project directory, the exe directory, the exe's parent and the
+ * working directory, in that order; the first candidate that exists wins. Every
+ * key is resolved once, logged once, and recorded for the `resolved_paths`
+ * debug command (the acceptance harness reads it instead of guessing a cwd).
+ * ------------------------------------------------------------------------- */
+static PsxPathRoots               g_path_roots;static bool                       g_path_roots_ready = false;
+static std::string                g_path_config;   /* the game.toml actually loaded */
+
+static void path_roots_init(const char* argv0) {
+    std::error_code ec;
+    std::filesystem::path config_dir;
+    if (!g_path_config.empty())
+        config_dir = PSXRecompV4::find_project_root(g_path_config);
+    if (config_dir.empty()) config_dir = exe_dir_from_argv(argv0);
+    const std::string config =
+        PSXRecompV4::host_path_forward_slashes(PSXRecompV4::host_absolute(config_dir, ec));
+    const std::string exe =
+        PSXRecompV4::host_path_forward_slashes(exe_dir_from_argv(argv0));
+    psx_path_roots_init(&g_path_roots, config.c_str(), exe.c_str());
+    g_path_roots_ready = true;
+    psx_resolved_paths_set_roots(g_path_config.c_str(), &g_path_roots);
+}
+
+static void set_env(const char* name, const std::string& value) {
+#ifdef _WIN32
+    _putenv_s(name, value.c_str());
+#else
+    setenv(name, value.c_str(), 1);
+#endif
+}
+
+static void set_env_if_unset(const char* name, const std::string& value) {
+    if (std::getenv(name)) return;
+    set_env(name, value);
+}
+
+/* Resolve one key, log it once and remember it for `resolved_paths`. `fallback`
+ * is the loader's already-absolute value (or an env value) used when game.toml
+ * did not write the key. */
+static std::string resolve_path_key(const char* key, const char* configured,
+                                    const char* fallback, const char* source) {
+    if (const char* seen = psx_resolved_paths_get(key)) return seen;
+    if (!g_path_roots_ready) path_roots_init(nullptr);
+
+    char out[PSX_PATH_RESOLVE_MAX];
+    if (configured && configured[0]) {
+        psx_path_resolve(&g_path_roots, configured, out, sizeof out);
+        psx_resolved_paths_note(key, configured, out, source);
+    } else if (fallback && fallback[0]) {
+        psx_path_resolve(&g_path_roots, fallback, out, sizeof out);
+        psx_resolved_paths_note(key, fallback, out, source);
+    } else {
+        return std::string();
+    }
+    const char* resolved = psx_resolved_paths_get(key);
+    return resolved ? resolved : std::string();
+}
+
+/* The HD pack is selected once the renderer can take it: the Vulkan backend
+ * reads PSXRECOMP_HD_PACK at init, the OpenGL backend needs a live context. A
+ * mod that already selected a pack wins (gpu_hd_textures_active). */
+static void configure_hd_pack_if_needed(const std::string& root) {
+    char error[256];
+    if (root.empty() || !psx_path_exists(root.c_str())) return;
+    if (gpu_hd_textures_active()) return;
+    error[0] = '\0';
+    if (!gpu_hd_textures_configure(root.c_str(), 1, 0, error, sizeof error))
+        std::fprintf(stderr, "psxrecomp: HD pack %s: %s\n", root.c_str(), error);
+}
+
+/* HD pack root default (docs/HD_TEXTURES.md 5): the committed pack first, the
+ * demo build second. Neither present => the pack stays off (fast path). */
+static std::string default_hd_pack_root(void) {
+    static const char* candidates[] = {
+        "assets/hd_pack/we2002-texture-replacements",
+        "runs/hd_pack/we2002-texture-replacements",
+    };
+    for (const char* candidate : candidates) {
+        char out[PSX_PATH_RESOLVE_MAX];
+        if (psx_path_resolve(&g_path_roots, candidate, out, sizeof out) &&
+            psx_path_exists(out))
+            return resolve_path_key("assets.hd_pack_dir", candidate, nullptr, "default");
+    }
+    return resolve_path_key("assets.hd_pack_dir", candidates[0], nullptr, "default");
+}
+
+/* The report itself lives in resolved_paths.c; the debug server asks for it
+ * after audio_native_init() has recorded the [audio] keys. */
 
 static void close_controller(void);
 static void shutdown_runtime(void);
@@ -15660,6 +15757,13 @@ int main(int argc, char** argv) {
     /* Record the resolved config path for the TCP fmv_state report (observability:
      * proves which game.toml actually loaded — CLI --game vs the baked default). */
     g_active_config_path = game_config_path;
+    /* docs/ASSET_PATHS.md: anchor the path rule on the project directory this
+     * game.toml belongs to (the .gitignore/.git/CMakeLists.txt walk, so a copy
+     * of game.toml inside a build dir still resolves to the checkout) and hand
+     * the same roots to the audio module. */
+    g_path_config = game_config_path ? game_config_path : "";
+    path_roots_init(argv[0]);
+    audio_native_set_path_roots(g_path_roots.config_dir, g_path_roots.exe_dir);
 
     std::filesystem::path memcard_dir;
     std::filesystem::path memcard1_path;   /* explicit slot-1 .mcd (empty => dir/card1.mcd) */
@@ -15679,6 +15783,8 @@ int main(int argc, char** argv) {
     std::string assets_override_dir;
     bool        assets_override_enabled = true;
     bool        assets_prepare_on_start = true;
+    /* [assets] HD texture pack root (docs/HD_TEXTURES.md 5). */
+    std::string hd_pack_root;
     bool multitap_enabled = true; /* [controller] multitap; 3+ seats offline */
     bool multitap_analog = true;  /* DualShock-on-tap hack; game.toml/settings */
     /* [controller] device routing (defaults: P1 keyboard/digital, P2 none). */
@@ -15830,7 +15936,11 @@ int main(int argc, char** argv) {
                     gc.netplay_required_disc_fps[i];
             }
             if (!gc.discs.empty()) resolved_disc = gc.discs.front();
-            if (gc.runtime.has_memcard_dir)  memcard_dir   = gc.runtime.memcard_dir;
+            if (gc.runtime.has_memcard_dir)
+                memcard_dir = resolve_path_key(
+                    "runtime.memcard_dir",
+                    gc.runtime.memcard_dir_configured.c_str(),
+                    gc.runtime.memcard_dir.string().c_str(), "config");
             if (gc.runtime.has_window_title) window_title  = gc.runtime.window_title;
             if (gc.runtime.has_debug_port)   debug_port    = gc.runtime.debug_port;
             /* On-the-fly string translation / localization (framework feature —
@@ -15850,13 +15960,49 @@ int main(int argc, char** argv) {
             saves_auto_create_cards = gc.runtime.saves.auto_create_cards;
             saves_format_on_corrupt = gc.runtime.saves.format_on_corrupt;
             saves_slot2             = gc.runtime.saves.slot2;
-            assets_disc_dir         = gc.runtime.assets.disc_dir.string();
+            assets_disc_dir         = resolve_path_key(
+                "assets.disc_dir", gc.runtime.assets.disc_dir_configured.c_str(),
+                gc.runtime.assets.disc_dir.string().c_str(), "config");
             assets_preload          = gc.runtime.assets.preload;
             assets_preload_max_mib  = gc.runtime.assets.preload_max_mib;
             assets_preload_exclude  = gc.runtime.assets.preload_exclude;
-            assets_override_dir     = gc.runtime.assets.override_dir.string();
+            assets_override_dir     = resolve_path_key(
+                "assets.override_dir",
+                gc.runtime.assets.override_dir_configured.c_str(),
+                gc.runtime.assets.override_dir.string().c_str(), "config");
             assets_override_enabled = gc.runtime.assets.override_enabled;
             assets_prepare_on_start = gc.runtime.assets.prepare_on_start;
+            /* HD pack root (docs/HD_TEXTURES.md 5, docs/ASSET_PATHS.md): the
+             * env var wins (documented debug switch), then [assets]
+             * hd_pack_dir, then the committed/demo pack search. The resolved
+             * root is exported under both pack env names when the caller set
+             * neither, so the Vulkan renderer picks it up at init. */
+            {
+                const char* pack_env = std::getenv("PSXRECOMP_HD_PACK");
+                if (!pack_env || !pack_env[0])
+                    pack_env = std::getenv("PSXRECOMP_HD_TEXTURE_ROOT");
+                if (pack_env && pack_env[0]) {
+                    hd_pack_root = resolve_path_key("assets.hd_pack_dir", pack_env,
+                                                    nullptr, "env");
+                    if (psx_path_exists(hd_pack_root.c_str())) {
+                        /* A relative debug value obeys the rule too: hand the
+                         * renderer the absolute path the report names. */
+                        set_env("PSXRECOMP_HD_PACK", hd_pack_root);
+                        set_env("PSXRECOMP_HD_TEXTURE_ROOT", hd_pack_root);
+                    }
+                } else if (gc.runtime.assets.has_hd_pack_dir) {
+                    hd_pack_root = resolve_path_key(
+                        "assets.hd_pack_dir",
+                        gc.runtime.assets.hd_pack_dir_configured.c_str(),
+                        gc.runtime.assets.hd_pack_dir.string().c_str(), "config");
+                } else {
+                    hd_pack_root = default_hd_pack_root();
+                }
+                if (!hd_pack_root.empty() && psx_path_exists(hd_pack_root.c_str())) {
+                    set_env_if_unset("PSXRECOMP_HD_PACK", hd_pack_root);
+                    set_env_if_unset("PSXRECOMP_HD_TEXTURE_ROOT", hd_pack_root);
+                }
+            }
             /* turbo_loads / offer_turbo_loads are deprecated and ignored. Load
              * acceleration is owned by the Mods catalog (Fast Loading / CD
              * Speed), which ships with every title and defaults off, so the
@@ -18417,10 +18563,11 @@ session_reboot:
      * artefact is missing. Existing artefacts are never overwritten and a
      * missing/invalid image is not fatal: the game boots exactly as before. */
     if (assets_prepare_on_start || cli_prepare_assets) {
-        const std::filesystem::path ap_cfg_dir =
-            game_config_path ? std::filesystem::path(game_config_path).parent_path()
-                             : std::filesystem::path(".");
-        const std::string ap_root = ap_cfg_dir.string();
+        /* docs/ASSET_PATHS.md: the tools' default output dirs (assets/str,
+         * assets/audio, assets/override, assets/hd_pack) are project-relative,
+         * so prepare writes where the Python tools write — the game.toml
+         * project dir, not the directory of a copied game.toml inside a build. */
+        const std::string ap_root = g_path_roots.config_dir;
         AssetPrepareOptions ap_opt{};
         ap_opt.disc_path = disc_path_str.empty() ? nullptr : disc_path_str.c_str();
         ap_opt.root_dir  = ap_root.c_str();
@@ -18436,11 +18583,9 @@ session_reboot:
      * an uncovered LBA silently keeps the emulated drive path. */
     {
         std::string dir = assets_disc_dir;
-        std::filesystem::path cfg_dir =
-            game_config_path ? std::filesystem::path(game_config_path).parent_path()
-                             : std::filesystem::path(".");
         if (dir.empty())
-            dir = (cfg_dir / "runs" / "iso_full").string();
+            dir = resolve_path_key("assets.disc_dir", "runs/iso_full", nullptr,
+                                   "default");
         std::vector<const char*> excl;
         excl.reserve(assets_preload_exclude.size());
         for (const auto& e : assets_preload_exclude) excl.push_back(e.c_str());
@@ -18463,10 +18608,12 @@ session_reboot:
         }
 
         /* Patched guest asset images (docs/ASSET_OVERRIDE.md). Default path is
-         * <config dir>/assets/override; enabled whenever it has a manifest. */
+         * <project dir>/assets/override; enabled whenever it has a manifest. */
+        std::string ov = assets_override_dir;
+        if (ov.empty())
+            ov = resolve_path_key("assets.override_dir", "assets/override",
+                                  nullptr, "default");
         if (assets_override_enabled) {
-            std::string ov = assets_override_dir;
-            if (ov.empty()) ov = (cfg_dir / "assets" / "override").string();
             AssetOverrideStats ost;
             if (asset_provider_override_init(ov.c_str())) {
                 asset_provider_get_override_stats(&ost);
@@ -18721,6 +18868,7 @@ session_reboot:
         gl_renderer_set_interpolation(0, 0, 0, 59.94, 0);
         latency_ring_set_backend("opengl");
         latency_ring_set_present_mode(0);
+        configure_hd_pack_if_needed(hd_pack_root);
         std::fprintf(stdout, "psxrecomp: hidden OpenGL headless enabled (backend=opengl hidden=1 audio=0 controllers=0)\n");
     } else {
         std::fprintf(stdout, "psxrecomp: headless frontend enabled\n");
@@ -18902,6 +19050,7 @@ session_reboot:
             (dynres_requested() && g_video_scale_applies) ? 1 : 0);
         g_gl_active = (gl_renderer_init_context(sdl_window) != 0);
         dynres_setup();
+        configure_hd_pack_if_needed(hd_pack_root);
 
         /* Bezel artwork (Mods): load after the GL context exists. */
         if (!g_bezel_path.empty() && g_gl_active) {

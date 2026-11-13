@@ -480,16 +480,19 @@ between Play and TCP availability.
 
 ## Complete command index (generated)
 
-**360 commands registered** — 347 on the native server (`runtime/src/debug_server.c`), 61 on the Beetle server (`runtime/src/beetle_debug_server.c`).
+**368 commands registered** — 355 on the native server (`runtime/src/debug_server.c`), 61 on the Beetle server (`runtime/src/beetle_debug_server.c`).
 
-73 of 360 have prose above; **287 are index-only**. An index-only command still works — it just has no description here yet. Send it `{"cmd":"<name>"}` and read the reply, or find its `handle_*` function in the server source.
+74 of 368 have prose above; **294 are index-only**. An index-only command still works — it just has no description here yet. Send it `{"cmd":"<name>"}` and read the reply, or find its `handle_*` function in the server source.
 
 Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this block has drifted from the code.
 
 | Command | Native | Beetle | Described above |
 |---|:--:|:--:|:--:|
 | `a0_history` | ✓ |  |  |
+| `asset_override_stats` | ✓ |  |  |
+| `asset_provider_stats` | ✓ |  |  |
 | `audio_events` | ✓ | ✓ |  |
+| `audio_state` | ✓ |  |  |
 | `audio_stats` | ✓ | ✓ |  |
 | `audio_wav` | ✓ | ✓ |  |
 | `autocompile_run` | ✓ |  |  |
@@ -616,6 +619,7 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `get_snapshots` | ✓ | ✓ | ✓ |
 | `gl_coh_ring` | ✓ |  |  |
 | `gl_fbo_peek` | ✓ |  |  |
+| `gl_frame_perf` | ✓ |  |  |
 | `gl_interp` | ✓ |  | ✓ |
 | `gl_present_ring` | ✓ |  |  |
 | `gl_texwin_batch` | ✓ |  |  |
@@ -624,6 +628,7 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `gl_ws_ablate` | ✓ |  |  |
 | `gp1_dump` | ✓ |  | ✓ |
 | `gpu_frame_dump` | ✓ |  | ✓ |
+| `gpu_hide` | ✓ |  |  |
 | `gpu_opcodes` | ✓ |  |  |
 | `gpu_ring_stats` | ✓ |  |  |
 | `gpu_state` | ✓ |  | ✓ |
@@ -634,8 +639,8 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `gte_ring_dump` | ✓ |  |  |
 | `gte_state` | ✓ |  |  |
 | `guest_tty_dump` | ✓ |  |  |
-| `hd_textures` | ✓ |  | ✓ |
 | `hd_pack` | ✓ |  | ✓ |
+| `hd_textures` | ✓ |  | ✓ |
 | `history` | ✓ | ✓ | ✓ |
 | `hle_dump` | ✓ |  | ✓ |
 | `host_launch_timings` | ✓ |  | ✓ |
@@ -734,6 +739,7 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `render_thread` | ✓ |  | ✓ |
 | `resident_events` | ✓ |  |  |
 | `resident_status` | ✓ |  |  |
+| `resolved_paths` | ✓ |  |  |
 | `restore_trace` | ✓ |  |  |
 | `restore_trace_clear` | ✓ |  |  |
 | `restore_trace_window` | ✓ |  |  |
@@ -800,6 +806,7 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `unwatch` | ✓ |  | ✓ |
 | `vblank_rate` | ✓ |  |  |
 | `video_info` | ✓ |  | ✓ |
+| `vk_frame_perf` | ✓ |  |  |
 | `vk_perf` | ✓ |  |  |
 | `vram_peek` | ✓ | ✓ | ✓ |
 | `vsync_query_hle` | ✓ |  |  |

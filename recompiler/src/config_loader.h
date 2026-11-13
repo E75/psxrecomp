@@ -198,6 +198,11 @@ struct SavesConfig {
 // is optional; an absent/missing manifest falls back to the ISO path unchanged.
 struct AssetsConfig {
     std::filesystem::path disc_dir;  // e.g. "runs/iso_full" (contains manifest.json)
+    // The value exactly as game.toml wrote it. The runtime resolves this with
+    // the docs/ASSET_PATHS.md rule (game.toml dir, exe dir, exe/.., cwd);
+    // `disc_dir` above stays the loader's project-root absolute form for the
+    // recompiler and for callers that never had a working directory.
+    std::string           disc_dir_configured;
     bool                  preload = true;
     int                   preload_max_mib = 400;
     // Path prefixes never held in RAM (the .RA/.DA streams stay on the ISO).
@@ -206,7 +211,16 @@ struct AssetsConfig {
     // runtime uses <config dir>/assets/override. Applied only when that
     // directory holds a valid manifest.json.
     std::filesystem::path override_dir;
+    std::string           override_dir_configured;
     bool                  override_enabled = true;
+    // HD texture pack root (docs/HD_TEXTURES.md, docs/ASSET_PATHS.md). Absent
+    // => the runtime takes the first existing of
+    // assets/hd_pack/we2002-texture-replacements and
+    // runs/hd_pack/we2002-texture-replacements; an explicitly empty value
+    // disables the pack.
+    std::filesystem::path hd_pack_dir;
+    std::string           hd_pack_dir_configured;
+    bool                  has_hd_pack_dir = false;
     // In-exe asset preparation (docs/IN_EXE_ASSETS.md): on first start, build
     // the raw STR extent from the user's disc and write
     // assets/prepare_report.json. Only acts while an artefact is missing and
@@ -240,6 +254,7 @@ struct RuntimeConfig {
 
     bool                  has_memcard_dir = false;
     std::filesystem::path memcard_dir;     // absolute path (resolved against project root)
+    std::string           memcard_dir_configured;  // value as game.toml wrote it
 
     // [saves] / [assets] blocks (see SavesConfig / AssetsConfig above).
     SavesConfig           saves;

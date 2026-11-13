@@ -453,6 +453,7 @@ ${PSXRECOMP_ROOT}/runtime/src/psx_guest_yield.c
     ${PSXRECOMP_ROOT}/runtime/src/audio_shadow.c
     ${PSXRECOMP_ROOT}/runtime/src/audio_trace.c
     ${PSXRECOMP_ROOT}/runtime/src/audio_native.c
+    ${PSXRECOMP_ROOT}/runtime/src/resolved_paths.c
     ${PSXRECOMP_ROOT}/runtime/src/color_lut.c
     ${PSXRECOMP_ROOT}/runtime/src/iso_reader.cpp
     ${PSXRECOMP_ROOT}/runtime/src/iso_reader_c.cpp

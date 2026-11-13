@@ -395,6 +395,7 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
         const toml::value& av = toml::find(cfg, "assets");
         if (av.contains("disc_dir")) {
             const auto rel = toml::find<std::string>(av, "disc_dir");
+            rt.assets.disc_dir_configured = rel;
             if (!rel.empty()) rt.assets.disc_dir = PSXRecompV4::host_resolve(root, rel);
         }
         if (av.contains("preload"))
@@ -414,8 +415,19 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
         }
         if (av.contains("override_dir")) {
             const auto rel = toml::find<std::string>(av, "override_dir");
+            rt.assets.override_dir_configured = rel;
             if (!rel.empty())
                 rt.assets.override_dir = PSXRecompV4::host_resolve(root, rel);
+        }
+        if (av.contains("hd_pack_dir")) {
+            /* docs/ASSET_PATHS.md: the runtime resolves this with the shared
+             * rule. An explicit "" disables the pack; absent keeps the default
+             * search (assets/hd_pack, then runs/hd_pack). */
+            const auto rel = toml::find<std::string>(av, "hd_pack_dir");
+            rt.assets.hd_pack_dir_configured = rel;
+            rt.assets.has_hd_pack_dir = true;
+            if (!rel.empty())
+                rt.assets.hd_pack_dir = PSXRecompV4::host_resolve(root, rel);
         }
         if (av.contains("override"))
             rt.assets.override_enabled = toml::find<bool>(av, "override");
@@ -454,6 +466,7 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
     }
     if (runtime.contains("memcard_dir")) {
         const auto rel = toml::find<std::string>(runtime, "memcard_dir");
+        rt.memcard_dir_configured = rel;
         rt.memcard_dir = PSXRecompV4::host_resolve(root, rel);
         rt.has_memcard_dir = true;
     }

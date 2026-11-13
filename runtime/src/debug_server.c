@@ -51,6 +51,7 @@
 #include "spu.h"
 #include "audio_trace.h"
 #include "audio_native.h"
+#include "resolved_paths.h"
 #include "mdec.h"
 #include "interrupts.h"
 #include "psx_cycles.h"
@@ -13910,6 +13911,24 @@ static void handle_asset_override_stats(int id, const char *json)
              (unsigned long long)st.bytes);
 }
 
+/* resolved_paths: docs/ASSET_PATHS.md — every asset/config key the runtime
+ * resolved, with the configured value, the absolute path and whether it exists,
+ * plus the four anchors of the rule (game.toml project dir, exe dir, exe/..,
+ * cwd). Read-only: it never creates or rewrites anything. The acceptance
+ * harness reads this so a live asset row can only FAIL on a genuine absence. */
+static void handle_resolved_paths(int id, const char *json)
+{
+    (void)json;
+    char body[8192];
+    audio_native_init();   /* records audio.cdda_dir / audio.str_raw (once) */
+    if (psx_resolved_paths_json(body, (int)sizeof body) <= 0) {
+        send_fmt("{\"id\":%d,\"ok\":false,\"error\":\"resolved_paths unavailable\"}\n",
+                 id);
+        return;
+    }
+    send_fmt("{\"id\":%d,\"ok\":true,%s}\n", id, body);
+}
+
 /* cdrom_timing: passive L1.5 physical deadline -> buffer -> INT1 exposure
  * summary. `reset:1` starts a fresh measurement window without touching the
  * controller or its schedules. late_bins are exact, 1..64, 65..1024,
@@ -16049,6 +16068,7 @@ static const CmdEntry s_commands[] = {
     { "cdrom_bursts",         handle_cdrom_bursts },
     { "asset_provider_stats", handle_asset_provider_stats },
     { "asset_override_stats", handle_asset_override_stats },
+    { "resolved_paths",    handle_resolved_paths },
     { "cdrom_timing",         handle_cdrom_timing },
     { "turbo_loads",          handle_turbo_loads },
     { "turbo_audio_sink",     handle_turbo_audio_sink },

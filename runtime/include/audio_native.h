@@ -45,6 +45,11 @@ typedef struct AudioNativeCddaTrack {
 
 void audio_native_init(void);   /* idempotent; resolves the config + directory */
 
+/* Install the docs/ASSET_PATHS.md resolution roots: the game.toml project
+ * directory and the executable directory (main.cpp calls this once at startup,
+ * before the first CD/SPU use). Without it the rule starts at the exe dir. */
+void audio_native_set_path_roots(const char* config_dir, const char* exe_dir);
+
 /* ---- CD-DA (called from iso_reader_c.cpp) ------------------------------ */
 /* Install the track table. Call only when the mounted image has no audio
  * tracks of its own; the playlist stays inactive (count 0) if no WAV exists. */

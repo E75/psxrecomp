@@ -1007,6 +1007,7 @@ if(BUILD_TESTING)
         tests/test_mod_runtime.cpp
         src/iso_reader_c.cpp
         src/audio_native.c
+        src/resolved_paths.c
         src/mod_runtime.cpp
         src/mod_packages.cpp
         src/mod_media.cpp
@@ -1035,6 +1036,7 @@ if(BUILD_TESTING)
         tests/test_netplay_view_mods.cpp
         src/iso_reader_c.cpp
         src/audio_native.c
+        src/resolved_paths.c
         src/mod_runtime.cpp
         src/mod_packages.cpp
         src/mod_media.cpp

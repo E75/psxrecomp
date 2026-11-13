@@ -23,6 +23,8 @@
  */
 
 #include "audio_native.h"
+#include "host_path_resolve.h"   /* docs/ASSET_PATHS.md: the shared path rule */
+#include "resolved_paths.h"      /* record both keys for `resolved_paths` */
 
 #include <ctype.h>
 #include <stdio.h>
@@ -42,17 +44,6 @@
 #define CFG_PATH_MAX       512
 
 /* ------------------------------------------------------------------ paths */
-
-static int path_is_dir(const char* path) {
-    if (!path || !*path) return 0;
-#if defined(_WIN32)
-    DWORD a = GetFileAttributesA(path);
-    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
-#else
-    struct stat st;
-    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
-#endif
-}
 
 /* Directory holding the executable (empty when it cannot be determined). */
 static void exe_dir(char* out, size_t cap) {
@@ -81,12 +72,6 @@ static void join_path(char* out, size_t cap, const char* dir, const char* rel) {
     size_t n = strlen(dir);
     const char* sep = (dir[n - 1] == '/' || dir[n - 1] == '\\') ? "" : "/";
     snprintf(out, cap, "%s%s%s", dir, sep, rel);
-}
-
-static int path_is_absolute(const char* p) {
-    if (!p || !*p) return 0;
-    if (p[0] == '/' || p[0] == '\\') return 1;
-    return isalpha((unsigned char)p[0]) && p[1] == ':';
 }
 
 /* --------------------------------------------------------- config parsing */
@@ -323,20 +308,35 @@ static void iso_stem(const char* iso_path, char* out, size_t cap) {
     out[o] = '\0';
 }
 
-/* First existing candidate for a configured path: as given (cwd), then the exe
- * directory, then its parent. Falls back to the configured string so the state
- * report still shows where the files belong. */
-static void resolve_path(const char* configured, char* out, size_t cap) {
-    char exe[CFG_PATH_MAX], cand[CFG_PATH_MAX];
-    snprintf(out, cap, "%s", configured);
-    if (!configured[0] || path_is_dir(configured) || path_is_absolute(configured)) return;
-    exe_dir(exe, sizeof(exe));
-    if (!exe[0]) return;
-    join_path(cand, sizeof(cand), exe, configured);
-    if (path_is_dir(cand)) { snprintf(out, cap, "%s", cand); return; }
-    join_path(cand, sizeof(cand), exe, "../");
-    strncat(cand, configured, sizeof(cand) - strlen(cand) - 1);
-    if (path_is_dir(cand)) snprintf(out, cap, "%s", cand);
+/* The four anchors of the path rule (docs/ASSET_PATHS.md). main.cpp installs
+ * the game.toml project dir + exe dir at startup; a module used on its own
+ * (unit tests) falls back to the exe dir on first resolve. */
+static PsxPathRoots g_roots;
+static int          g_roots_ready;
+
+static void resolve_dir(void);
+
+void audio_native_set_path_roots(const char* config_dir, const char* exe) {
+    psx_path_roots_init(&g_roots, config_dir, exe);
+    g_roots_ready = 1;
+    if (g.inited) resolve_dir();   /* roots arrived after a lazy init */
+}
+
+/* First existing candidate for a configured path, docs/ASSET_PATHS.md: the
+ * game.toml project dir, the exe dir, its parent, then the cwd. main.cpp hands
+ * the project root in at startup; without it (unit tests, a bare module) the
+ * rule starts at the exe directory. The resolved path is recorded for the
+ * `resolved_paths` command and logged once per key. */
+static void resolve_key(const char* key, const char* configured,
+                        const char* source, char* out, size_t cap) {
+    char exe[CFG_PATH_MAX];
+    if (!g_roots_ready) {
+        exe_dir(exe, sizeof exe);
+        psx_path_roots_init(&g_roots, NULL, exe);
+        g_roots_ready = 1;
+    }
+    psx_path_resolve(&g_roots, configured, out, cap);
+    psx_resolved_paths_note(key, configured, out, source);
 }
 
 static void resolve_dir(void) {
@@ -352,11 +352,12 @@ static void resolve_dir(void) {
         snprintf(configured, sizeof(configured), "assets/audio");
         snprintf(g.dir_source, sizeof(g.dir_source), "default");
     }
-    resolve_path(configured, g.dir, sizeof(g.dir));
+    resolve_key("audio.cdda_dir", configured, g.dir_source, g.dir, sizeof(g.dir));
 
     if (!config_audio_key("str_raw", configured, sizeof(configured)))
         snprintf(configured, sizeof(configured), "assets/str");
-    resolve_path(configured, g.str_dir, sizeof(g.str_dir));
+    resolve_key("audio.str_raw", configured, "config", g.str_dir,
+                sizeof(g.str_dir));
 }
 
 void audio_native_init(void) {
