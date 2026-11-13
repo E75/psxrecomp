@@ -25,6 +25,7 @@
 #include "dirty_ram_interp.h"
 #include "guest_tty.h"
 #include "psx_cycles.h"
+#include "psx_guest_io.h"
 #include "psx_icache.h"
 #include "psx_memory.h"
 #include "pgxp.h"
@@ -1218,6 +1219,9 @@ uint32_t memory_get_bios_checksum(void) { return s_bios_checksum; }
 
 void memory_init(const char* bios_path) {
     psx_ram_apply_size_request();
+    /* A host pointer into the device window (decompiled C, psx_guest_io.h) must
+     * service the register, not fault: install before any guest code runs. */
+    (void)psx_guest_io_install();
     if (!ram) {
         ram = (uint8_t*)psx_map_fixed(PSX_RAM_BASE, RAM_SIZE);
         if (!ram) {

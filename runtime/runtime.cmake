@@ -361,6 +361,8 @@ set(PSXRECOMP_RUNTIME_SOURCES
     ${PSXRECOMP_ROOT}/runtime/src/local_mouse_policy.cpp
     ${PSXRECOMP_ROOT}/runtime/src/local_mouse_sdl.cpp
     ${PSXRECOMP_ROOT}/runtime/src/memory.c
+${PSXRECOMP_ROOT}/runtime/src/psx_guest_io.c
+${PSXRECOMP_ROOT}/runtime/src/psx_guest_yield.c
     ${PSXRECOMP_ROOT}/runtime/src/psx_ram_geometry.c
     ${PSXRECOMP_ROOT}/runtime/src/kernel_patch_ranges.c
     ${PSXRECOMP_ROOT}/runtime/src/guest_tty.c
