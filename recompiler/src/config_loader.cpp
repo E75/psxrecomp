@@ -419,6 +419,8 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
         }
         if (av.contains("override"))
             rt.assets.override_enabled = toml::find<bool>(av, "override");
+        if (av.contains("prepare_on_start"))
+            rt.assets.prepare_on_start = toml::find<bool>(av, "prepare_on_start");
     }
     if (cfg.contains("runtime")) {
         const toml::value& runtime = toml::find(cfg, "runtime");

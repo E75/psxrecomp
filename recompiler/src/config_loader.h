@@ -207,6 +207,11 @@ struct AssetsConfig {
     // directory holds a valid manifest.json.
     std::filesystem::path override_dir;
     bool                  override_enabled = true;
+    // In-exe asset preparation (docs/IN_EXE_ASSETS.md): on first start, build
+    // the raw STR extent from the user's disc and write
+    // assets/prepare_report.json. Only acts while an artefact is missing and
+    // never overwrites one; the HD pack / MODEL override stay Python-built.
+    bool                  prepare_on_start = true;
 };
 
 struct RuntimeConfig {

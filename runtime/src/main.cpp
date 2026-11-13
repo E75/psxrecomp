@@ -19,6 +19,7 @@
 #include "psx_interpreter.h"
 #include "cdrom.h"
 #include "asset_provider.h"
+#include "asset_prepare.h"
 #include "fntrace.h"
 #include "render_pass_projection.h"
 #include "text_xlate.h"
@@ -15493,6 +15494,7 @@ int main(int argc, char** argv) {
     const char* cli_window_title = nullptr;  /* label windows in a fleet */
     const char* cli_netplay_query = nullptr; /* --netplay-query <request> */
     const char* cli_memcard_dir = nullptr;   /* isolate writable state in a fleet */
+    bool        cli_prepare_assets = false;  /* --prepare-assets: run the in-exe asset step */
     std::vector<std::string> cli_path_arg_storage;
     cli_path_arg_storage.reserve((size_t)argc);
     auto is_cli_option = [](const char* arg) {
@@ -15535,6 +15537,7 @@ int main(int argc, char** argv) {
      *   --renderer <name>   override the renderer: software|opengl|vulkan
      *   --launcher          force the GUI launcher (overrides skip_launcher)
      *   --no-launcher       skip the GUI launcher (boot straight in)
+     *   --prepare-assets    run the in-exe asset step (raw STR + report)
      *   --headless          skip SDL window/audio; use TCP screenshots/state
      *   --hidden-window     full presenter in a never-shown window (TCP-driven
      *                       tests of interpolation / render passes)
@@ -15577,6 +15580,10 @@ int main(int argc, char** argv) {
             force_launcher = true;
         } else if (std::strcmp(argv[i], "--no-launcher") == 0) {
             force_no_launcher = true;
+        } else if (std::strcmp(argv[i], "--prepare-assets") == 0) {
+            /* Run the in-exe asset step even when [assets] prepare_on_start is
+             * false (docs/IN_EXE_ASSETS.md). Never overwrites an artefact. */
+            cli_prepare_assets = true;
         } else if (std::strcmp(argv[i], "--headless-opengl") == 0) {
             g_headless = 1;
             g_headless_opengl = 1;
@@ -15671,6 +15678,7 @@ int main(int argc, char** argv) {
     /* [assets] patched guest images (docs/ASSET_OVERRIDE.md). */
     std::string assets_override_dir;
     bool        assets_override_enabled = true;
+    bool        assets_prepare_on_start = true;
     bool multitap_enabled = true; /* [controller] multitap; 3+ seats offline */
     bool multitap_analog = true;  /* DualShock-on-tap hack; game.toml/settings */
     /* [controller] device routing (defaults: P1 keyboard/digital, P2 none). */
@@ -15848,6 +15856,7 @@ int main(int argc, char** argv) {
             assets_preload_exclude  = gc.runtime.assets.preload_exclude;
             assets_override_dir     = gc.runtime.assets.override_dir.string();
             assets_override_enabled = gc.runtime.assets.override_enabled;
+            assets_prepare_on_start = gc.runtime.assets.prepare_on_start;
             /* turbo_loads / offer_turbo_loads are deprecated and ignored. Load
              * acceleration is owned by the Mods catalog (Fast Loading / CD
              * Speed), which ships with every title and defaults off, so the
@@ -18403,6 +18412,24 @@ session_reboot:
     if (g_audio_spu_hq)
         std::fprintf(stdout, "psxrecomp: SPU float-shadow enabled (verified-enhancement)\n");
     spu_init();
+    /* In-exe asset preparation (docs/IN_EXE_ASSETS.md): with the disc already
+     * resolved, build the raw STR extent + report while an enhancement
+     * artefact is missing. Existing artefacts are never overwritten and a
+     * missing/invalid image is not fatal: the game boots exactly as before. */
+    if (assets_prepare_on_start || cli_prepare_assets) {
+        const std::filesystem::path ap_cfg_dir =
+            game_config_path ? std::filesystem::path(game_config_path).parent_path()
+                             : std::filesystem::path(".");
+        const std::string ap_root = ap_cfg_dir.string();
+        AssetPrepareOptions ap_opt{};
+        ap_opt.disc_path = disc_path_str.empty() ? nullptr : disc_path_str.c_str();
+        ap_opt.root_dir  = ap_root.c_str();
+        ap_opt.force     = cli_prepare_assets ? 1 : 0;
+        AssetPrepareResult ap_res{};
+        if (asset_prepare_run(&ap_opt, &ap_res) < 0)
+            std::fprintf(stdout, "psxrecomp: assets: preparation skipped (%s)\n",
+                         asset_prepare_last_error());
+    }
     /* Native asset provider: serve data sectors from the extracted tree
      * (runs/iso_full + manifest.json) before cdrom_init() mounts the image, so
      * the very first boot sectors already come from RAM. A missing manifest or
