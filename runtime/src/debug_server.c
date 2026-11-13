@@ -50,6 +50,7 @@
 #include "memcard.h"
 #include "spu.h"
 #include "audio_trace.h"
+#include "audio_native.h"
 #include "mdec.h"
 #include "interrupts.h"
 #include "psx_cycles.h"
@@ -7212,6 +7213,18 @@ static void handle_audio_stats(int id, const char *json)
              (unsigned long long)out_underruns,
              (unsigned long long)overflow_drops,
              correction);
+}
+
+/* audio_state: where each CD audio stream comes from (docs/AUDIO.md) — the
+ * native WAV / raw extent or the emulated CD-XA / CD-DA path, with sample
+ * rate, channels, frames pushed and underruns. Read-only; reports "none" when
+ * no stream has run yet and is safe to poll at any time. */
+static void handle_audio_state(int id, const char *json)
+{
+    (void)json;
+    char body[2048];
+    audio_native_state_json(body, (int)sizeof body);
+    send_fmt("{\"id\":%d,\"ok\":true,%s}", id, body);
 }
 
 static void handle_audio_wav(int id, const char *json)
@@ -15789,6 +15802,7 @@ static const CmdEntry s_commands[] = {
     { "spu_events",        handle_spu_events },
     { "spu_events_reset",  handle_spu_events_reset },
     { "audio_stats",       handle_audio_stats },
+    { "audio_state",       handle_audio_state },
     { "audio_wav",         handle_audio_wav },
     { "audio_events",      handle_audio_events },
     { "card_buffer_dump",  handle_card_buffer_dump },

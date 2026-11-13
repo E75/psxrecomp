@@ -104,10 +104,13 @@ int iso_cdda_native_scan(void* handle) {
     audio_native_cdda_note_disc_audio(disc_audio);
 
     /* The disc's only streamed XA lives inside the one movie; its decoded WAV
-     * is an independent stream from the CD-DA tracks above. */
+     * is an independent stream from the CD-DA tracks above. The same extent is
+     * the one a raw-sector dump can serve without the image. */
     PS1::ISOFileEntry str;
-    if (reader->FindFile("MOVIE/WE2002.STR", str))
+    if (reader->FindFile("MOVIE/WE2002.STR", str)) {
         audio_native_xa_configure(str.lba, str.size / 2048u, "MOVIE/WE2002.STR");
+        audio_native_str_raw_configure(str.lba, str.size / 2048u);
+    }
 
     if (disc_audio > 0) { audio_native_state_flush(); return 0; }
 
@@ -161,6 +164,13 @@ int iso_read_sector(void* handle, uint32_t lba, uint8_t* buffer, int size) {
 
 int iso_read_raw_sector(void* handle, uint32_t lba, uint8_t* buffer, int size) {
     if (!handle || !buffer || size < 2352) return 0;
+    /* Raw STR extent (audio_native.c): the movie's Form-2 sectors, video and
+     * interleaved XA audio together, from assets/str instead of the image.
+     * Absent file => the disc path below, unchanged. */
+    if (audio_native_str_raw_read(lba, buffer, size)) {
+        mod_runtime_patch_disc_sector(lba, 1, buffer, 2352);
+        return 1;
+    }
     auto* reader = static_cast<PS1::ISOReader*>(handle);
     if (!mod_runtime_read_disc_extent(lba, 1, buffer, size) && !reader->ReadRawSector(lba, buffer)) return 0;
     mod_runtime_patch_disc_sector(lba, 1, buffer, 2352);

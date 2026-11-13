@@ -76,9 +76,22 @@ void audio_native_xa_configure(uint32_t str_lba, uint32_t str_sectors,
 int audio_native_xa_fill(const int16_t* emulated, int frames, int16_t* out,
                          int stream_active, int delivered_lba);
 
+/* ---- Raw STR sectors (called from iso_reader_c.cpp) ------------------- */
+/* A streamed STR's sectors are Mode 2 Form 2 (2324 payload bytes), which the
+ * extracted 2048-byte tree cannot carry, so its XA audio cannot decode from
+ * there. `<str_raw>/WE2002.STR.raw` (see tools/assets/extract_str_raw.py)
+ * holds the extent's raw 2352-byte sectors, video and interleaved audio
+ * together, behind a 32-byte header: "PSTR", version 1, start LBA, sector
+ * count, sector size 2352, 12 reserved bytes. Absent or invalid file => the
+ * disc image path, exactly as before. */
+void audio_native_str_raw_configure(uint32_t start_lba, uint32_t sectors);
+/* 1 = the sector was served from the raw file. */
+int  audio_native_str_raw_read(uint32_t lba, uint8_t* out, int size);
+
 /* ---- State ------------------------------------------------------------ */
-/* {"cdda":{source,file,rate,channels,frames,underruns,track,tracks},
- *  "xa":{source,file,rate,channels,frames,underruns,active,str_lba}} */
+/* {"cdda_dir":..,"cdda":{source,file,rate,channels,frames,underruns,track,
+ *  tracks,disc_audio_tracks},"xa":{source,file,rate,out_rate,channels,frames,
+ *  underruns,active,str_lba},"str_raw":{source,file,sectors,served}} */
 int  audio_native_state_json(char* out, int cap);
 /* Rewrite <exe_dir>/audio_state.json (transitions + every ~2 s of stream). */
 void audio_native_state_flush(void);

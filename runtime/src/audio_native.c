@@ -115,14 +115,15 @@ static int find_config(char* out, size_t cap) {
     return 0;
 }
 
-/* [audio] cdda_dir = "..." — read here rather than through config_loader.h so
- * this module stays usable by the standalone unit tests. */
-static int config_cdda_dir(char* out, size_t cap) {
+/* One string key from the [audio] block — read here rather than through
+ * config_loader.h so this module stays usable by the standalone unit tests. */
+static int config_audio_key(const char* key, char* out, size_t cap) {
     char cfg[CFG_PATH_MAX];
     if (!find_config(cfg, sizeof(cfg))) return 0;
     FILE* f = fopen(cfg, "rb");
     if (!f) return 0;
 
+    const size_t key_len = strlen(key);
     char line[512];
     int in_audio = 0, got = 0;
     while (!got && fgets(line, sizeof(line), f)) {
@@ -131,7 +132,7 @@ static int config_cdda_dir(char* out, size_t cap) {
         if (*s == '#' || *s == '\r' || *s == '\n' || !*s) continue;
         if (*s == '[') { in_audio = strncmp(s, "[audio]", 7) == 0; continue; }
         if (!in_audio) continue;
-        if (strncmp(s, "cdda_dir", 8) != 0) continue;
+        if (strncmp(s, key, key_len) != 0) continue;
         char* eq = strchr(s, '=');
         if (!eq) continue;
         char* v = eq + 1;
@@ -269,6 +270,7 @@ static struct {
     int      inited;
     char     dir[CFG_PATH_MAX];
     char     dir_source[24];   /* "env" | "config" | "default" */
+    char     str_dir[CFG_PATH_MAX];
 
     /* CD-DA */
     AudioNativeCddaTrack tracks[CDDA_MAX_TRACKS];
@@ -286,6 +288,16 @@ static struct {
     int       xa_edge;
     uint64_t  xa_pos;          /* native frames consumed */
     uint64_t  xa_underruns;
+
+    /* Raw STR sectors */
+    FILE*     raw_f;
+    uint32_t  raw_data_off;
+    uint32_t  raw_start_lba;
+    uint32_t  raw_sectors;
+    int       raw_tried;       /* open attempted */
+    int       raw_on;
+    uint64_t  raw_served;
+    char      raw_name[WAV_NAME_MAX];
 
     AudioStreamState cdda;
     AudioStreamState xastream;
@@ -311,35 +323,40 @@ static void iso_stem(const char* iso_path, char* out, size_t cap) {
     out[o] = '\0';
 }
 
+/* First existing candidate for a configured path: as given (cwd), then the exe
+ * directory, then its parent. Falls back to the configured string so the state
+ * report still shows where the files belong. */
+static void resolve_path(const char* configured, char* out, size_t cap) {
+    char exe[CFG_PATH_MAX], cand[CFG_PATH_MAX];
+    snprintf(out, cap, "%s", configured);
+    if (!configured[0] || path_is_dir(configured) || path_is_absolute(configured)) return;
+    exe_dir(exe, sizeof(exe));
+    if (!exe[0]) return;
+    join_path(cand, sizeof(cand), exe, configured);
+    if (path_is_dir(cand)) { snprintf(out, cap, "%s", cand); return; }
+    join_path(cand, sizeof(cand), exe, "../");
+    strncat(cand, configured, sizeof(cand) - strlen(cand) - 1);
+    if (path_is_dir(cand)) snprintf(out, cap, "%s", cand);
+}
+
 static void resolve_dir(void) {
     char configured[CFG_PATH_MAX] = "";
-    char exe[CFG_PATH_MAX], cand[CFG_PATH_MAX];
-    exe_dir(exe, sizeof(exe));
 
     const char* env = getenv("PSX_CDDA_DIR");
     if (env && *env) {
         snprintf(configured, sizeof(configured), "%s", env);
         snprintf(g.dir_source, sizeof(g.dir_source), "env");
-    } else if (config_cdda_dir(configured, sizeof(configured))) {
+    } else if (config_audio_key("cdda_dir", configured, sizeof(configured))) {
         snprintf(g.dir_source, sizeof(g.dir_source), "config");
     } else {
         snprintf(configured, sizeof(configured), "assets/audio");
         snprintf(g.dir_source, sizeof(g.dir_source), "default");
     }
+    resolve_path(configured, g.dir, sizeof(g.dir));
 
-    /* First candidate that exists as a directory wins; otherwise keep the
-     * configured string so the state report still shows where to put files. */
-    snprintf(g.dir, sizeof(g.dir), "%s", configured);
-    if (path_is_dir(configured)) return;
-    if (!path_is_absolute(configured)) {
-        if (exe[0]) {
-            join_path(cand, sizeof(cand), exe, configured);
-            if (path_is_dir(cand)) { snprintf(g.dir, sizeof(g.dir), "%s", cand); return; }
-            join_path(cand, sizeof(cand), exe, "../");
-            strncat(cand, configured, sizeof(cand) - strlen(cand) - 1);
-            if (path_is_dir(cand)) { snprintf(g.dir, sizeof(g.dir), "%s", cand); return; }
-        }
-    }
+    if (!config_audio_key("str_raw", configured, sizeof(configured)))
+        snprintf(configured, sizeof(configured), "assets/str");
+    resolve_path(configured, g.str_dir, sizeof(g.str_dir));
 }
 
 void audio_native_init(void) {
@@ -558,6 +575,78 @@ int audio_native_xa_fill(const int16_t* emulated, int frames, int16_t* out,
     return 1;
 }
 
+/* ------------------------------------------------------------- raw STR */
+
+#define STR_RAW_MAGIC   "PSTR"
+#define STR_RAW_VERSION 1u
+#define STR_RAW_HEADER  32u
+#define STR_RAW_SECTOR  2352u
+
+/* Open the raw extent once. The header carries the LBA range, so the file also
+ * works when no image is mounted to walk the ISO9660 tree. */
+static void raw_open(void) {
+    if (g.raw_tried) return;
+    g.raw_tried = 1;
+
+    char path[CFG_PATH_MAX];
+    size_t n = strlen(g.str_dir);
+    if (n > 4 && strcmp(g.str_dir + n - 4, ".raw") == 0) {
+        snprintf(path, sizeof(path), "%s", g.str_dir);
+    } else {
+        join_path(path, sizeof(path), g.str_dir, "");
+        snprintf(path + strlen(path), sizeof(path) - strlen(path), "WE2002.STR.raw");
+    }
+
+    FILE* f = fopen(path, "rb");
+    if (!f) return;
+    uint8_t hdr[STR_RAW_HEADER];
+    if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr) ||
+        memcmp(hdr, STR_RAW_MAGIC, 4) != 0) {
+        fclose(f);
+        return;
+    }
+    const uint32_t version = rd32(hdr + 4);
+    const uint32_t start   = rd32(hdr + 8);
+    const uint32_t sectors = rd32(hdr + 12);
+    const uint32_t ssize   = rd32(hdr + 16);
+    if (version != STR_RAW_VERSION || ssize != STR_RAW_SECTOR || sectors == 0) {
+        fclose(f);
+        return;
+    }
+    g.raw_f = f;
+    g.raw_data_off = STR_RAW_HEADER;
+    g.raw_start_lba = start;
+    g.raw_sectors = sectors;
+    g.raw_on = 1;
+    const char* base = path;
+    for (const char* p = path; *p; ++p) if (*p == '/' || *p == '\\') base = p + 1;
+    snprintf(g.raw_name, sizeof(g.raw_name), "%s", base);
+    printf("audio: STR raw sectors from %s (%u sectors at LBA %u)\n",
+           path, (unsigned)sectors, (unsigned)start);
+}
+
+void audio_native_str_raw_configure(uint32_t start_lba, uint32_t sectors) {
+    audio_native_init();
+    raw_open();
+    if (g.raw_on) return;   /* the file's own header is authoritative */
+    g.raw_start_lba = start_lba;
+    g.raw_sectors = sectors;
+}
+
+int audio_native_str_raw_read(uint32_t lba, uint8_t* out, int size) {
+    if (!out || size < (int)STR_RAW_SECTOR) return 0;
+    if (!g.inited) audio_native_init();
+    if (!g.raw_tried) raw_open();
+    if (!g.raw_on) return 0;
+    if (lba < g.raw_start_lba || lba - g.raw_start_lba >= g.raw_sectors) return 0;
+    const long off = (long)g.raw_data_off +
+        (long)((uint64_t)(lba - g.raw_start_lba) * STR_RAW_SECTOR);
+    if (fseek(g.raw_f, off, SEEK_SET) != 0) return 0;
+    if (fread(out, 1, STR_RAW_SECTOR, g.raw_f) != STR_RAW_SECTOR) return 0;
+    g.raw_served++;
+    return 1;
+}
+
 /* -------------------------------------------------------------- state */
 
 int audio_native_state_json(char* out, int cap) {
@@ -573,7 +662,9 @@ int audio_native_state_json(char* out, int cap) {
         "\"tracks\":%d,\"disc_audio_tracks\":%d},"
         "\"xa\":{\"source\":\"%s\",\"file\":\"%s\",\"rate\":%d,"
         "\"out_rate\":44100,\"channels\":%d,\"frames\":%llu,"
-        "\"underruns\":%llu,\"active\":%d,\"str_lba\":%u}}",
+        "\"underruns\":%llu,\"active\":%d,\"str_lba\":%u},"
+        "\"str_raw\":{\"source\":\"%s\",\"file\":\"%s\",\"dir\":\"%s\","
+        "\"start_lba\":%u,\"sectors\":%u,\"served\":%llu}}",
         g.dir, g.dir_source,
         cdda_src, g.native_on ? g.cdda.file : "",
         g.native_on ? 44100 : 0, g.native_on ? 2 : 0,
@@ -585,12 +676,15 @@ int audio_native_state_json(char* out, int cap) {
         g.xa_on ? g.xa.rate : 0, g.xa_on ? g.xastream.channels : 0,
         (unsigned long long)g.xastream.frames,
         (unsigned long long)g.xastream.underruns,
-        g.xa_edge, g.str_lba);
+        g.xa_edge, g.str_lba,
+        g.raw_on ? "native" : "disc", g.raw_on ? g.raw_name : "",
+        g.str_dir, g.raw_start_lba, g.raw_sectors,
+        (unsigned long long)g.raw_served);
 }
 
 void audio_native_state_flush(void) {
     if (!g.inited) return;
-    char json[1024], path[CFG_PATH_MAX], exe[CFG_PATH_MAX];
+    char json[1536], path[CFG_PATH_MAX], exe[CFG_PATH_MAX];
     audio_native_state_json(json, (int)sizeof(json));
     exe_dir(exe, sizeof(exe));
     join_path(path, sizeof(path), exe, "audio_state.json");
