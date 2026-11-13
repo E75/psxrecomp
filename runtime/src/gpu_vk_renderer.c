@@ -85,6 +85,7 @@ const GpuRenderBackend *vk_backend_get(void) { return 0; }
 #endif
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
+#include "png_write.h"        /* png_write_rgb — present_shot readback */
 #include "vk_shaders_spv.h"   /* generated: spv_geo_vert/frag, spv_geo_tex_vert/frag,
                                *            spv_pack_comp, spv_blit_vert/frag */
 
@@ -1717,6 +1718,84 @@ static void letterbox(int sw, int sh, int aw, int ah, VkOffset3D off[2]) {
     off[1].x = x + tw;  off[1].y = y + th;  off[1].z = 1;
 }
 
+/* ---- present shot (diagnostic readback) --------------------------------- */
+/* present_shot under Vulkan. The swapchain present has no readback hook, so the
+ * frame is REBUILT on the CPU: the displayed region is decoded from the (just
+ * synced) CPU VRAM mirror and scaled into the same letterboxed rect the present
+ * blit uses, so the PNG carries the presented aspect. Called from every present
+ * path; it claims a staged request only, so a normal frame never pays for a
+ * readback (the rule that keeps this diagnostic-only).
+ *
+ * `argb` non-NULL = the already-composed CPU frame (24-bit FMV present); passed
+ * as-is because the packed RGB888 bytes have no VRAM coordinates to decode from.
+ *
+ * Gaps vs the GL capture: the OSD toast/rewind/savestate overlays (consumed by
+ * vk_osd_blit in the same command buffer) and the native-wide margins (they
+ * live only on the GPU wide surface) are not in the mirror, and the pixels are
+ * native VRAM resolution rather than the internal (SSAA) resolution. */
+static void shot_serve(int dx, int dy, int dw, int dh,
+                       const uint32_t *argb, int aspect_num, int aspect_den)
+{
+    extern int  present_shot_take(char *out, int n);
+    extern void present_shot_done(int ok);
+    char path[512];
+    if (!present_shot_take(path, (int)sizeof(path))) return;
+
+    /* 15-bit frames present from the GPU VRAM image, so pull it down first.
+     * NEVER sync on 24-bit: the readback clobbers the packed RGB888 bytes the
+     * CPU present just staged (same rule as main.cpp's depth24 present). */
+    if (!argb) vk_renderer_sync_cpu();
+
+    int cw = (int)s_sc_extent.width, ch = (int)s_sc_extent.height;
+    if (cw <= 0 || ch <= 0) { cw = dw > 0 ? dw : 1; ch = dh > 0 ? dh : 1; }
+    uint8_t *rgb = (uint8_t *)calloc((size_t)cw * (size_t)ch * 3u, 1u);  /* black margins */
+    if (!rgb) { present_shot_done(0); return; }
+
+    VkOffset3D dst[2];
+    letterbox(cw, ch, aspect_num > 0 ? aspect_num : 4,
+                      aspect_den > 0 ? aspect_den : 3, dst);
+    /* Short GP1(07h) / FMV bands letterbox inside that rect, as the presents do. */
+    if (dh > 0 && dh < 240) {
+        int box_h = dst[1].y - dst[0].y;
+        int content_h = (box_h * dh) / 240;
+        if (content_h < 1) content_h = 1;
+        dst[0].y += (box_h - content_h) / 2;
+        dst[1].y = dst[0].y + content_h;
+    }
+
+    GpuDisplayInfo di;
+    memset(&di, 0, sizeof di);
+    di.display_x = (uint32_t)(dx < 0 ? 0 : dx);
+    di.display_y = (uint32_t)(dy < 0 ? 0 : dy);
+
+    int tw = dst[1].x - dst[0].x, th = dst[1].y - dst[0].y;
+    if (tw > 0 && th > 0 && dw > 0 && dh > 0) {
+        for (int y = 0; y < th; y++) {
+            int cy = dst[0].y + y;
+            if (cy < 0 || cy >= ch) continue;
+            uint32_t sy = (uint32_t)((int64_t)y * dh / th);
+            uint8_t *row = rgb + ((size_t)cy * (size_t)cw + (size_t)dst[0].x) * 3u;
+            for (int x = 0; x < tw; x++, row += 3) {
+                uint32_t sx = (uint32_t)((int64_t)x * dw / tw);
+                if (argb) {
+                    uint32_t p = argb[(size_t)sy * (size_t)dw + sx];
+                    row[0] = (uint8_t)(p >> 16);
+                    row[1] = (uint8_t)(p >> 8);
+                    row[2] = (uint8_t)p;
+                } else {
+                    gpu_display_pixel_rgb(&di, sx, sy, &row[0], &row[1], &row[2]);
+                }
+            }
+        }
+    }
+
+    int wrote = 0;
+    FILE *pf = fopen(path, "wb");
+    if (pf) { wrote = png_write_rgb(pf, rgb, (uint32_t)cw, (uint32_t)ch); fclose(pf); }
+    free(rgb);
+    present_shot_done(wrote);
+}
+
 /* ---- opaque swapchain present pass --------------------------------------- */
 /* The plain present path blitted the VRAM image into the swapchain with
  * vkCmdBlitImage, which copies alpha too. VRAM alpha is the PSX mask/STP bit
@@ -1935,6 +2014,10 @@ int vk_renderer_present_vram(int disp_x, int disp_y, int w, int h,
     if (!s_ctx_ok) return 0;
     flush_cpu_upload();   /* displayed VRAM may include pending CPU writes */
     flush_tex_batch(); flush_geometry(); gpu_sync();   /* drain all draws; VRAM in TRANSFER_SRC */
+    /* present_shot: serve a staged capture from the VRAM this blit is about to
+     * read, before the swap (see shot_serve). */
+    shot_serve(disp_x, disp_y, w, h, NULL,
+               force_4_3 ? 4 : s_aspect_num, force_4_3 ? 3 : s_aspect_den);
     VkImage sc; VkCommandBuffer cb; uint32_t idx, fr;
     if (!acquire_present(&sc, &cb, &idx, &fr)) return 1; /* frame skipped/recreated */
 
@@ -1986,6 +2069,9 @@ int vk_renderer_present_vram(int disp_x, int disp_y, int w, int h,
 void vk_renderer_present_blank(void) {
     if (!s_ctx_ok) return;
     flush_tex_batch(); flush_geometry(); gpu_sync();
+    /* present_shot: display disabled — claim the request so the client's poll
+     * terminates, with the black frame that is actually on screen. */
+    shot_serve(0, 0, 0, 0, NULL, s_aspect_num, s_aspect_den);
     VkImage sc; VkCommandBuffer cb; uint32_t idx, fr;
     if (!acquire_present(&sc, &cb, &idx, &fr)) return;
     img_barrier(cb, sc, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -2033,6 +2119,9 @@ void vk_renderer_present_cpu(const uint32_t *pixels, int src_w, int src_h,
     (void)force_4_3;
     if (!s_ctx_ok || !pixels || src_w <= 0 || src_h <= 0) { vk_renderer_present_blank(); return; }
     flush_tex_batch(); flush_geometry(); gpu_sync();
+    /* present_shot: the composed CPU frame is already here — no VRAM decode. */
+    shot_serve(0, 0, src_w, src_h, pixels,
+               force_4_3 ? 4 : s_aspect_num, force_4_3 ? 3 : s_aspect_den);
 
     if (s_cpres_w != src_w || s_cpres_h != src_h) {
         p_vkQueueWaitIdle(s_queue);      /* old resources may be in flight */
@@ -2115,6 +2204,10 @@ int vk_renderer_present_wide(int disp_x, int disp_y, int disp_h, int linear) {
     int S = s_scale;
     int native_w = s_wide_w - 2 * s_wide_offset;
     if (native_w <= 0) native_w = s_wide_w;
+    /* present_shot: the wide margins exist only on the GPU surface, so capture
+     * the canonical display span the VRAM mirror holds (4:3 inside the wide
+     * window) — narrow, never black. */
+    shot_serve(disp_x, disp_y, native_w, disp_h, NULL, 4, 3);
     VkOffset3D dst[2];
     letterbox((int)s_sc_extent.width, (int)s_sc_extent.height,
               4 * s_wide_w, 3 * native_w, dst);

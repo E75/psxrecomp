@@ -2286,7 +2286,9 @@ static bool          g_vk_active = false;    /* Vulkan context live -> VK presen
  *
  * Staged here and fulfilled by whichever backend owns the present: the SDL
  * software path reads back via SDL_RenderReadPixels, the GL path via
- * glReadPixels before SwapWindow (gpu_gl_renderer.c).
+ * glReadPixels before SwapWindow (gpu_gl_renderer.c), the Vulkan path by
+ * recomposing the displayed region from the CPU VRAM mirror
+ * (shot_serve in gpu_vk_renderer.c).
  *
  * THREADING: the request is written from a debug-server command handler on the
  * emu thread (debug_server_poll safe point), but GL fulfilment can run on the
@@ -2331,11 +2333,8 @@ extern "C" int present_shot_request(const char *path)
 {
     if (!path || !*path) return 0;
     if (g_headless)  return 0;   /* no present surface to read back */
-    /* Vulkan owns its own swapchain present (see the g_vk_active branch in
-     * sdl_vblank_present_body) and has no readback hook, so nothing would ever
-     * fulfil the request. Refuse honestly instead of accepting a shot that can
-     * never complete — CLAUDE.md rule 15. */
-    if (g_vk_active) return 0;
+    /* Vulkan has no swapchain readback, so its present paths rebuild the frame
+     * from the CPU VRAM mirror instead (shot_serve in gpu_vk_renderer.c). */
     {
         std::lock_guard<std::mutex> lk(s_present_shot_mtx);
         std::snprintf(s_present_shot_path, sizeof(s_present_shot_path), "%s", path);

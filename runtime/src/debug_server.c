@@ -10356,9 +10356,9 @@ static void handle_screenshot_wide_hires(int id, const char *json)
  * next present. Sample `present_shot_seq` before staging and poll it until the
  * counter moves; `wrote` in that reply says whether a file actually landed.
  *
- * Refused up front on headless (no present surface) and on the Vulkan backend,
- * which presents through its own swapchain and has no readback hook — accepting
- * there would leave a request nothing can ever fulfil. */
+ * Refused up front on headless (no present surface). The Vulkan backend has no
+ * swapchain readback either, but fulfils the request by rebuilding the frame
+ * from the CPU VRAM mirror (shot_serve in gpu_vk_renderer.c). */
 static void handle_present_shot(int id, const char *json)
 {
     extern int present_shot_request(const char *path);
@@ -10368,8 +10368,7 @@ static void handle_present_shot(int id, const char *json)
         strncpy(path, "psx_present_shot.png", sizeof(path) - 1);
     path[sizeof(path) - 1] = '\0';
     if (!present_shot_request(path)) {
-        send_err(id, "present_shot unavailable (headless, or the Vulkan backend "
-                     "which has no present readback)");
+        send_err(id, "present_shot unavailable (headless: no present surface)");
         return;
     }
     send_fmt("{\"id\":%d,\"ok\":true,\"path\":\"%s\",\"staged\":true,\"seq\":%d}",
