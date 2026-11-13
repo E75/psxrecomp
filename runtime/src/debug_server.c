@@ -15304,6 +15304,20 @@ static void handle_vk_frame_perf(int id, const char *json)
     send_fmt("{\"id\":%d,\"ok\":true,\"vk_frame_perf\":%s}", id, buf);
 }
 
+/* "gl_frame_perf": the OpenGL twin of vk_frame_perf (gpu_gl_renderer.c
+ * gl_frame_perf_json). Identical JSON keys - backend, scale, gpu_ts, target,
+ * all{...}, frames[] with cpu_ms/scene_gpu_ms/present_gpu_ms/gpu/draws - so
+ * tools/we/perf.py frame and the acceptance harness measure both backends the
+ * same way. arg count=N (default 240, ring holds 256). */
+static void handle_gl_frame_perf(int id, const char *json)
+{
+    extern int gl_frame_perf_json(char *out, int cap, int count);
+    int count = json_get_int(json, "count", 240);
+    static char buf[98304];
+    gl_frame_perf_json(buf, (int)sizeof(buf), count);
+    send_fmt("{\"id\":%d,\"ok\":true,\"gl_frame_perf\":%s}", id, buf);
+}
+
 static void handle_lockstep(int id, const char *json) {
     /* #2 lockstep comparator. {"lo":N,"hi":M} arms the frame window; the reply
      * reports the first compiled-vs-interp block divergence (if any) so far. */
@@ -15755,6 +15769,7 @@ static const CmdEntry s_commands[] = {
     { "nclip_stats",       handle_nclip_stats },
     { "frame_perf",        handle_frame_perf },
     { "vk_frame_perf",     handle_vk_frame_perf },
+    { "gl_frame_perf",     handle_gl_frame_perf },
     { "gl_ws_ablate",      handle_gl_ws_ablate },
     { "gl_interp",         handle_gl_interp },
     { "render_pass_stats", handle_render_pass_stats },

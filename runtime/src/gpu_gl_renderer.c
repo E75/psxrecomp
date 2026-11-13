@@ -1136,6 +1136,21 @@ static int    s_hold_tw = 0, s_hold_th = 0; /* texture size in texels */
 static int    s_hold_force_4_3 = 0;
 static int    s_hold_linear = 0;
 
+/* Only two callers ever ask for hold-last: the netplay resim tick and the
+ * rewind pause loop. Capturing unconditionally meant a full-drawable copy
+ * (33 MB at 4K) plus its implicit back-buffer sync on EVERY present, for an
+ * image nothing read. Capture while a consumer exists; otherwise
+ * gl_renderer_present_hold_last re-presents the live VRAM band (the guest is
+ * frozen when it is called, so VRAM still holds the frame).
+ * Native-wide surfaces are the exception: a canonical band present cannot
+ * reproduce the wide image, so keep the capture whenever one exists. */
+static int hold_needed(void) {
+    extern int psx_netplay_active(void);
+    if (psx_netplay_active() || psx_rewind_is_open()) return 1;
+    for (int i = 0; i < WIDE_MAX_SURF; i++) if (s_wide_fbo[i]) return 1;
+    return 0;
+}
+
 /* Post-load freeze probe (main.cpp): accumulate skip/swap/dirty marks. */
 static uint64_t s_probe_skip = 0;
 static uint64_t s_probe_swap = 0;
@@ -6451,6 +6466,77 @@ int gl_renderer_perf_aggregate(int wide_filter, double out[18]) {
     return n;
 }
 
+/* "gl_frame_perf": the OpenGL twin of gpu_vk_renderer.c's vk_frame_perf_json.
+ * Same JSON shape, so tools/we/perf.py frame (and the acceptance harness) print
+ * p50/p95/max from the same fields for both backends. Samples come from the
+ * frame_perf ring (two GL_TIME_ELAPSED queries per frame, read GLPERF_NBUF
+ * frames late), so the query itself never blocks on the GPU. */
+static int gfp_cmp(const void *a, const void *b) {
+    double x = *(const double *)a, y = *(const double *)b;
+    return x < y ? -1 : (x > y ? 1 : 0);
+}
+
+int gl_frame_perf_json(char *out, int cap, int count) {
+    GL_RT_SYNC("gl_frame_perf");
+    if (count <= 0) count = 240;
+    int navail = (int)(s_pf_ring_seq < (uint64_t)GLPERF_RING ? s_pf_ring_seq : GLPERF_RING);
+    if (count < navail) navail = count;
+    static double cpu_s[GLPERF_RING], sc_s[GLPERF_RING], pr_s[GLPERF_RING];
+    double cpu_sum = 0, sc_sum = 0, pr_sum = 0, dr_sum = 0;
+    uint64_t start = s_pf_ring_seq - (uint64_t)navail;
+    for (int i = 0; i < navail; i++) {
+        const GlPerfSample *s = &s_pf_ring[(start + i) % GLPERF_RING];
+        cpu_s[i] = s->total_ms; cpu_sum += s->total_ms;
+        sc_s[i] = s->scene_gpu_ms; sc_sum += s->scene_gpu_ms;
+        pr_s[i] = s->present_gpu_ms; pr_sum += s->present_gpu_ms;
+        dr_sum += s->batches;
+    }
+    qsort(cpu_s, (size_t)navail, sizeof(double), gfp_cmp);
+    double p50 = navail ? cpu_s[(int)(navail * 0.50)] : 0.0;
+    double p95 = navail ? cpu_s[navail > 1 ? (int)(navail * 0.95) : 0] : 0.0;
+    double mx  = navail ? cpu_s[navail - 1] : 0.0;
+    double sc_max = 0, pr_max = 0;
+    for (int i = 0; i < navail; i++) {
+        if (sc_s[i] > sc_max) sc_max = sc_s[i];
+        if (pr_s[i] > pr_max) pr_max = pr_s[i];
+    }
+    /* Displayed rect of the last present, native units + the internal scale:
+     * the GL counterpart of the Vulkan windowed target (GL renders the whole
+     * VRAM at S; only this rect is drawn and presented). */
+    int tw = s_last_dw > 0 ? s_last_dw : 0, th = s_last_dh > 0 ? s_last_dh : 0;
+    double pct = (double)tw * (double)th / ((double)VRAM_W * (double)VRAM_H);
+    int o = snprintf(out, cap,
+        "{\"backend\":\"opengl\",\"samples\":%d,\"scale\":%d,\"gpu_ts\":%d,"
+        "\"target\":[%d,%d,%d,%d],\"target_pct\":%.3f,\"target_grows\":0,"
+        "\"all\":{\"cpu_ms_avg\":%.3f,\"cpu_ms_p50\":%.3f,\"cpu_ms_p95\":%.3f,"
+        "\"cpu_ms_max\":%.3f,\"scene_gpu_ms_avg\":%.3f,\"scene_gpu_ms_max\":%.3f,"
+        "\"present_gpu_ms_avg\":%.3f,\"present_gpu_ms_max\":%.3f,"
+        "\"allocs_avg\":0.0,\"submits_avg\":%.2f,\"draws_avg\":%.1f},"
+        "\"frames\":[",
+        navail, s_out_scale, s_pf_on ? 1 : 0,
+        s_last_dx, s_last_dy, tw, th, pct,
+        navail ? cpu_sum / navail : 0.0, p50, p95, mx,
+        navail ? sc_sum / navail : 0.0, sc_max,
+        navail ? pr_sum / navail : 0.0, pr_max,
+        navail ? 1.0 : 0.0, navail ? dr_sum / navail : 0.0);
+    for (int i = 0; i < navail; i++) {
+        const GlPerfSample *s = &s_pf_ring[(start + i) % GLPERF_RING];
+        o += snprintf(out + o, (size_t)(cap - o),
+            "%s{\"f\":%llu,\"cpu_ms\":%.3f,\"scene_gpu_ms\":%.3f,"
+            "\"present_gpu_ms\":%.3f,\"gpu\":%u,\"alloc\":0,\"submit\":1,"
+            "\"draws\":%u,\"geo\":%.0f,\"tex\":%u,\"blit\":0,\"sync\":0,"
+            "\"wait_us\":0,\"tgt\":[%d,%d,%d,%d],\"cover\":[%d,%d,%d,%d],\"oob\":0}",
+            i ? "," : "", (unsigned long long)s->frame, s->total_ms,
+            s->scene_gpu_ms, s->present_gpu_ms, s_pf_on ? 1u : 0u,
+            (unsigned)(s->batches > 0 ? s->batches : 0), s->prims,
+            (unsigned)(s->batches > 0 ? s->batches : 0),
+            s_last_dx, s_last_dy, tw, th, s_last_dx, s_last_dy, tw, th);
+        if (o >= cap - 320) break;
+    }
+    o += snprintf(out + o, (size_t)(cap - o), "]}");
+    return o;
+}
+
 /* Native-wide mirror ablation (perf attribution): see s_ws_ablate. */
 void gl_renderer_set_ws_ablate(int mode) {
     GL_RT_SYNC("set_ws_ablate"); s_ws_ablate = (mode >= 0 && mode <= 3) ? mode : 0; }
@@ -8201,7 +8287,14 @@ static void gl_draw_osd_image(const uint32_t *px, int ow, int oh,
  * PRESENT_IMAGE_RING_H-tall thumbnail FBO, and read it back through a pair of
  * pixel-pack buffers so the GPU->CPU copy of frame N completes while frame
  * N+1 is presented (no pipeline stall). Tagged with the frame number at issue
- * time. Absent buffer-mapping entry points disable only this feed. */
+ * time. Absent buffer-mapping entry points disable only this feed.
+ *
+ * COST: the source is the DEFAULT framebuffer, so the driver must finish every
+ * queued scene command and resolve the back buffer before the blit - a
+ * full-drawable read per present (3840x2160 RGBA8 = 33 MB at 4K) plus the
+ * implicit pipeline sync. Nothing in tools/ consumes the ring by default (the
+ * debug server commands are the only readers), so on OpenGL the feed is
+ * opt-in: PSX_PRESENT_IMAGE_RING=1. See docs/GL_PERF.md. */
 #ifndef PSX_NO_DEBUG_TOOLS
 #include "present_image_ring.h"
 extern uint64_t s_frame_count;
@@ -8213,9 +8306,22 @@ static int      s_pir_w, s_pir_pending[2], s_pir_pending_w[2], s_pir_idx;
 static uint32_t s_pir_frame[2];
 static int      s_pir_disabled;
 
+static int pir_wanted(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("PSX_PRESENT_IMAGE_RING");
+        v = (e && e[0] == '1') ? 1 : 0;
+        if (!v)
+            fprintf(stdout, "psxrecomp: GL presented-image ring off "
+                    "(PSX_PRESENT_IMAGE_RING=1 enables it; it costs a "
+                    "full-drawable copy per present)\n");
+    }
+    return v;
+}
+
 static void present_image_ring_capture_gl(void) {
     if (s_pir_disabled || !p_glMapBuffer || !p_glUnmapBuffer) return;
-    if (!present_image_ring_accepting()) return;
+    if (!pir_wanted() || !present_image_ring_accepting()) return;
     int ww = 0, wh = 0;
     SDL_GL_GetDrawableSize(s_win, &ww, &wh);
     const int tw = present_image_ring_thumb_w(ww, wh);
@@ -8851,12 +8957,25 @@ static void present_bezel(int ww, int wh, int lx, int ly, int lw, int lh) {
     p_glUseProgram(0);
 }
 
+/* Defined with the present path below. */
+static void present_vram_impl(int disp_x, int disp_y, int w, int h, int linear,
+                              int force_4_3);
+
 int gl_renderer_present_hold_last(void) {
     GL_RT_SYNC("present_hold_last");
     int ww = 0, wh = 0;
     int lx, ly, lw, lh;
-    if (!s_ctx || !s_win || s_hold_kind == HOLD_NONE || !s_hold_tex)
+    if (!s_ctx || !s_win)
         return 0;
+    if (s_hold_kind == HOLD_NONE || !s_hold_tex) {
+        /* No capture was taken (nothing asked for one at present time): the
+         * guest is frozen here, so the authoritative VRAM surface still holds
+         * the frame - present that band instead of a stale/blank image. */
+        if (s_last_present_path != GL_PRES_VRAM || s_last_dw < 1 || s_last_dh < 1)
+            return 0;
+        present_vram_impl(s_last_dx, s_last_dy, s_last_dw, s_last_dh, 1, 0);
+        return 1;
+    }
     SDL_GL_GetDrawableSize(s_win, &ww, &wh);
     if (ww < 1 || wh < 1)
         return 0;
@@ -9023,7 +9142,12 @@ static void present_vram_impl(int disp_x, int disp_y, int w, int h, int linear,
     pres_record(GL_PRES_VRAM, disp_x, disp_y, w, h, lx, ly, lw, lh);
     gpu_timeline_note(GTL_PRESENT, GTL_PATH_VRAM_FBO,
                       (uint32_t)disp_x | ((uint32_t)disp_y << 16));
-    hold_capture_drawable();
+    /* hold-last: only while a consumer exists, and from the source band (an
+     * FBO->texture blit) rather than the back buffer (see hold_needed). */
+    if (hold_needed())
+        hold_capture_native_fbo(src_fbo, src_x, disp_y, w, h, force_4_3, linear);
+    else
+        hold_invalidate();
     latency_ring_mark(LAT_SWAP_BEGIN);
     gl_swap_with_osd();
     latency_ring_mark(LAT_SWAP_END);
