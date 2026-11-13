@@ -2949,6 +2949,8 @@ uint32_t cdrom_read(uint32_t addr) {
     case 0x1F801802:
         if (data_fifo_ready()) {
             ret = RB_.data[RB_.pos++];
+            if (RB_.pos >= RB_.size && last_sector_lba >= 0)
+                asset_provider_note_read_complete((uint32_t)last_sector_lba);
         }
         break;
 
@@ -3121,6 +3123,11 @@ uint32_t cdrom_dma_read(void) {
         memcpy(&val, RB_.data + RB_.pos, 4);
         RB_.pos += 4;
         got = 1;
+        /* Completion hook for patched asset images: the guest has now been
+         * handed the whole sector, so an override tail can be written once
+         * (docs/ASSET_OVERRIDE.md). No-op when no override is loaded. */
+        if (RB_.pos >= RB_.size && last_sector_lba >= 0)
+            asset_provider_note_read_complete((uint32_t)last_sector_lba);
     }
     /* Per-word DMA data reads flood the CD trace ring (hundreds per sector) and
      * evict the command/IRQ/seek/play history we actually need to read the

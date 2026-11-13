@@ -412,6 +412,13 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
                  toml::find<std::vector<std::string>>(av, "preload_exclude"))
                 if (!e.empty()) rt.assets.preload_exclude.push_back(e);
         }
+        if (av.contains("override_dir")) {
+            const auto rel = toml::find<std::string>(av, "override_dir");
+            if (!rel.empty())
+                rt.assets.override_dir = PSXRecompV4::host_resolve(root, rel);
+        }
+        if (av.contains("override"))
+            rt.assets.override_enabled = toml::find<bool>(av, "override");
     }
     if (cfg.contains("runtime")) {
         const toml::value& runtime = toml::find(cfg, "runtime");

@@ -66,6 +66,51 @@ void asset_provider_get_stats(AssetProviderStats* out);
 /* Zero hits/misses/bytes (keeps the loaded manifest and the preload). */
 void asset_provider_reset_stats(void);
 
+/*
+ * Patched guest asset images (docs/ASSET_OVERRIDE.md).
+ *
+ * A directory holds manifest.json (format "we2002-asset-override/1") plus the
+ * patched files. Each entry names a guest destination, a byte budget and the
+ * retail disc read it replaces:
+ *
+ *   files[]: { path, guest_address, bytes, sha256,
+ *              max_bytes?, ceiling?,
+ *              retail_load?: { lba, sectors, dest } }
+ *
+ * Apply rule, two parts, no game-code change:
+ *   (a) sectors [lba, lba+sectors) are answered from the patched file's first
+ *       sectors*2048 bytes instead of the disc/tree (asset_provider_read_sector);
+ *   (b) the remaining tail is copied once into guest RAM at
+ *       guest_address + sectors*2048 when that last sector has been drained
+ *       (asset_provider_note_read_complete, called by cdrom.c).
+ *
+ * Every validation failure (missing manifest, bad sha256, size over
+ * max_bytes/ceiling, dest != guest_address) drops that entry and leaves the
+ * stock path byte-identical: the entry is never served and never written.
+ */
+typedef struct {
+    int      enabled;        /* override manifest loaded */
+    int      entries;        /* usable entries */
+    int      applied;        /* entries whose head+tail are in guest RAM */
+    int      skipped;        /* entries refused at load (see reason) */
+    uint64_t bytes;          /* patched bytes served or written */
+    char     override_dir[512];
+    char     reason[256];    /* first refusal reason (empty when none) */
+} AssetOverrideStats;
+
+/* Load <dir>/manifest.json. Returns 1 when at least one entry is usable.
+ * Independent of the extracted-tree provider above: an override may be the
+ * only source (it then supplies every sector of its retail read). */
+int  asset_provider_override_init(const char* dir);
+void asset_provider_override_shutdown(void);
+
+/* Called by cdrom.c when the sector buffer of `lba` is fully consumed, i.e.
+ * the guest has the retail read. Writes the pending tail once. Cheap when no
+ * override is loaded (single branch). */
+void asset_provider_note_read_complete(uint32_t lba);
+
+void asset_provider_get_override_stats(AssetOverrideStats* out);
+
 #ifdef __cplusplus
 }
 #endif

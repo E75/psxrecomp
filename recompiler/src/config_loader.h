@@ -202,6 +202,11 @@ struct AssetsConfig {
     int                   preload_max_mib = 400;
     // Path prefixes never held in RAM (the .RA/.DA streams stay on the ISO).
     std::vector<std::string> preload_exclude;
+    // Patched guest asset images (docs/ASSET_OVERRIDE.md). Empty => the
+    // runtime uses <config dir>/assets/override. Applied only when that
+    // directory holds a valid manifest.json.
+    std::filesystem::path override_dir;
+    bool                  override_enabled = true;
 };
 
 struct RuntimeConfig {

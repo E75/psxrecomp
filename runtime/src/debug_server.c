@@ -13879,6 +13879,24 @@ static void handle_asset_provider_stats(int id, const char *json)
                  ? (double)st.hits / (double)(st.hits + st.misses) : 0.0);
 }
 
+/* asset_override_stats: patched guest images from [assets] override_dir
+ * (docs/ASSET_OVERRIDE.md). `applied` counts entries whose head sectors and
+ * tail bytes are in guest RAM; `skipped` counts entries refused at load
+ * (size/sha256/ceiling), in which case `reason` says why and the disc data is
+ * untouched. bytes = patched bytes served or written. */
+static void handle_asset_override_stats(int id, const char *json)
+{
+    (void)json;
+    AssetOverrideStats st;
+    asset_provider_get_override_stats(&st);
+    send_fmt("{\"id\":%d,\"ok\":true,\"enabled\":%s,\"override_dir\":\"%s\","
+             "\"reason\":\"%s\",\"entries\":%d,\"applied\":%d,\"skipped\":%d,"
+             "\"bytes\":%llu}\n",
+             id, st.enabled ? "true" : "false", st.override_dir, st.reason,
+             st.entries, st.applied, st.skipped,
+             (unsigned long long)st.bytes);
+}
+
 /* cdrom_timing: passive L1.5 physical deadline -> buffer -> INT1 exposure
  * summary. `reset:1` starts a fresh measurement window without touching the
  * controller or its schedules. late_bins are exact, 1..64, 65..1024,
@@ -16001,6 +16019,7 @@ static const CmdEntry s_commands[] = {
     { "cd_overwrite",         handle_cd_overwrite },
     { "cdrom_bursts",         handle_cdrom_bursts },
     { "asset_provider_stats", handle_asset_provider_stats },
+    { "asset_override_stats", handle_asset_override_stats },
     { "cdrom_timing",         handle_cdrom_timing },
     { "turbo_loads",          handle_turbo_loads },
     { "turbo_audio_sink",     handle_turbo_audio_sink },

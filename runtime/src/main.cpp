@@ -15668,6 +15668,9 @@ int main(int argc, char** argv) {
     bool        assets_preload         = true;
     int         assets_preload_max_mib = 400;
     std::vector<std::string> assets_preload_exclude;
+    /* [assets] patched guest images (docs/ASSET_OVERRIDE.md). */
+    std::string assets_override_dir;
+    bool        assets_override_enabled = true;
     bool multitap_enabled = true; /* [controller] multitap; 3+ seats offline */
     bool multitap_analog = true;  /* DualShock-on-tap hack; game.toml/settings */
     /* [controller] device routing (defaults: P1 keyboard/digital, P2 none). */
@@ -15843,6 +15846,8 @@ int main(int argc, char** argv) {
             assets_preload          = gc.runtime.assets.preload;
             assets_preload_max_mib  = gc.runtime.assets.preload_max_mib;
             assets_preload_exclude  = gc.runtime.assets.preload_exclude;
+            assets_override_dir     = gc.runtime.assets.override_dir.string();
+            assets_override_enabled = gc.runtime.assets.override_enabled;
             /* turbo_loads / offer_turbo_loads are deprecated and ignored. Load
              * acceleration is owned by the Mods catalog (Fast Loading / CD
              * Speed), which ships with every title and defaults off, so the
@@ -18404,12 +18409,11 @@ session_reboot:
      * an uncovered LBA silently keeps the emulated drive path. */
     {
         std::string dir = assets_disc_dir;
-        if (dir.empty()) {
-            std::filesystem::path cfg_dir =
-                game_config_path ? std::filesystem::path(game_config_path).parent_path()
-                                 : std::filesystem::path(".");
+        std::filesystem::path cfg_dir =
+            game_config_path ? std::filesystem::path(game_config_path).parent_path()
+                             : std::filesystem::path(".");
+        if (dir.empty())
             dir = (cfg_dir / "runs" / "iso_full").string();
-        }
         std::vector<const char*> excl;
         excl.reserve(assets_preload_exclude.size());
         for (const auto& e : assets_preload_exclude) excl.push_back(e.c_str());
@@ -18429,6 +18433,27 @@ session_reboot:
                 "psxrecomp: asset provider off (%s: %s); disc reads use the "
                 "mounted image\n",
                 st.disc_dir[0] ? st.disc_dir : dir.c_str(), st.error);
+        }
+
+        /* Patched guest asset images (docs/ASSET_OVERRIDE.md). Default path is
+         * <config dir>/assets/override; enabled whenever it has a manifest. */
+        if (assets_override_enabled) {
+            std::string ov = assets_override_dir;
+            if (ov.empty()) ov = (cfg_dir / "assets" / "override").string();
+            AssetOverrideStats ost;
+            if (asset_provider_override_init(ov.c_str())) {
+                asset_provider_get_override_stats(&ost);
+                std::fprintf(stdout,
+                    "psxrecomp: asset override %s: %d file(s) loaded\n",
+                    ost.override_dir, ost.entries);
+            } else {
+                asset_provider_get_override_stats(&ost);
+                if (ost.skipped)
+                    std::fprintf(stdout,
+                        "psxrecomp: asset override %s: all %d entries refused "
+                        "(%s); disc data kept\n", ov.c_str(), ost.skipped,
+                        ost.reason);
+            }
         }
     }
     cdrom_init(disc_path_str.empty() ? NULL : disc_path_str.c_str());

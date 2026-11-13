@@ -25,6 +25,8 @@
  */
 
 #include "asset_provider.h"
+#include "psx_memory.h"
+#include "psx_sha256.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +36,16 @@
 #define AP_PATH_MAX       256
 #define AP_MANIFEST_MAX   (32u * 1024u * 1024u)
 #define AP_SECTOR         2048u
+
+#define AP_OVERRIDE_MAX        16
+#define AP_OVERRIDE_MANIFEST   (1u * 1024u * 1024u)
+#define AP_OVERRIDE_FILE_MAX   (16u * 1024u * 1024u)
+#define AP_OVERRIDE_NAME_MAX   64
+
+/* Host base of the guest RAM backing store (memory.c). Declared locally like
+ * overlay_loader.c does; the override tail is the only thing this module
+ * writes, and only at guest_address + sectors*2048. */
+extern uint8_t* memory_get_ram_ptr(void);
 
 typedef struct {
     uint32_t lba;
@@ -235,6 +247,398 @@ static void ap_preload(uint64_t budget, const char* const* excludes,
     }
 }
 
+/* ---- patched guest asset images --------------------------------------- */
+
+typedef struct {
+    char     name[AP_OVERRIDE_NAME_MAX];  /* file entry "path" (for the log) */
+    uint32_t guest_address;               /* absolute guest RAM address */
+    uint32_t size;                        /* file bytes */
+    uint32_t head_bytes;                  /* sectors*2048 served as sectors */
+    uint32_t head_sectors;                /* whole sectors of head_bytes */
+    uint32_t tail_bytes;                  /* size - head_bytes, written once */
+    uint32_t lba;                         /* retail_load.lba */
+    uint32_t sectors;                     /* retail_load.sectors */
+    uint8_t* data;                        /* whole patched file in RAM */
+    int      tail_pending;                /* tail not yet written to RAM */
+    int      applied;                     /* head served + tail written */
+    uint32_t head_served;                 /* sectors answered so far */
+} ApOverride;
+
+static ApOverride s_ov[AP_OVERRIDE_MAX];
+static int        s_ov_count;
+static int        s_ov_enabled;
+static int        s_ov_applied;
+static int        s_ov_skipped;
+static uint64_t   s_ov_bytes;
+static char       s_ov_dir[512];
+static char       s_ov_reason[256];
+
+static void ap_ov_skip(const char* name, const char* why) {
+    s_ov_skipped++;
+    if (!s_ov_reason[0])
+        snprintf(s_ov_reason, sizeof(s_ov_reason), "%s: %s",
+                 name && name[0] ? name : "manifest", why);
+    fprintf(stderr, "psxrecomp: asset override refused %s (%s); disc data kept\n",
+            name && name[0] ? name : "manifest", why);
+}
+
+void asset_provider_override_shutdown(void) {
+    for (int i = 0; i < s_ov_count; i++) free(s_ov[i].data);
+    memset(s_ov, 0, sizeof(s_ov));
+    s_ov_count = 0;
+    s_ov_enabled = 0;
+    s_ov_applied = 0;
+    s_ov_skipped = 0;
+    s_ov_bytes = 0;
+    s_ov_dir[0] = '\0';
+    s_ov_reason[0] = '\0';
+}
+
+/* ---- minimal JSON walking (override manifest only) -------------------- */
+
+static const char* ap_j_ws(const char* p, const char* end) {
+    while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r'))
+        p++;
+    return p;
+}
+
+/* `p` points at '{'; returns the matching '}' (or end when unterminated).
+ * String literals are skipped so braces inside text cannot confuse it. */
+static const char* ap_j_object_end(const char* p, const char* end) {
+    int depth = 0, in_str = 0, esc = 0;
+    for (; p < end; p++) {
+        const char c = *p;
+        if (in_str) {
+            if (esc) esc = 0;
+            else if (c == '\\') esc = 1;
+            else if (c == '"') in_str = 0;
+            continue;
+        }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '{') depth++;
+        else if (c == '}' && --depth == 0) return p;
+    }
+    return end;
+}
+
+/* Number after `key`, quoted or bare, decimal or 0x hex. Bounded by obj_end. */
+static int ap_j_u32(const char* obj, const char* obj_end, const char* key,
+                    uint32_t* out) {
+    const char* k = ap_find(obj, obj_end, key);
+    const char* c;
+    char* endp = NULL;
+    unsigned long v;
+    if (!k) return 0;
+    c = strchr(k, ':');
+    if (!c || c >= obj_end) return 0;
+    c = ap_j_ws(c + 1, obj_end);
+    if (c < obj_end && *c == '"') c = ap_j_ws(c + 1, obj_end);
+    if (c >= obj_end) return 0;
+    v = strtoul(c, &endp, 0); /* base 0 accepts 8100 and 0x8016E800 */
+    if (endp == c) return 0;
+    *out = (uint32_t)v;
+    return 1;
+}
+
+static int ap_j_str(const char* obj, const char* obj_end, const char* key,
+                    char* out, size_t cap) {
+    const char* k = ap_find(obj, obj_end, key);
+    const char* c;
+    const char* e;
+    size_t n;
+    if (!k) return 0;
+    c = strchr(k, ':');
+    if (!c || c >= obj_end) return 0;
+    c = strchr(c, '"');
+    if (!c || c >= obj_end) return 0;
+    c++;
+    e = strchr(c, '"');
+    if (!e || e >= obj_end) return 0;
+    n = (size_t)(e - c);
+    if (n == 0 || n >= cap) return 0;
+    memcpy(out, c, n);
+    out[n] = '\0';
+    return 1;
+}
+
+/* First '{' of the object/array value that follows `key`. */
+static const char* ap_j_value_object(const char* obj, const char* obj_end,
+                                     const char* key) {
+    const char* k = ap_find(obj, obj_end, key);
+    const char* c;
+    if (!k) return NULL;
+    c = strchr(k, ':');
+    if (!c || c >= obj_end) return NULL;
+    c = ap_j_ws(c + 1, obj_end);
+    return (c < obj_end && (*c == '{' || *c == '[')) ? c : NULL;
+}
+
+static int ap_ov_name_from_path(const char* path, char* out, size_t cap) {
+    const char* base = path;
+    const char* s;
+    for (s = path; *s; s++)
+        if (*s == '/' || *s == '\\') base = s + 1;
+    if (!base[0]) return 0;
+    snprintf(out, cap, "%s", base);
+    return 1;
+}
+
+static int ap_ov_hex_eq(const uint8_t digest[32], const char* hex) {
+    static const char* k = "0123456789abcdef";
+    if (!hex || strlen(hex) != 64) return 0;
+    for (int i = 0; i < 32; i++) {
+        char hi = hex[i * 2], lo = hex[i * 2 + 1];
+        char want_hi = k[digest[i] >> 4], want_lo = k[digest[i] & 0xF];
+        if (hi >= 'A' && hi <= 'F') hi = (char)(hi - 'A' + 'a');
+        if (lo >= 'A' && lo <= 'F') lo = (char)(lo - 'A' + 'a');
+        if (hi != want_hi || lo != want_lo) return 0;
+    }
+    return 1;
+}
+
+static int ap_ov_read_file(const char* dir, const char* path, uint32_t expect,
+                           uint8_t** out) {
+    char full[1024];
+    FILE* f;
+    uint8_t* buf;
+    size_t n;
+    if (expect == 0 || expect > AP_OVERRIDE_FILE_MAX) return 0;
+    snprintf(full, sizeof(full), "%s/%s", dir, path);
+    f = fopen(full, "rb");
+    if (!f) return 0;
+    buf = (uint8_t*)malloc(expect);
+    if (!buf) { fclose(f); return 0; }
+    n = fread(buf, 1, expect, f);
+    if (n != expect || fgetc(f) != EOF) { free(buf); fclose(f); return 0; }
+    fclose(f);
+    *out = buf;
+    return 1;
+}
+
+/* One files[] entry. Inherits max_bytes / retail_load from the top-level
+ * "load" object when the entry does not carry its own. */
+static void ap_ov_parse_entry(const char* obj, const char* obj_end,
+                              const char* load, const char* load_end) {
+    char path[AP_PATH_MAX], name[AP_OVERRIDE_NAME_MAX], hex[80];
+    char rl[512];              /* the retail_load span, NUL-copied */
+    const char* rl_start;
+    const char* rl_end;
+    const char* rl_limit;
+    uint32_t guest_address = 0, bytes = 0, max_bytes = 0, ceiling = 0;
+    uint32_t lba = 0, sectors = 0, dest = 0;
+    uint8_t digest[32];
+    ApOverride* e;
+    size_t rl_len;
+
+    if (!ap_j_str(obj, obj_end, "\"path\"", path, sizeof(path))) return;
+    ap_ov_name_from_path(path, name, sizeof(name));
+    if (!ap_j_u32(obj, obj_end, "\"guest_address\"", &guest_address) ||
+        !ap_j_u32(obj, obj_end, "\"bytes\"", &bytes)) {
+        ap_ov_skip(name, "entry lacks guest_address/bytes");
+        return;
+    }
+    if (!ap_j_str(obj, obj_end, "\"sha256\"", hex, sizeof(hex))) {
+        ap_ov_skip(name, "entry lacks sha256");
+        return;
+    }
+
+    /* retail_load: per entry first, then the top-level load block. */
+    rl_start = ap_j_value_object(obj, obj_end, "\"retail_load\"");
+    rl_limit = obj_end;
+    if (!rl_start) {
+        rl_start = ap_j_value_object(load, load_end, "\"retail_load\"");
+        rl_limit = load_end;
+    }
+    if (!rl_start) { ap_ov_skip(name, "no retail_load (lba/sectors)"); return; }
+    rl_end = ap_j_object_end(rl_start, rl_limit);
+    rl_len = (size_t)(rl_end - rl_start);
+    if (rl_len >= sizeof(rl)) rl_len = sizeof(rl) - 1;
+    memcpy(rl, rl_start, rl_len);
+    rl[rl_len] = '\0';
+    if (!ap_j_u32(rl, rl + rl_len, "\"lba\"", &lba) ||
+        !ap_j_u32(rl, rl + rl_len, "\"sectors\"", &sectors) || sectors == 0) {
+        ap_ov_skip(name, "retail_load lacks lba/sectors");
+        return;
+    }
+    if (!ap_j_u32(rl, rl + rl_len, "\"dest\"", &dest)) dest = guest_address;
+
+    /* Budget: entry max_bytes, else load.max_bytes. Ceiling optional. */
+    if (!ap_j_u32(obj, obj_end, "\"max_bytes\"", &max_bytes))
+        ap_j_u32(load, load_end, "\"max_bytes\"", &max_bytes);
+    ap_j_u32(obj, obj_end, "\"ceiling\"", &ceiling);
+
+    if (dest != guest_address) {
+        ap_ov_skip(name, "retail_load.dest != guest_address");
+        return;
+    }
+    if (max_bytes && bytes > max_bytes) {
+        ap_ov_skip(name, "size over max_bytes");
+        return;
+    }
+    if (ceiling && (uint64_t)guest_address + bytes > (uint64_t)ceiling) {
+        ap_ov_skip(name, "size over ceiling");
+        return;
+    }
+    if (guest_address < 0x80000000u || guest_address >= 0x80800000u ||
+        (uint64_t)(guest_address & 0x1FFFFFFFu) + bytes > psx_ram_live_bytes()) {
+        ap_ov_skip(name, "guest_address outside live RAM");
+        return;
+    }
+    if (s_ov_count >= AP_OVERRIDE_MAX) {
+        ap_ov_skip(name, "too many override entries");
+        return;
+    }
+
+    e = &s_ov[s_ov_count];
+    memset(e, 0, sizeof(*e));
+    if (!ap_ov_read_file(s_ov_dir, path, bytes, &e->data)) {
+        ap_ov_skip(name, "file missing or size mismatch");
+        return;
+    }
+    psx_sha256_compute(e->data, bytes, digest);
+    if (!ap_ov_hex_eq(digest, hex)) {
+        free(e->data);
+        e->data = NULL;
+        ap_ov_skip(name, "sha256 mismatch");
+        return;
+    }
+
+    snprintf(e->name, sizeof(e->name), "%s", name);
+    e->guest_address = guest_address;
+    e->size = bytes;
+    e->lba = lba;
+    e->sectors = sectors;
+    e->head_bytes = sectors * AP_SECTOR;
+    if (e->head_bytes > bytes) e->head_bytes = bytes;
+    e->head_sectors = e->head_bytes / AP_SECTOR;
+    e->tail_bytes = bytes - e->head_bytes;
+    e->tail_pending = e->tail_bytes > 0;
+    s_ov_count++;
+}
+
+int asset_provider_override_init(const char* dir) {
+    char path[1024];
+    FILE* f;
+    char* text;
+    long len;
+    size_t got;
+    const char* load;
+    const char* load_end;
+    const char* files;
+    const char* p;
+    const char* end;
+
+    asset_provider_override_shutdown();
+    if (!dir || !dir[0]) return 0;
+    snprintf(s_ov_dir, sizeof(s_ov_dir), "%s", dir);
+    snprintf(path, sizeof(path), "%s/manifest.json", s_ov_dir);
+    f = fopen(path, "rb");
+    if (!f) {
+        s_ov_dir[0] = '\0';
+        return 0;
+    }
+    if (fseek(f, 0, SEEK_END) != 0 || (len = ftell(f)) <= 0 ||
+        (unsigned long)len > AP_OVERRIDE_MANIFEST ||
+        fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        s_ov_dir[0] = '\0';
+        return 0;
+    }
+    text = (char*)malloc((size_t)len + 1);
+    if (!text) { fclose(f); s_ov_dir[0] = '\0'; return 0; }
+    got = fread(text, 1, (size_t)len, f);
+    fclose(f);
+    text[got] = '\0';
+    if (got != (size_t)len) { free(text); s_ov_dir[0] = '\0'; return 0; }
+
+    end = text + got;
+    load = ap_j_value_object(text, end, "\"load\"");
+    load_end = load ? ap_j_object_end(load, end) : NULL;
+    files = ap_j_value_object(text, end, "\"files\"");
+    if (!load || !files) {
+        free(text);
+        s_ov_dir[0] = '\0';
+        return 0;
+    }
+    p = files + 1; /* past '[' */
+    while (p < end) {
+        const char* obj_end;
+        p = ap_j_ws(p, end);
+        if (p >= end || *p == ']') break;
+        if (*p == ',') { p++; continue; }
+        if (*p != '{') { p++; continue; }
+        obj_end = ap_j_object_end(p, end);
+        ap_ov_parse_entry(p, obj_end, load, load_end);
+        p = obj_end + 1;
+    }
+    free(text);
+
+    s_ov_enabled = s_ov_count > 0;
+    if (!s_ov_enabled) { s_ov_dir[0] = '\0'; return 0; }
+    return 1;
+}
+
+void asset_provider_get_override_stats(AssetOverrideStats* out) {
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    out->enabled = s_ov_enabled;
+    out->entries = s_ov_count;
+    out->applied = s_ov_applied;
+    out->skipped = s_ov_skipped;
+    out->bytes = s_ov_bytes;
+    snprintf(out->override_dir, sizeof(out->override_dir), "%s", s_ov_dir);
+    snprintf(out->reason, sizeof(out->reason), "%s", s_ov_reason);
+}
+
+/* Part (a): the first sectors*2048 bytes of a patched image replace the disc
+ * sectors. A sector past head_bytes (file shorter than the retail read) falls
+ * through so the stock read stays byte-identical. */
+static int ap_ov_read_sector(uint32_t lba, uint8_t* dst) {
+    for (int i = 0; i < s_ov_count; i++) {
+        ApOverride* e = &s_ov[i];
+        uint32_t off;
+        if (lba < e->lba) continue;
+        off = lba - e->lba;
+        if (off >= e->head_sectors) continue;
+        memcpy(dst, e->data + (size_t)off * AP_SECTOR, AP_SECTOR);
+        e->head_served++;
+        s_ov_bytes += AP_SECTOR;
+        return 1;
+    }
+    return 0;
+}
+
+/* Part (b): the tail lands once, when the guest has drained the last sector of
+ * the retail read. The tail sits past the DMA window, so it cannot race the
+ * sector transfer that is still in flight. */
+void asset_provider_note_read_complete(uint32_t lba) {
+    if (s_ov_count == 0) return;
+    for (int i = 0; i < s_ov_count; i++) {
+        ApOverride* e = &s_ov[i];
+        uint32_t addr, off;
+        if (!e->tail_pending) continue;
+        if (lba != e->lba + e->sectors - 1u) continue;
+        addr = e->guest_address + e->sectors * AP_SECTOR;
+        if (!psx_ram_resolve(addr, e->tail_bytes, &off)) {
+            e->tail_pending = 0;
+            fprintf(stderr,
+                    "psxrecomp: asset override %s: tail 0x%08X+%u outside live "
+                    "RAM; disc data kept\n", e->name, addr, e->tail_bytes);
+            continue;
+        }
+        memcpy(memory_get_ram_ptr() + off, e->data + e->head_bytes, e->tail_bytes);
+        e->tail_pending = 0;
+        e->applied = 1;
+        s_ov_applied++;
+        s_ov_bytes += e->tail_bytes;
+        fprintf(stdout,
+                "psxrecomp: asset override %s applied: %u B -> 0x%08X "
+                "(%u sectors from LBA %u, %u B tail)\n",
+                e->name, e->size, e->guest_address, e->sectors, e->lba,
+                e->tail_bytes);
+    }
+}
+
 /* ---- public API ------------------------------------------------------- */
 
 void asset_provider_shutdown(void) {
@@ -251,6 +655,7 @@ void asset_provider_shutdown(void) {
     if (s_stream_fp) { fclose(s_stream_fp); s_stream_fp = NULL; }
     s_stream_idx = -1;
     s_hits = s_misses = s_bytes = 0;
+    asset_provider_override_shutdown();
 }
 
 int asset_provider_init(const char* disc_dir, int preload, int preload_max_mib,
@@ -353,7 +758,13 @@ static int ap_read_from_disk(int idx, uint32_t offset, uint8_t* dst) {
 int asset_provider_read_sector(uint32_t lba, uint8_t* dst) {
     int idx;
     uint32_t offset;
-    if (!s_enabled || !dst) return 0;
+    if (!dst) return 0;
+
+    /* Patched guest images win over the extracted tree: the override exists
+     * precisely to replace those sectors, and it may be the only source. */
+    if (s_ov_count && ap_ov_read_sector(lba, dst)) return 1;
+
+    if (!s_enabled) return 0;
 
     idx = ap_find_entry(lba);
     if (idx < 0) { s_misses++; return 0; }
