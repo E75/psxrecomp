@@ -20,6 +20,8 @@
 #include "spu_gauss.h"
 #include "spu_shadow.h"
 #include "audio_trace.h"
+#include "audio_native.h"
+#include "cdrom.h"
 #include "crc32.h"
 #include "psx_cycles.h"
 
@@ -420,6 +422,21 @@ void spu_cd_audio_reset(void) {
 
 void spu_cd_audio_push(const int16_t* stereo, int frames) {
     if (!stereo || frames <= 0) return;
+
+    /* Native XA source (audio_native.c): when the decoded movie audio is
+     * available it replaces the emulated CD-XA decode for this push. The push
+     * cadence IS the drive's sector delivery, so the native stream inherits
+     * the STR's 7-video:1-audio interleave timing instead of running on its
+     * own clock — that is what keeps the movie's audio in sync with its
+     * video. The emulated decode above still ran, which keeps EOF/INT4
+     * handling, muting and the SPU CD-input mix point untouched. */
+    int16_t native_xa[AUDIO_NATIVE_XA_MAX_FRAMES * 2];
+    if (frames >= 1024 && frames <= AUDIO_NATIVE_XA_MAX_FRAMES &&
+        audio_native_xa_fill(stereo, frames, native_xa,
+                             cdrom_xa_stream_active(),
+                             cdrom_get_delivered_lba())) {
+        stereo = native_xa;
+    }
 
     uint32_t in_frames = (uint32_t)frames;
     if (in_frames > SPU_CD_RING_FRAMES) {

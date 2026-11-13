@@ -1006,6 +1006,7 @@ if(BUILD_TESTING)
     add_executable(mod_runtime_test
         tests/test_mod_runtime.cpp
         src/iso_reader_c.cpp
+        src/audio_native.c
         src/mod_runtime.cpp
         src/mod_packages.cpp
         src/mod_media.cpp
@@ -1033,6 +1034,7 @@ if(BUILD_TESTING)
     add_executable(netplay_view_mods_test
         tests/test_netplay_view_mods.cpp
         src/iso_reader_c.cpp
+        src/audio_native.c
         src/mod_runtime.cpp
         src/mod_packages.cpp
         src/mod_media.cpp
