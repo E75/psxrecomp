@@ -45,6 +45,7 @@
 #include "present_image_ring.h"
 #include "load_transition_ring.h"
 #include "cdrom.h"
+#include "asset_provider.h"
 #include "sio.h"
 #include "memcard.h"
 #include "spu.h"
@@ -59,6 +60,8 @@
 #include "card_data_writes.h"
 #include "crash_trace.h"
 #include "gpu_gl_renderer.h"
+#include "gpu_vk_renderer.h"
+#include "vk_hd_pack.h"
 #include "render_pass.h"
 #include "mod_plugins.h"   /* psx_mod_render_pass_status */
 #include "lockstep.h"
@@ -10174,6 +10177,40 @@ static void handle_hd_textures(int id, const char *json)
              (unsigned long long)info.pending_dump_sources, diagnostic_json);
 }
 
+/* hd_pack — Vulkan HD texture-pack surface (docs/HD_TEXTURES.md).
+ * Reports hd_pack_loaded / overrides / pixels_replaced / misses plus the CLUT
+ * override counters. Optional `root` opens (or "" closes) an explicit pack and
+ * re-applies the CLUT-row overrides; the GL/OpenGL path keeps using
+ * `hd_textures` above. */
+static void handle_hd_pack(int id, const char *json)
+{
+    char root[1024];
+    if (json_get_str(json, "root", root, sizeof(root))) {
+        char error[512] = "";
+        if (!vk_hd_pack_set_root(root[0] ? root : NULL, error, sizeof(error))) {
+            send_err(id, error[0] ? error : "could not open the texture pack");
+            return;
+        }
+        vk_renderer_hd_pack_changed();
+    }
+    VkHdPackStats stats;
+    vk_hd_pack_get_stats(&stats);
+    char root_json[8192];
+    json_escape_string(root_json, sizeof(root_json), stats.root ? stats.root : "");
+    const int backend = gr_backend();
+    send_fmt("{\"id\":%d,\"ok\":true,\"backend\":\"%s\",\"hd_pack_loaded\":%s,"
+             "\"root\":\"%s\",\"entries\":%llu,\"overrides\":%llu,"
+             "\"pixels_replaced\":%llu,\"misses\":%llu,\"palettes\":%llu,"
+             "\"clut_files\":%llu}",
+             id,
+             backend == GR_BACKEND_OPENGL ? "opengl" :
+                 backend == GR_BACKEND_VULKAN ? "vulkan" : "software",
+             stats.loaded ? "true" : "false", root_json,
+             (unsigned long long)stats.entries, (unsigned long long)stats.overrides,
+             (unsigned long long)stats.pixels_replaced, (unsigned long long)stats.misses,
+             (unsigned long long)stats.palettes, (unsigned long long)stats.clut_files);
+}
+
 /* Dynamic internal resolution ([video] dynamic_resolution; docs/TCP_COMMANDS.md).
  * dynres: the controller's state and the last step. */
 static void handle_dynres(int id, const char *json)
@@ -13818,6 +13855,30 @@ static void handle_cdrom_bursts(int id, const char *json)
     send_fmt("]}\n");
 }
 
+/* asset_provider_stats: sectors answered from the extracted tree instead of
+ * the emulated drive. `reset:1` starts a fresh window (e.g. before one match
+ * load) without touching the preload. hits+misses is the number of data
+ * sectors the drive was asked for while the provider was enabled. */
+static void handle_asset_provider_stats(int id, const char *json)
+{
+    if (json_get_int(json, "reset", 0) == 1) asset_provider_reset_stats();
+    AssetProviderStats st;
+    asset_provider_get_stats(&st);
+    send_fmt("{\"id\":%d,\"ok\":true,\"enabled\":%s,\"disc_dir\":\"%s\","
+             "\"error\":\"%s\",\"files\":%d,\"preloaded_files\":%d,"
+             "\"frontend_files\":%d,\"preloaded_bytes\":%llu,"
+             "\"preloaded_mib\":%.2f,\"hits\":%llu,\"misses\":%llu,"
+             "\"bytes\":%llu,\"hit_rate\":%.4f}\n",
+             id, st.enabled ? "true" : "false", st.disc_dir, st.error,
+             st.files, st.preloaded_files, st.frontend_files,
+             (unsigned long long)st.preloaded_bytes,
+             (double)st.preloaded_bytes / (1024.0 * 1024.0),
+             (unsigned long long)st.hits, (unsigned long long)st.misses,
+             (unsigned long long)st.bytes,
+             (st.hits + st.misses)
+                 ? (double)st.hits / (double)(st.hits + st.misses) : 0.0);
+}
+
 /* cdrom_timing: passive L1.5 physical deadline -> buffer -> INT1 exposure
  * summary. `reset:1` starts a fresh measurement window without touching the
  * controller or its schedules. late_bins are exact, 1..64, 65..1024,
@@ -15868,6 +15929,7 @@ static const CmdEntry s_commands[] = {
     { "wide_full",         handle_wide_full },
     { "video_info",        handle_video_info },
     { "hd_textures",       handle_hd_textures },
+    { "hd_pack",           handle_hd_pack },
     { "dynres",            handle_dynres },
     { "dynres_force",      handle_dynres_force },
     { "dynres_check",      handle_dynres_check },
@@ -15938,6 +16000,7 @@ static const CmdEntry s_commands[] = {
     { "cdrom_instant_rate",   handle_cdrom_instant_rate },
     { "cd_overwrite",         handle_cd_overwrite },
     { "cdrom_bursts",         handle_cdrom_bursts },
+    { "asset_provider_stats", handle_asset_provider_stats },
     { "cdrom_timing",         handle_cdrom_timing },
     { "turbo_loads",          handle_turbo_loads },
     { "turbo_audio_sink",     handle_turbo_audio_sink },

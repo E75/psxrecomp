@@ -375,6 +375,7 @@ set(PSXRECOMP_RUNTIME_SOURCES
     ${PSXRECOMP_ROOT}/runtime/src/frame_gen.c
     ${PSXRECOMP_ROOT}/runtime/src/gpu_gl_renderer.c
     ${PSXRECOMP_ROOT}/runtime/src/gpu_hd_textures.cpp
+    ${PSXRECOMP_ROOT}/runtime/src/vk_hd_pack.cpp
     ${PSXRECOMP_ROOT}/runtime/src/hd_texture_pack.cpp
     ${PSXRECOMP_ROOT}/runtime/src/duckstation_texture_pack.cpp
     ${PSXRECOMP_ROOT}/runtime/src/psx_openxr.c
@@ -443,6 +444,7 @@ set(PSXRECOMP_RUNTIME_SOURCES
     ${PSXRECOMP_ROOT}/runtime/src/cue_sheet.cpp
     ${PSXRECOMP_ROOT}/runtime/src/disc_path.cpp
     ${PSXRECOMP_ROOT}/runtime/src/cdrom.c
+    ${PSXRECOMP_ROOT}/runtime/src/asset_provider.c
     ${PSXRECOMP_ROOT}/runtime/src/spu.c
     ${PSXRECOMP_ROOT}/runtime/src/spu_shadow.c
     ${PSXRECOMP_ROOT}/runtime/src/audio_shadow.c

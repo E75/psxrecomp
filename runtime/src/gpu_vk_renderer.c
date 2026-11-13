@@ -55,6 +55,8 @@
 #include "psx_rewind.h"
 #include "crash_trace.h"
 #include "gpu_vk_upload.h"
+#include "gpu_hd_textures.h"
+#include "vk_hd_pack.h"
 #include "latency_ring.h"
 
 #include <stdio.h>
@@ -77,6 +79,7 @@ void vk_renderer_set_present_mode(int m){(void)m;}
 void vk_renderer_set_display_aspect(int n,int d){(void)n;(void)d;}
 int  vk_perf_json(char *out,int cap,int count){(void)count; return cap>2?snprintf(out,cap,"[]"):0;}
 int  vk_frame_perf_json(char *out,int cap,int count){(void)count; return cap>2?snprintf(out,cap,"{}"):0;}
+void vk_renderer_hd_pack_changed(void) {}
 const GpuRenderBackend *vk_backend_get(void) { return 0; }
 
 #else  /* PSX_HAVE_VULKAN */
@@ -573,10 +576,12 @@ static float s_pc_x[3], s_pc_y[3];     /* native VRAM px, fractional  */
 static int   s_pq_valid = 0;           /* perspective weights present */
 static float s_pq[3];
 
-/* Textured batch: 19 floats/vert (pos,uv,col,tpage,clut,depth,raw,limits,q).
- * q is the perspective weight ([video] perspective_texturing); 0 = affine,
- * which the vertex shader turns into w == 1.0 — the faithful default. */
-#define TEXV 19
+/* Textured batch: 24 floats/vert (pos,uv,col,tpage,clut,depth,raw,limits,q,
+ * hd_source,hd_mode). q is the perspective weight ([video]
+ * perspective_texturing); 0 = affine, which the vertex shader turns into
+ * w == 1.0 — the faithful default. hd_mode == 0 is the native sampling fast
+ * path; the HD pack only touches the last five floats of an overridden prim. */
+#define TEXV 24
 typedef struct { float v[TEXV]; } TexVert;
 #define VK_TBUF_VERTS 98304               /* multiple of 3; see VK_VBUF_VERTS */
 static VkBuffer       s_tbuf;
@@ -586,6 +591,36 @@ static uint32_t       s_tcount;
 static uint32_t       s_tbase;            /* first vertex of the open batch */
 static int            s_tb_semi = -2, s_tb_mask = 0, s_tb_check = 0, s_tb_filter = 0;
 static int            s_tb_twin[4] = {0,0,0,0};
+
+/* ---- HD texture-pack override cache ------------------------------------
+ * Overrides are materialized once per texture identity (pack key + pack
+ * generation) into an RGBA8 image and reused for every draw of that texture.
+ * The pixels themselves arrive from the upload-time pack match
+ * (gpu_hd_textures_acquire_draw -> hd_texture_pack_match), so nothing is
+ * decoded or re-uploaded per draw; a prim without an override keeps the raw
+ * VRAM path bit-for-bit. */
+#define VK_HD_CACHE_MAX 64
+#define VK_HD_CACHE_BUDGET (96u * 1024u * 1024u)
+typedef struct {
+    VkImage         img;
+    VkDeviceMemory  mem;
+    VkImageView     view;
+    VkDescriptorSet set;
+    VkImageLayout   layout;
+    uint64_t        key, generation;
+    uint32_t        w, h;
+    size_t          bytes;
+    uint64_t        last_use;
+} HdVkTexture;
+static HdVkTexture  s_hd_cache[VK_HD_CACHE_MAX];
+static size_t       s_hd_cache_bytes;
+static uint64_t     s_hd_cache_clock;
+static VkDescriptorPool s_hd_dpool;
+static VkImage        s_hd_dummy_img;
+static VkDeviceMemory s_hd_dummy_mem;
+static VkImageView    s_hd_dummy_view;
+static VkDescriptorSet s_tb_hd_set;       /* descriptor set of the open batch */
+
 
 static void flush_geometry(void);         /* commit pending untextured batch */
 static void flush_tex_batch(void);        /* commit pending textured batch */
@@ -597,6 +632,8 @@ static void gpu_copy_rect(int sx, int sy, int dx, int dy, int w, int h);
 static void ensure_cpu(void);             /* GPU -> CPU mirror readback */
 static int  make_staging(VkDeviceSize bytes, VkBuffer *buf, VkDeviceMemory *mem, void **map);
 static void free_staging(VkBuffer buf, VkDeviceMemory mem);
+static void hd_write_set(VkDescriptorSet set, VkImageView hd_view);
+static void hd_cache_clear(void);
 
 /* draw area / offset / per-prim render state (set via the vtable setters) */
 static int s_da_x1, s_da_y1, s_da_x2 = VRAM_W - 1, s_da_y2 = VRAM_H - 1;
@@ -1711,17 +1748,38 @@ static int create_render_targets(void) {
 
     /* Descriptor set layouts. */
     {
+        VkDescriptorSetLayoutBinding tex_b[2] = {
+            { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL },
+            { 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL } };
         VkDescriptorSetLayoutBinding b = { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                                            VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
         VkDescriptorSetLayoutCreateInfo ci = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-        ci.bindingCount = 1; ci.pBindings = &b;
+        ci.bindingCount = 2; ci.pBindings = tex_b;
         if (p_vkCreateDescriptorSetLayout(s_dev, &ci, NULL, &s_dsl_tex) != VK_SUCCESS) return vk_die("dsl tex");
+        ci.bindingCount = 1; ci.pBindings = &b;
         if (p_vkCreateDescriptorSetLayout(s_dev, &ci, NULL, &s_dsl_blit) != VK_SUCCESS) return vk_die("dsl blit");
         VkDescriptorSetLayoutBinding pb[2] = {
             { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL },
             { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          1, VK_SHADER_STAGE_COMPUTE_BIT, NULL } };
         ci.bindingCount = 2; ci.pBindings = pb;
         if (p_vkCreateDescriptorSetLayout(s_dev, &ci, NULL, &s_dsl_pack) != VK_SUCCESS) return vk_die("dsl pack");
+    }
+
+    /* 1x1 dummy override image: the fast path binds it at binding 1 and the
+     * fragment shader never samples it while v_hd_mode == 0. */
+    if (!make_image(VK_FORMAT_R8G8B8A8_UNORM, 1, 1,
+                    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                    VK_IMAGE_ASPECT_COLOR_BIT, &s_hd_dummy_img, &s_hd_dummy_mem,
+                    &s_hd_dummy_view)) return 0;
+    {
+        VkImageLayout dummy_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkCommandBuffer cb = begin_oneshot();
+        img_to(cb, s_hd_dummy_img, &dummy_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkClearColorValue zero = {{0,0,0,0}};
+        VkImageSubresourceRange crng = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        p_vkCmdClearColorImage(cb, s_hd_dummy_img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &crng);
+        img_to(cb, s_hd_dummy_img, &dummy_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        end_oneshot(cb);
     }
 
     /* Descriptor pool + sets: ds_tex (1) + ds_pack (1) + blit ring (BLIT_DESC_RING). */
@@ -1744,9 +1802,9 @@ static int create_render_targets(void) {
             ai.descriptorPool = s_dpool; ai.descriptorSetCount = 1; ai.pSetLayouts = &s_dsl_blit;
             if (p_vkAllocateDescriptorSets(s_dev, &ai, &s_ds_blit_ring[i]) != VK_SUCCESS) return vk_die("blit set alloc");
         }
-        /* ds_tex: raw mirror sampled. ds_pack: hr sampled + raw storage; the
-         * hr side is (re)written by tgt_set_bindings whenever the target is
-         * (re)allocated. */
+        /* ds_tex: raw mirror sampled + the dummy override image. ds_pack: hr
+         * sampled + raw storage; the hr side is (re)written by
+         * tgt_set_bindings whenever the target is (re)allocated. */
         VkDescriptorImageInfo raw_smp = { s_samp, s_raw_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkDescriptorImageInfo raw_st  = { VK_NULL_HANDLE, s_raw_view, VK_IMAGE_LAYOUT_GENERAL };
         VkWriteDescriptorSet w[2] = {0};
@@ -1755,6 +1813,25 @@ static int create_render_targets(void) {
         w[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[1].dstSet = s_ds_pack; w[1].dstBinding = 1;
         w[1].descriptorCount = 1; w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; w[1].pImageInfo = &raw_st;
         p_vkUpdateDescriptorSets(s_dev, 2, w, 0, NULL);
+        hd_write_set(s_ds_tex, s_hd_dummy_view);
+    }
+
+    /* HD override descriptor sets: one per cache slot, allocated up front so no
+     * set is ever freed while a submitted draw still references it. */
+    {
+        VkDescriptorPoolSize hd_size = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                         (uint32_t)(2 * VK_HD_CACHE_MAX) };
+        VkDescriptorPoolCreateInfo hpci = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        hpci.maxSets = VK_HD_CACHE_MAX; hpci.poolSizeCount = 1; hpci.pPoolSizes = &hd_size;
+        if (p_vkCreateDescriptorPool(s_dev, &hpci, NULL, &s_hd_dpool) != VK_SUCCESS)
+            return vk_die("hd desc pool");
+        for (int i = 0; i < VK_HD_CACHE_MAX; i++) {
+            VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+            ai.descriptorPool = s_hd_dpool; ai.descriptorSetCount = 1; ai.pSetLayouts = &s_dsl_tex;
+            if (p_vkAllocateDescriptorSets(s_dev, &ai, &s_hd_cache[i].set) != VK_SUCCESS)
+                return vk_die("hd desc set alloc");
+            hd_write_set(s_hd_cache[i].set, s_hd_dummy_view);
+        }
     }
 
     /* Pipeline layouts. */
@@ -1833,7 +1910,7 @@ static VkPipeline get_pipeline(int prog, int topo, int blend, int stencil, int c
 
     VkShaderModule vs, fs; VkPipelineLayout layout;
     VkVertexInputBindingDescription bind = {0};
-    VkVertexInputAttributeDescription attrs[9]; uint32_t nattr;
+    VkVertexInputAttributeDescription attrs[11]; uint32_t nattr;
     if (prog == 0) {            /* GEO */
         vs = s_mod_geo_v; fs = s_mod_geo_f; layout = s_pl_geo;
         bind = (VkVertexInputBindingDescription){ 0, sizeof(Vert), VK_VERTEX_INPUT_RATE_VERTEX };
@@ -1852,7 +1929,9 @@ static VkPipeline get_pipeline(int prog, int topo, int blend, int stencil, int c
         attrs[6] = (VkVertexInputAttributeDescription){ 6, 0, VK_FORMAT_R32_SFLOAT, 52 };
         attrs[7] = (VkVertexInputAttributeDescription){ 7, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 56 };
         attrs[8] = (VkVertexInputAttributeDescription){ 8, 0, VK_FORMAT_R32_SFLOAT, 72 };  /* a_q */
-        nattr = 9;
+        attrs[9] = (VkVertexInputAttributeDescription){ 9, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 76 }; /* a_hd_source */
+        attrs[10] = (VkVertexInputAttributeDescription){ 10, 0, VK_FORMAT_R32_SFLOAT, 92 }; /* a_hd_mode */
+        nattr = 11;
     } else {                    /* BLIT (vertex-less: rect from push constant) */
         vs = s_mod_blit_v; fs = s_mod_blit_f; layout = s_pl_blit;
         nattr = 0;
@@ -2017,6 +2096,10 @@ int vk_renderer_init_context(SDL_Window *win) {
     }
 
     s_ctx_ok = 1;
+    /* HD texture pack: open PSXRECOMP_HD_PACK (a pack already configured by
+     * the mods path is reused) and apply the CLUT-row overrides that are
+     * already resident in VRAM. */
+    if (vk_hd_pack_init()) vk_renderer_hd_pack_changed();
     vk_log("instance/device/swapchain/VRAM + raw mirror/pipelines ready");
     return 1;
 }
@@ -2049,6 +2132,11 @@ void vk_renderer_shutdown(void) {
     if (s_pl_blit) p_vkDestroyPipelineLayout(s_dev, s_pl_blit, NULL);
     if (s_pl_pack) p_vkDestroyPipelineLayout(s_dev, s_pl_pack, NULL);
     if (s_dpool)    p_vkDestroyDescriptorPool(s_dev, s_dpool, NULL);
+    hd_cache_clear();   /* HD override images (needs s_dev, before the pool) */
+    if (s_hd_dpool) { p_vkDestroyDescriptorPool(s_dev, s_hd_dpool, NULL); s_hd_dpool = VK_NULL_HANDLE; }
+    if (s_hd_dummy_view) p_vkDestroyImageView(s_dev, s_hd_dummy_view, NULL);
+    if (s_hd_dummy_img)  p_vkDestroyImage(s_dev, s_hd_dummy_img, NULL);
+    if (s_hd_dummy_mem)  p_vkFreeMemory(s_dev, s_hd_dummy_mem, NULL);
     if (s_perf_pool) { p_vkDestroyQueryPool(s_dev, s_perf_pool, NULL); s_perf_pool = VK_NULL_HANDLE; }
     if (s_dsl_tex)  p_vkDestroyDescriptorSetLayout(s_dev, s_dsl_tex, NULL);
     if (s_dsl_pack) p_vkDestroyDescriptorSetLayout(s_dev, s_dsl_pack, NULL);
@@ -3120,6 +3208,170 @@ static void free_staging(VkBuffer buf, VkDeviceMemory mem) {
     staging_release(buf, mem);
 }
 
+/* ---- HD override images ------------------------------------------------ */
+/* Point one cached descriptor set at (raw VRAM mirror, override image). The
+ * layout is s_dsl_tex, so the same pipeline layout/pipeline serves both the
+ * native and the overridden draw. */
+static void hd_write_set(VkDescriptorSet set, VkImageView hd_view) {
+    VkDescriptorImageInfo raw_smp = { s_samp, s_raw_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkDescriptorImageInfo hd_smp  = { s_samp, hd_view,  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkWriteDescriptorSet w[2] = {0};
+    w[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[0].dstSet = set; w[0].dstBinding = 0;
+    w[0].descriptorCount = 1; w[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w[0].pImageInfo = &raw_smp;
+    w[1] = w[0]; w[1].dstBinding = 1; w[1].pImageInfo = &hd_smp;
+    p_vkUpdateDescriptorSets(s_dev, 2, w, 0, NULL);
+}
+
+static void hd_texture_destroy(HdVkTexture *t) {
+    if (t->view) p_vkDestroyImageView(s_dev, t->view, NULL);
+    if (t->img)  p_vkDestroyImage(s_dev, t->img, NULL);
+    if (t->mem)  p_vkFreeMemory(s_dev, t->mem, NULL);
+    s_hd_cache_bytes -= t->bytes;
+    VkDescriptorSet set = t->set;
+    memset(t, 0, sizeof(*t));
+    t->set = set;   /* the set outlives the image and is re-pointed on reuse */
+}
+
+/* Upload one decoded override (RGBA8) and return its descriptor set. `mode` is
+ * the alpha class from the pack and `src` the (origin_u, origin_v, source_w,
+ * source_h) rectangle the image covers in native texture space. */
+static VkDescriptorSet hd_texture(const GpuHdTextureImage *image, int *mode,
+                                  float src[4]) {
+    if (!image || !image->rgba || !image->width || !image->height ||
+        !image->source_width || !image->source_height ||
+        image->stride != (size_t)image->width * 4u ||
+        (int)image->width > s_max_image_dim || (int)image->height > s_max_image_dim)
+        return VK_NULL_HANDLE;
+    const size_t bytes = (size_t)image->stride * image->height;
+    if (bytes > VK_HD_CACHE_BUDGET) return VK_NULL_HANDLE;
+
+    HdVkTexture *slot = NULL, *victim = NULL;
+    for (int i = 0; i < VK_HD_CACHE_MAX; ++i) {
+        HdVkTexture *t = &s_hd_cache[i];
+        if (t->img && t->key == image->cache_key && t->generation == image->generation) {
+            t->last_use = ++s_hd_cache_clock;
+            *mode = image->alpha_mode;
+            src[0] = (float)image->origin_u; src[1] = (float)image->origin_v;
+            src[2] = (float)image->source_width; src[3] = (float)image->source_height;
+            return t->set;
+        }
+        if (!t->img && !slot) slot = t;
+        if (t->img && (!victim || t->last_use < victim->last_use)) victim = t;
+    }
+    if (!slot) {
+        if (!victim) return VK_NULL_HANDLE;
+        /* Freeing an image whose descriptor set may still be referenced by a
+         * submitted draw needs a full drain; evictions are rare (64 entries). */
+        flush_tex_batch();
+        gpu_sync();
+        hd_texture_destroy(victim);
+        slot = victim;
+    }
+    if (s_hd_cache_bytes + bytes > VK_HD_CACHE_BUDGET && victim && victim != slot) {
+        flush_tex_batch();
+        gpu_sync();
+        hd_texture_destroy(victim);
+    }
+    if (!slot->set) return VK_NULL_HANDLE;
+
+    if (!make_image(VK_FORMAT_R8G8B8A8_UNORM, (int)image->width, (int)image->height,
+                    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                    VK_IMAGE_ASPECT_COLOR_BIT, &slot->img, &slot->mem, &slot->view))
+        return VK_NULL_HANDLE;
+    slot->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VkBuffer buf; VkDeviceMemory mem; void *map;
+    if (!make_staging((VkDeviceSize)bytes, &buf, &mem, &map)) {
+        hd_texture_destroy(slot);
+        return VK_NULL_HANDLE;
+    }
+    memcpy(map, image->rgba, bytes);
+    VkCommandBuffer cb = begin_oneshot();
+    img_to(cb, slot->img, &slot->layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkBufferImageCopy rc = {0};
+    rc.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    rc.imageSubresource.layerCount = 1;
+    rc.imageExtent.width = image->width; rc.imageExtent.height = image->height;
+    rc.imageExtent.depth = 1;
+    p_vkCmdCopyBufferToImage(cb, buf, slot->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &rc);
+    img_to(cb, slot->img, &slot->layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    end_oneshot(cb);
+    defer_staging(buf, mem);   /* copy in flight; freed at the next gpu_sync */
+
+    slot->key = image->cache_key; slot->generation = image->generation;
+    slot->w = image->width; slot->h = image->height; slot->bytes = bytes;
+    slot->last_use = ++s_hd_cache_clock;
+    s_hd_cache_bytes += bytes;
+    hd_write_set(slot->set, slot->view);
+    vk_hd_pack_note_texture(image->width, image->height);
+
+    *mode = image->alpha_mode;
+    src[0] = (float)image->origin_u; src[1] = (float)image->origin_v;
+    src[2] = (float)image->source_width; src[3] = (float)image->source_height;
+    return slot->set;
+}
+
+/* Drop every override image (pack reload/shutdown, savestate restage). */
+static void hd_cache_clear(void) {
+    if (!s_dev) return;
+    for (int i = 0; i < VK_HD_CACHE_MAX; ++i) {
+        if (s_hd_cache[i].img) hd_texture_destroy(&s_hd_cache[i]);
+        /* The sets outlive the images: point them back at the dummy so a
+         * stale binding can never reference a destroyed view. */
+        if (s_hd_cache[i].set && s_hd_dummy_view)
+            hd_write_set(s_hd_cache[i].set, s_hd_dummy_view);
+    }
+    s_hd_cache_bytes = 0;
+    s_tb_hd_set = VK_NULL_HANDLE;
+}
+
+/* Pack changed (opened, reloaded, closed): drop the materialized overrides and
+ * apply the CLUT-row overrides that are already resident in VRAM. Palettes are
+ * uploaded at boot, long before a pack is selected, so the upload hook alone
+ * would never see them. */
+void vk_renderer_hd_pack_changed(void) {
+    if (!s_dev) return;
+    flush_tex_batch();
+    gpu_sync();
+    hd_cache_clear();
+    if (!s_ready || !s_vram || !vk_hd_pack_active()) return;
+
+    enum { SWEEP_MAX = 512 };
+    static VkBufferImageCopy copies[SWEEP_MAX];
+    static uint16_t blocks[SWEEP_MAX][16];
+    int n = 0;
+    for (int y = 0; y < VRAM_H && n < SWEEP_MAX; y++) {
+        for (int x = 0; x < VRAM_W; x += 16) {
+            const uint16_t *src = s_vram + (size_t)y * VRAM_W + x;
+            uint16_t replacement[16];
+            if (!vk_hd_pack_clut_lookup(src, replacement)) continue;
+            for (int i = 0; i < 16; i++)
+                blocks[n][i] = (uint16_t)((src[i] & 0x8000u) | (replacement[i] & 0x7FFFu));
+            memset(&copies[n], 0, sizeof(copies[n]));
+            copies[n].imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            copies[n].imageSubresource.layerCount = 1;
+            copies[n].imageOffset.x = x; copies[n].imageOffset.y = y;
+            copies[n].imageExtent.width = 16; copies[n].imageExtent.height = 1;
+            copies[n].imageExtent.depth = 1;
+            copies[n].bufferOffset = (VkDeviceSize)n * 32;
+            if (++n >= SWEEP_MAX) break;
+        }
+    }
+    if (!n) return;
+    VkBuffer buf; VkDeviceMemory mem; void *map;
+    if (!make_staging((VkDeviceSize)n * 32, &buf, &mem, &map)) return;
+    memcpy(map, blocks, (size_t)n * 32);
+    VkCommandBuffer cb = begin_oneshot();
+    img_to(cb, s_raw_img, &s_raw_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    p_vkCmdCopyBufferToImage(cb, buf, s_raw_img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             (uint32_t)n, copies);
+    img_to(cb, s_raw_img, &s_raw_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    end_oneshot(cb);
+    defer_staging(buf, mem);
+    gpu_sync();
+}
+
 /* hr -> raw mirror: pack the dirty rect via the compute pass (top-left sample of
  * each SxS block). Caller has already drained the batches that dirtied it. */
 static void pack_flush(void) {
@@ -3232,6 +3484,10 @@ static void vram_upload_block(int x, int y, int w, int h, const uint16_t *data) 
     VkBuffer rbuf; VkDeviceMemory rmem; void *rmap;
     if (make_staging((VkDeviceSize)w * h * 2, &rbuf, &rmem, &rmap)) {
         memcpy(rmap, data, (size_t)w * h * 2);
+        /* CLUT-row overrides land here, at the upload boundary: the GPU mirror
+         * gets the re-authored 16-entry palette, the CPU array keeps the disc
+         * values (see docs/HD_TEXTURES.md). */
+        vk_hd_pack_patch_clut((uint16_t*)rmap, x, y, w, h);
         VkCommandBuffer cb = begin_oneshot();
         img_to(cb, s_raw_img, &s_raw_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         VkBufferImageCopy rc = {0};
@@ -3319,6 +3575,8 @@ static void flush_cpu_upload(void) {
                 rgb555_to_rgba8(src[col], m + (size_t)col * 4);
         }
         rcopies[i].bufferOffset = (VkDeviceSize)texoff * 2;
+        /* CLUT-row overrides, upload boundary (raw mirror only). */
+        vk_hd_pack_patch_clut(rdst + texoff, x, y, w, h);
         rcopies[i].imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         rcopies[i].imageSubresource.layerCount = 1;
         rcopies[i].imageOffset.x = x; rcopies[i].imageOffset.y = y;
@@ -4001,7 +4259,8 @@ static void flush_tex_batch(void) {
     vram_to(cb, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     begin_geo_pass(cb);
     set_vp_scissor(cb);
-    p_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_pl_tex, 0, 1, &s_ds_tex, 0, NULL);
+    VkDescriptorSet tex_set = s_tb_hd_set ? s_tb_hd_set : s_ds_tex;
+    p_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_pl_tex, 0, 1, &tex_set, 0, NULL);
     VkDeviceSize off = 0;
     p_vkCmdBindVertexBuffers(cb, 0, 1, &s_tbuf, &off);
     TexPush tp = {0};
@@ -4101,6 +4360,23 @@ static void gpu_textured_triangle(const int *xs, const int *ys, const int *us, c
     flush_cpu_upload(); /* uploaded texels/CLUTs must be sampleable + order */
     flush_pack_if_sampling(base_x, base_y, depth, clut_x, clut_y);
 
+    /* HD pack override. The pack was matched against the tracked VRAM upload
+     * when this texture page/CLUT arrived; here the (already decoded) image is
+     * looked up in the GPU cache, so a repeated draw costs one key compare. */
+    VkDescriptorSet hd_set = VK_NULL_HANDLE;
+    float hd_src[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    int hd_mode = 0;
+    if (vk_hd_pack_active()) {
+        GpuHdTextureImage hd = {0};
+        uint32_t window = (uint32_t)(s_tw_mask_x | (s_tw_mask_y << 5) |
+                                     (s_tw_off_x << 10) | (s_tw_off_y << 15));
+        if (vk_hd_pack_acquire(texpage, clut_x, clut_y, lim, window, semi >= 0, &hd)) {
+            hd_set = hd_texture(&hd, &hd_mode, hd_src);
+            if (!hd_set) hd_mode = 0;
+            vk_hd_pack_release(&hd);
+        }
+    }
+
     int twx = s_tw_mask_x, twy = s_tw_mask_y, tox = s_tw_off_x, toy = s_tw_off_y;
     /* A semi-transparent prim must NOT coalesce with its neighbours (its two
      * STP passes would straddle overlapping prims — painter's-order violation;
@@ -4109,7 +4385,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys, const int *us, c
     int isolate = (semi >= 0);
     if (s_tcount > 0 &&
         (isolate || semi != s_tb_semi || s_mask_set != s_tb_mask || s_mask_check != s_tb_check ||
-         s_texfilter != s_tb_filter ||
+         s_texfilter != s_tb_filter || hd_set != s_tb_hd_set ||
          twx != s_tb_twin[0] || twy != s_tb_twin[1] || tox != s_tb_twin[2] || toy != s_tb_twin[3]))
         flush_tex_batch();
     if (s_tbase + s_tcount + 3 > VK_TBUF_VERTS) {
@@ -4120,6 +4396,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys, const int *us, c
     if (s_tcount == 0) {
         s_tb_semi = semi; s_tb_mask = s_mask_set; s_tb_check = s_mask_check; s_tb_filter = s_texfilter;
         s_tb_twin[0] = twx; s_tb_twin[1] = twy; s_tb_twin[2] = tox; s_tb_twin[3] = toy;
+        s_tb_hd_set = hd_set;
     }
     int bx0 = xs[0], bx1 = xs[0], by0 = ys[0], by1 = ys[0];
     for (int i = 0; i < 3; i++) {
@@ -4134,6 +4411,8 @@ static void gpu_textured_triangle(const int *xs, const int *ys, const int *us, c
         vp[14] = (float)lim[0];  vp[15] = (float)lim[1];
         vp[16] = (float)lim[2];  vp[17] = (float)lim[3];
         vp[18] = s_pq_valid ? s_pq[i] : 0.0f;   /* a_q; 0 = affine */
+        vp[19] = hd_src[0]; vp[20] = hd_src[1]; vp[21] = hd_src[2]; vp[22] = hd_src[3];
+        vp[23] = (float)hd_mode;                /* 0 = native sampling */
         if (xs[i] < bx0) bx0 = xs[i]; if (xs[i] > bx1) bx1 = xs[i];
         if (ys[i] < by0) by0 = ys[i]; if (ys[i] > by1) by1 = ys[i];
     }

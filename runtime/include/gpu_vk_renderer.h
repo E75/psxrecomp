@@ -68,6 +68,11 @@ void vk_renderer_set_display_aspect(int num, int den);
  * submits and draw calls. */
 int  vk_frame_perf_json(char *out, int cap, int count);
 
+/* HD texture pack changed (opened/reloaded/closed from the debug server or the
+ * env config). Drops materialized overrides and re-applies the CLUT-row
+ * overrides to the GPU VRAM mirror. Safe to call when no pack is loaded. */
+void vk_renderer_hd_pack_changed(void);
+
 #ifdef __cplusplus
 }
 #endif

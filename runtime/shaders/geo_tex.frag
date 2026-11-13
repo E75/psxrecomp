@@ -13,8 +13,13 @@ layout(location = 5) flat in int   v_raw;     /* 1 = no colour modulation */
 layout(location = 6) flat in ivec4 v_limits;  /* prim uv bounds (inclusive) */
 layout(location = 7) smooth in vec2 v_uv_p;   /* perspective-correct UV */
 layout(location = 8) flat   in int  v_persp;  /* 1 = use v_uv_p, else affine */
+layout(location = 9) flat   in vec4 v_hd_source; /* origin_u,origin_v,src_w,src_h */
+layout(location = 10) flat  in int  v_hd_mode;   /* 0 = native, else alpha class */
 
 layout(set = 0, binding = 0) uniform usampler2D u_vram;
+/* HD texture-pack override. Only sampled when v_hd_mode != 0, so binding a 1x1
+ * dummy (the no-pack fast path) costs nothing. */
+layout(set = 0, binding = 1) uniform sampler2D u_hd;
 
 layout(push_constant) uniform PC {
     float u_shift;
@@ -52,13 +57,48 @@ int fetch_texel(int u, int v) {
 vec3 col5(int raw) {
     return vec3(float(raw & 31), float((raw >> 5) & 31), float((raw >> 10) & 31)) / 31.0;
 }
+/* HD replacement lookup: the native texel coordinate (after texture-window /
+ * limits) is mapped into the override image through v_hd_source. Mirrors the GL
+ * backend's hd_texel so one pack serves both. */
+vec4 hd_texel(vec2 uv) {
+    ivec2 p = ivec2(floor(uv)); vec2 f = fract(uv);
+    p &= ivec2(255);
+    ivec4 tw = ivec4(pc.u_twin.x, pc.u_twin.y, pc.u_twin.z, pc.u_twin.w);
+    if ((tw.x | tw.y) != 0) p = (p & ~(tw.xy * 8)) | ((tw.zw & tw.xy) * 8);
+    else p = clamp(p, v_limits.xy, v_limits.zw);
+    vec2 t = (vec2(p) + f - v_hd_source.xy) / v_hd_source.zw;
+    ivec2 size = textureSize(u_hd, 0);
+    ivec2 at = clamp(ivec2(floor(t * vec2(size))), ivec2(0), size - ivec2(1));
+    return texelFetch(u_hd, at, 0);
+}
 void main() {
     int stp; vec3 rgb;
     /* v_persp is 0 for every prim unless [video] perspective_texturing is on
      * AND this prim's packet carried full GTE projection provenance, so the
      * default is the PS1's affine (noperspective) mapping. */
     vec2 uv = (v_persp != 0) ? v_uv_p : v_uv;
-    if (pc.u_filter == 0) {
+    if (v_hd_mode != 0) {
+        vec4 hd = hd_texel(uv);
+        rgb = hd.rgb;
+        if (v_hd_mode == 1) {
+            /* Beetle pack: cutout and STP stay authoritative on the native
+             * texel, the pack only replaces colour (and fully transparent HD
+             * pixels are dropped). */
+            if (hd.a == 0.0) discard;
+            int native = fetch_texel(int(floor(uv.x)), int(floor(uv.y)));
+            if (native == 0) discard;
+            stp = (native >> 15) & 1;
+        } else if (v_hd_mode == 2) {
+            if (hd.a < 128.0 / 255.0) discard;
+            stp = 0;
+        } else if (v_hd_mode == 4) {
+            if (hd.a == 0.0) discard;
+            stp = hd.a < 1.0 ? 1 : 0;
+        } else {
+            stp = hd.a <= 242.0 / 255.0 ? 1 : 0;
+            if (all(equal(hd, vec4(0.0))) || (stp == 0 && all(equal(hd.rgb, vec3(0.0))))) discard;
+        }
+    } else if (pc.u_filter == 0) {
         int raw = fetch_texel(int(floor(uv.x)), int(floor(uv.y)));
         if (raw == 0) discard;
         rgb = col5(raw);
