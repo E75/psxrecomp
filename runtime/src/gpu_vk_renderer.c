@@ -95,9 +95,13 @@ const GpuRenderBackend *vk_backend_get(void) { return 0; }
 #include "png_write.h"        /* png_write_rgb — present_shot readback */
 #include "vk_shaders_spv.h"   /* generated: spv_geo_vert/frag, spv_geo_tex_vert/frag,
                                *            spv_pack_comp, spv_blit_vert/frag */
+#include "vram_ext.h"
 
 #define VRAM_W 1024
 #define VRAM_H 512
+/* Raw-mirror width: guest VRAM (0..1023) plus the [video] vram_extension
+ * columns at 1024..1215 (host x = guest x + VRAM_EXT_OFFSET for x >= 512). */
+#define VRAM_HOST_W VRAM_EXT_HOST_W
 
 static int s_aspect_num = 4, s_aspect_den = 3;
 
@@ -629,6 +633,7 @@ static void pack_flush(void);             /* hr -> raw mirror (dirty rect) */
 static void flush_pack_if_sampling(int tpx, int tpy, int depth, int clx, int cly);
 static void vram_upload_block(int x, int y, int w, int h, const uint16_t *data);
 static void gpu_copy_rect(int sx, int sy, int dx, int dy, int w, int h);
+static void vkb_draw_flat_rect(int x, int y, int w, int h, uint16_t c);
 static void ensure_cpu(void);             /* GPU -> CPU mirror readback */
 static int  make_staging(VkDeviceSize bytes, VkBuffer *buf, VkDeviceMemory *mem, void **map);
 static void free_staging(VkBuffer buf, VkDeviceMemory mem);
@@ -1422,7 +1427,8 @@ typedef struct {
     int   _pad[2];      /* 24,28 -> ivec4 16-byte align */
     int   rect[4];      /* 32..47: x0,y0,x1,y1 native px */
 } BlitPush;             /* 48 bytes */
-typedef struct { int scale, off_x, off_y, tgt_x, tgt_y; } PackPush;   /* 20 bytes */
+typedef struct { int scale, off_x, off_y, tgt_x, tgt_y,
+                 ext_x0, ext_x1, ext_y0, ext_y1, ext_off; } PackPush;   /* 40 bytes */
 
 /* First-creation seed: the CPU VRAM array holds every CPU-side pixel write the
  * game made (fills, uploads, MDEC blocks) — including writes made before the
@@ -1691,7 +1697,7 @@ static int create_render_targets(void) {
     /* Native raw mirror (sampled + storage) and the native-res upload image.
      * Everything sized by the *display* scale lives in the windowed target and
      * is created on the first draw/present (tgt_create). */
-    if (!make_image(VK_FORMAT_R16_UINT, VRAM_W, VRAM_H,
+    if (!make_image(VK_FORMAT_R16_UINT, VRAM_HOST_W, VRAM_H,
                     VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                     VK_IMAGE_ASPECT_COLOR_BIT, &s_raw_img, &s_raw_mem, &s_raw_view)) return 0;
@@ -3385,12 +3391,27 @@ static void pack_flush(void) {
     s_perf_cur.pack_flushes++;
     int w = x1 - x + 1;
     int h = y1 - y + 1;
+    /* [video] vram_extension: redirect the wide framebuffer's overflow columns
+     * into the raw mirror's extension columns (see vram_ext.h). The gate comes
+     * from gpu.c (draw area == the display buffer); a render-to-texture pass
+     * leaves it off. */
+    int ex0 = -1, ex1 = 0, ey0 = 0, ey1 = 0;
+    int gx0, gy0, gx1, gy1;
+    if (vram_ext_region(&gx0, &gy0, &gx1, &gy1)) {
+        ex0 = VRAM_EXT_X0; ex1 = gx1; ey0 = gy0; ey1 = gy1;
+        int cx0 = x > ex0 ? x : ex0, cx1 = x1 < ex1 ? x1 : ex1;
+        int cy0 = y > ey0 ? y : ey0, cy1 = y1 < ey1 ? y1 : ey1;
+        if (cx0 <= cx1 && cy0 <= cy1)
+            vram_ext_note_remap((uint64_t)(cx1 - cx0 + 1) *
+                                (uint64_t)(cy1 - cy0 + 1));
+    }
     VkCommandBuffer cb = begin_oneshot();
     vram_to(cb, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);     /* hr sampled */
     img_to(cb, s_raw_img, &s_raw_layout, VK_IMAGE_LAYOUT_GENERAL); /* raw storage */
     p_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, s_pipe_pack);
     p_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, s_pl_pack, 0, 1, &s_ds_pack, 0, NULL);
-    PackPush pp = { s_scale, x, y, s_tx0, s_ty0 };
+    PackPush pp = { s_scale, x, y, s_tx0, s_ty0,
+                    ex0, ex1, ey0, ey1, VRAM_EXT_OFFSET };
     p_vkCmdPushConstants(cb, s_pl_pack, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pp, &pp);
     p_vkCmdDispatch(cb, (uint32_t)((w + 7) / 8), (uint32_t)((h + 7) / 8), 1);
     img_to(cb, s_raw_img, &s_raw_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -3670,18 +3691,36 @@ static void ensure_cpu(void) {
      * only on screenshots / guest VRAM reads, never every frame. */
     rect_add(&s_pack_dirty, 0, 0, VRAM_W - 1, VRAM_H - 1);
     pack_flush();
+    /* Guest plane (0..1023) + the [video] vram_extension plane (1024..1215)
+     * come down in one staging buffer, each tightly packed. */
+    const size_t guest_bytes = (size_t)VRAM_W * VRAM_H * 2;
+    const size_t ext_bytes   = (size_t)VRAM_EXT_COLS * VRAM_H * 2;
+    int ext_live = vram_ext_driving();
+    size_t total_bytes = guest_bytes + (ext_live ? ext_bytes : 0);
     VkBuffer buf; VkDeviceMemory mem; void *map;
-    if (!make_staging((VkDeviceSize)VRAM_W * VRAM_H * 2, &buf, &mem, &map)) return;
+    if (!make_staging((VkDeviceSize)total_bytes, &buf, &mem, &map)) return;
     VkCommandBuffer cb = begin_oneshot();
     img_to(cb, s_raw_img, &s_raw_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     VkBufferImageCopy rc = {0};
     rc.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; rc.imageSubresource.layerCount = 1;
+    rc.bufferRowLength = VRAM_W;
     rc.imageExtent.width = VRAM_W; rc.imageExtent.height = VRAM_H; rc.imageExtent.depth = 1;
     p_vkCmdCopyImageToBuffer(cb, s_raw_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &rc);
+    if (ext_live) {
+        rc.bufferOffset = (VkDeviceSize)guest_bytes;
+        rc.bufferRowLength = VRAM_EXT_COLS;
+        rc.imageOffset.x = VRAM_EXT_OFFSET; rc.imageOffset.y = 0;
+        rc.imageExtent.width = VRAM_EXT_COLS;
+        p_vkCmdCopyImageToBuffer(cb, s_raw_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &rc);
+    }
     img_to(cb, s_raw_img, &s_raw_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     end_oneshot(cb);
     gpu_sync();   /* the readback result must be complete before we read it */
-    memcpy(s_vram, map, (size_t)VRAM_W * VRAM_H * 2);
+    memcpy(s_vram, map, guest_bytes);
+    if (ext_live) {
+        memcpy(vram_ext_host(), (const uint8_t *)map + guest_bytes, ext_bytes);
+        vram_ext_note_readback((uint64_t)ext_bytes);
+    }
     free_staging(buf, mem);
     s_gpu_dirty = 0;
 }
@@ -3733,13 +3772,39 @@ static void vkb_set_draw_offset(int x, int y) { s_off_x = x; s_off_y = y; }
  * the CPU array immediately (like every CPU-side VRAM write) and rides the
  * batched s_up_rects upload — the old per-fill staging upload was part of
  * the per-op alloc/submit churn. */
-static void vkb_fill_rect(int x, int y, int w, int h, uint16_t color) {
+/* CPU-path fill: guest VRAM + the upload queue (texture/CPU writes). */
+static void vkb_fill_rect_guest(int x, int y, int w, int h, uint16_t color) {
     sw_fill_rect(x, y, w, h, color);
     if (!s_ctx_ok) return;
     if (x < 0) { w += x; x = 0; } if (y < 0) { h += y; y = 0; }
     if (x + w > VRAM_W) w = VRAM_W - x; if (y + h > VRAM_H) h = VRAM_H - y;
     if (w <= 0 || h <= 0) return;
     up_add(x, y, x + w - 1, y + h - 1);
+}
+
+/* GP0 0x02 fill is a DRAW, not an upload: inside the wide framebuffer's
+ * overflow columns ([video] vram_extension) it goes to the target and lands in
+ * the extension plane through the pack, never in the guest texture pages. */
+static void vkb_fill_rect(int x, int y, int w, int h, uint16_t color) {
+    int gx0, gy0, gx1, gy1;
+    if (w <= 0 || h <= 0) return;
+    if (vram_ext_region(&gx0, &gy0, &gx1, &gy1)) {
+        int ox0 = x > VRAM_EXT_X0 ? x : VRAM_EXT_X0;
+        int ox1 = (x + w - 1) < gx1 ? (x + w - 1) : gx1;
+        int oy0 = y > gy0 ? y : gy0;
+        int oy1 = (y + h - 1) < gy1 ? (y + h - 1) : gy1;
+        if (ox0 <= ox1 && oy0 <= oy1) {
+            if (x < ox0) vkb_fill_rect_guest(x, y, ox0 - x, h, color);
+            if (y < oy0)
+                vkb_fill_rect_guest(ox0, y, ox1 - ox0 + 1, oy0 - y, color);
+            if (oy1 + 1 < y + h)
+                vkb_fill_rect_guest(ox0, oy1 + 1, ox1 - ox0 + 1,
+                                    (y + h) - (oy1 + 1), color);
+            vkb_draw_flat_rect(ox0, oy0, ox1 - ox0 + 1, oy1 - oy0 + 1, color);
+            return;
+        }
+    }
+    vkb_fill_rect_guest(x, y, w, h, color);
 }
 
 /* Same policy as GL: skip framebuffer-sized depth24 (RGB888) transfers only;
@@ -3826,6 +3891,31 @@ static void vkb_vram_transfer_in(int x, int y, int w, int h, const uint16_t *dat
     up_add_transfer(x, y, w, h);   /* exact touched rects, incl. per-pixel wrap */
 }
 
+/* The [video] vram_extension plane is host scratch, not guest state: after a
+ * savestate restore the restored frame must not show the previous session's
+ * overflow columns, so clear both the CPU plane and the raw mirror region. */
+static void vkb_ext_clear(void) {
+    if (!s_ready || !s_ctx_ok) return;
+    const size_t bytes = (size_t)VRAM_EXT_COLS * VRAM_H * 2;
+    memset(vram_ext_host(), 0, bytes);
+    VkBuffer buf; VkDeviceMemory mem; void *map;
+    if (!make_staging((VkDeviceSize)bytes, &buf, &mem, &map)) return;
+    memset(map, 0, bytes);
+    VkCommandBuffer cb = begin_oneshot();
+    img_to(cb, s_raw_img, &s_raw_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkBufferImageCopy rc = {0};
+    rc.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    rc.imageSubresource.layerCount = 1;
+    rc.imageOffset.x = VRAM_EXT_OFFSET;
+    rc.imageExtent.width = VRAM_EXT_COLS;
+    rc.imageExtent.height = VRAM_H;
+    rc.imageExtent.depth = 1;
+    p_vkCmdCopyBufferToImage(cb, buf, s_raw_img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &rc);
+    img_to(cb, s_raw_img, &s_raw_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    end_oneshot(cb);
+    defer_staging(buf, mem);
+}
+
 void vk_renderer_restage_vram_after_savestate(void) {
     if (!s_ctx_ok || !s_vram) return;
     s_up_nrects = 0;
@@ -3833,6 +3923,7 @@ void vk_renderer_restage_vram_after_savestate(void) {
     s_depth24_skip_up = 0;
     up_add_transfer(0, 0, VRAM_W, VRAM_H);
     flush_cpu_upload();
+    vkb_ext_clear();
     if (gpu_display_is_depth24()) {
         s_depth24_skip_up = 1;
         depth24_mark_scanout_band();
@@ -3853,6 +3944,14 @@ static void vkb_vram_write(int x, int y, uint16_t pixel) {
 }
 static uint16_t vkb_vram_read(int x, int y) {
     ensure_cpu();   /* gated by s_gpu_dirty; cheap when nothing was drawn */
+    return s_vram ? s_vram[y * VRAM_W + x] : 0;
+}
+/* Scanout read ([video] vram_extension): the wide framebuffer's overflow
+ * columns are in the extension plane, everything else in guest VRAM. */
+static uint16_t vkb_vram_read_display(int x, int y) {
+    ensure_cpu();
+    int i = vram_ext_plane_index(x, y);
+    if (i >= 0) return vram_ext_host()[i];
     return s_vram ? s_vram[y * VRAM_W + x] : 0;
 }
 
@@ -4726,6 +4825,7 @@ static const GpuRenderBackend VK_BACKEND = {
     .render_display_hires          = vkb_render_display_hires,
     .vram_write                    = vkb_vram_write,
     .vram_read                     = vkb_vram_read,
+    .vram_read_display             = vkb_vram_read_display,
     .vram_transfer_in              = vkb_vram_transfer_in,
     .vram_transfer_out             = vkb_vram_transfer_out,
     .set_draw_area                 = vkb_set_draw_area,

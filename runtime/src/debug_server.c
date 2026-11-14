@@ -37,6 +37,7 @@
 #endif
 #include "dma.h"
 #include "gpu.h"
+#include "vram_ext.h"
 #include "gpu_hd_textures.h"
 #include "gpu_render.h"   /* gr_scale + gr_render_display_hires (screenshot_hires) */
 #include "present_ring.h"
@@ -5716,6 +5717,8 @@ static void handle_pgxp(int id, const char *json)
 static void handle_gpu_state(int id, const char *json)
 {
     (void)json;
+    char vram_ext_json[384];
+    vram_ext_debug_json(vram_ext_json, (int)sizeof vram_ext_json);
     GpuDisplayInfo di;
     gpu_get_display_info(&di);
     uint32_t gpustat = gpu_read_gpustat();
@@ -5766,7 +5769,8 @@ static void handle_gpu_state(int id, const char *json)
              "\"backdrop\":{\"veto\":%d,\"eval_frame\":%u,\"rects\":%u,"
              "\"full\":%d,\"short\":%d,\"x\":[%d,%d],\"reveal\":%d,"
              "\"canon_pct\":%u,\"left_pct\":%u,\"right_pct\":%u,"
-             "\"last_short\":%u,\"evaluations\":%llu,\"short_frames\":%llu}}}",
+             "\"last_short\":%u,\"evaluations\":%llu,\"short_frames\":%llu},"
+             "\"vram_ext_stats\":%s}",
              id, di.display_x, di.display_y,
              di.width, di.height,
              di.screen_offset_y,
@@ -5813,7 +5817,7 @@ static void handle_gpu_state(int id, const char *json)
              ws.bd_full, ws.bd_short, ws.bd_min_x, ws.bd_max_x, ws.bd_reveal,
              ws.bd_canon_pct, ws.bd_left_pct, ws.bd_right_pct,
              ws.bd_last_short, (unsigned long long)ws.bd_evaluations,
-             (unsigned long long)ws.bd_short_frames);
+             (unsigned long long)ws.bd_short_frames, vram_ext_json);
 }
 
 static void handle_ws_aspect_cone_site(int id, const char *json)

@@ -83,6 +83,7 @@
 #include "frame_interpolation.h"
 #include "render_pass_plan.h"
 #include "render_pass.h"
+#include "vram_ext.h"
 #include "psx_cycles.h"
 #include "psx_video_timing.h"
 #include "mod_plugins.h"      /* PSX_MOD_RENDER_PASS_* reasons */
@@ -153,6 +154,9 @@ static uint64_t s_fg_flips;   /* frame generation (below): game frames seen */
 
 #define VRAM_W 1024
 #define VRAM_H 512
+/* Raw R16UI mirror width: guest VRAM 0..1023 plus the [video] vram_extension
+ * columns at 1024..1215 (host x = guest x + VRAM_EXT_OFFSET for x >= 512). */
+#define VRAM_HOST_W VRAM_EXT_HOST_W
 /* GL_MAX_INTERNAL_SCALE (the compile-time ceiling) lives in gpu_render.h; the
  * effective scale is clamped to the driver and memory limits at init. */
 #ifndef PSXGL_MAX_RENDERBUFFER_SIZE
@@ -792,7 +796,7 @@ PrimRec g_ptrace[PTRACE_CAP]; int g_ptrace_n = 0;   /* snapshot (extern) */
 static GLint s_uBlitSrc = -1, s_uBlitPass = -1, s_uBlitMaskset = -1;
 static GLint s_uBlitSrcDiv = -1, s_uBlitSrcOff = -1;
 /* PACK program uniforms. */
-static GLint s_uPackHr = -1, s_uPackScale = -1;
+static GLint s_uPackHr = -1, s_uPackScale = -1, s_uPackOff = -1;
 static GLint s_uStencilSrc = -1, s_uStencilOff = -1;
 
 static uint32_t     *s_conv = NULL;        /* RGBA8 staging for uploads      */
@@ -1845,9 +1849,10 @@ static const char *PACK_FS =
     "#version 330\n"
     "uniform sampler2D u_hr;\n"
     "uniform int u_scale;\n"
+    "uniform int u_off;\n"       /* window-x shift for the extension pass */
     "out uint o_pix;\n"
     "void main(){\n"
-    "  ivec2 p = ivec2(gl_FragCoord.xy);\n"
+    "  ivec2 p = ivec2(gl_FragCoord.xy) - ivec2(u_off, 0);\n"
     "  vec4 c = texelFetch(u_hr, p * u_scale, 0);\n"
     "  uint r = uint(c.r * 255.0 + 0.5) >> 3;\n"
     "  uint g = uint(c.g * 255.0 + 0.5) >> 3;\n"
@@ -2605,6 +2610,18 @@ static const HiwTile *hiw_ensure(int x0, int x1) {
 }
 
 /* ---- coherency: hr FBO -> raw mirror (pack) ------------------------------ */
+/* One pack draw over a guest-coord rect. `off` shifts the destination window
+ * (and therefore gl_FragCoord) right by that many texels while the shader
+ * subtracts it again, so the SOURCE stays at the guest coordinate and only the
+ * DESTINATION moves: that is the [video] vram_extension redirect. */
+static void pack_rect(int x0, int y0, int x1, int y1, int off) {
+    if (x1 < x0 || y1 < y0) return;
+    glViewport(off, 0, VRAM_HOST_W, VRAM_H);
+    glScissor(x0 + off, y0, x1 - x0 + 1, y1 - y0 + 1);
+    p_glUniform1i(s_uPackOff, off);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+}
+
 static void pack_flush(void) {
     if (!s_raster_ok || !s_pack_dirty.set) return;
     /* A generated frame draws into its own surfaces: the raw mirror keeps
@@ -2630,9 +2647,7 @@ static void pack_flush(void) {
     }
 
     p_glBindFramebuffer(PSXGL_FRAMEBUFFER, s_raw_fbo);
-    glViewport(0, 0, VRAM_W, VRAM_H);
     glEnable(GL_SCISSOR_TEST);
-    glScissor(x, y, w, h);
     glDisable(GL_BLEND);
     glDisable(GL_STENCIL_TEST);
     p_glUseProgram(s_pack_prog);
@@ -2641,7 +2656,29 @@ static void pack_flush(void) {
     p_glUniform1i(s_uPackHr, 0);
     p_glUniform1i(s_uPackScale, s_hr_scale);
     p_glBindVertexArray(s_empty_vao);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    int x1 = x + w - 1, y1 = y + h - 1;
+    int gx0, gy0, gx1, gy1;
+    if (!vram_ext_region(&gx0, &gy0, &gx1, &gy1)) {
+        pack_rect(x, y, x1, y1, 0);
+    } else {
+        /* Rows outside the framebuffer band: no redirect (texture writes). */
+        pack_rect(x, y, x1, gy0 - 1, 0);
+        pack_rect(x, gy1 + 1, x1, y1, 0);
+        int by0 = y > gy0 ? y : gy0;
+        int by1 = y1 < gy1 ? y1 : gy1;
+        /* Inside the band: columns left of the split stay guest, the overflow
+         * columns go to the extension plane. */
+        pack_rect(x, by0, x1 < VRAM_EXT_X0 - 1 ? x1 : VRAM_EXT_X0 - 1, by1, 0);
+        pack_rect(VRAM_EXT_X0 > x ? VRAM_EXT_X0 : x, by0, gx1 < x1 ? gx1 : x1,
+                  by1, VRAM_EXT_OFFSET);
+        int cx0 = x > VRAM_EXT_X0 ? x : VRAM_EXT_X0;
+        int cx1 = x1 < gx1 ? x1 : gx1;
+        if (cx0 <= cx1 && by0 <= by1)
+            vram_ext_note_remap((uint64_t)(cx1 - cx0 + 1) *
+                                (uint64_t)(by1 - by0 + 1));
+    }
+
     p_glBindVertexArray(0);
     p_glUseProgram(0);
     glDisable(GL_SCISSOR_TEST);
@@ -2710,6 +2747,15 @@ static void ensure_cpu(void) {
     glReadPixels(rx, ry, rw, rh, PSXGL_RED_INTEGER, GL_UNSIGNED_SHORT,
                  s_vram + (size_t)ry * VRAM_W + rx);
     glPixelStorei(PSXGL_PACK_ROW_LENGTH, 0);
+    /* [video] vram_extension: the raw mirror's extension columns hold the wide
+     * framebuffer's overflow, which guest VRAM never contains. */
+    if (vram_ext_driving()) {
+        glPixelStorei(PSXGL_PACK_ROW_LENGTH, VRAM_EXT_COLS);
+        glReadPixels(VRAM_EXT_OFFSET, 0, VRAM_EXT_COLS, VRAM_H,
+                     PSXGL_RED_INTEGER, GL_UNSIGNED_SHORT, vram_ext_host());
+        glPixelStorei(PSXGL_PACK_ROW_LENGTH, 0);
+        vram_ext_note_readback((uint64_t)VRAM_EXT_COLS * VRAM_H * 2);
+    }
     p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, 0);
     s_gpu_dirty = 0;
     rect_clear(&s_cpu_dirty);
@@ -4413,6 +4459,31 @@ static void glb_draw_gouraud_triangle(int x0,int y0,uint16_t c0,int x1,int y1,ui
 }
 static void glb_fill_rect(int x,int y,int w,int h,uint16_t c){
     if (pass_refuse_write("fill", x, y, w, h)) return;
+    /* [video] vram_extension: a fill inside the wide framebuffer's overflow
+     * columns is a DRAW, not an upload - it must reach the FBO (and from there
+     * the extension plane) without touching the guest texture pages. */
+    int gx0, gy0, gx1, gy1;
+    if (w > 0 && h > 0 && vram_ext_region(&gx0, &gy0, &gx1, &gy1)) {
+        int ox0 = x > VRAM_EXT_X0 ? x : VRAM_EXT_X0;
+        int ox1 = (x + w - 1) < gx1 ? (x + w - 1) : gx1;
+        int oy0 = y > gy0 ? y : gy0;
+        int oy1 = (y + h - 1) < gy1 ? (y + h - 1) : gy1;
+        if (ox0 <= ox1 && oy0 <= oy1) {
+            if (cpu_raster_required()) {
+                int faithful = native_draw_begin();
+                if (x < ox0) sw_fill_rect(x, y, ox0 - x, h, c);
+                if (y < oy0)
+                    sw_fill_rect(ox0, y, ox1 - ox0 + 1, oy0 - y, c);
+                if (oy1 + 1 < y + h)
+                    sw_fill_rect(ox0, oy1 + 1, ox1 - ox0 + 1,
+                                 (y + h) - (oy1 + 1), c);
+                native_draw_end(faithful);
+            }
+            if (!s_raster_ok) return;
+            gpu_fill(x, y, w, h, c);
+            return;
+        }
+    }
     if (cpu_raster_required()) {
         int faithful = native_draw_begin();
         sw_fill_rect(x,y,w,h,c);
@@ -4678,6 +4749,14 @@ static void glb_vram_write(int x,int y,uint16_t px){
     up_add(x & (VRAM_W-1), y & (VRAM_H-1), x & (VRAM_W-1), y & (VRAM_H-1));
 }
 static uint16_t glb_vram_read(int x,int y){ depth24_upload_policy(); ensure_cpu(); return sw_vram_read(x,y); }
+/* Scanout read ([video] vram_extension): the wide framebuffer's overflow
+ * columns are in the extension plane, everything else in guest VRAM. */
+static uint16_t glb_vram_read_display(int x,int y){
+    depth24_upload_policy(); ensure_cpu();
+    int i = vram_ext_plane_index(x, y);
+    if (i >= 0) return vram_ext_host()[i];
+    return sw_vram_read(x,y);
+}
 static void glb_vram_transfer_in(int x,int y,int w,int h,const uint16_t *d){
     if (pass_refuse_write("upload", x, y, w, h)) return;
     depth24_upload_policy();
@@ -5045,7 +5124,7 @@ static int init_gpu_raster(void) {
     if (!s_conv) return 0;
 
     s_up_tex      = make_tex(GL_RGBA8, VRAM_W, VRAM_H, GL_RGBA, GL_UNSIGNED_BYTE);
-    s_raw_tex     = make_tex(PSXGL_R16UI, VRAM_W, VRAM_H, PSXGL_RED_INTEGER, GL_UNSIGNED_SHORT);
+    s_raw_tex     = make_tex(PSXGL_R16UI, VRAM_HOST_W, VRAM_H, PSXGL_RED_INTEGER, GL_UNSIGNED_SHORT);
     /* Force the driver's first texture-upload allocation while the renderer is
      * initializing. NVIDIA otherwise defers it until the first MDEC frame,
      * producing a measured ~33 ms glTexSubImage hitch and an audible underrun. */
@@ -5108,6 +5187,7 @@ static int init_gpu_raster(void) {
     s_uBlitSrcOff  = p_glGetUniformLocation(s_blit_prog, "u_src_off");
     s_uPackHr    = p_glGetUniformLocation(s_pack_prog, "u_hr");
     s_uPackScale = p_glGetUniformLocation(s_pack_prog, "u_scale");
+    s_uPackOff   = p_glGetUniformLocation(s_pack_prog, "u_off");
     s_uStencilSrc = p_glGetUniformLocation(s_stencil_prog, "u_src");
     s_uStencilOff = p_glGetUniformLocation(s_stencil_prog, "u_off");
     s_uBhSrc     = p_glGetUniformLocation(s_blit_hi_prog, "u_src");
@@ -9885,6 +9965,7 @@ static const GpuRenderBackend GL_BACKEND = {
     .draw_line = glb_draw_line, .draw_shaded_line = glb_draw_shaded_line,
     .render_display = glb_render_display, .render_display_hires = glb_render_display_hires,
     .vram_write = glb_vram_write, .vram_read = glb_vram_read,
+    .vram_read_display = glb_vram_read_display,
     .vram_transfer_in = glb_vram_transfer_in, .vram_transfer_out = glb_vram_transfer_out,
     .set_draw_area = glb_set_draw_area, .get_draw_area = glb_get_draw_area,
     .set_draw_offset = glb_set_draw_offset,

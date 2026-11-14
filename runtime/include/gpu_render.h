@@ -109,6 +109,8 @@ int gr_render_display_hires(uint32_t *out_pixels, int out_pitch,
 void gr_vram_upload_begin(int x, int y, int w, int h);
 void gr_vram_write(int x, int y, uint16_t pixel);
 uint16_t gr_vram_read(int x, int y);
+/* Scanout read: the display/GP0 0xC0 view of VRAM (extension-plane aware). */
+uint16_t gr_vram_read_display(int x, int y);
 void gr_vram_transfer_in(int x, int y, int w, int h, const uint16_t *data);
 void gr_vram_transfer_out(int x, int y, int w, int h, uint16_t *data);
 
@@ -194,6 +196,11 @@ typedef struct GpuRenderBackend {
                                  int dx, int dy, int dw, int dh);
     void (*vram_write)(int x, int y, uint16_t pixel);
     uint16_t (*vram_read)(int x, int y);
+    /* Optional (NULL = same as vram_read): the scanout view of VRAM. With
+     * [video] vram_extension a wide framebuffer's overflow columns live in the
+     * host extension plane, so the display/GP0 0xC0 read must follow the same
+     * remap the pack applied. vram_read stays canonical (textures intact). */
+    uint16_t (*vram_read_display)(int x, int y);
     void (*vram_transfer_in)(int x, int y, int w, int h, const uint16_t *data);
     void (*vram_transfer_out)(int x, int y, int w, int h, uint16_t *data);
     void (*set_draw_area)(int x1, int y1, int x2, int y2);

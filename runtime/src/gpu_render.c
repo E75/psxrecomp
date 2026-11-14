@@ -14,6 +14,7 @@
 #include "gpu_sw_renderer.h"
 #include "gpu_hd_textures.h"
 #include "gpu_uv.h"
+#include "vram_ext.h"
 #include <stdio.h>
 
 static const GpuRenderBackend SW_BACKEND = {
@@ -44,6 +45,7 @@ static const GpuRenderBackend SW_BACKEND = {
     .render_display_hires          = sw_render_display_hires,
     .vram_write                    = sw_vram_write,
     .vram_read                     = sw_vram_read,
+    .vram_read_display             = sw_vram_read_display,
     .vram_transfer_in              = sw_vram_transfer_in,
     .vram_transfer_out             = sw_vram_transfer_out,
     .set_draw_area                 = sw_set_draw_area,
@@ -115,6 +117,7 @@ void gr_set_backend(GrBackend backend) {
         if (gl) {
             g_b = gl;
             g_effective = GR_BACKEND_OPENGL;
+            vram_ext_set_backend(VRAM_EXT_BACKEND_OPENGL);
             fprintf(stdout, "psxrecomp: renderer = opengl (%s)\n", gl->name);
             return;
         }
@@ -125,6 +128,7 @@ void gr_set_backend(GrBackend backend) {
         if (vk) {
             g_b = vk;
             g_effective = GR_BACKEND_VULKAN;
+            vram_ext_set_backend(VRAM_EXT_BACKEND_VULKAN);
             fprintf(stdout, "psxrecomp: renderer = vulkan (%s)\n", vk->name);
             return;
         }
@@ -133,6 +137,7 @@ void gr_set_backend(GrBackend backend) {
     }
     g_b = &SW_BACKEND;
     g_effective = GR_BACKEND_SOFTWARE;
+    vram_ext_set_backend(VRAM_EXT_BACKEND_SOFTWARE);
 }
 
 GrBackend gr_backend(void) { return g_effective; }
@@ -234,6 +239,10 @@ int gr_render_display_hires(uint32_t *o, int p, int dx, int dy, int dw, int dh) 
 void gr_vram_upload_begin(int x, int y, int w, int h) { gpu_hd_textures_begin_upload(x,y,w,h); }
 void gr_vram_write(int x, int y, uint16_t pixel)     { g_b->vram_write(x, y, pixel); gpu_hd_textures_invalidate(x,y,1,1); }
 uint16_t gr_vram_read(int x, int y)                  { return g_b->vram_read(x, y); }
+uint16_t gr_vram_read_display(int x, int y) {
+    return g_b->vram_read_display ? g_b->vram_read_display(x, y)
+                                  : g_b->vram_read(x, y);
+}
 void gr_vram_transfer_in(int x, int y, int w, int h, const uint16_t *d)  { g_b->vram_transfer_in(x, y, w, h, d); gpu_hd_textures_track_upload(x,y,w,h,d); }
 void gr_vram_transfer_out(int x, int y, int w, int h, uint16_t *d)       { g_b->vram_transfer_out(x, y, w, h, d); }
 void gr_set_draw_area(int x1, int y1, int x2, int y2){ g_b->set_draw_area(x1, y1, x2, y2); }

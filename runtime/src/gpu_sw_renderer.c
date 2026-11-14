@@ -30,6 +30,7 @@
 #include "gpu_sw_renderer.h"
 #include "gpu_vram_dirty.h"
 #include "gpu_sw_edges.h"
+#include "vram_ext.h"
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -120,6 +121,14 @@ static inline uint16_t vram_get(int x, int y) {
     x &= (VRAM_WIDTH - 1);
     y &= (VRAM_HEIGHT - 1);
     return g_vram[y * VRAM_WIDTH + x];
+}
+
+/* Scanout read: a [video] vram_extension wide framebuffer keeps its overflow
+ * columns (x >= 512) in the host extension plane, not in guest VRAM. */
+static inline uint16_t vram_get_scanout(int x, int y) {
+    int i = vram_ext_plane_index(x, y);
+    if (i >= 0) return vram_ext_host()[i];
+    return vram_get(x, y);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1594,6 +1603,10 @@ uint16_t sw_vram_read(int x, int y) {
     return vram_get(x, y);
 }
 
+uint16_t sw_vram_read_display(int x, int y) {
+    return vram_get_scanout(x, y);
+}
+
 /* ------------------------------------------------------------------ */
 /* Bulk VRAM transfers                                                */
 /* ------------------------------------------------------------------ */
@@ -1739,7 +1752,7 @@ int sw_render_display(uint32_t *out_pixels, int out_pitch,
 
         for (int col = 0; col < disp_w; col++) {
             int vx = (disp_x + col) & (VRAM_WIDTH - 1);
-            dst[col] = rgb555_to_argb(g_vram[vy * VRAM_WIDTH + vx]);
+            dst[col] = rgb555_to_argb(vram_get_scanout(vx, vy));
             count++;
         }
     }

@@ -6,7 +6,13 @@
  * Dispatched over the dirty rect: global id + (off_x,off_y) = native coord.
  * The render target covers only the displayed window (gpu_vk_renderer.c
  * tgt_create), so the fetch subtracts its native origin before scaling.
- * Ported from the GL backend's PACK_FS (fragment) to a compute pass. */
+ * Ported from the GL backend's PACK_FS (fragment) to a compute pass.
+ *
+ * [video] vram_extension: pixels of a wide framebuffer that fall past column
+ * 512 are stored at host column p.x + ext_off instead of p.x, so the guest
+ * texture pages at 512..1023 are never overwritten. The SOURCE (the target
+ * fetch) stays at the guest coordinate; only the DESTINATION moves. ext_x0 < 0
+ * disables the redirect (stock 512-wide display, render-to-texture). */
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 0) uniform sampler2D u_hr;             /* RGBA8 target */
 layout(set = 0, binding = 1, r16ui) uniform writeonly uimage2D u_raw;
@@ -16,6 +22,11 @@ layout(push_constant) uniform PC {
     int off_y;
     int u_tgt_x;           /* native VRAM coord of target texel (0,0) */
     int u_tgt_y;
+    int ext_x0;            /* first redirected guest column, or -1 */
+    int ext_x1;            /* last redirected guest column */
+    int ext_y0;            /* first redirected row */
+    int ext_y1;            /* last redirected row */
+    int ext_off;           /* host column offset */
 } pc;
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy) + ivec2(pc.off_x, pc.off_y);
@@ -27,5 +38,9 @@ void main() {
     uint g = uint(c.g * 255.0 + 0.5) >> 3;
     uint b = uint(c.b * 255.0 + 0.5) >> 3;
     uint o = r | (g << 5) | (b << 10) | (c.a >= 0.5 ? 0x8000u : 0u);
-    imageStore(u_raw, p, uvec4(o, 0, 0, 0));
+    ivec2 d = p;
+    if (pc.ext_x0 >= 0 && p.x >= pc.ext_x0 && p.x <= pc.ext_x1 &&
+        p.y >= pc.ext_y0 && p.y <= pc.ext_y1)
+        d.x = p.x + pc.ext_off;
+    imageStore(u_raw, d, uvec4(o, 0, 0, 0));
 }

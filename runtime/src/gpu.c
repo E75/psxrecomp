@@ -21,6 +21,7 @@
 #include "gpu_sw_renderer.h"
 #include "gpu_vram_dirty.h"
 #include "gpu_render.h"
+#include "vram_ext.h"
 #include "ws_view_anchor.h"
 #include "text_xlate.h"
 #include "crash_trace.h"
@@ -3802,6 +3803,7 @@ uint64_t g_pollhack_vblank_count = 0;  /* instrumentation: poll-fallback VBlank 
 
 static void gpu_reset_state(int clear_vram) {
     ws_reset_scene_history();
+    vram_ext_init();     /* [video] vram_extension, once per process */
     if (clear_vram) {
         memset(vram, 0, sizeof(vram));
         gpu_vram_dirty_mark_all();
@@ -4011,12 +4013,15 @@ uint32_t gpu_read_gpuread(void) {
     /* Read two 16-bit pixels from VRAM and pack into one 32-bit word.
      * Routed through the renderer facade: under the GL backend the GPU-side
      * framebuffer is authoritative and must be synced down before the CPU
-     * array is read (no-op cost on the software backend). */
+     * array is read (no-op cost on the software backend). The DISPLAY read
+     * follows the [video] vram_extension plane, so a guest that reads back the
+     * wide framebuffer (feedback effects, screenshots) sees the frame and not
+     * the texture pages the extension protected. */
     uint32_t value = 0;
     for (int i = 0; i < 2; i++) {
         uint16_t rx = (vram_read_x + vram_read_col) % 1024;
         uint16_t ry = (vram_read_y + vram_read_row) % 512;
-        value |= (uint32_t)gr_vram_read((int)rx, (int)ry) << (i * 16);
+        value |= (uint32_t)gr_vram_read_display((int)rx, (int)ry) << (i * 16);
 
         if (++vram_read_col == vram_read_w) {
             vram_read_col = 0;
@@ -4340,6 +4345,15 @@ void gpu_display_pixel_rgb(const GpuDisplayInfo* di, uint32_t x, uint32_t y,
 
     uint32_t vx = (di->display_x + x) & 1023u;
     uint32_t vy = (di->display_y + y) & 511u;
+    /* [video] vram_extension: the wide framebuffer's overflow columns live in
+     * the host extension plane, not in guest VRAM (see docs/VRAM_EXTENSION.md). */
+    {
+        int ei = vram_ext_plane_index((int)vx, (int)vy);
+        if (ei >= 0) {
+            gpu_rgb555_to_rgb888(vram_ext_host()[ei], r, g, b);
+            return;
+        }
+    }
     gpu_rgb555_to_rgb888(vram[vy * 1024u + vx], r, g, b);
 }
 
@@ -4446,7 +4460,14 @@ void gpu_get_display_info(GpuDisplayInfo* out) {
      * present/filter issue, not a reason to shrink CRTC width. */
 
     /* Clamp to sane maximums */
-    if (w > 640) w = 640;
+    /* [video] vram_extension: a guest display wider than 512 (the native 682
+     * raster) is only coherent with the host extension plane, so the switch
+     * that enables the plane also raises the cap to the guest VRAM width.
+     * Off = the historical 640 cap, byte-identical. */
+    {
+        uint32_t cap = vram_ext_enabled() ? (uint32_t)VRAM_EXT_GUEST_W : 640u;
+        if (w > cap) w = cap;
+    }
     if (out->depth24) {
         if (screen_h > PSX_DISPLAY_PRESENT_MAX_HEIGHT)
             screen_h = PSX_DISPLAY_PRESENT_MAX_HEIGHT;
@@ -4470,6 +4491,48 @@ void gpu_get_display_info(GpuDisplayInfo* out) {
     out->screen_source_skip_y = screen_source_skip_y;
     out->screen_offset_y = vertical.valid ? vertical.offset_y : 0;
     if (vres) out->screen_offset_y *= 2;
+}
+
+/* ---- Host VRAM extension ([video] vram_extension) ----------------------
+ * Decide, from the current draw area and display geometry, whether this frame's
+ * draws land in the display buffer. When they do, the columns past x=512 of
+ * that buffer are redirected to the host extension plane by the renderer's
+ * pack (see docs/VRAM_EXTENSION.md). The gate is what keeps a render-to-texture
+ * pass untouched: such a pass sets a draw area that is NOT the display rect.
+ *
+ * A double-buffered title sets the draw area to BOTH 240-line bands
+ * (WE2002: [0,240]..[681,479]) while the display scans out one of them, so the
+ * Y test is containment, not equality. The X span must match exactly: that is
+ * the framebuffer's width, and it is what makes the overflow columns real. */
+static void vram_ext_sync(void) {
+    if (!vram_ext_enabled()) return;
+    GpuDisplayInfo di;
+    gpu_get_display_info(&di);
+    vram_ext_note_present((int)di.width);
+
+    int on = 0, x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    const int disp_x1 = (int)di.display_x + (int)di.width - 1;
+    if (!di.disabled && !di.depth24 &&
+        di.width > (uint32_t)VRAM_EXT_X0 &&
+        disp_x1 < VRAM_EXT_GUEST_W &&
+        disp_x1 <= VRAM_EXT_X0 + VRAM_EXT_COLS - 1 &&
+        (int)di.display_y + (int)di.height <= 512 &&
+        (int)draw_area_left == (int)di.display_x &&
+        (int)draw_area_right == disp_x1 &&
+        (int)draw_area_top <= (int)di.display_y &&
+        (int)draw_area_bottom >= (int)(di.display_y + di.height - 1)) {
+        on = 1;
+        x0 = (int)di.display_x;
+        x1 = disp_x1;
+        y0 = (int)draw_area_top;
+        y1 = (int)draw_area_bottom;
+    } else if (di.width > (uint32_t)VRAM_EXT_X0) {
+        /* Wide display, but the draws are somewhere else: render-to-texture
+         * (or a depth24/disabled frame). Nothing is redirected; counted so the
+         * game lane can prove WE2002 never takes this branch mid-match. */
+        vram_ext_note_gate_off(1);
+    }
+    vram_ext_set_region(on, x0, y0, x1, y1);
 }
 
 /* Debug accessors for GP1 display-range / mode (TCP gpu_state). */
@@ -5989,6 +6052,7 @@ static void gp0_exec_draw_area_tl(void) {
                      (int)draw_area_right, (int)draw_area_bottom);
     ws_nw_sync_target();  /* back buffer (draw_area_left) → wide mirror surface */
     gpu_timeline_note(GTL_DRAW_AREA, draw_area_left, draw_area_top);
+    vram_ext_sync();      /* draw area changed: re-derive the overflow gate */
 }
 
 static void gp0_exec_draw_area_br(void) {
@@ -5999,6 +6063,7 @@ static void gp0_exec_draw_area_br(void) {
     draw_area_right  = param & 0x3FF;
     draw_area_bottom = (param >> 10) & 0x3FF;
     split_trace_note_draw_area();
+    vram_ext_sync();      /* draw area changed: re-derive the overflow gate */
     gr_set_draw_area((int)draw_area_left, (int)draw_area_top,
                      (int)draw_area_right, (int)draw_area_bottom);
     ws_nw_sync_target();  /* back buffer (draw_area_left) → wide mirror surface */
@@ -7787,6 +7852,8 @@ void gpu_write_gp1(uint32_t val) {
             psx_fatal_halt(reason);
         }
     }
+    /* Display geometry changed: re-derive the vram-extension gate. */
+    vram_ext_sync();
 }
 
 /* ---- boot snapshot: complete GPU register state (see boot_state.h) ---- */
@@ -8123,6 +8190,7 @@ void gpu_pass_checkpoint_restore(void) {
     gr_set_draw_offset(draw_offset_x, draw_offset_y);
     gr_set_mask_bits((int)set_mask_bit, (int)check_mask_bit);
     ws_nw_sync_target();
+    vram_ext_sync();
     /* Target sync may classify the scene before render_pass.c restores RAM.
      * Do not retain history learned from the synthetic draw or that query. */
     gpu_pass_scene_transfer(1);

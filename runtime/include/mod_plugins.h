@@ -171,6 +171,18 @@ void psx_mod_write_code_word(uint32_t address, uint32_t value);
 uint32_t psx_mod_call_guest(struct CPUState* cpu, uint32_t function,
                             uint32_t return_address, uint32_t a0, uint32_t a1,
                             uint32_t a2, uint32_t a3);
+/* psx_mod_call_guest, reporting whether the guest returned. A vector that
+ * blocks or switches threads (ChangeThread A0:03, ReturnFromException C0:03,
+ * WaitEvent B0:06, anything ending in a thread switch) longjmps to the guest
+ * scheduler and never comes back to the C caller: *returned is then 0 and the
+ * caller must not continue with the call's result. The plain form above keeps
+ * the historical behaviour and only counts the event (psx_guest_call_stats,
+ * psx_guest_call.h). A host call also publishes its caller's real guest $ra as
+ * the resume PC for a thread switch or an interrupt taken at its boundary, so
+ * no call sentinel can ever land in a TCB or an EPC. */
+uint32_t psx_mod_call_guest_ex(struct CPUState* cpu, uint32_t function,
+                               uint32_t return_address, uint32_t a0, uint32_t a1,
+                               uint32_t a2, uint32_t a3, int* returned);
 /* psx_mod_call_guest in zero guest time, for CPU/RAM work a game spends guest
  * time on while it loads (allocators, decoders, table builds). Every RAM,
  * register and device effect of the callee is kept, as if it executed in an

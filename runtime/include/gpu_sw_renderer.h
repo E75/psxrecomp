@@ -106,6 +106,9 @@ int sw_render_display_hires(uint32_t* out_pixels, int out_pitch,
 /* VRAM transfer (CPU->VRAM, VRAM->CPU) */
 void sw_vram_write(int x, int y, uint16_t pixel);
 uint16_t sw_vram_read(int x, int y);
+/* Scanout read: follows the [video] vram_extension plane for a wide
+ * framebuffer's overflow columns. Canonical sw_vram_read does not. */
+uint16_t sw_vram_read_display(int x, int y);
 void sw_vram_transfer_in(int x, int y, int w, int h, const uint16_t* data);
 void sw_vram_transfer_out(int x, int y, int w, int h, uint16_t* data);
 
