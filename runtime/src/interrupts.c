@@ -1926,6 +1926,33 @@ irq_deliver_eval:
         /* jmp_val 0 (normal return) or 1 (ReturnFromException): done. */
         break;
     }
+    /* Ack exactly once per delivery. Hardware leaves the ack to the handler
+     * (I_STAT write). If the SAME bit is still pending after a full delivery AND
+     * the guest resumes at the SAME PC, the handler could not ack it - an
+     * unmasked source with no installed handler, which re-fires at every block
+     * leader and starves the guest (docs/BOOT_BLOCKERS.md section 5). Clear it
+     * here once, exactly as the kernel's default handler would, and count it so
+     * the condition is visible instead of silent. */
+    {
+        const uint32_t pend_after = i_stat & i_mask & 0x7FFu;
+        static uint32_t s_last_pend, s_last_pc;
+        static uint64_t s_forgiven;
+        const uint32_t resumed = g_exception_real_epc;
+        if (pend_after != 0u && pend_after == s_last_pend && resumed == s_last_pc) {
+            i_stat &= ~pend_after;
+            psx_irq_refresh_cause_ip2();
+            if (++s_forgiven <= 8) {
+                fprintf(stderr,
+                        "psx_interrupts: handler did not ack I_STAT 0x%03X at pc 0x%08X "
+                        "(delivery %llu) - acked once at the boundary\n",
+                        (unsigned)pend_after, (unsigned)resumed,
+                        (unsigned long long)s_forgiven);
+                fflush(stderr);
+            }
+        }
+        s_last_pend = i_stat & i_mask & 0x7FFu;
+        s_last_pc = resumed;
+    }
     /* Restore previous exception-owner state. Supports nested exceptions
      * if they ever arise (uncommon but harmless). */
     g_exception_owner_fiber = prev_owner_fiber;

@@ -1114,6 +1114,18 @@ static void interrupt_write_stat_masked(uint32_t val, uint32_t mask) {
     uint32_t ack_mask = mask & 0x7FFu;
     uint32_t before = i_stat;
     i_stat = (i_stat & ~ack_mask) | (i_stat & val & ack_mask);
+    /* Ack trace (first 8): tells whether the guest's handler acks at all, which
+     * is what an IRQ storm hinges on (docs/BOOT_BLOCKERS.md section 5). */
+    {
+        static int s_ack_logs;
+        if (s_ack_logs < 8) {
+            s_ack_logs++;
+            fprintf(stderr, "psx_interrupts: I_STAT write val=0x%03X mask=0x%03X %03X -> %03X\n",
+                    (unsigned)(val & 0x7FFu), (unsigned)ack_mask,
+                    (unsigned)before, (unsigned)i_stat);
+            fflush(stderr);
+        }
+    }
     if ((before & 1u) && !(i_stat & 1u)) g_vblank_ack_count++;  /* VBLANK bit 1->0 */
     psx_irq_refresh_cause_ip2();
 }
