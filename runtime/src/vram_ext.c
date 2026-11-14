@@ -275,6 +275,8 @@ static struct {
     uint64_t pack_calls;
     uint64_t pack_passes;
     uint64_t pack_pixels;
+    uint64_t gl_bypass_frames;
+    int      gl_bypass_reason;
     int      pack_max_x1;              /* widest pack rect right edge seen */
     int      present_width;
 } s_stats;
@@ -356,6 +358,24 @@ void vram_ext_note_pack_passes(uint64_t passes, uint64_t pixels) {
     s_stats.pack_pixels += pixels;
 }
 
+/* A frame the GL GPU raster did not draw. One query answers "is the GPU path
+ * actually running?"; the first frame per reason also lands in the log. */
+void vram_ext_note_gl_bypass(int reason) {
+    static const char *const why[] = {
+        "none", "no GL context", "GL raster not initialised",
+        "depth24 scanout", "dual-raster CPU authority",
+        "HD native authority", "frame-generation draw"
+    };
+    static unsigned seen;
+    s_stats.gl_bypass_frames++;
+    s_stats.gl_bypass_reason = reason;
+    if (reason < 1 || reason >= (int)(sizeof why / sizeof why[0])) return;
+    if (seen & (1u << reason)) return;
+    seen |= 1u << reason;
+    fprintf(stderr, "psxrecomp: GL GPU raster bypassed for VRAM: %s (the CPU "
+                    "rasterizer owns VRAM, the GPU pack does not run)\n", why[reason]);
+}
+
 void vram_ext_reset_stats(void) { memset(&s_stats, 0, sizeof s_stats); }
 
 /* The debug reply path must stay small: `gpu_state` is a big object and a reply
@@ -380,7 +400,8 @@ int vram_ext_debug_json(char *out, int cap) {
                     "\"guest_pack_pixels\":%llu,"
                     "\"gate_off_frames\":%llu,\"present_width\":%d,"
                     "\"pack_calls\":%llu,\"pack_max_x1\":%d,"
-                    "\"pack_passes\":%llu,\"pack_pixels\":%llu}",
+                    "\"pack_passes\":%llu,\"pack_pixels\":%llu,"
+                    "\"gl_bypass_frames\":%llu,\"gl_bypass_reason\":%d}",
                     vram_ext_enabled(), vram_ext_driving(), s_backend,
                     on, x0, y0, x1, y1, bands, by0, by1,
                     (unsigned long long)(s_stats.pack_redirect_pixels +
@@ -394,5 +415,7 @@ int vram_ext_debug_json(char *out, int cap) {
                     (unsigned long long)s_stats.pack_calls,
                     s_stats.pack_max_x1,
                     (unsigned long long)s_stats.pack_passes,
-                    (unsigned long long)s_stats.pack_pixels);
+                    (unsigned long long)s_stats.pack_pixels,
+                    (unsigned long long)s_stats.gl_bypass_frames,
+                    s_stats.gl_bypass_reason);
 }

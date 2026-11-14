@@ -94,6 +94,10 @@ void vram_ext_note_pack_rect(int x0, int y0, int x1, int y1);
 void vram_ext_note_cpu_redirect(uint64_t pixels);
 /* One pack pass (a draw/dispatch) and its fragment count, for the cost check. */
 void vram_ext_note_pack_passes(uint64_t passes, uint64_t pixels);
+/* GL only: a frame where the GPU raster was bypassed (CPU rasterizer drew, the
+ * GPU present no-opped). reason: 1 = no context, 2 = raster not ok, 3 = depth24
+ * skip, 4 = dual-raster authority, 5 = HD native authority, 6 = frame-gen draw. */
+void vram_ext_note_gl_bypass(int reason);
 /* A texture fetch must never resolve through the redirect: pass 1 if a texture
  * or upload path resolved a coordinate through vram_ext_map_x(). Every texture
  * path in the tree passes the canonical guest plane, so this stays 0 and

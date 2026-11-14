@@ -5578,7 +5578,14 @@ int gl_renderer_init_context(SDL_Window *win) {
     }
     if (ok) ok = init_gpu_raster();
     if (!ok) {
-        fprintf(stdout, "psxrecomp: GL pipeline init failed — falling back to software renderer\n");
+        /* Name what failed: the FBO status and the target scale decide whether
+         * this is a device capability (4K target too big) or a shader/FBO bug.
+         * The caller then falls back to software, which shows up as
+         * vram_ext_stats.gl_bypass_reason 2. */
+        fprintf(stdout, "psxrecomp: GL pipeline init failed - falling back to "
+                        "software renderer (scale %dx, last FBO status 0x%X, "
+                        "max dim %d, alloc retries %d)\n",
+                s_out_scale, s_last_fbo_status, s_gl_max_dim, s_scale_alloc_retries);
         SDL_GL_DeleteContext(s_ctx); s_ctx = NULL;
         s_raster_ok = 0;
         return 0;
@@ -9150,7 +9157,22 @@ static void present_vram_impl(int disp_x, int disp_y, int w, int h, int linear,
         if (rth_record_present(RTH_PRESENT_VRAM, 6, a)) return;
         gl_rth_acquire("present_oversize");
     }
-    if (!s_ctx || !s_raster_ok) return;
+    if (!s_ctx || !s_raster_ok) {
+        /* The GPU raster is not drawing this frame: the CPU rasterizer owns
+         * VRAM and main.cpp presents the CPU image. Name it once, and count it,
+         * so "pack_calls 0" can never be a silent mystery again. */
+        vram_ext_note_gl_bypass(!s_ctx ? 1 : 2);
+        return;
+    }
+    if (cpu_vram_authoritative() && !s_fg_drawing) {
+        /* Dual-raster / HD-authority / depth24: by design the CPU rasterizer
+         * owns VRAM and the pack is skipped (the GPU image is presentation). */
+        vram_ext_note_gl_bypass(s_depth24_skip_up ? 3 :
+                                s_cpu_auth_dual ? 4 : 5);
+    } else if (s_fg_drawing) {
+        /* A generated (in-between) frame: pack_flush returns early for it. */
+        vram_ext_note_gl_bypass(6);
+    }
     flush_flat_batch();
     flush_tex_batch();
     flush_cpu_upload();
