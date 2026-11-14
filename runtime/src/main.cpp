@@ -19766,6 +19766,7 @@ session_reboot:
     std::fprintf(stdout, "psxrecomp runtime: execution completed, PC=0x%08X\n", cpu.pc);
     { extern uint32_t g_pc0_reason;
       extern uint32_t g_pc0_src;
+      extern uint32_t g_isr_resume_src;
       PsxGuestCallStats gcs;
       psx_guest_call_stats(&gcs);
       /* g_pc0_reason: 0 guest jr/return, 1 change-thread-self, 2 fiber switch,
@@ -19774,12 +19775,13 @@ session_reboot:
       std::fprintf(stdout,
                    "psxrecomp runtime: [exit diag] pc0_reason=%u pc0_src=%u guest_calls=%llu "
                    "returns=%llu non_returning=%llu bad_ra=%llu bad_sp=%llu irq_in_call=%llu "
-                   "isr_returns=%llu isr_bad_target=%llu\n",
+                   "isr_returns=%llu isr_bad_target=%llu isr_resume_src=%u\n",
                    (unsigned)g_pc0_reason, (unsigned)g_pc0_src,
                    (unsigned long long)gcs.calls, (unsigned long long)gcs.returns,
                    (unsigned long long)gcs.non_returning, (unsigned long long)gcs.bad_ra,
                    (unsigned long long)gcs.bad_sp, (unsigned long long)gcs.irq_in_call,
-                   (unsigned long long)gcs.isr_returns, (unsigned long long)gcs.isr_bad_target);
+                   (unsigned long long)gcs.isr_returns, (unsigned long long)gcs.isr_bad_target,
+                   (unsigned)g_isr_resume_src);
     }
     { extern uint64_t g_slice_fired, g_slice_irq_taken, g_dirty_ram_insns_run;
       extern uint32_t g_slice_exit_pc, g_slice_exit_reason, g_slice_exit_iter;

@@ -14,6 +14,7 @@
 #include "psx_cycles.h"
 #include "psx_netplay.h"
 #include "crash_trace.h"
+#include "fntrace.h"
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -248,6 +249,26 @@ void starvation_ring_dump(const char *path) {
                 e->active_device, e->mc_state, e->pad_state, e->selected_slot,
                 e->g_sio_timing_active, e->tx_rdy_visible, e->tx_em_visible,
                 e->i_stat, e->i_mask);
+    }
+    /* Dispatch PC tail: where the guest actually is when it stops
+     * heartbeating. The starvation ring above is SIO/card oriented; the
+     * always-on fntrace ring names the last call targets, return addresses and
+     * stacks, which is what a spin inside a handler needs (docs/BOOT_BLOCKERS.md
+     * section 4). One extra JSON line, last 64 entries. */
+    {
+        extern FntraceEntry g_fntrace_ring[FNTRACE_RING_CAP];
+        extern uint64_t     g_fntrace_seq;
+        const uint64_t seq = g_fntrace_seq;
+        const uint64_t n = seq < 64u ? seq : 64u;
+        fprintf(f, "{\"pc_tail\":{\"seq\":%llu,\"count\":%llu,\"entries\":[",
+                (unsigned long long)seq, (unsigned long long)n);
+        for (uint64_t k = 0; k < n; k++) {
+            const FntraceEntry *e = &g_fntrace_ring[(seq - n + k) & (FNTRACE_RING_CAP - 1u)];
+            fprintf(f, "%s{\"frame\":%u,\"target\":\"0x%08X\",\"ra\":\"0x%08X\","
+                       "\"sp\":\"0x%08X\",\"a0\":\"0x%08X\",\"a1\":\"0x%08X\"}",
+                    k ? "," : "", e->frame, e->target, e->ra, e->sp, e->a0, e->a1);
+        }
+        fprintf(f, "]}}\n");
     }
     fclose(f);
 }

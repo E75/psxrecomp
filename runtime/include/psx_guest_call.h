@@ -62,6 +62,16 @@ typedef struct PsxGuestCallStats {
     uint64_t isr_bad_target; /* RFE / vector target that was not a plausible guest PC */
 } PsxGuestCallStats;
 
+/* Which source supplied the last substituted ISR resume target. */
+enum {
+    PSX_ISR_SRC_NONE = 0,    /* no substitution: the guest's own target was usable */
+    PSX_ISR_SRC_EPC = 1,     /* g_exception_real_epc (the delivery's real interrupted PC) */
+    PSX_ISR_SRC_ARCH_EPC = 2,/* COP0.EPC, which the guest's handler restored */
+    PSX_ISR_SRC_CALLER = 3,  /* the host call's caller continuation */
+    PSX_ISR_SRC_NONE_BAD = 4 /* nothing usable: the bad target was left in place */
+};
+extern uint32_t g_isr_resume_src;
+
 void psx_guest_call_stats(PsxGuestCallStats* out);
 
 /* Aligned and inside live main RAM or the BIOS ROM window. The same rule the
@@ -89,8 +99,9 @@ void psx_guest_call_note_irq(void);
 /* Bookkeeping for the ISR return path: `ok` = the RFE target (the kernel's
  * ReturnFromException loads it from the thread TCB into k0 and jumps) was a
  * plausible guest PC. A bad target is substituted before the jump
- * (interrupts.c psx_rfe_escape_check) and counted here. */
-void psx_guest_call_note_isr_return(int ok);
+ * (interrupts.c psx_rfe_escape_check) and counted here; `bad_target` and
+ * `used` are logged so the next occurrence names its field. */
+void psx_guest_call_note_isr_return(int ok, uint32_t bad_target, uint32_t used);
 
 /* Why the guest last ended at PC 0 (docs/BOOT_BLOCKERS.md section 5). */
 enum {

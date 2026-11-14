@@ -126,12 +126,23 @@ void psx_guest_call_note_irq(void)
     s_call_stats.irq_in_call++;
 }
 
-void psx_guest_call_note_isr_return(int ok)
+uint32_t g_isr_resume_src = 0;
+
+void psx_guest_call_note_isr_return(int ok, uint32_t bad_target, uint32_t used)
 {
-    if (ok) s_call_stats.isr_returns++;
-    else {
-        s_call_stats.isr_bad_target++;
-        call_log("ISR return target is not a guest PC", 0, 0);
+    if (ok) {
+        s_call_stats.isr_returns++;
+        return;
+    }
+    s_call_stats.isr_bad_target++;
+    if (s_call_logs < 8) {
+        s_call_logs++;
+        fprintf(stderr,
+                "psx_guest_call: ISR return target 0x%08X is not a guest PC; resumed at 0x%08X "
+                "(src %u, %s)\n",
+                bad_target, used, (unsigned)g_isr_resume_src,
+                used ? "substituted" : "nothing usable");
+        fflush(stderr);
     }
 }
 

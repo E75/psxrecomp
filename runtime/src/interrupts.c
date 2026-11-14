@@ -816,18 +816,36 @@ void psx_rfe_escape_check(CPUState* cpu) {
      * is not a plausible guest PC, so guest RFEs stay byte-identical. */
     if (in_exception && cpu->pc != PSX_EXC_SENTINEL_PC &&
         !psx_guest_pc_plausible(cpu->pc)) {
-        uint32_t fix = psx_guest_pc_plausible(g_exception_real_epc)
-                           ? g_exception_real_epc
-                           : psx_guest_call_resume_pc();
+        /* Preference order matters: the delivery's real EPC, then COP0.EPC (which
+         * the guest's own handler restored), then the host call's continuation.
+         * The legacy EPC sentinel is never a resume target, even though it is a
+         * RAM address that psx_guest_pc_plausible() accepts. */
+        extern uint32_t g_isr_resume_src;
+        const uint32_t bad = cpu->pc;
+        uint32_t fix = 0;
+        if (psx_guest_pc_plausible(g_exception_real_epc) &&
+            g_exception_real_epc != PSX_EXC_SENTINEL_PC) {
+            fix = g_exception_real_epc;
+            g_isr_resume_src = 1u;   /* PSX_ISR_SRC_EPC */
+        } else if (psx_guest_pc_plausible(cpu->cop0[COP0_EPC]) &&
+                   cpu->cop0[COP0_EPC] != PSX_EXC_SENTINEL_PC) {
+            fix = cpu->cop0[COP0_EPC];
+            g_isr_resume_src = 2u;   /* PSX_ISR_SRC_ARCH_EPC */
+        } else if (psx_guest_pc_plausible(psx_guest_call_resume_pc())) {
+            fix = psx_guest_call_resume_pc();
+            g_isr_resume_src = 3u;   /* PSX_ISR_SRC_CALLER */
+        } else {
+            g_isr_resume_src = 4u;   /* PSX_ISR_SRC_NONE_BAD */
+        }
         if (fix != 0u) {
             extern uint32_t g_pc0_src;
             g_pc0_src = 3u;   /* PSX_PC0_SRC_K0 */
-            psx_guest_call_note_isr_return(0);
             cpu->pc = fix;
         }
+        psx_guest_call_note_isr_return(0, bad, fix);
     } else if (in_exception && g_rfe_escape_pending &&
                cpu->pc != PSX_EXC_SENTINEL_PC) {
-        psx_guest_call_note_isr_return(1);   /* a real guest PC came back from the TCB */
+        psx_guest_call_note_isr_return(1, 0, cpu->pc);
     }
     /* Escape ONLY when this RFE is the synchronous handler completing on the SAME
      * fiber that set up the exception (the owner of exception_jmpbuf). in_exception
@@ -1767,7 +1785,7 @@ irq_deliver_eval:
         if (!psx_guest_pc_plausible(target_pc)) {
             extern uint32_t g_pc0_src;
             g_pc0_src = 4u;   /* PSX_PC0_SRC_EPC */
-            psx_guest_call_note_isr_return(0);
+            psx_guest_call_note_isr_return(0, target_pc, 0);
             PSX_CHECK_INTERRUPTS_RETURN();
         }
         /* The RAM exception vector is a LUI/ADDIU pair that materializes the
