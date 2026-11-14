@@ -30,6 +30,8 @@ static uint32_t s_call_resume[PSX_GUEST_CALL_MAX_DEPTH];  /* 0 = unknown frame *
 int             g_psx_guest_call_depth;
 static PsxGuestCallStats s_call_stats;
 static int      s_call_logs;
+static uint64_t s_boundaries;          /* dispatch reached a call's return address */
+static uint32_t s_sentinel[PSX_GUEST_CALL_MAX_DEPTH];
 
 int psx_guest_pc_plausible(uint32_t pc)
 {
@@ -97,7 +99,9 @@ int psx_guest_call_enter(uint32_t caller_ra, uint32_t sp)
         call_log("no guest continuation:", 0, caller_ra);
     }
     if (g_psx_guest_call_depth >= PSX_GUEST_CALL_MAX_DEPTH) return 0;
-    s_call_resume[g_psx_guest_call_depth++] = pc;
+    s_call_resume[g_psx_guest_call_depth] = pc;
+    s_sentinel[g_psx_guest_call_depth] = 0u;
+    g_psx_guest_call_depth++;
     return 1;
 }
 
@@ -106,6 +110,7 @@ void psx_guest_call_leave(int pushed)
     if (pushed && g_psx_guest_call_depth > 0) {
         g_psx_guest_call_depth--;
         s_call_resume[g_psx_guest_call_depth] = 0;
+        s_sentinel[g_psx_guest_call_depth] = 0;
     }
 }
 
@@ -124,6 +129,14 @@ void psx_guest_call_note_suspended(void)
 void psx_guest_call_note_irq(void)
 {
     s_call_stats.irq_in_call++;
+}
+
+void psx_guest_call_note_boundary(void) { s_boundaries++; }
+uint64_t psx_guest_call_boundary_count(void) { return s_boundaries; }
+
+uint32_t psx_guest_call_sentinel(void)
+{
+    return g_psx_guest_call_depth > 0 ? s_sentinel[g_psx_guest_call_depth - 1] : 0u;
 }
 
 uint32_t g_isr_resume_src = 0;
@@ -186,11 +199,18 @@ uint32_t psx_mod_call_guest_ex(struct CPUState* cpu, uint32_t function,
     cpu->gpr[6] = a2;
     cpu->gpr[7] = a3;
     cpu->gpr[31] = return_address;
+    if (pushed && g_psx_guest_call_depth > 0)
+        s_sentinel[g_psx_guest_call_depth - 1] = return_address;
+    const uint64_t boundaries_before = s_boundaries;
     psx_snapshot_host_call_begin();
     psx_dispatch_call(cpu, function, return_address);
-    /* The guest returned through the call's own $ra. Anything else (a thread
-     * switch, a wild exit) means the C caller must not continue. */
-    const int came_back = (cpu->gpr[31] == return_address);
+    /* Positive return test: the dispatch reported that it reached this call's
+     * return address (psx_guest_call_note_boundary). $ra alone is NOT a test -
+     * an interrupt delivered at the boundary can leave the handler's registers
+     * (or a thread's TCB context) in place, which made ordinary returning calls
+     * look non-returning (A0h vector, DMA start). */
+    const int came_back = (s_boundaries != boundaries_before) ||
+                          (cpu->gpr[31] == return_address);
     const uint32_t result = cpu->gpr[2];
     if (framed) cpu->gpr[29] = sp0;
     memcpy(cpu->gpr, regs, sizeof regs);

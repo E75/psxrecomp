@@ -2318,6 +2318,10 @@ void psx_check_interrupts_at(CPUState* cpu, uint32_t resume_pc) {
      * later thread switch resumes on it (the PC=0 class). Only substituted when
      * the value is not a plausible guest PC, so guest edges are unchanged. */
     if (g_psx_guest_call_depth != 0 && !psx_guest_pc_plausible(resume_pc)) {
+        /* This is the host call's return boundary (the dispatch passes the call
+         * sentinel here): the callee returned. Record it positively - see
+         * psx_guest_call.h. */
+        psx_guest_call_note_boundary();
         const uint32_t host = psx_guest_call_resume_pc();
         if (host != 0u) resume_pc = host;
     }

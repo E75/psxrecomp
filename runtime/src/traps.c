@@ -1136,6 +1136,22 @@ void psx_unaligned_access(CPUState* cpu, uint32_t addr, uint32_t pc) {
 }
 
 void psx_unknown_dispatch(CPUState* cpu, uint32_t addr, uint32_t phys) {
+    /* A context-copying BIOS call (SysEnqIntRP / InterruptCallback / a callback
+     * node) can store the host call's return address in guest state; when that
+     * context is resumed, the guest `jr`s to it. That is the callee returning to
+     * the C caller, not a dispatch miss: end the dispatch so psx_mod_call_guest
+     * takes its normal return path. */
+    {
+        extern uint32_t psx_guest_call_sentinel(void);
+        extern uint32_t psx_guest_call_resume_pc(void);
+        const uint32_t sentinel = psx_guest_call_sentinel();
+        if (sentinel != 0u && addr == sentinel) {
+            extern void psx_guest_call_note_boundary(void);
+            psx_guest_call_note_boundary();
+            cpu->pc = 0;
+            return;
+        }
+    }
     /* NULL dispatch: address 0 is never a valid function target.
      * Silently absorb — this can happen when a corrupt function pointer
      * or uninitialized callback slot is dispatched. */

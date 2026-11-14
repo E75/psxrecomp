@@ -96,6 +96,18 @@ void psx_guest_call_leave(int pushed);
 /* An interrupt was delivered while a host call was in flight (interrupts.c). */
 void psx_guest_call_note_irq(void);
 
+/* The dispatch reached a host call's return address (interrupts.c
+ * psx_check_interrupts_at sees the call sentinel at the return boundary).
+ * This is the positive "the call returned" signal: $ra alone is not one,
+ * because an interrupt delivered at the boundary can leave the handler's
+ * registers in place. */
+void psx_guest_call_note_boundary(void);
+uint64_t psx_guest_call_boundary_count(void);
+
+/* The return address the innermost host call is using, 0 when none. A guest
+ * `jr`/`jalr` to it is the callee returning, not a dispatch miss. */
+uint32_t psx_guest_call_sentinel(void);
+
 /* Bookkeeping for the ISR return path: `ok` = the RFE target (the kernel's
  * ReturnFromException loads it from the thread TCB into k0 and jumps) was a
  * plausible guest PC. A bad target is substituted before the jump
