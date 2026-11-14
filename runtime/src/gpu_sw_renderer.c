@@ -1052,6 +1052,9 @@ void sw_draw_textured_triangle(int x0, int y0, int u0, int v0,
                                int x2, int y2, int u2, int v2,
                                uint16_t clut_x, uint16_t clut_y,
                                uint16_t texpage) {
+    /* Textures sample the canonical guest plane (vram_get), never the host
+     * extension plane. Contract tripwire: must stay 0. */
+    vram_ext_note_texture_read(0);
     int64_t area2 = (int64_t)(x1 - x0) * (int64_t)(y2 - y0)
                   - (int64_t)(x2 - x0) * (int64_t)(y1 - y0);
     if (area2 == 0) { precise_consumed(); return; }
