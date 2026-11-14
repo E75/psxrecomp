@@ -53,6 +53,13 @@ static uint64_t        s_seq = 0;
  * (send_all_blocking); read by the emu thread's watchdog. Atomic so the
  * cross-thread store/load is single-copy atomic on every target. */
 static _Atomic uint64_t s_last_heartbeat_us = 0;
+/* Startup grace counter: a cold start compiles shaders, opens the HD pack and
+ * reads cold assets, and the first frame can legitimately take seconds. The
+ * watchdog only judges a runtime that has actually presented frames - a boot
+ * right after a rebuild once hard-exited at 4.6 s while the pack was loading
+ * (2026-11-14), which is slow, not wedged. */
+#define STARVATION_STARTUP_GRACE_HEARTBEATS 120u
+static _Atomic unsigned s_heartbeats = 0;
 static int             s_dump_done = 0;
 
 static uint64_t heartbeat_load(void) {
@@ -82,12 +89,14 @@ static uint64_t starvation_timeout_us(void) {
 void starvation_watchdog_heartbeat(void) {
     atomic_store_explicit(&s_last_heartbeat_us, host_us_now(),
                           memory_order_relaxed);
+    atomic_fetch_add_explicit(&s_heartbeats, 1u, memory_order_relaxed);
 }
 
 void starvation_ring_reset(void) {
     memset(s_ring, 0, sizeof(s_ring));
     s_seq = 0;
     atomic_store_explicit(&s_last_heartbeat_us, 0, memory_order_relaxed);
+    atomic_store_explicit(&s_heartbeats, 0u, memory_order_relaxed);
     s_dump_done = 0;
 }
 
@@ -282,6 +291,9 @@ void starvation_watchdog_check(void) {
      * threshold (see starvation_watchdog_stale). */
     uint64_t last = heartbeat_load();
     if (last == 0) return;                 /* not initialized yet */
+    if (atomic_load_explicit(&s_heartbeats, memory_order_relaxed) <
+        STARVATION_STARTUP_GRACE_HEARTBEATS)
+        return;                            /* still booting: a slow first frame is not a wedge */
     uint64_t timeout = starvation_timeout_us();
     if (timeout == 0) return;              /* watchdog disabled (renderer bring-up) */
     uint64_t now = host_us_now();
