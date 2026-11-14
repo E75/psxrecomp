@@ -38,6 +38,7 @@
 #include "lockstep.h"
 #include "psx_cycles.h"
 #include "psx_cycle_freeze.h"
+#include "psx_guest_call.h"
 #include "psx_scheduler.h"
 #include "psx_video_timing.h"
 #include "spu.h"
@@ -2210,6 +2211,17 @@ irq_deliver_eval:
  * current generated code on the good baseline for instrumented comparison. */
 void psx_check_interrupts_at(CPUState* cpu, uint32_t resume_pc) {
     uint32_t prev = s_compiled_interrupt_resume_pc;
+    /* A host-initiated guest call returns to a call sentinel, and the dispatch
+     * boundary hands that sentinel here as the "resume PC". It is not a code
+     * address: the interrupted thread's real continuation is the calling C
+     * frame's $ra (psx_guest_call.h). Without this the legacy EPC sentinel is
+     * stored into the thread's TCB architecturally by the BIOS handler, and a
+     * later thread switch resumes on it (the PC=0 class). Only substituted when
+     * the value is not a plausible guest PC, so guest edges are unchanged. */
+    if (g_psx_guest_call_depth != 0 && !psx_guest_pc_plausible(resume_pc)) {
+        const uint32_t host = psx_guest_call_resume_pc();
+        if (host != 0u) resume_pc = host;
+    }
     s_compiled_interrupt_resume_pc = resume_pc;
     psx_check_interrupts(cpu); /* flushes load-charge batch on entry */
     s_compiled_interrupt_resume_pc = prev;

@@ -1,0 +1,82 @@
+#ifndef PSXRECOMP_PSX_GUEST_CALL_H
+#define PSXRECOMP_PSX_GUEST_CALL_H
+
+/* Host-initiated guest calls and the guest's "resume PC".
+ *
+ * psx_mod_call_guest() enters guest code from host C. The callee returns to
+ * the caller-supplied return address (the hybrid layer uses 0x8F000000), which
+ * is a sentinel, NOT a code address: the caller is host C, and the guest's real
+ * continuation is the C frame's $ra (the address the opt-in function publishes
+ * when it finishes).
+ *
+ * Everything that PERSISTS "the guest PC this thread will resume at" must use
+ * that real continuation, never the sentinel:
+ *
+ *   - a thread switch inside the call (ChangeThread/WaitEvent) saves the
+ *     yielding thread's context to its TCB (traps.c psx_save_context_to_tcb);
+ *     a sentinel there resumes the thread on a non-code address, which is the
+ *     "execution completed, PC=0" class in docs/BOOT_BLOCKERS.md section 3;
+ *   - an interrupt delivered at the call's return boundary uses the same value
+ *     as EPC (interrupts.c psx_check_interrupts_at), and the BIOS handler
+ *     stores it in the TCB architecturally.
+ *
+ * psx_guest_call_enter()/leave() bracket the dispatch and publish the caller's
+ * real continuation; psx_guest_call_resume_pc() returns it (outermost frame
+ * first, so nested host calls cannot hide it). Both consumers substitute it
+ * only when the value they were given is not a plausible guest PC, so guest
+ * paths are byte-for-byte unchanged.
+ *
+ * Non-returning calls. A vector that blocks or switches threads (ChangeThread
+ * A0:03, ReturnFromException C0:03, WaitEvent B0:06, and anything that ends in
+ * a thread switch) does not come back to the C caller: the scheduler longjmps
+ * out and the C frame is abandoned. psx_mod_call_guest_ex() reports that
+ * through *returned = 0 and psx_guest_call_stats() counts it; a caller that
+ * must not continue after such a call has to use the _ex form and stop when
+ * *returned is 0 (psx_mod_call_guest keeps the historical behaviour). */
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct PsxGuestCallStats {
+    uint64_t calls;          /* host-initiated guest calls */
+    uint64_t returns;        /* the guest came back to the call's return address */
+    uint64_t non_returning;  /* thread switch / wild exit: the C caller cannot continue */
+    uint64_t bad_ra;         /* no real guest continuation was available to substitute */
+} PsxGuestCallStats;
+
+void psx_guest_call_stats(PsxGuestCallStats* out);
+
+/* Aligned and inside live main RAM or the BIOS ROM window. The same rule the
+ * interrupt EPC selection uses; a hybrid call sentinel fails it. */
+int psx_guest_pc_plausible(uint32_t pc);
+
+/* Nonzero while at least one host-initiated call is in flight. The global is
+ * the hot-path form (psx_check_interrupts_at runs at every block leader). */
+extern int g_psx_guest_call_depth;
+int psx_guest_call_depth(void);
+
+/* The guest PC the interrupted/suspended thread must resume at, or 0 when no
+ * host call is in flight (or none had a real continuation). */
+uint32_t psx_guest_call_resume_pc(void);
+
+/* Bracket a host-initiated call. enter() returns 1 when it pushed a frame;
+ * pass that value back to leave(). caller_ra is the calling C frame's $ra. */
+int  psx_guest_call_enter(uint32_t caller_ra);
+void psx_guest_call_leave(int pushed);
+
+/* Bookkeeping from the call wrapper: did the guest return to the call's
+ * return address? */
+void psx_guest_call_note_return(int returned);
+
+/* A thread context was saved while a host call was in flight: the C caller
+ * will not continue (counted as non-returning). */
+void psx_guest_call_note_suspended(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

@@ -7,16 +7,102 @@
 #include "gpu.h"
 #include "interrupts.h"
 #include "psx_cycle_freeze.h"
+#include "psx_guest_call.h"
 #include "psx_memory.h"
 #include "spu.h"
+#include <stdio.h>
 #include <string.h>
 
-uint32_t psx_mod_call_guest(struct CPUState* cpu, uint32_t function,
-                            uint32_t return_address, uint32_t a0, uint32_t a1,
-                            uint32_t a2, uint32_t a3) {
+/* ── host-initiated guest calls: the caller's real continuation ─────────────
+ *
+ * See psx_guest_call.h. A host call's $ra is a sentinel; anything that persists
+ * a "resume PC" (TCB save on a thread switch, exception EPC at the call
+ * boundary) must use the C frame's $ra instead. Kept as a small stack so a
+ * nested host call cannot hide the outer continuation. */
+#define PSX_GUEST_CALL_MAX_DEPTH 8
+
+static uint32_t s_call_resume[PSX_GUEST_CALL_MAX_DEPTH];  /* 0 = unknown frame */
+int             g_psx_guest_call_depth;
+static PsxGuestCallStats s_call_stats;
+static int      s_call_logs;
+
+int psx_guest_pc_plausible(uint32_t pc)
+{
+    if (pc == 0u || (pc & 3u) != 0u) return 0;
+    const uint32_t phys = pc & 0x1FFFFFFFu;
+    return phys < psx_ram_live_bytes() ||
+           (phys >= 0x1FC00000u && phys < 0x1FC80000u);
+}
+
+int psx_guest_call_depth(void) { return g_psx_guest_call_depth; }
+
+uint32_t psx_guest_call_resume_pc(void)
+{
+    /* Outermost frame first: the guest continuation of the whole nested C
+     * chain, which is what a suspended thread or an EPC must point at. */
+    for (int i = 0; i < g_psx_guest_call_depth; i++)
+        if (s_call_resume[i] != 0u) return s_call_resume[i];
+    return 0;
+}
+
+void psx_guest_call_stats(PsxGuestCallStats* out)
+{
+    if (out) *out = s_call_stats;
+}
+
+static void call_log(const char* what, uint32_t callee, uint32_t ra)
+{
+    if (s_call_logs >= 8) return;
+    s_call_logs++;
+    fprintf(stderr, "psx_guest_call: %s callee 0x%08X caller ra 0x%08X\n",
+            what, callee, ra);
+    fflush(stderr);
+}
+
+int psx_guest_call_enter(uint32_t caller_ra)
+{
+    uint32_t pc = 0;
+    if (psx_guest_pc_plausible(caller_ra)) pc = caller_ra;
+    else pc = psx_guest_call_resume_pc();   /* nested call: inherit the outer frame */
+    if (pc == 0u) {
+        /* No guest continuation at all (the caller is host code entered without
+         * a guest $ra). Count it: an interrupt or thread switch here still has
+         * to fall back to the legacy sentinel path. */
+        s_call_stats.bad_ra++;
+        call_log("no guest continuation:", 0, caller_ra);
+    }
+    if (g_psx_guest_call_depth >= PSX_GUEST_CALL_MAX_DEPTH) return 0;
+    s_call_resume[g_psx_guest_call_depth++] = pc;
+    return 1;
+}
+
+void psx_guest_call_leave(int pushed)
+{
+    if (pushed && g_psx_guest_call_depth > 0) {
+        g_psx_guest_call_depth--;
+        s_call_resume[g_psx_guest_call_depth] = 0;
+    }
+}
+
+void psx_guest_call_note_return(int returned)
+{
+    s_call_stats.calls++;
+    if (returned) s_call_stats.returns++;
+    else s_call_stats.non_returning++;
+}
+
+void psx_guest_call_note_suspended(void)
+{
+    s_call_stats.non_returning++;
+}
+
+uint32_t psx_mod_call_guest_ex(struct CPUState* cpu, uint32_t function,
+                               uint32_t return_address, uint32_t a0, uint32_t a1,
+                               uint32_t a2, uint32_t a3, int* returned) {
     uint32_t regs[32];
     const uint32_t pc = cpu->pc, hi = cpu->hi, lo = cpu->lo;
     memcpy(regs, cpu->gpr, sizeof regs);
+    const int pushed = psx_guest_call_enter(regs[31]);
     cpu->gpr[4] = a0;
     cpu->gpr[5] = a1;
     cpu->gpr[6] = a2;
@@ -24,13 +110,26 @@ uint32_t psx_mod_call_guest(struct CPUState* cpu, uint32_t function,
     cpu->gpr[31] = return_address;
     psx_snapshot_host_call_begin();
     psx_dispatch_call(cpu, function, return_address);
+    /* The guest returned through the call's own $ra. Anything else (a thread
+     * switch, a wild exit) means the C caller must not continue. */
+    const int came_back = (cpu->gpr[31] == return_address);
     const uint32_t result = cpu->gpr[2];
     memcpy(cpu->gpr, regs, sizeof regs);
     cpu->pc = pc;
     cpu->hi = hi;
     cpu->lo = lo;
     psx_snapshot_host_call_end();
+    psx_guest_call_leave(pushed);
+    psx_guest_call_note_return(came_back);
+    if (!came_back) call_log("non-returning call:", function, regs[31]);
+    if (returned) *returned = came_back;
     return result;
+}
+
+uint32_t psx_mod_call_guest(struct CPUState* cpu, uint32_t function,
+                            uint32_t return_address, uint32_t a0, uint32_t a1,
+                            uint32_t a2, uint32_t a3) {
+    return psx_mod_call_guest_ex(cpu, function, return_address, a0, a1, a2, a3, 0);
 }
 
 /* The caller's in-flight timing state: deadlines are absolute guest cycles

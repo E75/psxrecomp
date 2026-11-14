@@ -112,6 +112,7 @@ extern "C" void psx_event_step_conservative_env_init(void);
 #include "launcher_device.h"
 #include "game_options.h"
 #include "mod_plugins.h"
+#include "psx_guest_call.h"
 #include "mod_local_input_policy.h"
 #include "mod_session_baseline.h"
 #include "mod_runtime.h"
@@ -19763,6 +19764,19 @@ session_reboot:
     }
 
     std::fprintf(stdout, "psxrecomp runtime: execution completed, PC=0x%08X\n", cpu.pc);
+    { extern uint32_t g_pc0_reason;
+      PsxGuestCallStats gcs;
+      psx_guest_call_stats(&gcs);
+      /* g_pc0_reason: 0 guest jr/return, 1 change-thread-self, 2 fiber switch,
+       * 3 critical section, 4 dispatch miss. The guest-call counters turn "a
+       * host call did not come back" into a number (docs/BOOT_BLOCKERS.md §3). */
+      std::fprintf(stdout,
+                   "psxrecomp runtime: [exit diag] pc0_reason=%u guest_calls=%llu returns=%llu "
+                   "non_returning=%llu bad_ra=%llu\n",
+                   (unsigned)g_pc0_reason,
+                   (unsigned long long)gcs.calls, (unsigned long long)gcs.returns,
+                   (unsigned long long)gcs.non_returning, (unsigned long long)gcs.bad_ra);
+    }
     { extern uint64_t g_slice_fired, g_slice_irq_taken, g_dirty_ram_insns_run;
       extern uint32_t g_slice_exit_pc, g_slice_exit_reason, g_slice_exit_iter;
       extern uint32_t g_slice_exit_dispatchable, g_slice_exit_dirty, g_slice_exit_in_text, g_slice_exit_want;

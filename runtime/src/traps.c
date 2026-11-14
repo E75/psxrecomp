@@ -6,6 +6,7 @@
 
 #include "cpu_state.h"
 #include "psx_memory.h"
+#include "psx_guest_call.h"
 #include "interrupts.h"
 #include "psx_bss.h"
 #include "psx_runtime.h"   /* fix B: psx_exc_escape_reason_t + g_exc_escape_reason */
@@ -315,6 +316,18 @@ static void psx_assert_no_sentinel_pc(const char* where, uint32_t tcb, uint32_t 
 
 static void psx_save_context_to_tcb(CPUState* cpu, uint32_t tcb, uint32_t resume_pc)
 {
+    /* A host-initiated guest call has no guest $ra: its caller is host C and
+     * gpr[31] holds the call sentinel (psx_guest_call.h). Persisting that as the
+     * thread's resume PC makes the thread resume on a non-code address when it
+     * is scheduled again — the "execution completed, PC=0" class. Save the
+     * caller's real continuation instead, and count the event. */
+    if (!psx_guest_pc_plausible(resume_pc)) {
+        const uint32_t host = psx_guest_call_resume_pc();
+        if (host != 0u) {
+            psx_guest_call_note_suspended();
+            resume_pc = host;
+        }
+    }
     psx_assert_no_sentinel_pc("save_context_to_tcb", tcb, resume_pc);
     uint32_t save = tcb + 8u;
     uint32_t sr = cpu->cop0[12];
