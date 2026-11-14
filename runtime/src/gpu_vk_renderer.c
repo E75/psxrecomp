@@ -3310,7 +3310,7 @@ static VkDescriptorSet hd_texture(const GpuHdTextureImage *image, int *mode,
     slot->last_use = ++s_hd_cache_clock;
     s_hd_cache_bytes += bytes;
     hd_write_set(slot->set, slot->view);
-    vk_hd_pack_note_texture(image->width, image->height);
+    gpu_hd_textures_note_texture(image->width, image->height);
 
     *mode = image->alpha_mode;
     src[0] = (float)image->origin_u; src[1] = (float)image->origin_v;
@@ -3416,6 +3416,7 @@ static void pack_flush(void) {
         }
     }
     vram_ext_note_pack_rect(x, y, x1, y1);
+    vram_ext_note_pack_passes(1, (uint64_t)w * (uint64_t)h);
     VkCommandBuffer cb = begin_oneshot();
     vram_to(cb, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);     /* hr sampled */
     img_to(cb, s_raw_img, &s_raw_layout, VK_IMAGE_LAYOUT_GENERAL); /* raw storage */
@@ -4485,6 +4486,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys, const int *us, c
         if (vk_hd_pack_acquire(texpage, clut_x, clut_y, lim, window, semi >= 0, &hd)) {
             hd_set = hd_texture(&hd, &hd_mode, hd_src);
             if (!hd_set) hd_mode = 0;
+            else gpu_hd_textures_note_applied();   /* same counter as the GL path */
             vk_hd_pack_release(&hd);
         }
     }

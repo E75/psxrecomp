@@ -265,13 +265,16 @@ uint16_t *vram_ext_host(void) { return s_host_plane; }
 /* ---------------------------------------------------------- counters ----- */
 
 static struct {
-    uint64_t present_reads_remapped;   /* fb pixels served from the extension */
+    uint64_t pack_redirect_pixels;     /* redirected by the pack (GPU path) */
+    uint64_t cpu_redirect_pixels;      /* redirected by the CPU rasterizer */
     uint64_t texture_reads_remapped;   /* MUST stay 0: textures are canonical */
     uint64_t guest_pack_pixels;        /* MUST stay 0: fb columns -> guest VRAM */
     uint64_t readback_bytes;
     uint64_t gate_off_frames;
     uint64_t presents;
     uint64_t pack_calls;
+    uint64_t pack_passes;
+    uint64_t pack_pixels;
     int      pack_max_x1;              /* widest pack rect right edge seen */
     int      present_width;
 } s_stats;
@@ -328,7 +331,7 @@ void vram_ext_note_pack_rect(int x0, int y0, int x1, int y1) {
         if (cx1 >= gx0 && cy0 <= cy1)
             redirected = (uint64_t)(cx1 - gx0 + 1) * (uint64_t)(cy1 - cy0 + 1);
     }
-    s_stats.present_reads_remapped += redirected;
+    s_stats.pack_redirect_pixels += redirected;
     if (in_band > redirected) {
         static int logged_rows;
         s_stats.guest_pack_pixels += in_band - redirected;
@@ -345,7 +348,12 @@ void vram_ext_note_pack_rect(int x0, int y0, int x1, int y1) {
 }
 
 void vram_ext_note_cpu_redirect(uint64_t pixels) {
-    s_stats.present_reads_remapped += pixels;
+    s_stats.cpu_redirect_pixels += pixels;
+}
+
+void vram_ext_note_pack_passes(uint64_t passes, uint64_t pixels) {
+    s_stats.pack_passes += passes;
+    s_stats.pack_pixels += pixels;
 }
 
 void vram_ext_reset_stats(void) { memset(&s_stats, 0, sizeof s_stats); }
@@ -366,17 +374,25 @@ int vram_ext_debug_json(char *out, int cap) {
                     "\"region_on\":%d,\"region\":[%d,%d,%d,%d],"
                     "\"bands\":%d,\"band_rows\":[%d,%d],"
                     "\"present_reads_remapped\":%llu,"
+                    "\"pack_redirect_pixels\":%llu,"
+                    "\"cpu_redirect_pixels\":%llu,"
                     "\"texture_reads_remapped\":%llu,"
                     "\"guest_pack_pixels\":%llu,"
                     "\"gate_off_frames\":%llu,\"present_width\":%d,"
-                    "\"pack_calls\":%llu,\"pack_max_x1\":%d}",
+                    "\"pack_calls\":%llu,\"pack_max_x1\":%d,"
+                    "\"pack_passes\":%llu,\"pack_pixels\":%llu}",
                     vram_ext_enabled(), vram_ext_driving(), s_backend,
                     on, x0, y0, x1, y1, bands, by0, by1,
-                    (unsigned long long)s_stats.present_reads_remapped,
+                    (unsigned long long)(s_stats.pack_redirect_pixels +
+                                         s_stats.cpu_redirect_pixels),
+                    (unsigned long long)s_stats.pack_redirect_pixels,
+                    (unsigned long long)s_stats.cpu_redirect_pixels,
                     (unsigned long long)s_stats.texture_reads_remapped,
                     (unsigned long long)s_stats.guest_pack_pixels,
                     (unsigned long long)s_stats.gate_off_frames,
                     s_stats.present_width,
                     (unsigned long long)s_stats.pack_calls,
-                    s_stats.pack_max_x1);
+                    s_stats.pack_max_x1,
+                    (unsigned long long)s_stats.pack_passes,
+                    (unsigned long long)s_stats.pack_pixels);
 }

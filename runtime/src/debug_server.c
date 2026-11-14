@@ -10225,17 +10225,51 @@ static void handle_hd_pack(int id, const char *json)
     char root_json[8192];
     json_escape_string(root_json, sizeof(root_json), stats.root ? stats.root : "");
     const int backend = gr_backend();
+    /* Miss diagnostics: the first distinct (page, depth) draws that fell back
+     * to native art, with the CRC the pack would have needed. */
+    GpuHdTextureMissDiag misses[GPU_HD_MISS_DIAG_MAX];
+    const int miss_count = gpu_hd_textures_miss_diag(misses, GPU_HD_MISS_DIAG_MAX);
+    char diag[4096];
+    int used = 0;
+    diag[0] = 0;
+    for (int i = 0; i < miss_count && i < GPU_HD_MISS_DIAG_MAX; ++i) {
+        const GpuHdTextureMissDiag *m = &misses[i];
+        const int n = snprintf(diag + used, sizeof(diag) - (size_t)used,
+            "%s{\"page_x\":%u,\"page_y\":%u,\"depth\":%u,\"clut_x\":%u,"
+            "\"clut_y\":%u,\"uv\":[%u,%u,%u,%u],\"page_crc\":\"%08x\","
+            "\"footprint_crc\":\"%08x\",\"palette_crc\":\"%08x\","
+            "\"nearest\":\"%08x-%08x\",\"nearest_bits\":%d,"
+            "\"page_key\":%s,\"footprint_key\":%s,\"palette_key\":%s,"
+            "\"draws\":%llu}",
+            used ? "," : "", m->page_x, m->page_y, m->depth, m->clut_x, m->clut_y,
+            m->u_first, m->u_last, m->v_first, m->v_last, m->page_hash,
+            m->footprint_hash, m->palette_hash, m->nearest_texture_hash,
+            m->nearest_palette_hash, m->nearest_prefix_bits,
+            m->page_key_known ? "true" : "false",
+            m->footprint_key_known ? "true" : "false",
+            m->palette_key_known ? "true" : "false",
+            (unsigned long long)m->draws);
+        if (n <= 0 || (size_t)n >= sizeof(diag) - (size_t)used) break;
+        used += n;
+    }
     send_fmt("{\"id\":%d,\"ok\":true,\"backend\":\"%s\",\"hd_pack_loaded\":%s,"
              "\"root\":\"%s\",\"entries\":%llu,\"overrides\":%llu,"
-             "\"pixels_replaced\":%llu,\"misses\":%llu,\"palettes\":%llu,"
-             "\"clut_files\":%llu}",
+             "\"textures\":%llu,\"pixels_replaced\":%llu,\"misses\":%llu,"
+             "\"vk_misses\":%llu,\"matched_draws\":%llu,\"draw_queries\":%llu,"
+             "\"palettes\":%llu,\"clut_files\":%llu,\"diag\":[%s]}",
              id,
              backend == GR_BACKEND_OPENGL ? "opengl" :
                  backend == GR_BACKEND_VULKAN ? "vulkan" : "software",
              stats.loaded ? "true" : "false", root_json,
              (unsigned long long)stats.entries, (unsigned long long)stats.overrides,
-             (unsigned long long)stats.pixels_replaced, (unsigned long long)stats.misses,
-             (unsigned long long)stats.palettes, (unsigned long long)stats.clut_files);
+             (unsigned long long)stats.textures,
+             (unsigned long long)stats.pixels_replaced,
+             (unsigned long long)stats.misses,
+             (unsigned long long)stats.vk_misses,
+             (unsigned long long)stats.matched,
+             (unsigned long long)stats.queries,
+             (unsigned long long)stats.palettes,
+             (unsigned long long)stats.clut_files, diag);
 }
 
 /* Dynamic internal resolution ([video] dynamic_resolution; docs/TCP_COMMANDS.md).

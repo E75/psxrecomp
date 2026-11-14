@@ -2618,6 +2618,8 @@ static const HiwTile *hiw_ensure(int x0, int x1) {
  * DESTINATION moves: that is the [video] vram_extension redirect. */
 static void pack_rect(int x0, int y0, int x1, int y1, int off) {
     if (x1 < x0 || y1 < y0) return;
+    /* Cost check: one pass and its fragment count (the destination scissor). */
+    vram_ext_note_pack_passes(1, (uint64_t)(x1 - x0 + 1) * (uint64_t)(y1 - y0 + 1));
     glViewport(off, 0, VRAM_HOST_W, VRAM_H);
     glScissor(x0 + off, y0, x1 - x0 + 1, y1 - y0 + 1);
     p_glUniform1i(s_uPackOff, off);
@@ -3071,6 +3073,9 @@ static GLuint hd_gl_texture(const GpuHdTextureImage* image) {
     texture->key = image->cache_key; texture->generation = image->generation;
     texture->last_use = ++s_hd_gl_cache_clock;
     texture->bytes = bytes; s_hd_gl_cache_bytes += bytes;
+    /* Backend-neutral counters (docs/HD_TEXTURES.md 5): the same numbers the
+     * Vulkan backend reports through `hd_pack`. */
+    gpu_hd_textures_note_texture(image->width, image->height);
     return texture->texture;
 }
 
