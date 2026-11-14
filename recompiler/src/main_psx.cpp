@@ -221,6 +221,7 @@ static int psxrecomp_game_main(int argc, char** argv) {
     std::set<uint32_t>    ds_funcs;             // [data_shards] funcs
     std::set<uint32_t>    mod_instruction_sites;
     std::set<uint32_t>    mod_entry_funcs;      // trusted game-mod entry hooks
+    std::set<uint32_t>    hybrid_entry_pcs;    // [recompiler] hybrid_entry_pcs_file
     std::vector<PSXRecompV4::WidescreenMaskedRejectSite> ws_cull_masked_reject;
     std::set<uint32_t>    hot_funcs;            // [recompiler] hot_funcs
     std::set<uint32_t>    load_charge_batch_funcs; // [recompiler] load_charge_batch*
@@ -289,6 +290,8 @@ static int psxrecomp_game_main(int argc, char** argv) {
         ds_funcs.insert(cfg.data_shard_funcs.begin(), cfg.data_shard_funcs.end());
         mod_entry_funcs.insert(cfg.mod_function_entry_funcs.begin(),
                                cfg.mod_function_entry_funcs.end());
+        hybrid_entry_pcs.insert(cfg.hybrid_entry_pcs.begin(),
+                                cfg.hybrid_entry_pcs.end());
         mod_instruction_sites.insert(cfg.mod_instruction_sites.begin(), cfg.mod_instruction_sites.end());
         hot_funcs.insert(cfg.hot_funcs.begin(), cfg.hot_funcs.end());
         if (cfg.load_charge_batch) {
@@ -408,6 +411,8 @@ static int psxrecomp_game_main(int argc, char** argv) {
         ws_tag_funcs.insert(wscfg.ws_sprite_tag_funcs.begin(), wscfg.ws_sprite_tag_funcs.end());
         mod_entry_funcs.insert(wscfg.mod_function_entry_funcs.begin(),
                                wscfg.mod_function_entry_funcs.end());
+        hybrid_entry_pcs.insert(wscfg.hybrid_entry_pcs.begin(),
+                                wscfg.hybrid_entry_pcs.end());
         mod_instruction_sites.insert(wscfg.mod_instruction_sites.begin(), wscfg.mod_instruction_sites.end());
         ws_cull_bias.insert(wscfg.ws_cull_bias_sites.begin(), wscfg.ws_cull_bias_sites.end());
         ws_cull_bias_lower.insert(wscfg.ws_cull_bias_lower_sites.begin(), wscfg.ws_cull_bias_lower_sites.end());
@@ -621,6 +626,7 @@ static int psxrecomp_game_main(int argc, char** argv) {
         check_set("widescreen.sprite_tag_funcs", ws_tag_funcs);
         check_set("data_shards.funcs", ds_funcs);
         check_set("recompiler.mod_function_entry_funcs", mod_entry_funcs);
+        check_set("recompiler.hybrid_entry_pcs_file", hybrid_entry_pcs);
         check_set("recompiler.hot_funcs", hot_funcs);
         check_set("recompiler.load_charge_batch_funcs", load_charge_batch_funcs);
         check_set("recompiler.fast_cycle_funcs", fast_cycle_funcs);
@@ -1475,6 +1481,7 @@ static int psxrecomp_game_main(int argc, char** argv) {
     codegen_config.ws_sprite_tag_funcs = ws_tag_funcs;
     codegen_config.data_shard_funcs = ds_funcs;
     codegen_config.mod_function_entry_funcs = mod_entry_funcs;
+    codegen_config.hybrid_entry_pcs = hybrid_entry_pcs;
     codegen_config.ws_cull_masked_reject_sites = ws_cull_masked_reject;
     codegen_config.mod_instruction_sites = mod_instruction_sites;
     codegen_config.hot_funcs = hot_funcs;

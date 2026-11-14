@@ -1901,6 +1901,30 @@ GameConfig load_game_config(const fs::path& config_path_in) {
             mod_function_entry_funcs.push_back(
                 parse_hex(a, "recompiler.mod_function_entry_funcs"));
     }
+    // Optional [recompiler] hybrid_entry_pcs_file — one hex PC per line; each
+    // listed PC gets the psx_mod_function_entry() entry hook as well.
+    std::vector<uint32_t> hybrid_entry_pcs;
+    if (recomp.contains("hybrid_entry_pcs_file")) {
+        const fs::path pcs_path = PSXRecompV4::host_resolve(
+            root, toml::find<std::string>(recomp, "hybrid_entry_pcs_file"));
+        std::ifstream in(pcs_path);
+        if (!in) {
+            throw std::runtime_error(fmt::format(
+                "{}: [recompiler] hybrid_entry_pcs_file not readable: {}",
+                config_path.string(), pcs_path.string()));
+        }
+        std::string line;
+        while (std::getline(in, line)) {
+            const auto hash = line.find('#');
+            if (hash != std::string::npos) line.erase(hash);
+            const auto first = line.find_first_not_of(" \t\r");
+            if (first == std::string::npos) continue;
+            const auto last = line.find_last_not_of(" \t\r");
+            hybrid_entry_pcs.push_back(parse_hex(
+                line.substr(first, last - first + 1),
+                "recompiler.hybrid_entry_pcs_file"));
+        }
+    }
     std::vector<uint32_t> hot_funcs;
     if (recomp.contains("hot_funcs")) {
         const auto& arr = toml::find<std::vector<std::string>>(recomp, "hot_funcs");
@@ -2672,6 +2696,7 @@ GameConfig load_game_config(const fs::path& config_path_in) {
         /*ws_auto_ui_proportional*/ ws_auto_ui_proportional,
         /*data_shard_funcs*/      data_shard_funcs,
         /*mod_function_entry_funcs*/ mod_function_entry_funcs,
+        /*hybrid_entry_pcs*/     hybrid_entry_pcs,
         /*mod_instruction_sites*/ mod_instruction_sites,
         /*hot_funcs*/             hot_funcs,
         /*load_charge_batch*/     load_charge_batch,

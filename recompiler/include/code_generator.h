@@ -66,6 +66,9 @@ struct CodeGenConfig {
     // Trusted game-mod entry hooks ([recompiler] mod_function_entry_funcs).
     // Only explicitly listed guest functions call the runtime dispatcher.
     std::set<uint32_t> mod_function_entry_funcs;
+    // [recompiler] hybrid_entry_pcs_file: every PC read from that file gets the
+    // same entry hook. Union with mod_function_entry_funcs; one hook per PC.
+    std::set<uint32_t> hybrid_entry_pcs;
     std::set<uint32_t> mod_instruction_sites;
 
     // [recompiler] hot_funcs: emit __attribute__((hot)) on these guest

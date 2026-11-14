@@ -1234,6 +1234,48 @@ void mod_function_completion_codegen_test() {
           "unconfigured functions retain the stock entry path");
 }
 
+// [recompiler] hybrid_entry_pcs_file: the decompiled-C dispatcher's registered
+// entry PCs get the same entry hook as mod_function_entry_funcs, and a PC in
+// both lists emits exactly one hook line.
+void hybrid_entry_pcs_test(const fs::path& root) {
+    const auto pcs_path = root / "hybrid_pcs.txt";
+    {
+        std::ofstream file(pcs_path, std::ios::binary);
+        file << "80020000\n# comment\n\n80020004\n";
+    }
+    const auto path = write_config(root, "hybrid-pcs",
+        "hybrid_entry_pcs_file = \"hybrid_pcs.txt\"\n");
+    const auto parsed = PSXRecompV4::load_game_config(path);
+    check(parsed.hybrid_entry_pcs.size() == 2 &&
+              parsed.hybrid_entry_pcs[0] == 0x80020000u &&
+              parsed.hybrid_entry_pcs[1] == 0x80020004u,
+          "hybrid entry PC file parses one hex PC per line");
+
+    PSXRecomp::CodeGenConfig config{};
+    config.hybrid_entry_pcs.insert(0x80010000u);
+    const auto code = generate_first_instruction(0x2402002Au, {}, false, config);
+    check(code.find("if (psx_mod_function_entry(cpu, 0x80010000u)) return;") !=
+              std::string::npos,
+          "hybrid entry PCs emit the trusted mod entry hook");
+
+    PSXRecomp::CodeGenConfig both{};
+    both.mod_function_entry_funcs.insert(0x80010000u);
+    both.hybrid_entry_pcs.insert(0x80010000u);
+    const auto once = generate_first_instruction(0x2402002Au, {}, false, both);
+    const size_t first = once.find("if (psx_mod_function_entry(cpu, 0x80010000u)) return;");
+    size_t count = 0;
+    for (size_t p = once.find("psx_mod_function_entry(cpu, 0x80010000u)"); p != std::string::npos;
+         p = once.find("psx_mod_function_entry(cpu, 0x80010000u)", p + 1))
+        ++count;
+    check(first != std::string::npos && count == 1,
+          fmt::format("a PC in both hook lists emits one hook line (saw {})", count));
+
+    const auto missing = write_config(root, "hybrid-pcs-missing",
+        "hybrid_entry_pcs_file = \"no-such-pcs.txt\"\n");
+    check_throws([&] { PSXRecompV4::load_game_config(missing); }, "not readable",
+                 "a missing hybrid entry PC file is an error");
+}
+
 void mod_instruction_codegen_test(const fs::path& root) {
     const auto path = write_config(root, "instruction-hooks",
         "mod_instruction_sites = [\"0x80010000\", \"0x80010004\"]\n");
@@ -1338,6 +1380,7 @@ int main() {
         jump_table_producer_codegen_test();
         cfg_codegen_load_delay_test();
         mod_function_completion_codegen_test();
+        hybrid_entry_pcs_test(root);
         mod_instruction_codegen_test(root);
         local_viewport_tests(root);
         cfg_fallthrough_reachability_test();

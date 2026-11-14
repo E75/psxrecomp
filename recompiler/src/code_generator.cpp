@@ -3089,7 +3089,12 @@ GeneratedFunction CodeGenerator::generate_function(
                                "  /* data-shard: replay or arm capture */\n",
                                func.start_addr);
     }
-    if (config_.mod_function_entry_funcs.count(func.start_addr)) {
+    // Trusted mod entry hook. Two sources feed it: the hand-listed
+    // [recompiler] mod_function_entry_funcs and the [recompiler]
+    // hybrid_entry_pcs_file set (the decompiled-C dispatcher's registered
+    // PCs). A PC in both emits one hook, not two.
+    if (config_.mod_function_entry_funcs.count(func.start_addr) ||
+        config_.hybrid_entry_pcs.count(func.start_addr)) {
         body_ss << config_.indent
                 << fmt::format(
                        "if (psx_mod_function_entry(cpu, 0x{:08X}u)) return;"
@@ -3444,12 +3449,25 @@ std::vector<GeneratedFunction> CodeGenerator::generate_alias_group(
         GeneratedFunction gf;
         gf.function_name = a->name;
         gf.signature = fmt::format("void {}(CPUState* cpu)", a->name);
+        // An alias entry is a separate dispatchable PC, so it needs its own
+        // mod/hybrid entry hook: the decompiled dispatcher has a case (and its
+        // own stack delta) per entry PC, not per shared host body.
+        const bool alias_hook =
+            config_.mod_function_entry_funcs.count(a->start_addr) ||
+            config_.hybrid_entry_pcs.count(a->start_addr);
         gf.body = fmt::format(
             "{{\n"
             "    debug_server_log_call_entry(0x{:08X}u);\n"
+            "{}"
             "    psx_alias_body_{:08X}(cpu, 0x{:08X}u);  /* alias entry into host func_{:08X} */\n"
             "}}\n",
-            a->start_addr, host, runtime_pc(a->start_addr), host);
+            a->start_addr,
+            alias_hook
+                ? fmt::format("    if (psx_mod_function_entry(cpu, 0x{:08X}u)) return;"
+                              "  /* trusted opt-in game-mod hook */\n",
+                              a->start_addr)
+                : std::string(),
+            host, runtime_pc(a->start_addr), host);
         gf.full_code = (i == 0 ? body.str() + "\n" : std::string()) +
                        gf.signature + "\n" + gf.body;
         gf.line_count = std::count(gf.full_code.begin(), gf.full_code.end(), '\n');
@@ -3517,8 +3535,19 @@ std::vector<GeneratedFunction> CodeGenerator::generate_all_functions(
             GeneratedFunction stub;
             stub.function_name = func.name;
             stub.signature = fmt::format("void {}(CPUState* cpu)", func.name);
+            // A registered mod/hybrid entry PC still hands off to the dispatcher
+            // even when discovery read the region as data: the decompiled body
+            // is the better answer than the fail-closed fatal below, and the
+            // fatal stays for every unregistered PC.
+            const bool stub_hook =
+                config_.mod_function_entry_funcs.count(func.start_addr) ||
+                config_.hybrid_entry_pcs.count(func.start_addr);
             stub.body = fmt::format(
-                "{{\n    psx_unknown_dispatch(cpu, 0x{:08X}u, 0x{:08X}u);\n}}\n",
+                "{{\n{}    psx_unknown_dispatch(cpu, 0x{:08X}u, 0x{:08X}u);\n}}\n",
+                stub_hook ? fmt::format("    if (psx_mod_function_entry(cpu, 0x{:08X}u)) return;"
+                                        "  /* trusted opt-in game-mod hook */\n",
+                                        func.start_addr)
+                          : std::string(),
                 runtime_pc(func.start_addr), func.start_addr & 0x1FFFFFFFu);
             stub.full_code = stub.signature + "\n" + stub.body;
             stub.line_count = 4;
@@ -3570,8 +3599,15 @@ std::vector<GeneratedFunction> CodeGenerator::generate_all_functions(
                 GeneratedFunction data_stub;
                 data_stub.function_name = func.name;
                 data_stub.signature = fmt::format("void {}(CPUState* cpu)", func.name);
+                const bool stub_hook =
+                    config_.mod_function_entry_funcs.count(func.start_addr) ||
+                    config_.hybrid_entry_pcs.count(func.start_addr);
                 data_stub.body = fmt::format(
-                    "{{\n    psx_unknown_dispatch(cpu, 0x{:08X}u, 0x{:08X}u);\n}}\n",
+                    "{{\n{}    psx_unknown_dispatch(cpu, 0x{:08X}u, 0x{:08X}u);\n}}\n",
+                    stub_hook ? fmt::format("    if (psx_mod_function_entry(cpu, 0x{:08X}u)) return;"
+                                            "  /* trusted opt-in game-mod hook */\n",
+                                            func.start_addr)
+                              : std::string(),
                     runtime_pc(func.start_addr), func.start_addr & 0x1FFFFFFFu);
                 data_stub.full_code = data_stub.signature + "\n" + data_stub.body;
                 data_stub.line_count = 4;

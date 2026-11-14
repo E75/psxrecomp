@@ -1098,6 +1098,13 @@ struct GameConfig {
     // entries that dispatch trusted, statically linked mod callbacks. Empty by
     // default, so projects that do not opt in emit no callback overhead.
     std::vector<uint32_t> mod_function_entry_funcs;
+    // [recompiler] hybrid_entry_pcs_file: a text file of one hex guest PC per
+    // line. Every listed PC gets the same psx_mod_function_entry() entry hook
+    // as mod_function_entry_funcs, so a decompiled-C dispatcher can take over
+    // the whole registered entry set instead of the handful spelled out in the
+    // TOML. Missing file is an error (an empty set would silently emit no
+    // hooks and run the recompiled bodies). Empty path = no hooks (default).
+    std::vector<uint32_t> hybrid_entry_pcs;
     // Opt-in pre-instruction callbacks; plugins supply exact-word guards.
     std::vector<uint32_t> mod_instruction_sites;
 
