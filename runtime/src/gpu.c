@@ -4511,19 +4511,47 @@ void gpu_get_display_info(GpuDisplayInfo* out) {
  * the OTHER band packing at guest columns - straight back over the texture
  * pages - and, when the displayed band was not the drawn one, closed the gate
  * entirely. So the redirect covers every band ever used as a display buffer
- * (learned here, forgotten when the display geometry changes), and the gate
- * only asks that the current draw area's X span is the display's. */
-#define VRAM_EXT_BANDS 4
-static uint32_t vram_ext_band_key;
-static int      vram_ext_band_key_set;
+ * (learned here, cleared only on a GPU reset), and the gate only asks that the
+ * current draw area's X span is the display's. */
 
-/* New game / GPU reset: the learned framebuffer bands and the display key are
- * stale (defined here because the key lives here). */
+/* New game / GPU reset: the learned framebuffer bands are stale. */
 static void vram_ext_reset_all(void) {
-    vram_ext_band_key = 0;
-    vram_ext_band_key_set = 0;
     vram_ext_reset_bands();
     vram_ext_set_region(0, 0, 0, 0, 0);
+}
+
+/* One-shot (up to 4 distinct signatures) diagnostic: a wide display whose draw
+ * area did not match names the comparison that failed, so a bad gate is read
+ * off the log instead of needing another A/B. */
+static void vram_ext_gate_log(const GpuDisplayInfo *di, int ax0, int ay0,
+                              int ax1, int ay1, int why) {
+    static const char *const reason[] = {
+        "open",
+        "display disabled",
+        "depth24 display",
+        "display width <= 512",
+        "display rows past VRAM",
+        "display x1 out of VRAM",
+        "display x1 past the extension plane",
+        "draw_area_left != display_x",
+        "draw_area_right != display_x1",
+        "band height != display height"
+    };
+    static uint32_t last_sig;
+    static int logged;
+    if (why <= 0 || why >= (int)(sizeof reason / sizeof reason[0])) return;
+    if (logged >= 4) return;
+    uint32_t sig = ((uint32_t)why << 28) ^ ((uint32_t)di->width << 16) ^
+                   ((uint32_t)(ax1 & 0xFFFF) << 8) ^ (uint32_t)(ax0 & 0xFF) ^
+                   ((uint32_t)(ay0 & 0xFF) << 4) ^ (uint32_t)(ay1 & 0xF);
+    if (logged && sig == last_sig) return;
+    last_sig = sig;
+    logged++;
+    fprintf(stderr, "psxrecomp: vram extension gate closed: display x0=%u w=%u h=%u y0=%u "
+                    "(x1=%u) draw_area [%d,%d,%d,%d] bands=%d; failed: %s\n",
+            (unsigned)di->display_x, (unsigned)di->width, (unsigned)di->height,
+            (unsigned)di->display_y, (unsigned)di->display_x + (unsigned)di->width - 1u,
+            ax0, ay0, ax1, ay1, vram_ext_band_rows(NULL, NULL), reason[why]);
 }
 
 static void vram_ext_sync(void) {
@@ -4532,48 +4560,68 @@ static void vram_ext_sync(void) {
     gpu_get_display_info(&di);
     vram_ext_note_present((int)di.width);
 
-    /* Bands belong to one display geometry. display_y is excluded: it flips
-     * between the two bands every frame. */
-    uint32_t key = ((uint32_t)di.display_x & 0x3FFu) |
-                   (((uint32_t)di.width & 0x7FFu) << 10) |
-                   (((uint32_t)di.height & 0x1FFu) << 21) |
-                   ((uint32_t)(di.depth24 ? 1u : 0u) << 30) |
-                   ((uint32_t)(di.disabled ? 1u : 0u) << 31);
-    if (!vram_ext_band_key_set || key != vram_ext_band_key) {
-        vram_ext_band_key = key;
-        vram_ext_band_key_set = 1;
-        vram_ext_reset_bands();
-    }
+    /* Bands are NOT keyed to the display geometry: the match can rewrite
+     * GP1(06h)/(07h) with per-frame jitter and a reset-on-change would wipe the
+     * learned set every frame - that failure mode closed the gate completely.
+     * They are clamped to VRAM and only cleared on a GPU reset; a stale band is
+     * harmless because the gate still requires the draw span to be the display
+     * span at the display's origin. */
 
-    const int disp_x1 = (int)di.display_x + (int)di.width - 1;
-    const int wide_ok = !di.disabled && !di.depth24 &&
-                        di.width > (uint32_t)VRAM_EXT_X0 &&
-                        disp_x1 < VRAM_EXT_GUEST_W &&
-                        disp_x1 <= VRAM_EXT_X0 + VRAM_EXT_COLS - 1 &&
-                        (int)di.display_y + (int)di.height <= 512;
-    const int span_ok = wide_ok &&
-                        (int)draw_area_left == (int)di.display_x &&
-                        (int)draw_area_right == disp_x1;
+    /* SPAN CONVENTION. Two different conventions meet here:
+     *   - GP0(E3/E4) draw area and the CRTC display rect are INCLUSIVE
+     *     (a 682-wide buffer is [0..681]);
+     *   - the guest's GsDRAWENV carries x1 EXCLUSIVE (`_DAT_80064854` = 682
+     *     for that same buffer), and the guest writes E4 with x1-1 = 681.
+     * A gate that compares one against the other exactly closes on the
+     * off-by-one, so both edges get a 1-pixel tolerance and every value here
+     * is converted to inclusive first (`dx1 = x0 + w - 1`). */
+    const int tol = 1;
+    const int dx0 = (int)di.display_x;
+    const int dx1 = dx0 + (int)di.width - 1;      /* inclusive */
+    const int dh  = (int)di.height;
+    const int ax0 = (int)draw_area_left;
+    const int ax1 = (int)draw_area_right;         /* inclusive (GP0 E4) */
+    const int ay0 = (int)draw_area_top;
+    const int ay1 = (int)draw_area_bottom;
 
+    int why = 0;   /* 0 = open; see vram_ext_gate_log */
+    if (di.disabled)                                      why = 1;
+    else if (di.depth24)                                  why = 2;
+    else if (di.width <= (uint32_t)VRAM_EXT_X0)           why = 3;
+    else if (dh <= 0 || (int)di.display_y + dh > 512)     why = 4;
+    else if (dx1 < 0 || dx1 >= VRAM_EXT_GUEST_W)          why = 5;
+    else if (dx1 > VRAM_EXT_X0 + VRAM_EXT_COLS - 1)       why = 6;
+    else if (abs(ax0 - dx0) > tol)                        why = 7;
+    else if (abs(ax1 - dx1) > tol)                        why = 8;
+
+    const int span_ok = (why == 0);
     if (span_ok) {
-        int band_h = (int)draw_area_bottom - (int)draw_area_top + 1;
-        /* A framebuffer band is one display height (or both stacked, when the
-         * game sets the area across the double buffer). */
-        if (band_h == (int)di.height || band_h == (int)di.height * 2)
-            vram_ext_learn_band((int)draw_area_top, (int)draw_area_bottom);
-    } else if (wide_ok) {
-        /* A draw that looks like the framebuffer (its X span is within a few
-         * pixels of the display's) but does not match: render-to-texture, or a
-         * gate bug. Counted; a texture page draw (256 wide) is not a miss. */
-        int d = (int)draw_area_right - disp_x1;
-        if (d < 0) d = -d;
-        if (d <= 8) vram_ext_note_gate_off(1);
+        /* Learn the band unconditionally: the span check already says this draw
+         * area is the display buffer's width at the display's origin, and the
+         * first frame after a flip draws into a band that has never been the
+         * display band yet (the pack of that frame can run before the flip).
+         * Region = every learned band PLUS the band being drawn now, so a missed
+         * learn can never close the gate for the frame that is on screen. */
+        vram_ext_learn_band(ay0, ay1);
+        int y0 = ay0, y1 = ay1;
+        int by0, by1;
+        if (vram_ext_band_rows(&by0, &by1)) {
+            if (by0 < y0) y0 = by0;
+            if (by1 > y1) y1 = by1;
+        }
+        vram_ext_set_region(1, dx0, y0, dx1, y1);
+    } else {
+        vram_ext_set_region(0, 0, 0, 0, 0);
+        if (di.width > (uint32_t)VRAM_EXT_X0) {
+            /* Count only framebuffer-like near misses: a texture-page draw
+             * (256 wide) is not a gate miss. */
+            int d = ax1 - dx1;
+            if (d < 0) d = -d;
+            if (d <= 8) vram_ext_note_gate_off(1);
+        }
     }
-
-    int on = 0, y0 = 0, y1 = 0;
-    if (span_ok && vram_ext_band_rows(&y0, &y1)) on = 1;
-    vram_ext_set_region(on, on ? (int)di.display_x : 0, y0,
-                        on ? disp_x1 : 0, y1);
+    if (di.width > (uint32_t)VRAM_EXT_X0)
+        vram_ext_gate_log(&di, ax0, ay0, ax1, ay1, why);
 }
 
 /* Debug accessors for GP1 display-range / mode (TCP gpu_state). */

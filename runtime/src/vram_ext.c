@@ -319,6 +319,10 @@ void vram_ext_note_pack_rect(int x0, int y0, int x1, int y1) {
 
 void vram_ext_reset_stats(void) { memset(&s_stats, 0, sizeof s_stats); }
 
+/* The debug reply path must stay small: `gpu_state` is a big object and a reply
+ * that blocks the emulation thread long enough trips the starvation watchdog
+ * (the query closed the connection at kickoff, four times). Keep this object
+ * under ~256 bytes: no unbounded arrays, no static config echoed back. */
 int vram_ext_debug_json(char *out, int cap) {
     if (!out || cap <= 0) return 0;
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
@@ -328,27 +332,17 @@ int vram_ext_debug_json(char *out, int cap) {
     int bands = vram_ext_band_rows(&by0, &by1);
     return snprintf(out, (size_t)cap,
                     "{\"enabled\":%d,\"driving\":%d,\"backend\":%d,"
-                    "\"host_w\":%d,\"ext_x0\":%d,\"ext_cols\":%d,\"offset\":%d,"
-                    "\"region\":[%d,%d,%d,%d],\"region_on\":%d,"
+                    "\"region_on\":%d,\"region\":[%d,%d,%d,%d],"
                     "\"bands\":%d,\"band_rows\":[%d,%d],"
                     "\"present_reads_remapped\":%llu,"
                     "\"texture_reads_remapped\":%llu,"
                     "\"guest_pack_pixels\":%llu,"
-                    "\"texture_reads_ok\":%d,\"redirect_ok\":%d,"
-                    "\"readback_bytes\":%llu,"
-                    "\"gate_off_frames\":%llu,\"presents\":%llu,"
-                    "\"present_width\":%d}",
+                    "\"gate_off_frames\":%llu,\"present_width\":%d}",
                     vram_ext_enabled(), vram_ext_driving(), s_backend,
-                    VRAM_EXT_HOST_W, VRAM_EXT_X0, VRAM_EXT_COLS, VRAM_EXT_OFFSET,
-                    x0, y0, x1, y1, on,
-                    bands, by0, by1,
+                    on, x0, y0, x1, y1, bands, by0, by1,
                     (unsigned long long)s_stats.present_reads_remapped,
                     (unsigned long long)s_stats.texture_reads_remapped,
                     (unsigned long long)s_stats.guest_pack_pixels,
-                    s_stats.texture_reads_remapped == 0,
-                    s_stats.guest_pack_pixels == 0,
-                    (unsigned long long)s_stats.readback_bytes,
                     (unsigned long long)s_stats.gate_off_frames,
-                    (unsigned long long)s_stats.presents,
                     s_stats.present_width);
 }
