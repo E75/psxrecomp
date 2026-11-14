@@ -808,6 +808,27 @@ void psx_rfe_mark_escape(void) {
  * real resume EPC). If an RFE armed the escape inside the synchronous handler,
  * longjmp back to psx_check_interrupts (cpu->pc preserved across the longjmp). */
 void psx_rfe_escape_check(CPUState* cpu) {
+    /* The kernel's ReturnFromException loads the resume PC from the thread's TCB
+     * into k0 (`lw k0,128(k1)`) and jumps to it. A host-initiated guest call has no
+     * guest PC of its own, so a slot saved by the runtime scheduler can hold 0
+     * there; jumping to it is a dispatch miss, not a guest return. Substitute the
+     * delivery's real EPC - the same rule as the call boundary: only when the value
+     * is not a plausible guest PC, so guest RFEs stay byte-identical. */
+    if (in_exception && cpu->pc != PSX_EXC_SENTINEL_PC &&
+        !psx_guest_pc_plausible(cpu->pc)) {
+        uint32_t fix = psx_guest_pc_plausible(g_exception_real_epc)
+                           ? g_exception_real_epc
+                           : psx_guest_call_resume_pc();
+        if (fix != 0u) {
+            extern uint32_t g_pc0_src;
+            g_pc0_src = 3u;   /* PSX_PC0_SRC_K0 */
+            psx_guest_call_note_isr_return(0);
+            cpu->pc = fix;
+        }
+    } else if (in_exception && g_rfe_escape_pending &&
+               cpu->pc != PSX_EXC_SENTINEL_PC) {
+        psx_guest_call_note_isr_return(1);   /* a real guest PC came back from the TCB */
+    }
     /* Escape ONLY when this RFE is the synchronous handler completing on the SAME
      * fiber that set up the exception (the owner of exception_jmpbuf). in_exception
      * is a single global, so a thread RESUMED on a different fiber (its own real EPC
@@ -1740,6 +1761,15 @@ irq_deliver_eval:
         uint32_t hi_val = (w0 & 0xFFFF) << 16;
         int16_t lo_val = (int16_t)(w1 & 0xFFFF);
         target_pc = hi_val + (uint32_t)(int32_t)lo_val;
+        /* A zeroed or half-patched vector (the kernel and HookEntryInt rewrite it)
+         * decodes to 0 here; dispatching that is a miss, not a delivery. Leave the
+         * interrupt pending for the next boundary and count it. */
+        if (!psx_guest_pc_plausible(target_pc)) {
+            extern uint32_t g_pc0_src;
+            g_pc0_src = 4u;   /* PSX_PC0_SRC_EPC */
+            psx_guest_call_note_isr_return(0);
+            PSX_CHECK_INTERRUPTS_RETURN();
+        }
         /* The RAM exception vector is a LUI/ADDIU pair that materializes the
          * installed handler address in $k0 before transferring to it.  The
          * host-side fast path decodes that pair and dispatches straight to the

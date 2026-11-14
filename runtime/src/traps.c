@@ -242,6 +242,7 @@ enum {
     PSX_PC0_DISPATCH_MISS = 4,  /* psx_unknown_dispatch couldn't resolve a target */
 };
 uint32_t g_pc0_reason = PSX_PC0_GUEST_RETURN;
+uint32_t g_pc0_src    = 0;   /* PSX_PC0_SRC_* (psx_guest_call.h) */
 
 static uint32_t psx_current_tcb_ptr(CPUState* cpu)
 {
@@ -882,6 +883,7 @@ void psx_scheduler_run(CPUState* cpu)
             if (psx_is_valid_tcb(cpu, cur)) {
                 run_pc = psx_restore_context_from_tcb(cpu, cur);
                 if (!psx_is_dispatchable(run_pc)) {
+                    g_pc0_src = 5u;   /* PSX_PC0_SRC_TCB */
                     char b[112];
                     snprintf(b, sizeof(b),
                         "scheduler: TCB 0x%08X has non-dispatchable resume PC 0x%08X",
@@ -1129,6 +1131,9 @@ void psx_unknown_dispatch(CPUState* cpu, uint32_t addr, uint32_t phys) {
      * or uninitialized callback slot is dispatched. */
     if (addr == 0) {
         g_pc0_reason = PSX_PC0_DISPATCH_MISS; /* guest jumped/returned to a null (0) target */
+        /* Distinguish a null *return address* from a null dispatch target: both
+         * land here, and the field name is what the next boot needs. */
+        g_pc0_src = (cpu->gpr[31] == 0u) ? 2u /* PSX_PC0_SRC_RA */ : 1u /* DISPATCH */;
         cpu->pc = 0;
         return;
     }

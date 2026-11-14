@@ -58,6 +58,8 @@ typedef struct PsxGuestCallStats {
     uint64_t bad_ra;         /* no real guest continuation was available to substitute */
     uint64_t bad_sp;         /* entered with a guest $sp that is not a plausible stack */
     uint64_t irq_in_call;    /* interrupts delivered while a host call was in flight */
+    uint64_t isr_returns;    /* RFE completions whose target was a plausible guest PC */
+    uint64_t isr_bad_target; /* RFE / vector target that was not a plausible guest PC */
 } PsxGuestCallStats;
 
 void psx_guest_call_stats(PsxGuestCallStats* out);
@@ -83,6 +85,23 @@ void psx_guest_call_leave(int pushed);
 
 /* An interrupt was delivered while a host call was in flight (interrupts.c). */
 void psx_guest_call_note_irq(void);
+
+/* Bookkeeping for the ISR return path: `ok` = the RFE target (the kernel's
+ * ReturnFromException loads it from the thread TCB into k0 and jumps) was a
+ * plausible guest PC. A bad target is substituted before the jump
+ * (interrupts.c psx_rfe_escape_check) and counted here. */
+void psx_guest_call_note_isr_return(int ok);
+
+/* Why the guest last ended at PC 0 (docs/BOOT_BLOCKERS.md section 5). */
+enum {
+    PSX_PC0_SRC_UNKNOWN = 0,
+    PSX_PC0_SRC_DISPATCH = 1,   /* psx_unknown_dispatch saw addr 0 */
+    PSX_PC0_SRC_RA = 2,         /* ... and $ra was 0 too: a null return address */
+    PSX_PC0_SRC_K0 = 3,         /* RFE target (TCB resume slot -> k0) was not a guest PC */
+    PSX_PC0_SRC_EPC = 4,        /* exception vector decode produced no guest PC */
+    PSX_PC0_SRC_TCB = 5         /* scheduler restored a TCB with no guest resume PC */
+};
+extern uint32_t g_pc0_src;
 
 /* Bookkeeping from the call wrapper: did the guest return to the call's
  * return address? */

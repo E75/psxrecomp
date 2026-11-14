@@ -19765,18 +19765,21 @@ session_reboot:
 
     std::fprintf(stdout, "psxrecomp runtime: execution completed, PC=0x%08X\n", cpu.pc);
     { extern uint32_t g_pc0_reason;
+      extern uint32_t g_pc0_src;
       PsxGuestCallStats gcs;
       psx_guest_call_stats(&gcs);
       /* g_pc0_reason: 0 guest jr/return, 1 change-thread-self, 2 fiber switch,
        * 3 critical section, 4 dispatch miss. The guest-call counters turn "a
        * host call did not come back" into a number (docs/BOOT_BLOCKERS.md §3). */
       std::fprintf(stdout,
-                   "psxrecomp runtime: [exit diag] pc0_reason=%u guest_calls=%llu returns=%llu "
-                   "non_returning=%llu bad_ra=%llu bad_sp=%llu irq_in_call=%llu\n",
-                   (unsigned)g_pc0_reason,
+                   "psxrecomp runtime: [exit diag] pc0_reason=%u pc0_src=%u guest_calls=%llu "
+                   "returns=%llu non_returning=%llu bad_ra=%llu bad_sp=%llu irq_in_call=%llu "
+                   "isr_returns=%llu isr_bad_target=%llu\n",
+                   (unsigned)g_pc0_reason, (unsigned)g_pc0_src,
                    (unsigned long long)gcs.calls, (unsigned long long)gcs.returns,
                    (unsigned long long)gcs.non_returning, (unsigned long long)gcs.bad_ra,
-                   (unsigned long long)gcs.bad_sp, (unsigned long long)gcs.irq_in_call);
+                   (unsigned long long)gcs.bad_sp, (unsigned long long)gcs.irq_in_call,
+                   (unsigned long long)gcs.isr_returns, (unsigned long long)gcs.isr_bad_target);
     }
     { extern uint64_t g_slice_fired, g_slice_irq_taken, g_dirty_ram_insns_run;
       extern uint32_t g_slice_exit_pc, g_slice_exit_reason, g_slice_exit_iter;

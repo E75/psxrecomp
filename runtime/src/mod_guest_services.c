@@ -35,8 +35,11 @@ int psx_guest_pc_plausible(uint32_t pc)
 {
     if (pc == 0u || (pc & 3u) != 0u) return 0;
     const uint32_t phys = pc & 0x1FFFFFFFu;
+    /* Live RAM, the BIOS ROM window, and the bus range a trusted plugin may use
+     * for mod-defined guest functions (mod_plugins.h). 0 never matches. */
     return phys < psx_ram_live_bytes() ||
-           (phys >= 0x1FC00000u && phys < 0x1FC80000u);
+           (phys >= 0x1FC00000u && phys < 0x1FC80000u) ||
+           (phys >= 0x0F000000u && phys < 0x10000000u);
 }
 
 int psx_guest_call_depth(void) { return g_psx_guest_call_depth; }
@@ -123,12 +126,33 @@ void psx_guest_call_note_irq(void)
     s_call_stats.irq_in_call++;
 }
 
+void psx_guest_call_note_isr_return(int ok)
+{
+    if (ok) s_call_stats.isr_returns++;
+    else {
+        s_call_stats.isr_bad_target++;
+        call_log("ISR return target is not a guest PC", 0, 0);
+    }
+}
+
 uint32_t psx_mod_call_guest_ex(struct CPUState* cpu, uint32_t function,
                                uint32_t return_address, uint32_t a0, uint32_t a1,
                                uint32_t a2, uint32_t a3, int* returned) {
     uint32_t regs[32];
     const uint32_t pc = cpu->pc, hi = cpu->hi, lo = cpu->lo;
     memcpy(regs, cpu->gpr, sizeof regs);
+
+    /* Refuse a call whose target is not a guest code address (a null function
+     * pointer in decompiled C reaches here as we_gcall(0)). Dispatching it would
+     * be a dispatch miss at 0; returning 0 keeps the caller alive and the event
+     * measurable. */
+    if (!psx_guest_pc_plausible(function)) {
+        s_call_stats.bad_ra++;
+        call_log("call target is not a guest PC:", function, regs[31]);
+        if (returned) *returned = 0;
+        return 0;
+    }
+
     const int pushed = psx_guest_call_enter(regs[31], cpu->gpr[29]);
 
     /* Reserve the callee's frame (see psx_guest_call.h). The C body never ran
