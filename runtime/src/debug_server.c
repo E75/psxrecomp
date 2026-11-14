@@ -15461,6 +15461,19 @@ static void handle_vk_frame_perf(int id, const char *json)
     send_fmt("{\"id\":%d,\"ok\":true,\"vk_frame_perf\":%s}", id, buf);
 }
 
+/* "vfx_state": [video] volumetrics / light-shaft state (vfx_state_json,
+ * docs/EFFECTS.md). Config as parsed, what the renderer actually armed (a
+ * device that cannot sample the depth format refuses fog), and the last
+ * measured cost of the effect passes against the 1.5 ms budget. */
+static void handle_vfx_state(int id, const char *json)
+{
+    extern int vfx_state_json(char *out, int cap);
+    (void)json;
+    static char buf[1024];
+    vfx_state_json(buf, (int)sizeof(buf));
+    send_fmt("{\"id\":%d,\"ok\":true,\"vfx_state\":%s}", id, buf);
+}
+
 /* "gl_frame_perf": the OpenGL twin of vk_frame_perf (gpu_gl_renderer.c
  * gl_frame_perf_json). Identical JSON keys - backend, scale, gpu_ts, target,
  * all{...}, frames[] with cpu_ms/scene_gpu_ms/present_gpu_ms/gpu/draws - so
@@ -15926,6 +15939,7 @@ static const CmdEntry s_commands[] = {
     { "nclip_stats",       handle_nclip_stats },
     { "frame_perf",        handle_frame_perf },
     { "vk_frame_perf",     handle_vk_frame_perf },
+    { "vfx_state",         handle_vfx_state },
     { "gl_frame_perf",     handle_gl_frame_perf },
     { "gl_ws_ablate",      handle_gl_ws_ablate },
     { "gl_interp",         handle_gl_interp },

@@ -96,6 +96,8 @@ const GpuRenderBackend *vk_backend_get(void) { return 0; }
 #include "vk_shaders_spv.h"   /* generated: spv_geo_vert/frag, spv_geo_tex_vert/frag,
                                *            spv_pack_comp, spv_blit_vert/frag */
 #include "vram_ext.h"
+#include "vfx.h"              /* [video] volumetrics / light shafts (docs/EFFECTS.md) */
+#include "gpu.h"              /* gpu_ot_rank: ordering-table depth proxy for fog */
 
 #define VRAM_W 1024
 #define VRAM_H 512
@@ -108,6 +110,74 @@ static int s_aspect_num = 4, s_aspect_den = 3;
 void vk_renderer_set_display_aspect(int num, int den) {
     if (num <= 0 || den <= 0) { num = 4; den = 3; }
     s_aspect_num = num; s_aspect_den = den;
+}
+
+/* ---- [video] volumetrics / light shafts (docs/EFFECTS.md) ---------------
+ * Both effects are armed once, here, and every cost they add is behind these
+ * flags: with volumetrics = "off" (the default) no pass, barrier, pipeline or
+ * counter differs from the pre-effect renderer.
+ *
+ * fog     - the geometry pass writes the per-primitive distance proxy into
+ *           clip-space z, which the unused depth attachment stores; the
+ *           present pass reads it and mixes toward the fog colour. Guest VRAM
+ *           is never modified.
+ * shafts  - the present draw goes into an offscreen post image and a radial
+ *           blur of its bright pixels is added on the way to the swapchain.
+ */
+static int   s_vfx_fog;                  /* fog present + depth proxy armed */
+static int   s_vfx_shafts;               /* light-shaft pass armed          */
+static float s_vfx_fog_density = 0.35f;
+static float s_vfx_fog_color[3] = { 0.722f, 0.784f, 0.847f };
+static float s_vfx_shaft_strength = 0.5f;
+static int   s_vfx_shaft_samples = 24;
+static float s_vfx_light_uv[2] = { 0.5f, 0.18f };
+static uint32_t s_vfx_ot_max = 1;        /* previous frame's highest OT rank */
+static uint32_t s_vfx_ot_cur;            /* this frame's highest OT rank      */
+static int   s_vfx_warned_budget;
+static int   s_vfx_failed;               /* resource creation failed (log once) */
+static int   s_vfx_depth_cleared;        /* fog proxy cleared for this frame   */
+static VkImageLayout s_vfx_ds_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+/* Depth-aspect-only view of the canonical target's DS image: a combined
+ * depth/stencil view cannot be sampled, and the fog present reads the depth
+ * aspect as its distance proxy. Created with the target, only when fog is
+ * armed. */
+static VkImageView s_ds_sample_view;
+
+/* Present-chain resources (defined with the present code below; declared here
+ * so the teardown path can release them). All NULL until first armed use. */
+typedef struct { float src_rect[4]; float fog[4]; } VfxPush;   /* 32 bytes */
+static VkRenderPass          s_vfx_post_rp;
+static VkImage               s_vfx_post_img;
+static VkDeviceMemory        s_vfx_post_mem;
+static VkImageView           s_vfx_post_view;
+static VkFramebuffer         s_vfx_post_fb;
+static uint32_t              s_vfx_post_w, s_vfx_post_h;
+static VkSampler             s_vfx_samp;
+static VkDescriptorSetLayout s_vfx_fog_dsl;
+static VkDescriptorSetLayout s_vfx_shaft_dsl;
+static VkPipelineLayout      s_vfx_fog_pl;
+static VkPipelineLayout      s_vfx_shaft_pl;
+static VkPipeline            s_vfx_fog_pipe;
+static VkPipeline            s_vfx_shaft_pipe;
+static VkDescriptorPool      s_vfx_pool;
+static VkShaderModule        s_vfx_fog_fs, s_vfx_shaft_fs;
+static void vfx_release_post(void);
+
+/* Depth proxy for the primitive being appended, or -1.0 when the effect is
+ * off. PGXP's normalized 1/z (a_q) is the real thing and is used per vertex
+ * inside geo_tex.vert; this is the fallback for prims without projection
+ * provenance: the packet's ordering-table node index, normalized by the
+ * previous frame's deepest node. The first drawn packet is the farthest (the
+ * PSY-Q linked-list walk runs back to front), hence 1 - rank/max. A packet
+ * with no linked list (0xFFFF, the direct/2D path) never fades. */
+static float vfx_prim_fog(void) {
+    if (!s_vfx_fog) return -1.0f;
+    uint32_t rank = gpu_ot_rank();
+    if (rank == 0xFFFFu) return 0.0f;
+    if (rank > s_vfx_ot_cur) s_vfx_ot_cur = rank;
+    if (s_vfx_ot_max < 4) return 0.0f;   /* not a depth-sorted list: no fade */
+    float f = 1.0f - (float)rank / (float)s_vfx_ot_max;
+    return f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
 }
 
 /* ---- dynamic loader ---------------------------------------------------- */
@@ -326,6 +396,14 @@ static int        s_texfilter;
 /* ---- geometry / render targets ----------------------------------------- */
 static VkImageView     s_vram_view;       /* RGBA8 hr render target view */
 static VkRenderPass    s_rpass;           /* color (hr) + depth/stencil */
+/* [video] volumetrics: same attachments, but the depth aspect is CLEARed at
+ * pass start (the geometry pass writes the fog depth proxy there; a stale
+ * value from the previous frame would fade pixels nothing drew this frame).
+ * Render-pass compatible with s_rpass, so the cached pipelines serve both. */
+static VkRenderPass    s_rpass_fog;
+/* Same, but depth LOADed: used for every geometry batch after the first in a
+ * frame, so a later batch's proxy does not wipe the earlier batches'. */
+static VkRenderPass    s_rpass_fog_load;
 static VkFramebuffer   s_fbo;
 
 /* Native R16_UINT raw VRAM mirror: the canonical 1555 bits, sampled in the
@@ -416,9 +494,11 @@ typedef struct {
              wide_passes, wide_clears, draws;
     /* CPU/GPU phase timing (vk_frame_perf). cpu_ms is present-to-present;
      * scene_gpu/present_gpu come from the timestamp pair of this frame and are
-     * filled in a few frames late (has_gpu until then). */
-    float    cpu_ms, scene_gpu_ms, present_gpu_ms;
-    uint32_t has_gpu;
+     * filled in a few frames late (has_gpu until then). vfx_ms is the cost of
+     * the [video] volumetrics / light-shaft passes inside the present
+     * (docs/EFFECTS.md); has_vfx is 0 on frames that recorded none. */
+    float    cpu_ms, scene_gpu_ms, present_gpu_ms, vfx_ms;
+    uint32_t has_gpu, has_vfx;
     /* Render-target footprint + the native rects this frame wrote, so the
      * windowed-target policy is observable (tgt = allocated bounds,
      * cover = union of draws/fills/uploads/copies, oob = writes clipped
@@ -432,9 +512,10 @@ static VkPerf s_perf_ring[VK_PERF_RING];
 static uint32_t s_perf_head;          /* number of frames recorded (monotonic) */
 static VkPerf s_perf_cur = { .cx1 = -1, .cy1 = -1 };   /* current frame */
 static uint32_t s_present_idx;
-/* Timestamp queries: 3 per frame (scene start, present start, present end),
- * VK_PERF_TS_SLOTS frames in flight, read VK_PERF_TS_LAG frames late so the
- * debug-server query never waits on the GPU. */
+/* Timestamp queries: 5 per frame (scene start, present start, present end,
+ * vfx start, vfx end), VK_PERF_TS_SLOTS frames in flight, read VK_PERF_TS_LAG
+ * frames late so the debug-server query never waits on the GPU. The two vfx
+ * slots are only written on frames that record a [video] volumetrics pass. */
 #define VK_PERF_TS_SLOTS 8
 #define VK_PERF_TS_LAG   6
 static VkQueryPool s_perf_pool;
@@ -467,9 +548,9 @@ static uint32_t perf_elapsed_us(uint64_t start) {
 static void perf_ts_scene_begin(VkCommandBuffer cb) {
     if (!s_ts_ok || s_perf_ts_frame_done) return;
     uint32_t slot = s_present_idx % VK_PERF_TS_SLOTS;
-    p_vkCmdResetQueryPool(cb, s_perf_pool, slot * 3, 3);
+    p_vkCmdResetQueryPool(cb, s_perf_pool, slot * 5, 5);
     p_vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                          s_perf_pool, slot * 3 + 0);
+                          s_perf_pool, slot * 5 + 0);
     s_perf_ts_frame_done = 1;
 }
 
@@ -481,7 +562,7 @@ static void perf_try_read_gpu(uint32_t frame_idx) {
     uint32_t slot = frame_idx % VK_PERF_TS_SLOTS;
     if (frame_idx + VK_PERF_TS_SLOTS <= s_present_idx) return;  /* slot reused */
     uint64_t ts[3] = {0, 0, 0};
-    VkResult r = p_vkGetQueryPoolResults(s_dev, s_perf_pool, slot * 3, 3,
+    VkResult r = p_vkGetQueryPoolResults(s_dev, s_perf_pool, slot * 5, 3,
                                          sizeof ts, ts, sizeof(uint64_t),
                                          VK_QUERY_RESULT_64_BIT);
     if (r != VK_SUCCESS) return;   /* not ready yet */
@@ -489,6 +570,25 @@ static void perf_try_read_gpu(uint32_t frame_idx) {
         p->scene_gpu_ms   = (float)(ts[1] - ts[0]) * s_ts_period_ns / 1.0e6f;
         p->present_gpu_ms = (float)(ts[2] - ts[1]) * s_ts_period_ns / 1.0e6f;
         p->has_gpu = 1;
+    }
+    /* q3/q4 exist only on frames that recorded a volumetrics pass. */
+    if (p->has_vfx) {
+        uint64_t vts[2] = {0, 0};
+        if (p_vkGetQueryPoolResults(s_dev, s_perf_pool, slot * 5 + 3, 2,
+                                    sizeof vts, vts, sizeof(uint64_t),
+                                    VK_QUERY_RESULT_64_BIT) == VK_SUCCESS &&
+            vts[1] >= vts[0]) {
+            p->vfx_ms = (float)(vts[1] - vts[0]) * s_ts_period_ns / 1.0e6f;
+            vfx_report_cost(p->vfx_ms);
+            /* Budget guard (docs/EFFECTS.md): the effect set is only defensible
+             * while it stays inside ~1.5 ms at 1440p. Report it, once. */
+            if (p->vfx_ms > 1.5f && !s_vfx_warned_budget) {
+                s_vfx_warned_budget = 1;
+                fprintf(stdout, "psxrecomp: vfx: pass cost %.2f ms exceeds the "
+                                "1.5 ms budget (fog=%d shafts=%d taps=%d)\n",
+                        (double)p->vfx_ms, s_vfx_fog, s_vfx_shafts, s_vfx_shaft_samples);
+            }
+        }
     }
 }
 
@@ -507,6 +607,14 @@ static void perf_collect_gpu(void) {
 static void perf_snapshot_present(void) {
     s_perf_cur.present_idx = s_present_idx++;
     s_perf_cur.present_qpc = SDL_GetPerformanceCounter();
+    /* [video] volumetrics: the ordering-table proxy is normalized by the
+     * deepest node of the PREVIOUS frame, because the current frame's total is
+     * only known here. */
+    if (s_vfx_fog) {
+        if (s_vfx_ot_cur > s_vfx_ot_max) s_vfx_ot_max = s_vfx_ot_cur;
+        s_vfx_ot_cur = 0;
+        s_vfx_depth_cleared = 0;   /* next frame's first geometry pass clears */
+    }
     if (s_perf_last_present_qpc) {
         uint64_t freq = SDL_GetPerformanceFrequency();
         s_perf_cur.cpu_ms = freq
@@ -545,7 +653,8 @@ static VkPipeline       s_pipe_pack;      /* compute */
 #define PIPE_BLENDS 5
 #define PIPE_STENCILS 3
 #define PIPE_CMASKS 2
-#define PIPE_CACHE_N (PIPE_PROGS * PIPE_TOPOS * PIPE_BLENDS * PIPE_STENCILS * PIPE_CMASKS)
+#define PIPE_FOGS 2    /* 0 no depth write, 1 depth-proxy write (volumetrics) */
+#define PIPE_CACHE_N (PIPE_PROGS * PIPE_TOPOS * PIPE_BLENDS * PIPE_STENCILS * PIPE_CMASKS * PIPE_FOGS)
 static VkPipeline s_pipe_cache[PIPE_CACHE_N];
 static VkShaderModule s_mod_geo_v, s_mod_geo_f, s_mod_tex_v, s_mod_tex_f, s_mod_blit_v, s_mod_blit_f;
 
@@ -567,6 +676,9 @@ static uint32_t       s_vcount;           /* verts accumulated this batch */
 static uint32_t       s_vbase;            /* first vertex of the open batch */
 static int            s_geo_semi = -2;    /* open untextured batch keys */
 static int            s_geo_mask = 0, s_geo_check = 0;
+/* Fog depth proxy of the OPEN batch ([video] volumetrics): the packet's
+ * ordering-table rank, captured when the batch opened. -1 = effect off. */
+static float          s_geo_fog = -1.0f;
 static int            s_geo_mirror_suppress = 0;   /* open batch: skip the wide mirror
                                                     * (full-screen overlay rect draws its
                                                     * own full-width wide pass instead) */
@@ -595,6 +707,7 @@ static uint32_t       s_tcount;
 static uint32_t       s_tbase;            /* first vertex of the open batch */
 static int            s_tb_semi = -2, s_tb_mask = 0, s_tb_check = 0, s_tb_filter = 0;
 static int            s_tb_twin[4] = {0,0,0,0};
+static float          s_tb_fog = -1.0f;   /* open batch fog proxy (see s_geo_fog) */
 
 /* ---- HD texture-pack override cache ------------------------------------
  * Overrides are materialized once per texture identity (pack key + pack
@@ -1099,6 +1212,7 @@ static int create_swapchain(void) {
 
 static void pp_release_swapchain(void);
 static void pp_destroy_all(void);
+static void vfx_release_swapchain(void);   /* [video] volumetrics, same lifetime */
 
 static void destroy_swapchain(void) {
     pp_release_swapchain();   /* present-pass views/framebuffers/pipeline */
@@ -1177,6 +1291,7 @@ static void tgt_destroy(void) {
     if (s_vram_img)    { p_vkDestroyImage(s_dev, s_vram_img, NULL); s_vram_img = VK_NULL_HANDLE; }
     if (s_vram_mem)    { p_vkFreeMemory(s_dev, s_vram_mem, NULL); s_vram_mem = VK_NULL_HANDLE; }
     if (s_ds_view)     { p_vkDestroyImageView(s_dev, s_ds_view, NULL); s_ds_view = VK_NULL_HANDLE; }
+    if (s_ds_sample_view) { p_vkDestroyImageView(s_dev, s_ds_sample_view, NULL); s_ds_sample_view = VK_NULL_HANDLE; }
     if (s_ds_img)      { p_vkDestroyImage(s_dev, s_ds_img, NULL); s_ds_img = VK_NULL_HANDLE; }
     if (s_ds_mem)      { p_vkFreeMemory(s_dev, s_ds_mem, NULL); s_ds_mem = VK_NULL_HANDLE; }
     if (s_scratch_view){ p_vkDestroyImageView(s_dev, s_scratch_view, NULL); s_scratch_view = VK_NULL_HANDLE; }
@@ -1255,8 +1370,20 @@ static int tgt_create(int x0, int y0, int x1, int y1) {
     }
     if (!make_image(s_ds_format, w * S, h * S,
                     VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                    /* [video] volumetrics samples the depth aspect as the fog
+                     * depth proxy in the present pass (docs/EFFECTS.md). */
+                    VK_IMAGE_USAGE_SAMPLED_BIT |
                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                     DS_ASPECT, &s_ds_img, &s_ds_mem, &s_ds_view)) return 0;
+    if (s_vfx_fog) {
+        /* Depth aspect only: a combined depth/stencil view is not sampleable. */
+        VkImageViewCreateInfo dv = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        dv.image = s_ds_img; dv.viewType = VK_IMAGE_VIEW_TYPE_2D; dv.format = s_ds_format;
+        dv.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        dv.subresourceRange.levelCount = 1; dv.subresourceRange.layerCount = 1;
+        if (p_vkCreateImageView(s_dev, &dv, NULL, &s_ds_sample_view) != VK_SUCCESS)
+            return vk_die("ds sample view failed");
+    }
     if (!make_image(VK_FORMAT_R8G8B8A8_UNORM, w * S, h * S,
                     VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                     VK_IMAGE_ASPECT_COLOR_BIT, &s_scratch_img, &s_scratch_mem, &s_scratch_view)) return 0;
@@ -1384,6 +1511,7 @@ static int tgt_create(int x0, int y0, int x1, int y1) {
         p_vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, 0, 0, NULL, 0, NULL, 1, &db);
     }
+    s_vfx_ds_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     end_oneshot(cb);
     gpu_sync();   /* the copy into the new images must complete before the old go */
 
@@ -1411,11 +1539,13 @@ static void bind_masked(VkCommandBuffer cb, int prog, int topo, int blend,
 /* ---- push-constant blocks (must match the shaders' layouts) -------------
  * Declared before the target machinery: the first-creation seed blit needs
  * BlitPush. */
-typedef struct { float shift, xoff, xhalf; } GeoPush;          /* 12 bytes */
+typedef struct { float shift, xoff, xhalf, fog_z; } GeoPush;   /* 16 bytes */
 typedef struct {
     float shift, xoff, xhalf;        /* 0,4,8 */
     int   semipass, maskset, filter; /* 12,16,20 */
-    int   _pad[2];                   /* 24,28 -> ivec4 16-byte align */
+    float fog_z;                     /* 24: [video] volumetrics depth proxy,
+                                      *     < 0 = off (clip z stays 0.0) */
+    int   _pad;                      /* 28 -> ivec4 16-byte align */
     int   twin[4];                   /* 32..47 */
 } TexPush;                           /* 48 bytes */
 typedef struct {
@@ -1741,6 +1871,25 @@ static int create_render_targets(void) {
     if (p_vkCreateRenderPass(s_dev, &rpi, NULL, &s_rpass) != VK_SUCCESS)
         return vk_die("render pass failed");
 
+    /* Fog variant ([video] volumetrics): identical attachments, depth CLEARed
+     * each pass so the per-primitive depth proxy never carries stale pixels.
+     * Only created when the effect is armed, so the off path allocates and
+     * records exactly what it did before. */
+    if (s_vfx_fog) {
+        att[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        if (p_vkCreateRenderPass(s_dev, &rpi, NULL, &s_rpass_fog) != VK_SUCCESS) {
+            s_rpass_fog = VK_NULL_HANDLE;
+            s_vfx_fog = 0;
+            fprintf(stdout, "psxrecomp: vfx: fog disabled (render pass failed)\n");
+        }
+        att[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        if (s_vfx_fog && p_vkCreateRenderPass(s_dev, &rpi, NULL, &s_rpass_fog_load) != VK_SUCCESS) {
+            s_rpass_fog_load = VK_NULL_HANDLE;
+            s_vfx_fog = 0;
+            fprintf(stdout, "psxrecomp: vfx: fog disabled (render pass failed)\n");
+        }
+    }
+
     /* No framebuffer here: the windowed target (tgt_create) owns the attachment
      * views and creates one per target size. */
 
@@ -1910,8 +2059,12 @@ static void tgt_set_bindings(void) {
  * stencil). prog 0 GEO / 1 TEX / 2 BLIT; topo 0 tri / 1 line; blend 0 off else
  * PS1 mode+1; stencil 0 SET / 1 CHECK-keep / 2 CHECK-invert. */
 static VkPipeline get_pipeline(int prog, int topo, int blend, int stencil, int cmask) {
-    int key = (((prog * PIPE_TOPOS + topo) * PIPE_BLENDS + blend) * PIPE_STENCILS + stencil)
-              * PIPE_CMASKS + cmask;
+    /* [video] volumetrics needs the depth attachment written (the fog depth
+     * proxy rides in clip z). The bit is constant for the process lifetime and
+     * costs nothing when the effect is off. */
+    int fz = s_vfx_fog ? 1 : 0;
+    int key = ((((prog * PIPE_TOPOS + topo) * PIPE_BLENDS + blend) * PIPE_STENCILS + stencil)
+              * PIPE_CMASKS + cmask) * PIPE_FOGS + fz;
     if (s_pipe_cache[key]) return s_pipe_cache[key];
 
     VkShaderModule vs, fs; VkPipelineLayout layout;
@@ -2007,7 +2160,7 @@ static VkPipeline get_pipeline(int prog, int topo, int blend, int stencil, int c
     else if (stencil == 1) { st.compareOp = VK_COMPARE_OP_EQUAL;  st.failOp = VK_STENCIL_OP_KEEP; st.passOp = VK_STENCIL_OP_KEEP;    st.depthFailOp = VK_STENCIL_OP_KEEP; }
     else                   { st.compareOp = VK_COMPARE_OP_EQUAL;  st.failOp = VK_STENCIL_OP_KEEP; st.passOp = VK_STENCIL_OP_INVERT;  st.depthFailOp = VK_STENCIL_OP_KEEP; }
     VkPipelineDepthStencilStateCreateInfo dss = { VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
-    dss.depthTestEnable = VK_FALSE; dss.depthWriteEnable = VK_FALSE;
+    dss.depthTestEnable = VK_FALSE; dss.depthWriteEnable = fz ? VK_TRUE : VK_FALSE;
     dss.stencilTestEnable = VK_TRUE; dss.front = st; dss.back = st;
 
     VkDynamicState dyn[3] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_STENCIL_REFERENCE };
@@ -2084,7 +2237,7 @@ int vk_renderer_init_context(SDL_Window *win) {
     if (s_ts_ok) {
         VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
         qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
-        qi.queryCount = VK_PERF_TS_SLOTS * 3;
+        qi.queryCount = VK_PERF_TS_SLOTS * 5;
         if (p_vkCreateQueryPool(s_dev, &qi, NULL, &s_perf_pool) != VK_SUCCESS) {
             s_ts_ok = 0; s_perf_pool = VK_NULL_HANDLE;
             vk_log("timestamp queries unavailable; vk_frame_perf reports CPU time only");
@@ -2092,7 +2245,34 @@ int vk_renderer_init_context(SDL_Window *win) {
     } else {
         vk_log("timestamp queries unsupported; vk_frame_perf reports CPU time only");
     }
+    /* [video] volumetrics / light shafts (docs/EFFECTS.md): read the config
+     * here, arm the flags BEFORE the render targets exist (the fog pass needs
+     * its depth-CLEAR variant), and leave every resource allocation to the
+     * first armed present. Off (the default) = nothing below changes. */
+    vfx_init();
+    s_vfx_fog_density    = vfx_fog_density();
+    vfx_fog_color(s_vfx_fog_color);
+    s_vfx_shaft_strength = vfx_shaft_strength();
+    s_vfx_shaft_samples  = vfx_shaft_samples();
+    vfx_shaft_light_uv(s_vfx_light_uv);
+    s_vfx_fog    = vfx_fog_enabled();
+    s_vfx_shafts = vfx_shafts_enabled();
+
     if (!create_render_targets()) return 0;
+
+    if (s_vfx_fog) {
+        /* The fog present samples the depth aspect as the proxy store. Refuse
+         * the effect (loudly) on a device that cannot sample that format. */
+        VkFormatProperties fp; p_vkGetPhysicalDeviceFormatProperties(s_phys, s_ds_format, &fp);
+        if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) {
+            s_vfx_fog = 0;
+            fprintf(stdout, "psxrecomp: vfx: fog disabled (depth format not sampleable)\n");
+        }
+    }
+    vfx_set_active(s_vfx_fog, s_vfx_shafts);
+    if (s_vfx_fog || s_vfx_shafts)
+        fprintf(stdout, "psxrecomp: vfx: armed fog=%d lightshafts=%d\n",
+                s_vfx_fog, s_vfx_shafts);
     /* PSX_VK_TGT=full pins the target to the whole VRAM (A/B measurement and
      * an escape hatch if a title writes outside its displayed buffers). */
     {
@@ -2116,6 +2296,16 @@ void vk_renderer_shutdown(void) {
     if (!s_dev) return;
     p_vkDeviceWaitIdle(s_dev);
     pp_destroy_all();
+    /* [video] volumetrics / light shafts (all NULL when never armed). The
+     * swapchain-lifetime half went with pp_destroy_all above. */
+    if (s_vfx_fog_pl)    { p_vkDestroyPipelineLayout(s_dev, s_vfx_fog_pl, NULL); s_vfx_fog_pl = VK_NULL_HANDLE; }
+    if (s_vfx_shaft_pl)  { p_vkDestroyPipelineLayout(s_dev, s_vfx_shaft_pl, NULL); s_vfx_shaft_pl = VK_NULL_HANDLE; }
+    if (s_vfx_pool)      { p_vkDestroyDescriptorPool(s_dev, s_vfx_pool, NULL); s_vfx_pool = VK_NULL_HANDLE; }
+    if (s_vfx_fog_dsl)   { p_vkDestroyDescriptorSetLayout(s_dev, s_vfx_fog_dsl, NULL); s_vfx_fog_dsl = VK_NULL_HANDLE; }
+    if (s_vfx_shaft_dsl) { p_vkDestroyDescriptorSetLayout(s_dev, s_vfx_shaft_dsl, NULL); s_vfx_shaft_dsl = VK_NULL_HANDLE; }
+    if (s_vfx_fog_fs)    { p_vkDestroyShaderModule(s_dev, s_vfx_fog_fs, NULL); s_vfx_fog_fs = VK_NULL_HANDLE; }
+    if (s_vfx_shaft_fs)  { p_vkDestroyShaderModule(s_dev, s_vfx_shaft_fs, NULL); s_vfx_shaft_fs = VK_NULL_HANDLE; }
+    if (s_vfx_samp)      { p_vkDestroySampler(s_dev, s_vfx_samp, NULL); s_vfx_samp = VK_NULL_HANDLE; }
     vk_gpu_sync_internal();   /* reclaim deferred staging before tearing down */
     cpres_cache_free();       /* FMV CPU-present cached image + staging */
     osd_staging_free();       /* host toast OSD staging */
@@ -2150,6 +2340,8 @@ void vk_renderer_shutdown(void) {
     if (s_samp)     p_vkDestroySampler(s_dev, s_samp, NULL);
     tgt_destroy();     /* windowed target: colour + depth/stencil + scratch + fbo */
     if (s_rpass)       p_vkDestroyRenderPass(s_dev, s_rpass, NULL);
+    if (s_rpass_fog)   p_vkDestroyRenderPass(s_dev, s_rpass_fog, NULL);
+    if (s_rpass_fog_load) p_vkDestroyRenderPass(s_dev, s_rpass_fog_load, NULL);
     if (s_raw_view)    p_vkDestroyImageView(s_dev, s_raw_view, NULL);
     if (s_up_view)     p_vkDestroyImageView(s_dev, s_up_view, NULL);
     if (s_vbuf)        p_vkDestroyBuffer(s_dev, s_vbuf, NULL);
@@ -2206,7 +2398,7 @@ static int acquire_present(VkImage *out_sc, VkCommandBuffer *out_cb,
     perf_ts_scene_begin(s_cmd[fr]);
     if (s_ts_ok)
         p_vkCmdWriteTimestamp(s_cmd[fr], VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                              s_perf_pool, (s_present_idx % VK_PERF_TS_SLOTS) * 3 + 1);
+                              s_perf_pool, (s_present_idx % VK_PERF_TS_SLOTS) * 5 + 1);
     *out_sc = s_sc_images[img_idx];
     *out_cb = s_cmd[fr];
     *out_idx = img_idx;
@@ -2345,7 +2537,7 @@ static void finish_present(VkCommandBuffer cb, VkImage sc,
 static void submit_present(VkCommandBuffer cb, uint32_t img_idx, uint32_t fr) {
     if (s_ts_ok)
         p_vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                              s_perf_pool, (s_present_idx % VK_PERF_TS_SLOTS) * 3 + 2);
+                              s_perf_pool, (s_present_idx % VK_PERF_TS_SLOTS) * 5 + 2);
     p_vkEndCommandBuffer(cb);
     /* Present command buffers write the acquired swapchain image with
      * transfer barriers, clears, and blits. Waiting only at color attachment
@@ -2491,6 +2683,7 @@ static void pp_release_swapchain(void) {
     }
     if (s_pp_pipe) { p_vkDestroyPipeline(s_dev, s_pp_pipe, NULL); s_pp_pipe = VK_NULL_HANDLE; }
     if (s_pp_rp)   { p_vkDestroyRenderPass(s_dev, s_pp_rp, NULL); s_pp_rp = VK_NULL_HANDLE; }
+    vfx_release_swapchain();   /* post image + fog/shaft pipelines are format-bound */
 }
 
 static void pp_destroy_all(void) {
@@ -2671,6 +2864,329 @@ static int pp_draw(VkCommandBuffer cb, uint32_t idx, uint32_t fr, VkImageView sr
     return 1;
 }
 
+/* ---- [video] volumetrics / light shafts present chain -------------------
+ * docs/EFFECTS.md. Two independent stages, both behind the config and both
+ * operating on the PRESENTED picture only (guest VRAM is never read as an
+ * effect source beyond the normal present sample, and never written):
+ *
+ *   fog    present_fog.frag - the plain present sample plus a mix toward the
+ *          fog colour driven by the depth attachment, which the geometry pass
+ *          used as a per-primitive distance-proxy store. No extra pass: the
+ *          same fullscreen triangle just reads one more texture.
+ *   shafts lightshaft.frag  - the picture is composed into an offscreen post
+ *          image first, then a radial blur of its bright pixels is added on
+ *          the way to the swapchain (one extra fullscreen pass + N taps).
+ *
+ * Everything here is lazily created on the first armed present; with
+ * volumetrics = "off" none of it is ever touched. The resource handles and
+ * VfxPush are declared with the config block at the top of the file so the
+ * teardown path can release them. */
+static VkDescriptorSet       s_vfx_fog_ds[VK_FRAMES];
+static VkDescriptorSet       s_vfx_shaft_ds[VK_FRAMES];
+
+/* Depth aspect of the canonical target: attachment layout by default, sampled
+ * only while a fog present reads the proxy. */
+static void vfx_ds_to(VkCommandBuffer cb, VkImageLayout want) {
+    if (!s_ds_img || s_vfx_ds_layout == want) return;
+    VkImageMemoryBarrier b = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    b.oldLayout = s_vfx_ds_layout; b.newLayout = want;
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = s_ds_img;
+    b.subresourceRange.aspectMask = DS_ASPECT;
+    b.subresourceRange.levelCount = 1; b.subresourceRange.layerCount = 1;
+    if (want == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) {
+        b.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        p_vkCmdPipelineBarrier(cb,
+            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
+    } else {
+        b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        b.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                          VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        p_vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+            0, 0, NULL, 0, NULL, 1, &b);
+    }
+    s_vfx_ds_layout = want;
+}
+
+/* Device-lifetime VFX objects: shaders, sampler, set layouts, pool, sets,
+ * pipeline layouts. */
+static int vfx_init_device(void) {
+    if (s_vfx_fog_pl) return 1;
+    s_vfx_fog_fs   = make_module(spv_present_fog_frag, spv_present_fog_frag_size);
+    s_vfx_shaft_fs = make_module(spv_lightshaft_frag, spv_lightshaft_frag_size);
+    if (!s_vfx_fog_fs || !s_vfx_shaft_fs) return 0;
+
+    VkSamplerCreateInfo sci = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    sci.magFilter = sci.minFilter = VK_FILTER_NEAREST;
+    sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    if (p_vkCreateSampler(s_dev, &sci, NULL, &s_vfx_samp) != VK_SUCCESS) return 0;
+
+    VkDescriptorSetLayoutBinding b[2] = {
+        { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL },
+        { 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL } };
+    VkDescriptorSetLayoutCreateInfo dci = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    dci.bindingCount = 2; dci.pBindings = b;
+    if (p_vkCreateDescriptorSetLayout(s_dev, &dci, NULL, &s_vfx_fog_dsl) != VK_SUCCESS) return 0;
+    dci.bindingCount = 1;
+    if (p_vkCreateDescriptorSetLayout(s_dev, &dci, NULL, &s_vfx_shaft_dsl) != VK_SUCCESS) return 0;
+
+    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * VK_FRAMES };
+    VkDescriptorPoolCreateInfo pci = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+    pci.maxSets = 2 * VK_FRAMES; pci.poolSizeCount = 1; pci.pPoolSizes = &ps;
+    if (p_vkCreateDescriptorPool(s_dev, &pci, NULL, &s_vfx_pool) != VK_SUCCESS) return 0;
+    for (int i = 0; i < VK_FRAMES; i++) {
+        VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        ai.descriptorPool = s_vfx_pool; ai.descriptorSetCount = 1; ai.pSetLayouts = &s_vfx_fog_dsl;
+        if (p_vkAllocateDescriptorSets(s_dev, &ai, &s_vfx_fog_ds[i]) != VK_SUCCESS) return 0;
+        ai.pSetLayouts = &s_vfx_shaft_dsl;
+        if (p_vkAllocateDescriptorSets(s_dev, &ai, &s_vfx_shaft_ds[i]) != VK_SUCCESS) return 0;
+    }
+
+    VkPushConstantRange pr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(VfxPush) };
+    VkPipelineLayoutCreateInfo li = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    li.setLayoutCount = 1; li.pushConstantRangeCount = 1; li.pPushConstantRanges = &pr;
+    li.pSetLayouts = &s_vfx_fog_dsl;
+    if (p_vkCreatePipelineLayout(s_dev, &li, NULL, &s_vfx_fog_pl) != VK_SUCCESS) return 0;
+    li.pSetLayouts = &s_vfx_shaft_dsl;
+    if (p_vkCreatePipelineLayout(s_dev, &li, NULL, &s_vfx_shaft_pl) != VK_SUCCESS) return 0;
+    return 1;
+}
+
+/* Post image (swapchain-sized, swapchain format) and its framebuffer. */
+static void vfx_release_post(void) {
+    if (s_vfx_post_fb)   { p_vkDestroyFramebuffer(s_dev, s_vfx_post_fb, NULL); s_vfx_post_fb = VK_NULL_HANDLE; }
+    if (s_vfx_post_view) { p_vkDestroyImageView(s_dev, s_vfx_post_view, NULL); s_vfx_post_view = VK_NULL_HANDLE; }
+    if (s_vfx_post_img)  { p_vkDestroyImage(s_dev, s_vfx_post_img, NULL); s_vfx_post_img = VK_NULL_HANDLE; }
+    if (s_vfx_post_mem)  { p_vkFreeMemory(s_dev, s_vfx_post_mem, NULL); s_vfx_post_mem = VK_NULL_HANDLE; }
+    s_vfx_post_w = s_vfx_post_h = 0;
+}
+
+/* Swapchain-lifetime VFX objects: the post image, its render pass and the two
+ * fullscreen pipelines are all bound to the swapchain format, so they go with
+ * it (pp_release_swapchain calls this). */
+static void vfx_release_swapchain(void) {
+    vfx_release_post();
+    if (s_vfx_post_rp)    { p_vkDestroyRenderPass(s_dev, s_vfx_post_rp, NULL); s_vfx_post_rp = VK_NULL_HANDLE; }
+    if (s_vfx_fog_pipe)   { p_vkDestroyPipeline(s_dev, s_vfx_fog_pipe, NULL); s_vfx_fog_pipe = VK_NULL_HANDLE; }
+    if (s_vfx_shaft_pipe) { p_vkDestroyPipeline(s_dev, s_vfx_shaft_pipe, NULL); s_vfx_shaft_pipe = VK_NULL_HANDLE; }
+}
+
+/* Lazily build the post pass, its framebuffer and the two fullscreen
+ * pipelines (format-dependent). Render-pass compatible with s_pp_rp, so the
+ * plain present pipeline can compose into the post image. */
+static int vfx_init_swapchain(void) {
+    if (!pp_init_device_objects() || !pp_init_swapchain_objects()) return 0;
+
+    if (!s_vfx_post_rp && s_vfx_shafts) {
+        VkAttachmentDescription att = {0};
+        att.format = s_sc_format; att.samples = VK_SAMPLE_COUNT_1_BIT;
+        att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;      /* letterbox bars stay black */
+        att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        att.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkAttachmentReference cref = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+        VkSubpassDescription sub = {0};
+        sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        sub.colorAttachmentCount = 1; sub.pColorAttachments = &cref;
+        /* Make the composed picture visible to the light-shaft pass. */
+        VkSubpassDependency dep = {0};
+        dep.srcSubpass = 0; dep.dstSubpass = VK_SUBPASS_EXTERNAL;
+        dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dep.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        dep.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        dep.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        VkRenderPassCreateInfo rpi = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+        rpi.attachmentCount = 1; rpi.pAttachments = &att;
+        rpi.subpassCount = 1; rpi.pSubpasses = &sub;
+        rpi.dependencyCount = 1; rpi.pDependencies = &dep;
+        if (p_vkCreateRenderPass(s_dev, &rpi, NULL, &s_vfx_post_rp) != VK_SUCCESS) return 0;
+    }
+
+    if (!s_vfx_fog_pipe || !s_vfx_shaft_pipe) {
+        VkPipelineShaderStageCreateInfo st[2] = {
+            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO },
+            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO } };
+        VkPipelineVertexInputStateCreateInfo vin = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+        VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo vp = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+        vp.viewportCount = 1; vp.scissorCount = 1;
+        VkPipelineRasterizationStateCreateInfo rs = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+        rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE; rs.lineWidth = 1.0f;
+        VkPipelineMultisampleStateCreateInfo ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineColorBlendAttachmentState ba = {0};
+        ba.colorWriteMask = 0xF;
+        VkPipelineColorBlendStateCreateInfo cb = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+        cb.attachmentCount = 1; cb.pAttachments = &ba;
+        VkDynamicState dyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        VkPipelineDynamicStateCreateInfo dy = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+        dy.dynamicStateCount = 2; dy.pDynamicStates = dyn;
+        VkGraphicsPipelineCreateInfo ci = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        st[0].stage = VK_SHADER_STAGE_VERTEX_BIT; st[0].module = s_pp_vs; st[0].pName = "main";
+        st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].pName = "main";
+        ci.stageCount = 2; ci.pStages = st;
+        ci.pVertexInputState = &vin; ci.pInputAssemblyState = &ia;
+        ci.pViewportState = &vp; ci.pRasterizationState = &rs;
+        ci.pMultisampleState = &ms; ci.pColorBlendState = &cb; ci.pDynamicState = &dy;
+        ci.renderPass = s_pp_rp;
+        st[1].module = s_vfx_fog_fs; ci.layout = s_vfx_fog_pl;
+        if (p_vkCreateGraphicsPipelines(s_dev, VK_NULL_HANDLE, 1, &ci, NULL, &s_vfx_fog_pipe) != VK_SUCCESS)
+            return 0;
+        st[1].module = s_vfx_shaft_fs; ci.layout = s_vfx_shaft_pl;
+        if (p_vkCreateGraphicsPipelines(s_dev, VK_NULL_HANDLE, 1, &ci, NULL, &s_vfx_shaft_pipe) != VK_SUCCESS)
+            return 0;
+    }
+
+    /* The post image is the light-shaft intermediate; fog-only needs none. */
+    if (!s_vfx_shafts) return 1;
+    if (s_vfx_post_fb && s_vfx_post_w == s_sc_extent.width && s_vfx_post_h == s_sc_extent.height)
+        return 1;
+    p_vkQueueWaitIdle(s_queue);            /* the old post image may be in flight */
+    vfx_release_post();
+    if (!make_image(s_sc_format, (int)s_sc_extent.width, (int)s_sc_extent.height,
+                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                    VK_IMAGE_ASPECT_COLOR_BIT, &s_vfx_post_img, &s_vfx_post_mem,
+                    &s_vfx_post_view)) return 0;
+    VkFramebufferCreateInfo fi = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+    fi.renderPass = s_vfx_post_rp; fi.attachmentCount = 1; fi.pAttachments = &s_vfx_post_view;
+    fi.width = s_sc_extent.width; fi.height = s_sc_extent.height; fi.layers = 1;
+    if (p_vkCreateFramebuffer(s_dev, &fi, NULL, &s_vfx_post_fb) != VK_SUCCESS) {
+        vfx_release_post(); return 0;
+    }
+    s_vfx_post_w = s_sc_extent.width; s_vfx_post_h = s_sc_extent.height;
+    return 1;
+}
+
+/* One fullscreen triangle into `fb` with `pipe`, push constants and an optional
+ * depth-proxy attachment read. Leaves the target in the pass's finalLayout. */
+static void vfx_draw_pass(VkCommandBuffer cb, VkRenderPass rp, VkFramebuffer fb,
+                          VkPipeline pipe, VkPipelineLayout pl, VkDescriptorSet set,
+                          const VkOffset3D dst[2], const VfxPush *pc,
+                          VkExtent2D area) {
+    VkClearValue clear = {0};
+    clear.color.float32[3] = 1.0f;
+    VkRenderPassBeginInfo bi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    bi.renderPass = rp; bi.framebuffer = fb; bi.renderArea.extent = area;
+    bi.clearValueCount = 1; bi.pClearValues = &clear;
+    p_vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
+    VkViewport view = { (float)dst[0].x, (float)dst[0].y,
+                        (float)(dst[1].x - dst[0].x), (float)(dst[1].y - dst[0].y), 0.0f, 1.0f };
+    VkRect2D sci = { { dst[0].x, dst[0].y },
+                     { (uint32_t)(dst[1].x - dst[0].x), (uint32_t)(dst[1].y - dst[0].y) } };
+    p_vkCmdSetViewport(cb, 0, 1, &view);
+    p_vkCmdSetScissor(cb, 0, 1, &sci);
+    p_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    p_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, 1, &set, 0, NULL);
+    p_vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof *pc, pc);
+    perf_draw(cb, 3, 1, 0, 0);
+    p_vkCmdEndRenderPass(cb);
+}
+
+/* Record the present of src_view through the armed effects into the acquired
+ * swapchain image `idx`, leaving it in TRANSFER_DST_OPTIMAL (finish_present
+ * contract). Returns 0 when nothing was recorded, so the caller keeps its
+ * plain present path. */
+static int vfx_present_draw(VkCommandBuffer cb, uint32_t idx, uint32_t fr,
+                            VkImageView src_view, int linear, const VkOffset3D dst[2],
+                            float u0, float v0, float u1, float v1) {
+    if ((!s_vfx_fog && !s_vfx_shafts) || s_vfx_failed) return 0;
+    if (!vfx_init_device() || !vfx_init_swapchain()) {
+        s_vfx_failed = 1;
+        fprintf(stdout, "psxrecomp: vfx: present chain unavailable, using the plain present\n");
+        return 0;
+    }
+    VkFramebuffer fb = pp_framebuffer(idx);
+    if (!fb) return 0;
+
+    if (s_ts_ok)
+        p_vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                              s_perf_pool, (s_present_idx % VK_PERF_TS_SLOTS) * 5 + 3);
+    s_perf_cur.has_vfx = 1;
+
+    VfxPush pc = {0};
+    pc.src_rect[0] = u0; pc.src_rect[1] = v0; pc.src_rect[2] = u1; pc.src_rect[3] = v1;
+    VkSampler src_samp = linear ? s_pp_lin : s_pp_near;
+
+    /* Descriptor set of the compose stage: the plain present binds only the
+     * picture, the fog present also binds the depth proxy. */
+    VkDescriptorSet compose_set = s_pp_ds[fr];
+    VkPipeline      compose_pipe = s_pp_pipe;
+    VkPipelineLayout compose_pl = s_pp_pl;
+    if (s_vfx_fog) {
+        vfx_ds_to(cb, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+        VkDescriptorImageInfo ii[2] = {
+            { src_samp, src_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+            { s_vfx_samp, s_ds_sample_view, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL } };
+        VkWriteDescriptorSet w[2] = {0};
+        for (int i = 0; i < 2; i++) {
+            w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w[i].dstSet = s_vfx_fog_ds[fr]; w[i].dstBinding = (uint32_t)i;
+            w[i].descriptorCount = 1;
+            w[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            w[i].pImageInfo = &ii[i];
+        }
+        p_vkUpdateDescriptorSets(s_dev, 2, w, 0, NULL);
+        compose_set = s_vfx_fog_ds[fr];
+        compose_pipe = s_vfx_fog_pipe;
+        compose_pl = s_vfx_fog_pl;
+        pc.fog[0] = s_vfx_fog_color[0];
+        pc.fog[1] = s_vfx_fog_color[1];
+        pc.fog[2] = s_vfx_fog_color[2];
+        pc.fog[3] = s_vfx_fog_density;
+    } else {
+        VkDescriptorImageInfo ii = { src_samp, src_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        w.dstSet = s_pp_ds[fr]; w.dstBinding = 0; w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w.pImageInfo = &ii;
+        p_vkUpdateDescriptorSets(s_dev, 1, &w, 0, NULL);
+    }
+
+    if (!s_vfx_shafts) {
+        /* FOG ONLY: the plain present triangle with one extra texture read. */
+        vfx_draw_pass(cb, s_pp_rp, fb, compose_pipe, compose_pl, compose_set,
+                      dst, &pc, s_sc_extent);
+        vfx_ds_to(cb, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    } else {
+        /* SHAFTS (with or without fog): compose into the post image, then
+         * radial-blur the bright pixels of that picture onto the swapchain. */
+        vfx_draw_pass(cb, s_vfx_post_rp, s_vfx_post_fb, compose_pipe, compose_pl,
+                      compose_set, dst, &pc, s_sc_extent);
+        if (s_vfx_fog) vfx_ds_to(cb, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+        VkDescriptorImageInfo ii = { s_pp_lin, s_vfx_post_view,
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        w.dstSet = s_vfx_shaft_ds[fr]; w.dstBinding = 0; w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w.pImageInfo = &ii;
+        p_vkUpdateDescriptorSets(s_dev, 1, &w, 0, NULL);
+
+        VfxPush sp = {0};
+        /* Picture rect inside the post image (the letterboxed dst). */
+        sp.src_rect[0] = (float)dst[0].x / (float)s_sc_extent.width;
+        sp.src_rect[1] = (float)dst[0].y / (float)s_sc_extent.height;
+        sp.src_rect[2] = (float)dst[1].x / (float)s_sc_extent.width;
+        sp.src_rect[3] = (float)dst[1].y / (float)s_sc_extent.height;
+        sp.fog[0] = s_vfx_shaft_strength;
+        sp.fog[1] = (float)s_vfx_shaft_samples;
+        sp.fog[2] = s_vfx_light_uv[0];
+        sp.fog[3] = s_vfx_light_uv[1];
+        vfx_draw_pass(cb, s_pp_rp, fb, s_vfx_shaft_pipe, s_vfx_shaft_pl,
+                      s_vfx_shaft_ds[fr], dst, &sp, s_sc_extent);
+    }
+
+    if (s_ts_ok)
+        p_vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                              s_perf_pool, (s_present_idx % VK_PERF_TS_SLOTS) * 5 + 4);
+    return 1;
+}
+
 int vk_renderer_present_vram(int disp_x, int disp_y, int w, int h,
                              int linear, int force_4_3) {
     if (!s_ctx_ok) return 0;
@@ -2712,7 +3228,11 @@ int vk_renderer_present_vram(int disp_x, int disp_y, int w, int h,
     float u1 = (disp_x + w - s_tx0) / (float)s_tw;
     float v1 = (disp_y + h - s_ty0) / (float)s_th;
     vram_to(cb, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    int drawn = pp_draw(cb, idx, fr, s_vram_view, linear, dst, u0, v0, u1, v1);
+    /* [video] volumetrics / light shafts take over the present draw; with the
+     * effects off this is the unchanged pp_draw call. */
+    int drawn = (s_vfx_fog || s_vfx_shafts)
+        ? vfx_present_draw(cb, idx, fr, s_vram_view, linear, dst, u0, v0, u1, v1)
+        : pp_draw(cb, idx, fr, s_vram_view, linear, dst, u0, v0, u1, v1);
     vram_to(cb, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);   /* re-park */
     if (drawn) {
         finish_present(cb, sc, idx, fr);
@@ -2903,9 +3423,13 @@ int vk_renderer_present_wide(int disp_x, int disp_y, int disp_h, int linear) {
 
     /* Opaque shader present first (see pp_draw); blit only as the fallback. */
     img_to(cb, s_wide_img[i], &s_wide_layout[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    int drawn = pp_draw(cb, idx, fr, s_wide_view[i], linear, dst,
-                        0.0f, disp_y / (float)VRAM_H,
-                        1.0f, (disp_y + disp_h) / (float)VRAM_H);
+    int drawn = (s_vfx_fog || s_vfx_shafts)
+        ? vfx_present_draw(cb, idx, fr, s_wide_view[i], linear, dst,
+                           0.0f, disp_y / (float)VRAM_H,
+                           1.0f, (disp_y + disp_h) / (float)VRAM_H)
+        : pp_draw(cb, idx, fr, s_wide_view[i], linear, dst,
+                  0.0f, disp_y / (float)VRAM_H,
+                  1.0f, (disp_y + disp_h) / (float)VRAM_H);
     if (drawn) {
         img_to(cb, s_wide_img[i], &s_wide_layout[i], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         finish_present(cb, sc, idx, fr);
@@ -2999,8 +3523,9 @@ int vk_frame_perf_json(char *out, int cap, int count) {
     if (n > VK_PERF_RING) n = VK_PERF_RING;
 
     static float cpu_s[VK_PERF_RING], sc_s[VK_PERF_RING], pr_s[VK_PERF_RING];
-    uint32_t ncpu = 0, nsc = 0, npr = 0;
-    double cpu_sum = 0, sc_sum = 0, pr_sum = 0;
+    static float vfx_s[VK_PERF_RING];
+    uint32_t ncpu = 0, nsc = 0, npr = 0, nvfx = 0;
+    double cpu_sum = 0, sc_sum = 0, pr_sum = 0, vfx_sum = 0;
     double al_sum = 0, su_sum = 0, dr_sum = 0;
     for (uint32_t i = 0; i < n; i++) {
         VkPerf *p = &s_perf_ring[(total - n + i) % VK_PERF_RING];
@@ -3010,14 +3535,17 @@ int vk_frame_perf_json(char *out, int cap, int count) {
             sc_s[nsc++] = p->scene_gpu_ms; sc_sum += p->scene_gpu_ms;
             pr_s[npr++] = p->present_gpu_ms; pr_sum += p->present_gpu_ms;
         }
+        if (p->has_vfx) { vfx_s[nvfx++] = p->vfx_ms; vfx_sum += p->vfx_ms; }
     }
     qsort(cpu_s, ncpu, sizeof(float), perf_cmp_f);
     if (nsc) qsort(sc_s, nsc, sizeof(float), perf_cmp_f);
     if (npr) qsort(pr_s, npr, sizeof(float), perf_cmp_f);
+    if (nvfx) qsort(vfx_s, nvfx, sizeof(float), perf_cmp_f);
     float cpu_p50 = ncpu ? cpu_s[(int)(ncpu * 0.50f)] : 0.0f;
     float cpu_p95 = ncpu ? cpu_s[ncpu > 1 ? (int)(ncpu * 0.95f) : 0] : 0.0f;
     float sc_max  = nsc ? sc_s[nsc - 1] : 0.0f;
     float pr_max  = npr ? pr_s[npr - 1] : 0.0f;
+    float vfx_max = nvfx ? vfx_s[nvfx - 1] : 0.0f;
 
     int o = snprintf(out, cap,
         "{\"backend\":\"vulkan\",\"samples\":%u,\"scale\":%d,\"gpu_ts\":%d,"
@@ -3025,6 +3553,7 @@ int vk_frame_perf_json(char *out, int cap, int count) {
         "\"all\":{\"cpu_ms_avg\":%.3f,\"cpu_ms_p50\":%.3f,\"cpu_ms_p95\":%.3f,"
         "\"cpu_ms_max\":%.3f,\"scene_gpu_ms_avg\":%.3f,\"scene_gpu_ms_max\":%.3f,"
         "\"present_gpu_ms_avg\":%.3f,\"present_gpu_ms_max\":%.3f,"
+        "\"vfx_ms_avg\":%.3f,\"vfx_ms_max\":%.3f,"
         "\"allocs_avg\":%.1f,\"submits_avg\":%.2f,\"draws_avg\":%.1f},"
         "\"frames\":[",
         n, s_scale, s_ts_ok ? (int)npr : 0,
@@ -3033,21 +3562,22 @@ int vk_frame_perf_json(char *out, int cap, int count) {
         ncpu ? (double)cpu_s[ncpu - 1] : 0.0,
         nsc ? sc_sum / nsc : 0.0, (double)sc_max,
         npr ? pr_sum / npr : 0.0, (double)pr_max,
+        nvfx ? vfx_sum / nvfx : 0.0, (double)vfx_max,
         n ? al_sum / n : 0.0, n ? su_sum / n : 0.0, n ? dr_sum / n : 0.0);
     for (uint32_t i = 0; i < n; i++) {
         VkPerf *p = &s_perf_ring[(total - n + i) % VK_PERF_RING];
         o += snprintf(out + o, cap - o,
             "%s{\"f\":%u,\"cpu_ms\":%.3f,\"scene_gpu_ms\":%.3f,"
-            "\"present_gpu_ms\":%.3f,\"gpu\":%u,\"alloc\":%u,\"submit\":%u,"
+            "\"present_gpu_ms\":%.3f,\"vfx_ms\":%.3f,\"gpu\":%u,\"alloc\":%u,\"submit\":%u,"
             "\"draws\":%u,\"geo\":%u,\"tex\":%u,\"blit\":%u,\"sync\":%u,"
             "\"wait_us\":%u,\"tgt\":[%d,%d,%d,%d],\"cover\":[%d,%d,%d,%d],\"oob\":%u}",
             i ? "," : "", p->present_idx, (double)p->cpu_ms,
-            (double)p->scene_gpu_ms, (double)p->present_gpu_ms, p->has_gpu,
+            (double)p->scene_gpu_ms, (double)p->present_gpu_ms, (double)p->vfx_ms, p->has_gpu,
             p->allocs, p->submits, p->draws, p->geo_flushes, p->tex_flushes,
             p->blits, p->syncs, p->wait_us,
             p->tx0, p->ty0, p->tw, p->th,
             p->cx0, p->cy0, p->cx1, p->cy1, p->oob);
-        if (o >= cap - 320) break;
+        if (o >= cap - 360) break;
     }
     o += snprintf(out + o, cap - o, "]}");
     return o;
@@ -3139,6 +3669,19 @@ static void begin_geo_pass(VkCommandBuffer cb) {
     rp.renderPass = s_rpass; rp.framebuffer = s_fbo;
     rp.renderArea.extent.width = (uint32_t)(s_tw * s_scale);
     rp.renderArea.extent.height = (uint32_t)(s_th * s_scale);
+    if (s_vfx_fog && s_rpass_fog) {
+        /* [video] volumetrics: clear the depth aspect to 0.0 (the fog factor
+         * "no fade") on the frame's FIRST geometry pass, then LOAD it for the
+         * rest so a later batch's proxy does not wipe the earlier ones. The
+         * stencil (mask bits) always loads, as in s_rpass. */
+        VkClearValue cv[2];
+        cv[0].color.float32[0] = 0.0f; cv[0].color.float32[1] = 0.0f;
+        cv[0].color.float32[2] = 0.0f; cv[0].color.float32[3] = 0.0f;
+        cv[1].depthStencil.depth = 0.0f; cv[1].depthStencil.stencil = 0;
+        rp.renderPass = s_vfx_depth_cleared ? s_rpass_fog_load : s_rpass_fog;
+        rp.clearValueCount = 2; rp.pClearValues = cv;
+        s_vfx_depth_cleared = 1;
+    }
     p_vkCmdBeginRenderPass(cb, &rp, VK_SUBPASS_CONTENTS_INLINE);
 }
 /* Bind a graphics pipeline implementing GL's mask_stencil: check==0 -> SET
@@ -4146,7 +4689,7 @@ static void flush_geometry(void) {
     begin_geo_pass(cb);
     set_vp_scissor(cb);
     bind_masked(cb, 0, 0, blend, s_geo_check, s_geo_mask);
-    GeoPush gp = { px_shift(), 0.0f, 512.0f };
+    GeoPush gp = { px_shift(), 0.0f, 512.0f, s_geo_fog };
     p_vkCmdPushConstants(cb, s_pl_geo, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof gp, &gp);
     VkDeviceSize off = 0;
     p_vkCmdBindVertexBuffers(cb, 0, 1, &s_vbuf, &off);
@@ -4155,7 +4698,7 @@ static void flush_geometry(void) {
     if (s_wide_cur >= 0 && !s_geo_mirror_suppress) {   /* native-wide mirror pass (same CB) */
         wide_pass_begin(cb);
         bind_masked(cb, 0, 0, blend, s_geo_check, s_geo_mask);
-        GeoPush wgp = { px_shift(), (float)wide_dx(), (float)s_wide_w / 2.0f };
+        GeoPush wgp = { px_shift(), (float)wide_dx(), (float)s_wide_w / 2.0f, s_geo_fog };
         p_vkCmdPushConstants(cb, s_pl_geo, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof wgp, &wgp);
         perf_draw(cb, n, 1, base, 0);
         p_vkCmdEndRenderPass(cb);
@@ -4207,7 +4750,8 @@ static void geo_prim_begin(void) {
     int semi = s_semi_en ? s_semi_mode : -1;
     if (s_vcount > 0 && (semi != s_geo_semi || s_mask_set != s_geo_mask || s_mask_check != s_geo_check))
         flush_geometry();
-    if (s_vcount == 0) { s_geo_semi = semi; s_geo_mask = s_mask_set; s_geo_check = s_mask_check; }
+    if (s_vcount == 0) { s_geo_semi = semi; s_geo_mask = s_mask_set; s_geo_check = s_mask_check;
+                         s_geo_fog = vfx_prim_fog(); }
 }
 
 static void tri3(float ax,float ay,const float ca[3],
@@ -4298,7 +4842,7 @@ static void wide_overlay_rect(int y, int h, uint16_t c, int semi) {
     VkCommandBuffer cb = begin_oneshot();
     wide_pass_begin(cb);   /* band scissor: full wide width, draw-area rows */
     bind_masked(cb, 0, 0, blend, s_mask_check, s_mask_set);
-    GeoPush gp = { px_shift(), 0.0f, (float)s_wide_w / 2.0f };
+    GeoPush gp = { px_shift(), 0.0f, (float)s_wide_w / 2.0f, s_geo_fog };
     p_vkCmdPushConstants(cb, s_pl_geo, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof gp, &gp);
     VkDeviceSize off = 0;
     p_vkCmdBindVertexBuffers(cb, 0, 1, &s_vbuf, &off);
@@ -4379,6 +4923,7 @@ static void flush_tex_batch(void) {
     TexPush tp = {0};
     tp.shift = px_shift(); tp.xoff = 0.0f; tp.xhalf = 512.0f;
     tp.maskset = s_tb_mask; tp.filter = s_tb_filter;
+    tp.fog_z = s_tb_fog;   /* [video] volumetrics: < 0 = off */
     tp.twin[0] = s_tb_twin[0]; tp.twin[1] = s_tb_twin[1]; tp.twin[2] = s_tb_twin[2]; tp.twin[3] = s_tb_twin[3];
     if (semi < 0) {
         /* OPAQUE batch: the STP bit does not gate COLOUR (every texel is
@@ -4511,6 +5056,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys, const int *us, c
         s_tb_semi = semi; s_tb_mask = s_mask_set; s_tb_check = s_mask_check; s_tb_filter = s_texfilter;
         s_tb_twin[0] = twx; s_tb_twin[1] = twy; s_tb_twin[2] = tox; s_tb_twin[3] = toy;
         s_tb_hd_set = hd_set;
+        s_tb_fog = vfx_prim_fog();   /* [video] volumetrics: batch depth proxy */
     }
     int bx0 = xs[0], bx1 = xs[0], by0 = ys[0], by1 = ys[0];
     for (int i = 0; i < 3; i++) {

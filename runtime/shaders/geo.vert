@@ -8,17 +8,24 @@
  * u_shift = half an HR pixel (0.5/S in native units): the rasterizer samples
  * coverage at pixel centers, the PS1 DDA at integer coords. The shift aligns
  * the two grids (matches the GL backend's GEO_VS). u_xoff/u_xhalf carry the
- * native-wide x translation / clip half-extent (0 / 512 canonical; Phase 4). */
+ * native-wide x translation / clip half-extent (0 / 512 canonical; Phase 4).
+ *
+ * u_fog_z ([video] volumetrics, docs/EFFECTS.md): the per-primitive distance
+ * proxy, written as clip-space z and captured in the (otherwise unused) depth
+ * attachment, which the present pass reads as the fog factor. Negative means
+ * the effect is off and z is exactly 0.0, i.e. the pre-effect pipeline. */
 layout(location = 0) in vec2 in_pos;
 layout(location = 1) in vec4 in_col;
 layout(push_constant) uniform PC {
     float u_shift;
     float u_xoff;
     float u_xhalf;
+    float u_fog_z;
 } pc;
 layout(location = 0) noperspective out vec4 v_col;
 void main() {
     gl_Position = vec4((in_pos.x + pc.u_shift + pc.u_xoff) / pc.u_xhalf - 1.0,
-                       (in_pos.y + pc.u_shift) / 256.0 - 1.0, 0.0, 1.0);
+                       (in_pos.y + pc.u_shift) / 256.0 - 1.0,
+                       max(pc.u_fog_z, 0.0), 1.0);
     v_col = in_col;
 }

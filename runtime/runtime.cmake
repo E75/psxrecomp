@@ -368,6 +368,7 @@ ${PSXRECOMP_ROOT}/runtime/src/psx_guest_yield.c
     ${PSXRECOMP_ROOT}/runtime/src/guest_tty.c
     ${PSXRECOMP_ROOT}/runtime/src/gpu.c
     ${PSXRECOMP_ROOT}/runtime/src/vram_ext.c
+    ${PSXRECOMP_ROOT}/runtime/src/vfx_config.c
     ${PSXRECOMP_ROOT}/runtime/src/ws_ui_group.c
     ${PSXRECOMP_ROOT}/runtime/src/ws_aspect_cone_math.c
     ${PSXRECOMP_ROOT}/runtime/src/gpu_sw_renderer.c

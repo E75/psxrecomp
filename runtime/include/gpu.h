@@ -26,6 +26,10 @@ void     gpu_set_gp0_source(uint32_t addr); /* diagnostic source for next GP0 wo
  * OT rank. This lets diagnostics distinguish front-layer UI packets from
  * depth-sorted world packets without guessing from primitive shape. */
 void     gpu_set_gp0_linked_list_node(uint32_t addr, uint32_t word_count);
+/* Ordering-table node index of the packet being processed (0xFFFF = no linked
+ * list, e.g. the direct/2D path). Read by the Vulkan backend as the depth
+ * proxy for [video] volumetrics fog when PGXP projection data is absent. */
+uint16_t gpu_ot_rank(void);
 void     gpu_vblank_tick(void);        /* Toggle LCF, called at each simulated vblank */
 /* Video standard before the first GP1(08h) (disc region: 1 = PAL). Applies
  * now and on every later gpu_init(); GP1(00h) still resets to NTSC. */

@@ -3741,6 +3741,12 @@ void gpu_set_gp0_linked_list_node(uint32_t addr, uint32_t word_count) {
     }
 }
 
+/* Ordering-table node index of the packet being processed. Host-side read only:
+ * the Vulkan backend's fog pass uses it as the per-primitive depth proxy when
+ * PGXP projection data is unavailable (docs/EFFECTS.md). 0xFFFF = no linked
+ * list (direct/2D path), which the backend treats as "no fade". */
+uint16_t gpu_ot_rank(void) { return gp0_ot_rank; }
+
 void gpu_ws_end_linked_list(void) {
     gp0_ot_rank = 0xFFFFu;
 }

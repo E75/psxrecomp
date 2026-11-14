@@ -31,6 +31,10 @@ layout(push_constant) uniform PC {
     int   u_semipass;
     int   u_maskset;
     int   u_filter;
+    /* [video] volumetrics (docs/EFFECTS.md): per-primitive distance proxy,
+     * written as clip-space z into the depth attachment the present pass reads
+     * as the fog factor. Negative = effect off => z is exactly 0.0. */
+    float u_fog_z;
     ivec4 u_twin;
 } pc;
 
@@ -60,7 +64,12 @@ void main() {
      * pre-multiplied by w = 1/q so post-divide NDC is unchanged while the
      * rasterizer interpolates v_uv_p hyperbolically. a_q == 0 => w == 1.0. */
     float w = (a_q > 0.0) ? (1.0 / a_q) : 1.0;
+    /* Fog depth proxy: PGXP's normalized 1/z weight when the prim carries
+     * projection provenance (a_q > 0), else the primitive's ordering-table
+     * proxy from the push constant; negative => effect off, z stays 0.0. */
+    float fogz = (pc.u_fog_z < 0.0) ? 0.0
+               : ((a_q > 0.0) ? (1.0 - a_q) : pc.u_fog_z);
     vec2 ndc = vec2((a_pos.x + pc.u_shift + pc.u_xoff) / pc.u_xhalf - 1.0,
                     (a_pos.y + pc.u_shift) / 256.0 - 1.0);
-    gl_Position = vec4(ndc * w, 0.0, w);
+    gl_Position = vec4(ndc * w, fogz * w, w);
 }
