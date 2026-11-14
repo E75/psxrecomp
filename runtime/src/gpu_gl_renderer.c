@@ -513,6 +513,12 @@ static uint64_t      s_dyn_last_swap_ticks = 0;
 static int           s_cpu_auth_dual = 0;
 /* Independent of netplay: the replacement surface must never become VRAM. */
 static int           s_hd_native_authority = 0;
+/* A replacements-only HD pack is probed before it is allowed to take VRAM
+ * authority: a pack that matches nothing must not force the CPU path. */
+static int           s_hd_probation;
+static int           s_hd_pending;
+static int           s_hd_probation_frames;
+#define HD_PROBATION_FRAMES 180   /* ~3 s at 60 Hz, then stay on the GPU path */
 static int           s_req_scale = 1;      /* requested before context init */
 /* Driver limits queried at init: min(GL_MAX_TEXTURE_SIZE,
  * GL_MAX_RENDERBUFFER_SIZE, GL_MAX_VIEWPORT_DIMS); 0 before init. */
@@ -3973,14 +3979,24 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
         flush_pack_if_sampling(-1, 0, depth, clut_x, clut_y);
     GpuHdTextureImage hd = {0};
     GLuint hd_tex = 0;
+    uint32_t hd_window = (uint32_t)(s_tw_mask_x | (s_tw_mask_y << 5) |
+                                   (s_tw_off_x << 10) | (s_tw_off_y << 15));
     if (s_hd_native_authority && !s_selected_bank_tex) {
-        uint32_t window = (uint32_t)(s_tw_mask_x | (s_tw_mask_y << 5) |
-                                    (s_tw_off_x << 10) | (s_tw_off_y << 15));
-        if (gpu_hd_textures_acquire_draw(texpage, clut_x, clut_y, lim, window,
+        if (gpu_hd_textures_acquire_draw(texpage, clut_x, clut_y, lim, hd_window,
                                         semi >= 0, &hd)) {
             hd_tex = hd_gl_texture(&hd);
             if (!hd_tex) hd.alpha_mode = 0;
             else gpu_hd_textures_note_applied();
+        }
+    } else if (s_hd_probation && !s_selected_bank_tex) {
+        /* Probe only: a match promotes to HD native authority at the next
+         * frame boundary (present). The image is released unbound, so the GPU
+         * path keeps drawing native and the pack keeps encoding native VRAM. */
+        GpuHdTextureImage probe = {0};
+        if (gpu_hd_textures_acquire_draw(texpage, clut_x, clut_y, lim, hd_window,
+                                        semi >= 0, &probe)) {
+            gpu_hd_textures_release_image(&probe);
+            s_hd_pending = 1;
         }
     }
     mark_prim_dirty(xs, ys, 3, 1 /* textured */);
@@ -5827,12 +5843,10 @@ void gl_renderer_set_cpu_auth_dual(int on) {
     }
 }
 
-void gl_renderer_set_hd_texture_mode(int on) {
-    /* Residency and CPU-authoritative VRAM stay on the emulation thread.
-     * Drain the GPU-authoritative stream before entering that mode; the
-     * eligibility gate below keeps the render thread parked until HD is off. */
-    GL_RT_SYNC("set_hd_texture_mode");
-    on = on ? 1 : 0;
+/* Enter/leave HD native authority (the CPU array becomes the VRAM authority and
+ * the GPU image is presentation-only). Split out of the public setter so the
+ * match gate can promote into it at a frame boundary. */
+static void hd_authority_apply(int on) {
     if (on == s_hd_native_authority) return;
     if (s_raster_ok) {
         flush_flat_batch(); flush_tex_batch(); flush_cpu_upload(); hiw_flush_queue();
@@ -5851,6 +5865,39 @@ void gl_renderer_set_hd_texture_mode(int on) {
     }
     s_gpu_dirty = 0; rect_clear(&s_cpu_dirty);
     if (on) s_selected_bank_tex = 0;
+}
+
+void gl_renderer_set_hd_texture_mode(int on) {
+    /* Residency and CPU-authoritative VRAM stay on the emulation thread.
+     * Drain the GPU-authoritative stream before entering that mode; the
+     * eligibility gate below keeps the render thread parked until HD is off. */
+    GL_RT_SYNC("set_hd_texture_mode");
+    on = on ? 1 : 0;
+    if (!on) {
+        s_hd_probation = 0; s_hd_pending = 0; s_hd_probation_frames = 0;
+        hd_authority_apply(0);
+        return;
+    }
+    if (s_hd_native_authority) return;
+
+    /* A loaded pack with 0 matching pages must NOT force HD native authority:
+     * that switches VRAM to the CPU rasterizer, skips the pack and pauses the
+     * render thread (measured 35.8 ms vs 16.7 ms at 4K for a pack that matched
+     * nothing). Dumping has no "match" by definition, so it enters at once;
+     * a replacements-only pack is probed for a few frames first (see
+     * gpu_textured_triangle) and promoted only when a page actually matched. */
+    if (gpu_hd_textures_dump_enabled()) {
+        s_hd_probation = 0; s_hd_pending = 0;
+        hd_authority_apply(1);
+        return;
+    }
+    if (!s_hd_probation) {
+        s_hd_probation = 1;
+        s_hd_probation_frames = 0;
+        fprintf(stdout, "psxrecomp: HD pack loaded: probing for matches before "
+                        "entering HD native authority (the GPU path stays active)\n");
+        fflush(stdout);
+    }
 }
 
 int gl_renderer_cpu_auth_dual(void) {
@@ -9163,6 +9210,25 @@ static void present_vram_impl(int disp_x, int disp_y, int w, int h, int linear,
          * so "pack_calls 0" can never be a silent mystery again. */
         vram_ext_note_gl_bypass(!s_ctx ? 1 : 2);
         return;
+    }
+    /* HD pack match gate: promote to native authority only when a replacement
+     * actually matched, otherwise give up and keep the GPU path (a pack with 0
+     * matches used to force the CPU path and pause the render thread). */
+    if (s_hd_probation) {
+        if (s_hd_pending) {
+            s_hd_probation = 0; s_hd_pending = 0;
+            hd_authority_apply(1);
+            fprintf(stdout, "psxrecomp: HD pack matched a page: HD native authority "
+                            "on (VRAM from the CPU rasterizer, GPU image presentation)\n");
+            fflush(stdout);
+        } else if (++s_hd_probation_frames > HD_PROBATION_FRAMES) {
+            s_hd_probation = 0; s_hd_probation_frames = 0;
+            fprintf(stdout, "psxrecomp: HD pack loaded but 0 pages matched in %d "
+                            "frames: staying on the GPU path (no HD native "
+                            "authority, render thread keeps running)\n",
+                    HD_PROBATION_FRAMES);
+            fflush(stdout);
+        }
     }
     if (cpu_vram_authoritative() && !s_fg_drawing) {
         /* Dual-raster / HD-authority / depth24: by design the CPU rasterizer

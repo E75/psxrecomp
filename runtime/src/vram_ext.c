@@ -304,7 +304,14 @@ void vram_ext_note_pack_rect(int x0, int y0, int x1, int y1) {
     s_stats.pack_calls++;
     if (x1 > s_stats.pack_max_x1) s_stats.pack_max_x1 = x1;
     int gx0 = x0 > VRAM_EXT_X0 ? x0 : VRAM_EXT_X0;
-    if (gx0 > x1) {
+    /* The framebuffer spans x0..region_x1. Columns past the display's right
+     * edge (682..1023) are texture pages - a copy or render-to-texture
+     * destination there is correctly guest - so they must not trip the
+     * assertion. Without this clamp the GL pack rect (which spans the full
+     * 1024-wide dirty rect) made guest_pack_pixels permanently non-zero. */
+    int gx1 = x1;
+    if (s_reg_on && gx1 > s_reg_x1) gx1 = s_reg_x1;
+    if (gx0 > gx1) {
         /* One-shot: the pack ran but its rect never reached the split, so the
          * framebuffer's overflow columns were not redirected. Names the rect,
          * the region and the bands for the next run. */
@@ -323,13 +330,13 @@ void vram_ext_note_pack_rect(int x0, int y0, int x1, int y1) {
         int cy0 = y0 > s_band[i].y0 ? y0 : s_band[i].y0;
         int cy1 = y1 < s_band[i].y1 ? y1 : s_band[i].y1;
         if (cy0 <= cy1)
-            in_band += (uint64_t)(x1 - gx0 + 1) * (uint64_t)(cy1 - cy0 + 1);
+            in_band += (uint64_t)(gx1 - gx0 + 1) * (uint64_t)(cy1 - cy0 + 1);
     }
     uint64_t redirected = 0;
     if (s_reg_on && vram_ext_driving()) {
         int cy0 = y0 > s_reg_y0 ? y0 : s_reg_y0;
         int cy1 = y1 < s_reg_y1 ? y1 : s_reg_y1;
-        int cx1 = x1 < s_reg_x1 ? x1 : s_reg_x1;
+        int cx1 = gx1 < s_reg_x1 ? gx1 : s_reg_x1;
         if (cx1 >= gx0 && cy0 <= cy1)
             redirected = (uint64_t)(cx1 - gx0 + 1) * (uint64_t)(cy1 - cy0 + 1);
     }
