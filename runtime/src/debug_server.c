@@ -5769,7 +5769,8 @@ static void handle_gpu_state(int id, const char *json)
              "\"backdrop\":{\"veto\":%d,\"eval_frame\":%u,\"rects\":%u,"
              "\"full\":%d,\"short\":%d,\"x\":[%d,%d],\"reveal\":%d,"
              "\"canon_pct\":%u,\"left_pct\":%u,\"right_pct\":%u,"
-             "\"last_short\":%u,\"evaluations\":%llu,\"short_frames\":%llu},"
+             "\"last_short\":%u,\"evaluations\":%llu,\"short_frames\":%llu}"
+             "},"
              "\"vram_ext_stats\":%s}",
              id, di.display_x, di.display_y,
              di.width, di.height,
@@ -7229,7 +7230,7 @@ static void handle_audio_state(int id, const char *json)
     (void)json;
     char body[2048];
     audio_native_state_json(body, (int)sizeof body);
-    send_fmt("{\"id\":%d,\"ok\":true,%s}", id, body);
+    send_fmt("{\"id\":%d,\"ok\":true,\"audio\":%s}", id, body);
 }
 
 static void handle_audio_wav(int id, const char *json)
