@@ -255,6 +255,20 @@ static int ws_configured(void) { return ws_xnum != ws_xden; }
  * pillarbox + the game-vs-2D detector, which both modes share. */
 static int ws_engaged(void) { return ws_mode != 0; }
 
+int gpu_ws_native_mode(void) { return ws_mode == 2; }
+
+uint32_t we_flag_gate(uint32_t flag)
+{
+    /* Bits 30-25, 23 and 18-13: every GTE error except the summary bit (31)
+     * and IR1 saturation (24). Only when bit31 is set *alone* does the guest's
+     * `bltz t1` reject the quad; in native-wide that is the wider frustum
+     * overflowing IR1, not a real geometry error. */
+    if (!gpu_ws_native_mode()) return flag;
+    if ((flag & 0x80000000u) && !(flag & 0x7E87E000u))
+        flag &= 0x7FFFFFFFu;
+    return flag;
+}
+
 /* Forward decls: defined later but used by psx_ws_backdrop_x above them. */
 static int32_t ws_scale_about(int32_t x, int32_t ax);
 static int32_t ws_disp_x(void);

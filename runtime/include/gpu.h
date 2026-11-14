@@ -106,6 +106,17 @@ int32_t psx_ws_local_viewport_width(int32_t vanilla);
 void gpu_ws_set_local_viewport_width_sites(const uint32_t *sites, int count);
 /* The title's local viewport uses the native-wide per-camera renderer. */
 void gpu_ws_set_local_viewport_native_wide(int enabled);
+/* 1 when the widescreen mode is native-wide (mode 2: wider frustum, wider
+ * frame, no X squash). Stock 4:3 and the legacy squash mode both return 0. */
+int gpu_ws_native_mode(void);
+/* GTE FLAG gate for the native-wide view (docs/HOOKS_REANCHOR.md 5.3).
+ *
+ * The wider frustum pushes camera-space X past 32767, so the GTE sets FLAG
+ * bit31 with IR1 saturation as the only error; the guest's `bltz t1` then
+ * drops the far quad. In native-wide mode this clears the summary bit when
+ * IR1 is the only error so the quad survives. In every other mode it returns
+ * the word unchanged, so stock and squash behaviour is bit-identical. */
+uint32_t we_flag_gate(uint32_t flag);
 int psx_ws_is_local_viewport_width_site(uint32_t pc);
 void gpu_vertical_split_debug(int *active, int *left_age, int *right_age);
 uint16_t gpu_vram_peek(int x, int y);
