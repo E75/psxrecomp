@@ -22,9 +22,13 @@ extern "C" {
 
 typedef struct VkHdPackStats {
     int loaded;                /* a pack is open and replacements are enabled */
-    uint64_t overrides;        /* distinct textures materialized on the GPU */
-    uint64_t pixels_replaced;  /* RGBA pixels copied into override images */
+    uint64_t overrides;        /* draws that sampled a replacement (both backends) */
+    uint64_t textures;         /* replacement images materialized by the backend */
+    uint64_t pixels_replaced;  /* pixels in those images */
     uint64_t misses;           /* draw queries that fell back to native art */
+    uint64_t matched;          /* draw queries the pack matched */
+    uint64_t queries;          /* draw queries issued */
+    uint64_t vk_misses;        /* misses seen by the Vulkan acquire shim */
     uint64_t palettes;         /* 16-entry CLUT blocks rewritten in VRAM */
     uint64_t clut_files;       /* `.clut.png` overrides found in the pack */
     size_t entries;            /* replacement PNGs in the pack */
@@ -49,9 +53,6 @@ int  vk_hd_pack_acquire(uint16_t texpage, uint16_t clut_x, uint16_t clut_y,
                         const int limits[4], uint32_t window, int semi,
                         GpuHdTextureImage* out);
 void vk_hd_pack_release(GpuHdTextureImage* image);
-
-/* Counters for the backend: one materialized override of w x h pixels. */
-void vk_hd_pack_note_texture(uint32_t width, uint32_t height);
 
 /* Upload-time CLUT patch. `words` is the w x h block being written to the GPU
  * VRAM mirror (row-major, x/y in VRAM words). Every fully covered 16-word

@@ -132,6 +132,15 @@ void refresh_stats(void) {
     gpu_hd_textures_get_diag(&diag);
     stats.loaded = gpu_hd_textures_replacements_enabled() ? 1 : 0;
     stats.entries = diag.replacement_count;
+    /* Backend-neutral numbers: both OpenGL and Vulkan report through the shared
+     * pack session, so an OpenGL acceptance run proves the pack just as well. */
+    stats.overrides = diag.applied_draws;
+    stats.textures = diag.materialized_textures;
+    stats.pixels_replaced = diag.pixels_replaced;
+    stats.matched = diag.matched_draws;
+    stats.queries = diag.draw_queries;
+    stats.misses = diag.draw_queries > diag.matched_draws
+                       ? diag.draw_queries - diag.matched_draws : 0;
     stats_root = diag.root ? diag.root : "";
     stats.root = stats_root.c_str();
 }
@@ -186,7 +195,7 @@ extern "C" int vk_hd_pack_acquire(uint16_t texpage, uint16_t clut_x, uint16_t cl
     if (!out) return 0;
     *out = GpuHdTextureImage{};
     if (!gpu_hd_textures_acquire_draw(texpage, clut_x, clut_y, limits, window, semi, out)) {
-        ++stats.misses;
+        ++stats.vk_misses;
         return 0;
     }
     return 1;
@@ -195,11 +204,6 @@ extern "C" int vk_hd_pack_acquire(uint16_t texpage, uint16_t clut_x, uint16_t cl
 extern "C" void vk_hd_pack_release(GpuHdTextureImage* image) {
     if (!image) return;
     gpu_hd_textures_release_image(image);
-}
-
-extern "C" void vk_hd_pack_note_texture(uint32_t width, uint32_t height) {
-    ++stats.overrides;
-    stats.pixels_replaced += static_cast<uint64_t>(width) * height;
 }
 
 extern "C" int vk_hd_pack_clut_lookup(const uint16_t* palette16, uint16_t out[16]) {

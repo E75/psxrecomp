@@ -88,6 +88,17 @@ int hd_texture_pack_lookup(const HdTexturePack* pack,
                            uint32_t palette_hash,
                            HdTexturePackEntry* out_entry);
 
+typedef struct HdTexturePackKey {
+    uint32_t texture_hash;
+    uint32_t palette_hash;
+} HdTexturePackKey;
+
+/* Diagnostic enumeration of the distinct, non-ambiguous keys. Fills up to
+ * `capacity` entries and returns the total count (which may exceed capacity). */
+size_t hd_texture_pack_keys(const HdTexturePack* pack,
+                            HdTexturePackKey* out,
+                            size_t capacity);
+
 /* Standard reflected IEEE CRC-32 (polynomial 0xEDB88320, initial/final XOR
  * 0xFFFFFFFF), feeding each uint16_t explicitly low byte then high byte. */
 uint32_t hd_texture_crc32_words_le(const uint16_t* words, size_t word_count);

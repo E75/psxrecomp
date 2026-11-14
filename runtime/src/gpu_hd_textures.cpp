@@ -42,6 +42,12 @@ struct Session {
     std::string dump_error;
     std::deque<std::string> diagnostics;
     GpuHdTextureDiag diag{};
+    /* Diagnostic surface: the pack's keys, snapshotted at configure time, and
+     * one record per distinct page that missed (see GpuHdTextureMissDiag). */
+    std::vector<HdTexturePackKey> keys;
+    std::vector<GpuHdTextureMissDiag> misses;
+    struct MissProbe { uint16_t page_x, page_y; uint8_t depth; uint64_t draws; };
+    std::vector<MissProbe> probes;
     ~Session() { hd_texture_pack_destroy(beetle); duck_texture_pack_destroy(duck); }
 };
 struct Lease {
@@ -222,8 +228,108 @@ std::shared_ptr<Composition> compose(const HdTextureDrawQuery& query,
     session->compositions.push_back(result); session->composition_bytes += bytes;
     return result;
 }
-void dump_query(const HdTextureDrawQuery& query, int semi) {
-    if (!session->dump || session->dump_failed) return;
+/* ---- miss diagnostics (docs/HD_TEXTURES.md 5) ---------------------------
+ * A packed page that does not match is invisible otherwise: the draw just falls
+ * back to native art. Record the pages that *look* like they should have
+ * matched (their palette or page CRC is in the pack, or the page CRC shares a
+ * long prefix with a key) and print the hashes the pack would have needed. */
+uint32_t rect_crc(const HdTextureDrawQuery& query, unsigned x0, unsigned y0,
+                  unsigned width, unsigned height) {
+    if (!query.vram || !width || !height) return 0;
+    if (x0 + width > 1024u || y0 + height > 512u) return 0;   /* wrapped: diag only */
+    std::vector<uint16_t> words;
+    words.reserve(static_cast<size_t>(width) * height);
+    for (unsigned row = 0; row < height; ++row) {
+        const uint16_t* src = query.vram + static_cast<size_t>(y0 + row) * 1024u + x0;
+        words.insert(words.end(), src, src + width);
+    }
+    return hd_texture_crc32_words_le(words.data(), words.size());
+}
+
+unsigned leading_equal_bits(uint32_t a, uint32_t b) {
+    const uint32_t diff = a ^ b;
+    if (!diff) return 32;
+    unsigned bits = 0;
+    for (uint32_t mask = 0x80000000u; mask && !(diff & mask); mask >>= 1) ++bits;
+    return bits;
+}
+
+void record_miss(const HdTextureDrawQuery& query) {
+    if (!session || session->keys.empty()) return;
+    /* Hot path: every un-packed texture lands here. Once the probe table is
+     * full nothing new can be learned, so stop scanning entirely. */
+    if (session->probes.size() >= GPU_HD_PROBE_MAX) return;
+    /* One probe per distinct page: the CRC pass is bounded, and a page that is
+     * drawn thousands of times is only hashed once. */
+    for (auto& probe : session->probes) {
+        if (probe.page_x != query.page_x || probe.page_y != query.page_y ||
+            probe.depth != query.depth)
+            continue;
+        ++probe.draws;
+        for (auto& miss : session->misses) {
+            if (miss.page_x == query.page_x && miss.page_y == query.page_y &&
+                miss.depth == query.depth) {
+                ++miss.draws;
+                break;
+            }
+        }
+        return;
+    }
+
+    const unsigned per_word = 4u >> query.depth;
+    GpuHdTextureMissDiag miss{};
+    miss.page_x = query.page_x; miss.page_y = query.page_y;
+    miss.depth = query.depth;
+    miss.clut_x = query.clut_x; miss.clut_y = query.clut_y;
+    miss.u_first = query.u_first; miss.u_last = query.u_last;
+    miss.v_first = query.v_first; miss.v_last = query.v_last;
+    const unsigned page_words = query.depth == HD_TEXTURE_DEPTH_16BPP ? 256u
+                              : query.depth == HD_TEXTURE_DEPTH_8BPP ? 128u : 64u;
+    miss.page_hash = rect_crc(query, query.page_x, query.page_y, page_words, 256u);
+    const unsigned first_word = query.u_first / per_word;
+    const unsigned last_word = query.u_last / per_word;
+    miss.footprint_hash = rect_crc(query, query.page_x + first_word,
+                                   query.page_y + query.v_first,
+                                   last_word - first_word + 1u,
+                                   unsigned{query.v_last} - query.v_first + 1u);
+    miss.palette_hash = hd_texture_hash_clut(query.vram, query.vram_word_count,
+                                             query.clut_x, query.clut_y,
+                                             query.depth);
+    miss.nearest_prefix_bits = -1;
+    for (const HdTexturePackKey& key : session->keys) {
+        if (key.texture_hash == miss.page_hash) miss.page_key_known = 1;
+        if (key.texture_hash == miss.footprint_hash) miss.footprint_key_known = 1;
+        if (query.depth != HD_TEXTURE_DEPTH_16BPP && key.palette_hash == miss.palette_hash)
+            miss.palette_key_known = 1;
+        const unsigned bits = leading_equal_bits(miss.page_hash, key.texture_hash);
+        if (miss.nearest_prefix_bits < 0 ||
+            bits > static_cast<unsigned>(miss.nearest_prefix_bits)) {
+            miss.nearest_prefix_bits = static_cast<int>(bits);
+            miss.nearest_texture_hash = key.texture_hash;
+            miss.nearest_palette_hash = key.palette_hash;
+        }
+    }
+    miss.draws = 1;
+    session->probes.push_back({miss.page_x, miss.page_y, miss.depth, 1});
+    /* Only a page the pack was plausibly authored for is worth printing: its
+     * palette is in the pack, a key is exact, or the page CRC shares 16+ bits
+     * with one (with a few hundred keys that is still ~1/65000 by chance). */
+    const bool interesting = miss.page_key_known || miss.footprint_key_known ||
+                             miss.palette_key_known || miss.nearest_prefix_bits >= 16;
+    if (!interesting || session->misses.size() >= GPU_HD_MISS_DIAG_MAX) return;
+    session->misses.push_back(miss);
+    std::fprintf(stderr,
+        "psxrecomp: hd pack miss page=%u,%u depth=%u clut=%u,%u "
+        "page_crc=%08X footprint_crc=%08X palette_crc=%08X "
+        "nearest=%08X-%08X (%d bits) page_key=%d footprint_key=%d palette_key=%d\n",
+        miss.page_x, miss.page_y, miss.depth, miss.clut_x, miss.clut_y,
+        miss.page_hash, miss.footprint_hash, miss.palette_hash,
+        miss.nearest_texture_hash, miss.nearest_palette_hash,
+        miss.nearest_prefix_bits, miss.page_key_known, miss.footprint_key_known,
+        miss.palette_key_known);
+}
+
+void dump_query(const HdTextureDrawQuery& query, int semi) {    if (!session->dump || session->dump_failed) return;
     char error[256]{};
     const int status = duck_texture_pack_dump_draw(session->duck, &query, semi, error, sizeof(error));
     if (status == HD_TEXTURE_LOOKUP_FOUND) ++session->diag.dumped_textures;
@@ -260,6 +366,14 @@ extern "C" int gpu_hd_textures_configure(const char* root, int replacements,
             std::filesystem::create_directories(directory / "dumps");
         }
         if (!duck_texture_pack_create(root, &next->duck, error, capacity)) return 0;
+        next->misses.clear();
+        next->probes.clear();
+        if (next->beetle) {
+            const size_t key_count = hd_texture_pack_keys(next->beetle, nullptr, 0);
+            next->keys.resize(key_count);
+            if (key_count)
+                hd_texture_pack_keys(next->beetle, next->keys.data(), key_count);
+        }
         if (session) {
             char dump_error[256]{};
             if (duck_texture_pack_flush_dumps(session->duck, dump_error, sizeof(dump_error)) < 0) {
@@ -366,6 +480,18 @@ extern "C" void gpu_hd_textures_get_diag(GpuHdTextureDiag* out) {
     out->diagnostic = session->diagnostics.back().c_str();
 }
 extern "C" void gpu_hd_textures_note_applied(void) { if (session) ++session->diag.applied_draws; }
+extern "C" void gpu_hd_textures_note_texture(uint32_t width, uint32_t height) {
+    if (!session) return;
+    ++session->diag.materialized_textures;
+    session->diag.pixels_replaced += static_cast<uint64_t>(width) * height;
+}
+extern "C" int gpu_hd_textures_miss_diag(GpuHdTextureMissDiag* out, int capacity) {
+    if (!session || !out || capacity <= 0) return 0;
+    const int total = static_cast<int>(session->misses.size());
+    const int copy = total < capacity ? total : capacity;
+    for (int i = 0; i < copy; ++i) out[i] = session->misses[static_cast<size_t>(i)];
+    return total;
+}
 extern "C" void gpu_hd_textures_set_vram(const uint16_t* vram) { native_vram = vram; gpu_hd_textures_reset_tracking(); }
 extern "C" void gpu_hd_textures_reset_tracking(void) {
     if (!session) return;
@@ -435,7 +561,10 @@ extern "C" int gpu_hd_textures_acquire_draw(uint16_t tp, uint16_t cx, uint16_t c
     if (!lease) return 0;
     if (session->beetle) {
         HdTextureMatch match{};
-        if (hd_texture_pack_match(session->beetle, &query, &match) != HD_TEXTURE_LOOKUP_FOUND) return 0;
+        if (hd_texture_pack_match(session->beetle, &query, &match) != HD_TEXTURE_LOOKUP_FOUND) {
+            record_miss(query);
+            return 0;
+        }
         ++session->diag.matched_draws;
         hd_texture_pack_request_decode(session->beetle, match.entry.texture_hash, match.entry.palette_hash);
         if (hd_texture_pack_acquire_decoded(session->beetle, match.entry.texture_hash,

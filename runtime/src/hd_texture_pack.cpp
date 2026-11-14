@@ -912,8 +912,23 @@ int hd_texture_pack_lookup(const HdTexturePack* pack,
     return HD_TEXTURE_LOOKUP_FOUND;
 }
 
-uint32_t hd_texture_crc32_words_le(const uint16_t* words, size_t word_count) {
-    if (!words && word_count != 0) return 0;
+size_t hd_texture_pack_keys(const HdTexturePack* pack,
+                            HdTexturePackKey* out,
+                            size_t capacity) {
+    if (!pack) return 0;
+    size_t count = 0;
+    for (const auto& item : pack->entries) {
+        if (item.second.ambiguous) continue;
+        if (out && count < capacity) {
+            out[count].texture_hash = item.second.texture_hash;
+            out[count].palette_hash = item.second.palette_hash;
+        }
+        ++count;
+    }
+    return count;
+}
+
+uint32_t hd_texture_crc32_words_le(const uint16_t* words, size_t word_count) {    if (!words && word_count != 0) return 0;
     uint32_t crc = 0xFFFFFFFFu;
     for (size_t i = 0; i < word_count; ++i) {
         crc = crc_byte(crc, static_cast<uint8_t>(words[i] & 0xFFu));

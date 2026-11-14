@@ -30,9 +30,39 @@ typedef struct GpuHdTextureDiag {
     size_t replacement_count;
     const char* diagnostic;
     uint64_t pending_dump_sources;
+    /* Backend-neutral "a replacement was turned into a sampled texture" and
+     * "pixels it contains", so OpenGL and Vulkan report the same numbers. */
+    uint64_t materialized_textures, pixels_replaced;
 } GpuHdTextureDiag;
 void gpu_hd_textures_get_diag(GpuHdTextureDiag* out);
 void gpu_hd_textures_note_applied(void);
+/* Called once per replacement image a backend actually uploads/samples. */
+void gpu_hd_textures_note_texture(uint32_t width, uint32_t height);
+
+/* Why a packed page did not match. Filled for the first few distinct
+ * (page, depth) misses of a session so a live run can prove whether the key
+ * scheme, the palette or the upload residency is the reason. Hashes use the
+ * pack's own derivation: CRC-32 over the VRAM words, low byte then high. */
+#define GPU_HD_MISS_DIAG_MAX 8
+#define GPU_HD_PROBE_MAX 64      /* distinct pages hashed for the diagnostic */
+typedef struct GpuHdTextureMissDiag {
+    uint16_t page_x, page_y;
+    uint8_t  depth;                 /* 0=4bpp 1=8bpp 2=16bpp */
+    uint16_t clut_x, clut_y;
+    uint8_t  u_first, u_last, v_first, v_last;
+    uint32_t page_hash;             /* CRC of the whole page rect (what the
+                                     * generator writes for a one-shot upload) */
+    uint32_t footprint_hash;        /* CRC of the rect this prim samples */
+    uint32_t palette_hash;          /* CRC of the live CLUT */
+    uint32_t nearest_texture_hash;  /* closest pack texture key to page_hash */
+    uint32_t nearest_palette_hash;
+    int      nearest_prefix_bits;   /* common leading bits, 32 = identical */
+    int      page_key_known;        /* page_hash is a pack texture key */
+    int      footprint_key_known;   /* footprint_hash is a pack texture key */
+    int      palette_key_known;     /* palette_hash is a pack palette key */
+    uint64_t draws;                 /* misses recorded for this page */
+} GpuHdTextureMissDiag;
+int gpu_hd_textures_miss_diag(GpuHdTextureMissDiag* out, int capacity);
 /* Non-GL backends can observe native draws for dumping; replacements remain
  * an OpenGL presentation feature. */
 void gpu_hd_textures_observe_draw(uint16_t texpage, uint16_t clut_x,
