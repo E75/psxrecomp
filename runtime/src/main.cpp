@@ -19772,10 +19772,11 @@ session_reboot:
        * host call did not come back" into a number (docs/BOOT_BLOCKERS.md §3). */
       std::fprintf(stdout,
                    "psxrecomp runtime: [exit diag] pc0_reason=%u guest_calls=%llu returns=%llu "
-                   "non_returning=%llu bad_ra=%llu\n",
+                   "non_returning=%llu bad_ra=%llu bad_sp=%llu irq_in_call=%llu\n",
                    (unsigned)g_pc0_reason,
                    (unsigned long long)gcs.calls, (unsigned long long)gcs.returns,
-                   (unsigned long long)gcs.non_returning, (unsigned long long)gcs.bad_ra);
+                   (unsigned long long)gcs.non_returning, (unsigned long long)gcs.bad_ra,
+                   (unsigned long long)gcs.bad_sp, (unsigned long long)gcs.irq_in_call);
     }
     { extern uint64_t g_slice_fired, g_slice_irq_taken, g_dirty_ram_insns_run;
       extern uint32_t g_slice_exit_pc, g_slice_exit_reason, g_slice_exit_iter;

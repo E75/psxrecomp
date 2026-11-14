@@ -1848,7 +1848,11 @@ irq_deliver_eval:
             debug_server_log_restore_event(4, cpu->pc, (uint32_t)jmp_val);
         }
         if (jmp_val == 0) {
-            /* Normal entry (or after RestoreState redirect): dispatch. */
+            /* Normal entry (or after RestoreState redirect): dispatch. A host
+             * call has no guest frame of its own, so an ISR taken here runs on
+             * the frame psx_mod_call_guest reserved for it; count the delivery
+             * so that class is measurable (psx_guest_call.h). */
+            if (g_psx_guest_call_depth != 0) psx_guest_call_note_irq();
             psx_dispatch(cpu, target_pc);
         }
         /* jmp_val 0 (normal return) or 1 (ReturnFromException): done. */

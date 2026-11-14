@@ -26,6 +26,17 @@
  * only when the value they were given is not a plausible guest PC, so guest
  * paths are byte-for-byte unchanged.
  *
+ * Register contract. A host call presents the C body's guest registers: a0..a3
+ * are the call's arguments, $ra is the call's return address (a sentinel), and
+ * $sp is the C body's guest stack pointer. Because a decompiled body never runs
+ * its own `addiu sp,sp,-N` prologue, that $sp is the CALLER's frame top, not a
+ * frame of its own: a callee that pushes a frame, and an ISR taken inside the
+ * call (which saves/restores $sp in the thread's TCB), would land in the live
+ * caller frame. psx_mod_call_guest therefore reserves a real frame below $sp
+ * for the duration of the call and moves the outgoing argument area (16($sp),
+ * eight slots) with it, so the callee sees the layout a guest `jal` gives it.
+ * $gp and $s8 are passed through unchanged; nothing else is synthesised.
+ *
  * Non-returning calls. A vector that blocks or switches threads (ChangeThread
  * A0:03, ReturnFromException C0:03, WaitEvent B0:06, and anything that ends in
  * a thread switch) does not come back to the C caller: the scheduler longjmps
@@ -45,6 +56,8 @@ typedef struct PsxGuestCallStats {
     uint64_t returns;        /* the guest came back to the call's return address */
     uint64_t non_returning;  /* thread switch / wild exit: the C caller cannot continue */
     uint64_t bad_ra;         /* no real guest continuation was available to substitute */
+    uint64_t bad_sp;         /* entered with a guest $sp that is not a plausible stack */
+    uint64_t irq_in_call;    /* interrupts delivered while a host call was in flight */
 } PsxGuestCallStats;
 
 void psx_guest_call_stats(PsxGuestCallStats* out);
@@ -63,9 +76,13 @@ int psx_guest_call_depth(void);
 uint32_t psx_guest_call_resume_pc(void);
 
 /* Bracket a host-initiated call. enter() returns 1 when it pushed a frame;
- * pass that value back to leave(). caller_ra is the calling C frame's $ra. */
-int  psx_guest_call_enter(uint32_t caller_ra);
+ * pass that value back to leave(). caller_ra is the calling C frame's $ra and
+ * sp its guest $sp (counted as bad_sp when it is not a plausible stack). */
+int  psx_guest_call_enter(uint32_t caller_ra, uint32_t sp);
 void psx_guest_call_leave(int pushed);
+
+/* An interrupt was delivered while a host call was in flight (interrupts.c). */
+void psx_guest_call_note_irq(void);
 
 /* Bookkeeping from the call wrapper: did the guest return to the call's
  * return address? */

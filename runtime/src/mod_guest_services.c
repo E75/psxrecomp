@@ -20,6 +20,11 @@
  * boundary) must use the C frame's $ra instead. Kept as a small stack so a
  * nested host call cannot hide the outer continuation. */
 #define PSX_GUEST_CALL_MAX_DEPTH 8
+/* Frame reserved below the caller's $sp for every host call: >= the largest
+ * prologue the C bodies' callers use, so the callee's frame never reaches the
+ * live caller frame. */
+#define PSX_HOST_CALL_FRAME     0x100u
+#define PSX_HOST_CALL_ARG_BYTES 32u   /* 16($sp) .. 16($sp)+31: 8 stack args */
 
 static uint32_t s_call_resume[PSX_GUEST_CALL_MAX_DEPTH];  /* 0 = unknown frame */
 int             g_psx_guest_call_depth;
@@ -59,9 +64,26 @@ static void call_log(const char* what, uint32_t callee, uint32_t ra)
     fflush(stderr);
 }
 
-int psx_guest_call_enter(uint32_t caller_ra)
+/* A guest stack pointer is plausible when it is aligned and inside live RAM
+ * with room for the argument area below it. */
+static int call_sp_plausible(uint32_t sp)
+{
+    uint32_t off;
+    if (sp == 0u || (sp & 3u) != 0u) return 0;
+    if (!psx_ram_resolve(sp, 4u, &off)) return 0;
+    return off + 16u + PSX_HOST_CALL_ARG_BYTES <= psx_ram_live_bytes();
+}
+
+int psx_guest_call_enter(uint32_t caller_ra, uint32_t sp)
 {
     uint32_t pc = 0;
+    if (!call_sp_plausible(sp)) {
+        /* No usable guest stack: the callee's frame has nowhere to go and an
+         * ISR taken here would save a non-stack $sp. Counted, not refused (the
+         * call may still be a leaf that never touches the stack). */
+        s_call_stats.bad_sp++;
+        call_log("bad guest sp:", 0, sp);
+    }
     if (psx_guest_pc_plausible(caller_ra)) pc = caller_ra;
     else pc = psx_guest_call_resume_pc();   /* nested call: inherit the outer frame */
     if (pc == 0u) {
@@ -96,13 +118,34 @@ void psx_guest_call_note_suspended(void)
     s_call_stats.non_returning++;
 }
 
+void psx_guest_call_note_irq(void)
+{
+    s_call_stats.irq_in_call++;
+}
+
 uint32_t psx_mod_call_guest_ex(struct CPUState* cpu, uint32_t function,
                                uint32_t return_address, uint32_t a0, uint32_t a1,
                                uint32_t a2, uint32_t a3, int* returned) {
     uint32_t regs[32];
     const uint32_t pc = cpu->pc, hi = cpu->hi, lo = cpu->lo;
     memcpy(regs, cpu->gpr, sizeof regs);
-    const int pushed = psx_guest_call_enter(regs[31]);
+    const int pushed = psx_guest_call_enter(regs[31], cpu->gpr[29]);
+
+    /* Reserve the callee's frame (see psx_guest_call.h). The C body never ran
+     * its own prologue, so $sp is the caller's frame top: without this the
+     * callee's `addiu sp,sp,-N` and any ISR taken inside the call overwrite the
+     * live caller frame. The outgoing argument area moves with it so 16($sp)
+     * still holds the stack-passed arguments. */
+    const uint32_t sp0 = cpu->gpr[29];
+    uint32_t arg[PSX_HOST_CALL_ARG_BYTES / 4u];
+    const int framed = call_sp_plausible(sp0);
+    if (framed) {
+        for (uint32_t i = 0; i < PSX_HOST_CALL_ARG_BYTES / 4u; i++)
+            arg[i] = psx_mod_read_word(sp0 + 16u + 4u * i);
+        cpu->gpr[29] = sp0 - PSX_HOST_CALL_FRAME;
+        for (uint32_t i = 0; i < PSX_HOST_CALL_ARG_BYTES / 4u; i++)
+            psx_mod_write_word(cpu->gpr[29] + 16u + 4u * i, arg[i]);
+    }
     cpu->gpr[4] = a0;
     cpu->gpr[5] = a1;
     cpu->gpr[6] = a2;
@@ -114,6 +157,7 @@ uint32_t psx_mod_call_guest_ex(struct CPUState* cpu, uint32_t function,
      * switch, a wild exit) means the C caller must not continue. */
     const int came_back = (cpu->gpr[31] == return_address);
     const uint32_t result = cpu->gpr[2];
+    if (framed) cpu->gpr[29] = sp0;
     memcpy(cpu->gpr, regs, sizeof regs);
     cpu->pc = pc;
     cpu->hi = hi;
