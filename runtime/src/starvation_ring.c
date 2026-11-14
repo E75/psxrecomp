@@ -250,26 +250,27 @@ void starvation_ring_dump(const char *path) {
                 e->g_sio_timing_active, e->tx_rdy_visible, e->tx_em_visible,
                 e->i_stat, e->i_mask);
     }
-    /* Dispatch PC tail: where the guest actually is when it stops
-     * heartbeating. The starvation ring above is SIO/card oriented; the
-     * always-on fntrace ring names the last call targets, return addresses and
-     * stacks, which is what a spin inside a handler needs (docs/BOOT_BLOCKERS.md
-     * section 4). One extra JSON line, last 64 entries. */
+    /* Dispatch PC tail: where the guest actually is when it stops heartbeating.
+     * The starvation ring above is SIO/card oriented; the dispatch tail ring is
+     * the one that is filled UNCONDITIONALLY on every dispatch (fntrace's own
+     * ring only records armed targets, which is why an earlier attempt at this
+     * dumped count 0). One extra JSON line, last 96 entries. */
     {
-        extern FntraceEntry g_fntrace_ring[FNTRACE_RING_CAP];
-        extern uint64_t     g_fntrace_seq;
-        const uint64_t seq = g_fntrace_seq;
-        const uint64_t n = seq < 64u ? seq : 64u;
+        extern DispTailEntry g_disp_tail[DISP_TAIL_CAP];
+        extern uint64_t      g_disp_tail_seq;
+        const uint64_t seq = g_disp_tail_seq;
+        const uint64_t n = seq < 96u ? seq : 96u;
         fprintf(f, "{\"pc_tail\":{\"seq\":%llu,\"count\":%llu,\"entries\":[",
                 (unsigned long long)seq, (unsigned long long)n);
         for (uint64_t k = 0; k < n; k++) {
-            const FntraceEntry *e = &g_fntrace_ring[(seq - n + k) & (FNTRACE_RING_CAP - 1u)];
-            fprintf(f, "%s{\"frame\":%u,\"target\":\"0x%08X\",\"ra\":\"0x%08X\","
-                       "\"sp\":\"0x%08X\",\"a0\":\"0x%08X\",\"a1\":\"0x%08X\"}",
-                    k ? "," : "", e->frame, e->target, e->ra, e->sp, e->a0, e->a1);
+            const DispTailEntry *e = &g_disp_tail[(seq - n + k) % DISP_TAIL_CAP];
+            fprintf(f, "%s{\"cyc\":%llu,\"target\":\"0x%08X\",\"ra\":\"0x%08X\","
+                       "\"sp\":\"0x%08X\"}",
+                    k ? "," : "", (unsigned long long)e->cycle, e->target, e->ra, e->sp);
         }
         fprintf(f, "]}}\n");
     }
+    fflush(f);
     fclose(f);
 }
 
@@ -290,11 +291,19 @@ void starvation_watchdog_check(void) {
          * the runtime starved. Tag the exit so psx_last_run_report.json
          * says "starvation_watchdog" instead of atexit/unknown. */
         fprintf(stderr, "starvation_watchdog: %llu us without heartbeat — "
-                "ring dumped to starvation_dump.jsonl, aborting\n",
+                "ring dumped to starvation_dump.jsonl, terminating (3)\n",
                 (unsigned long long)(now - last));
         fflush(stderr);
         psx_crash_trace_set_exit_origin("starvation_watchdog");
-        exit(2);
+        /* Hard exit, deliberately: exit()/abort() run atexit handlers and driver
+         * teardown, which can block on a lock the wedged thread still holds - the
+         * run then cannot even be killed (2026-11-14: taskkill reported "no
+         * running instance" while the process kept the debug port).
+         * TerminateProcess / _exit skip all of that and cannot hang. */
+#if defined(_WIN32)
+        TerminateProcess(GetCurrentProcess(), 3u);
+#endif
+        _exit(3);
     }
 }
 

@@ -323,10 +323,20 @@ static void psx_save_context_to_tcb(CPUState* cpu, uint32_t tcb, uint32_t resume
      * is scheduled again — the "execution completed, PC=0" class. Save the
      * caller's real continuation instead, and count the event. */
     if (!psx_guest_pc_plausible(resume_pc)) {
-        const uint32_t host = psx_guest_call_resume_pc();
-        if (host != 0u) {
+        /* Preference order (same rule as the RFE side): the delivery's real EPC,
+         * then COP0.EPC - the interrupted instruction, which the guest's own
+         * handler keeps architectural - then the host call's continuation. A
+         * slot that held instruction bytes (the `jr $ra` word 0x03E00008 seen in
+         * docs/BOOT_BLOCKERS.md section 4) is never a resume PC, and the legacy
+         * EPC sentinel is excluded even though it is a RAM address. */
+        uint32_t fix = 0;
+        if (psx_guest_pc_plausible(cpu->cop0[14]) && cpu->cop0[14] != PSX_EXC_SENTINEL_PC)
+            fix = cpu->cop0[14];
+        else if (psx_guest_pc_plausible(psx_guest_call_resume_pc()))
+            fix = psx_guest_call_resume_pc();
+        if (fix != 0u) {
             psx_guest_call_note_suspended();
-            resume_pc = host;
+            resume_pc = fix;
         }
     }
     psx_assert_no_sentinel_pc("save_context_to_tcb", tcb, resume_pc);

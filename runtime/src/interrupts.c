@@ -842,6 +842,26 @@ void psx_rfe_escape_check(CPUState* cpu) {
             g_pc0_src = 3u;   /* PSX_PC0_SRC_K0 */
             cpu->pc = fix;
         }
+        /* Name the field that supplied the bad target, once: the kernel's
+         * ReturnFromException takes it from the thread TCB (`lw k0,128(k1)`,
+         * k1 = TCB+8, so the slot is TCB+136) and jumps. Print that slot, the
+         * delivery EPC, COP0.EPC and the vector pair, so the next occurrence
+         * says whether the slot held code bytes (a jr/rfe word) or a stale PC. */
+        static int s_named;
+        if (!s_named) {
+            s_named = 1;
+            uint32_t pcb = cpu->read_word(0x108u);
+            uint32_t tcb = pcb ? cpu->read_word(pcb & 0x1FFFFFFFu) : 0u;
+            uint32_t slot = tcb ? cpu->read_word(tcb + 136u) : 0u;
+            fprintf(stderr,
+                    "psx_guest_call: bad ISR target 0x%08X -> 0x%08X (src %u); "
+                    "tcb=0x%08X slot+136=0x%08X epc=0x%08X arch_epc=0x%08X "
+                    "vector=0x%08X/0x%08X\n",
+                    bad, fix, (unsigned)g_isr_resume_src, tcb, slot,
+                    g_exception_real_epc, cpu->cop0[COP0_EPC],
+                    cpu->read_word(0x80000080u), cpu->read_word(0x80000084u));
+            fflush(stderr);
+        }
         psx_guest_call_note_isr_return(0, bad, fix);
     } else if (in_exception && g_rfe_escape_pending &&
                cpu->pc != PSX_EXC_SENTINEL_PC) {
