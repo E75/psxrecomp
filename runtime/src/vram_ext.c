@@ -174,6 +174,52 @@ int vram_ext_driving(void) {
 static int s_reg_on;
 static int s_reg_x0, s_reg_y0, s_reg_x1, s_reg_y1;
 
+/* -------------------------------------------------------------- bands ---- */
+/* Every row band that has been a display buffer with the current display
+ * geometry. The redirect covers all of them: a frame's pack can run after the
+ * game flipped to the other band, and packing the old band at guest columns
+ * would put the framebuffer straight back on the texture pages. */
+#define VRAM_EXT_BANDS 4
+static struct { int y0, y1; } s_band[VRAM_EXT_BANDS];
+static int s_band_n;
+
+void vram_ext_learn_band(int y0, int y1) {
+    if (y0 < 0) y0 = 0;
+    if (y1 > 511) y1 = 511;
+    if (y1 < y0) return;
+    for (int i = 0; i < s_band_n; i++)
+        if (y0 >= s_band[i].y0 && y1 <= s_band[i].y1) return;
+    if (s_band_n < VRAM_EXT_BANDS) {
+        s_band[s_band_n].y0 = y0;
+        s_band[s_band_n].y1 = y1;
+        s_band_n++;
+        return;
+    }
+    /* Table full: collapse to one band covering everything learned so far. */
+    int lo = y0, hi = y1;
+    for (int i = 0; i < s_band_n; i++) {
+        if (s_band[i].y0 < lo) lo = s_band[i].y0;
+        if (s_band[i].y1 > hi) hi = s_band[i].y1;
+    }
+    s_band[0].y0 = lo;
+    s_band[0].y1 = hi;
+    s_band_n = 1;
+}
+
+void vram_ext_reset_bands(void) { s_band_n = 0; }
+
+int vram_ext_band_rows(int *y0, int *y1) {
+    if (s_band_n <= 0) return 0;
+    int lo = s_band[0].y0, hi = s_band[0].y1;
+    for (int i = 1; i < s_band_n; i++) {
+        if (s_band[i].y0 < lo) lo = s_band[i].y0;
+        if (s_band[i].y1 > hi) hi = s_band[i].y1;
+    }
+    if (y0) *y0 = lo;
+    if (y1) *y1 = hi;
+    return 1;
+}
+
 void vram_ext_set_region(int on, int x0, int y0, int x1, int y1) {
     s_reg_on = on ? 1 : 0;
     s_reg_x0 = x0; s_reg_y0 = y0; s_reg_x1 = x1; s_reg_y1 = y1;
@@ -219,20 +265,58 @@ uint16_t *vram_ext_host(void) { return s_host_plane; }
 /* ---------------------------------------------------------- counters ----- */
 
 static struct {
-    uint64_t remapped_pixels;
+    uint64_t present_reads_remapped;   /* fb pixels served from the extension */
+    uint64_t texture_reads_remapped;   /* MUST stay 0: textures are canonical */
+    uint64_t guest_pack_pixels;        /* MUST stay 0: fb columns -> guest VRAM */
     uint64_t readback_bytes;
     uint64_t gate_off_frames;
     uint64_t presents;
     int      present_width;
 } s_stats;
 
-void vram_ext_note_remap(uint64_t pixels)       { s_stats.remapped_pixels += pixels; }
 void vram_ext_note_readback(uint64_t bytes)     { s_stats.readback_bytes += bytes; }
-void vram_ext_note_gate_off(uint64_t pixels)    { s_stats.gate_off_frames += pixels; }
+void vram_ext_note_gate_off(uint64_t frames)    { s_stats.gate_off_frames += frames; }
 void vram_ext_note_present(int width) {
     if (width > 0) s_stats.present_width = width;
     s_stats.presents++;
 }
+
+/* A texture fetch must resolve against the canonical guest plane. The GPU
+ * samplers use guest coordinates only (texelFetch with `& 1023`) and every
+ * upload path writes guest coordinates, so this stays 0; a path that remaps a
+ * texture coordinate reports 1 and `texture_reads_ok` flips false. */
+void vram_ext_note_texture_read(int remapped) {
+    if (remapped) s_stats.texture_reads_remapped++;
+}
+
+/* Split one pack rect into "served from the extension" (present-side) and
+ * "framebuffer column written into guest VRAM" (a redirect miss: the pack
+ * overwrote a texture page). The second number is the assertion. */
+void vram_ext_note_pack_rect(int x0, int y0, int x1, int y1) {
+    if (x0 > x1 || y0 > y1) return;
+    int gx0 = x0 > VRAM_EXT_X0 ? x0 : VRAM_EXT_X0;
+    if (gx0 > x1) return;
+
+    uint64_t in_band = 0;
+    for (int i = 0; i < s_band_n; i++) {
+        int cy0 = y0 > s_band[i].y0 ? y0 : s_band[i].y0;
+        int cy1 = y1 < s_band[i].y1 ? y1 : s_band[i].y1;
+        if (cy0 <= cy1)
+            in_band += (uint64_t)(x1 - gx0 + 1) * (uint64_t)(cy1 - cy0 + 1);
+    }
+    uint64_t redirected = 0;
+    if (s_reg_on && vram_ext_driving()) {
+        int cy0 = y0 > s_reg_y0 ? y0 : s_reg_y0;
+        int cy1 = y1 < s_reg_y1 ? y1 : s_reg_y1;
+        int cx1 = x1 < s_reg_x1 ? x1 : s_reg_x1;
+        if (cx1 >= gx0 && cy0 <= cy1)
+            redirected = (uint64_t)(cx1 - gx0 + 1) * (uint64_t)(cy1 - cy0 + 1);
+    }
+    s_stats.present_reads_remapped += redirected;
+    if (in_band > redirected)
+        s_stats.guest_pack_pixels += in_band - redirected;
+}
+
 void vram_ext_reset_stats(void) { memset(&s_stats, 0, sizeof s_stats); }
 
 int vram_ext_debug_json(char *out, int cap) {
@@ -240,17 +324,29 @@ int vram_ext_debug_json(char *out, int cap) {
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
     int on = s_reg_on && vram_ext_driving();
     if (on) { x0 = s_reg_x0; y0 = s_reg_y0; x1 = s_reg_x1; y1 = s_reg_y1; }
+    int by0 = 0, by1 = 0;
+    int bands = vram_ext_band_rows(&by0, &by1);
     return snprintf(out, (size_t)cap,
                     "{\"enabled\":%d,\"driving\":%d,\"backend\":%d,"
                     "\"host_w\":%d,\"ext_x0\":%d,\"ext_cols\":%d,\"offset\":%d,"
                     "\"region\":[%d,%d,%d,%d],\"region_on\":%d,"
-                    "\"remapped_pixels\":%llu,\"readback_bytes\":%llu,"
+                    "\"bands\":%d,\"band_rows\":[%d,%d],"
+                    "\"present_reads_remapped\":%llu,"
+                    "\"texture_reads_remapped\":%llu,"
+                    "\"guest_pack_pixels\":%llu,"
+                    "\"texture_reads_ok\":%d,\"redirect_ok\":%d,"
+                    "\"readback_bytes\":%llu,"
                     "\"gate_off_frames\":%llu,\"presents\":%llu,"
                     "\"present_width\":%d}",
                     vram_ext_enabled(), vram_ext_driving(), s_backend,
                     VRAM_EXT_HOST_W, VRAM_EXT_X0, VRAM_EXT_COLS, VRAM_EXT_OFFSET,
                     x0, y0, x1, y1, on,
-                    (unsigned long long)s_stats.remapped_pixels,
+                    bands, by0, by1,
+                    (unsigned long long)s_stats.present_reads_remapped,
+                    (unsigned long long)s_stats.texture_reads_remapped,
+                    (unsigned long long)s_stats.guest_pack_pixels,
+                    s_stats.texture_reads_remapped == 0,
+                    s_stats.guest_pack_pixels == 0,
                     (unsigned long long)s_stats.readback_bytes,
                     (unsigned long long)s_stats.gate_off_frames,
                     (unsigned long long)s_stats.presents,

@@ -1995,6 +1995,8 @@ static void hr_end(void) {
  * next GPU op (or readback/present) preserves PS1 command order. */
 static void flush_cpu_upload(void) {
     if (!s_raster_ok || s_up_nrects == 0) return;
+    /* Uploads carry textures/CLUTs: they are canonical, never redirected. */
+    vram_ext_note_texture_read(0);
     const int diag = runtime_upload_diag_enabled();
     if (diag) { s_rt_up_diag[0]++; s_rt_up_diag[1] += (uint64_t)s_up_nrects; }
     flush_flat_batch();  /* queued flat GEO before upload mutates VRAM */
@@ -2659,6 +2661,7 @@ static void pack_flush(void) {
 
     int x1 = x + w - 1, y1 = y + h - 1;
     int gx0, gy0, gx1, gy1;
+    vram_ext_note_pack_rect(x, y, x1, y1);
     if (!vram_ext_region(&gx0, &gy0, &gx1, &gy1)) {
         pack_rect(x, y, x1, y1, 0);
     } else {
@@ -2672,11 +2675,10 @@ static void pack_flush(void) {
         pack_rect(x, by0, x1 < VRAM_EXT_X0 - 1 ? x1 : VRAM_EXT_X0 - 1, by1, 0);
         pack_rect(VRAM_EXT_X0 > x ? VRAM_EXT_X0 : x, by0, gx1 < x1 ? gx1 : x1,
                   by1, VRAM_EXT_OFFSET);
-        int cx0 = x > VRAM_EXT_X0 ? x : VRAM_EXT_X0;
-        int cx1 = x1 < gx1 ? x1 : gx1;
-        if (cx0 <= cx1 && by0 <= by1)
-            vram_ext_note_remap((uint64_t)(cx1 - cx0 + 1) *
-                                (uint64_t)(by1 - by0 + 1));
+        /* ...and the columns past the display's right edge (texture pages that
+         * a render-to-texture pass or a VRAM copy wrote inside the band rows)
+         * stay guest too. */
+        pack_rect(gx1 + 1 > x ? gx1 + 1 : x, by0, x1, by1, 0);
     }
 
     p_glBindVertexArray(0);

@@ -3393,18 +3393,16 @@ static void pack_flush(void) {
     int h = y1 - y + 1;
     /* [video] vram_extension: redirect the wide framebuffer's overflow columns
      * into the raw mirror's extension columns (see vram_ext.h). The gate comes
-     * from gpu.c (draw area == the display buffer); a render-to-texture pass
-     * leaves it off. */
+     * from gpu.c (draw area X span == display X span, rows = every learned
+     * framebuffer band); a render-to-texture pass leaves it off. The counter
+     * splits this rect into present-side redirects and - the assertion -
+     * framebuffer columns that would land in guest VRAM. */
     int ex0 = -1, ex1 = 0, ey0 = 0, ey1 = 0;
     int gx0, gy0, gx1, gy1;
     if (vram_ext_region(&gx0, &gy0, &gx1, &gy1)) {
         ex0 = VRAM_EXT_X0; ex1 = gx1; ey0 = gy0; ey1 = gy1;
-        int cx0 = x > ex0 ? x : ex0, cx1 = x1 < ex1 ? x1 : ex1;
-        int cy0 = y > ey0 ? y : ey0, cy1 = y1 < ey1 ? y1 : ey1;
-        if (cx0 <= cx1 && cy0 <= cy1)
-            vram_ext_note_remap((uint64_t)(cx1 - cx0 + 1) *
-                                (uint64_t)(cy1 - cy0 + 1));
     }
+    vram_ext_note_pack_rect(x, y, x1, y1);
     VkCommandBuffer cb = begin_oneshot();
     vram_to(cb, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);     /* hr sampled */
     img_to(cb, s_raw_img, &s_raw_layout, VK_IMAGE_LAYOUT_GENERAL); /* raw storage */
@@ -3499,6 +3497,8 @@ static void blit_region(int x, int y, int w, int h, VkImageView src_view,
 static void vram_upload_block(int x, int y, int w, int h, const uint16_t *data) {
     if (w <= 0 || h <= 0 || !s_ready) return;
     s_perf_cur.upload_blocks++;
+    /* Uploads carry textures/CLUTs: they are canonical, never redirected. */
+    vram_ext_note_texture_read(0);
     flush_tex_batch(); flush_geometry();
 
     /* 1) raw mirror: native 1555, exact. */

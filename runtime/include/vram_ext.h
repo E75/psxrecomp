@@ -63,21 +63,39 @@ int  vram_ext_driving(void);
 void vram_ext_set_region(int on, int x0, int y0, int x1, int y1);
 int  vram_ext_region(int *x0, int *y0, int *x1, int *y1);
 
+/* Framebuffer row bands. A double-buffered title draws one 240-line band per
+ * frame and scans out one of them, and the pack of a frame's draws can run
+ * AFTER the game flipped to the other band - so the redirect must cover every
+ * band ever used as a display buffer, not just the one being drawn now.
+ * gpu.c learns them (draw area X span == display X span, band height == the
+ * display height) and forgets them when the display geometry changes. */
+void vram_ext_learn_band(int y0, int y1);
+void vram_ext_reset_bands(void);
+int  vram_ext_band_rows(int *y0, int *y1);   /* union of the learned bands */
+
 /* Per-pixel rule: extension-plane index (row * VRAM_EXT_COLS + col) for a
  * guest pixel that belongs in the extension, else -1. */
 int  vram_ext_plane_index(int x, int y);
 /* Host column for guest x at row y (x + VRAM_EXT_OFFSET when redirected). */
 int  vram_ext_map_x(int x, int y);
-
 /* The host extension plane: VRAM_EXT_COLS x 512 halfwords, column 0 == guest
  * column VRAM_EXT_X0. Filled by the backend readback, read by the CPU present
  * and by guest GP0 0xC0 reads of the framebuffer. */
 uint16_t *vram_ext_host(void);
 
 /* Counters (debug server "gpu_state" -> "vram_ext_stats"). */
-void vram_ext_note_remap(uint64_t pixels);
-void vram_ext_note_readback(uint64_t bytes);
+/* One pack rect, in guest coordinates: counts the framebuffer pixels that went
+ * to the extension plane (present-side) and - the assertion - any framebuffer
+ * column that went into GUEST VRAM instead (must be 0; >0 means the pack wrote
+ * over a texture page). */
+void vram_ext_note_pack_rect(int x0, int y0, int x1, int y1);
+/* A texture fetch must never resolve through the redirect: pass 1 if a texture
+ * or upload path resolved a coordinate through vram_ext_map_x(). Every texture
+ * path in the tree passes the canonical guest plane, so this stays 0 and
+ * `texture_reads_ok` proves it. */
+void vram_ext_note_texture_read(int remapped);
 void vram_ext_note_present(int width);
+void vram_ext_note_readback(uint64_t bytes);
 /* A wide display whose frame is drawn with the gate OFF (draw area is not the
  * framebuffer: render-to-texture). Diagnostic: must stay 0 for WE2002. */
 void vram_ext_note_gate_off(uint64_t frames);

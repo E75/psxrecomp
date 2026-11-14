@@ -3801,9 +3801,12 @@ uint64_t g_pollhack_vblank_count = 0;  /* instrumentation: poll-fallback VBlank 
 
 /* ---- Initialization ---- */
 
+static void vram_ext_reset_all(void);   /* fwd: defined with vram_ext_sync */
+
 static void gpu_reset_state(int clear_vram) {
     ws_reset_scene_history();
     vram_ext_init();     /* [video] vram_extension, once per process */
+    vram_ext_reset_all();
     if (clear_vram) {
         memset(vram, 0, sizeof(vram));
         gpu_vram_dirty_mark_all();
@@ -4494,45 +4497,83 @@ void gpu_get_display_info(GpuDisplayInfo* out) {
 }
 
 /* ---- Host VRAM extension ([video] vram_extension) ----------------------
- * Decide, from the current draw area and display geometry, whether this frame's
- * draws land in the display buffer. When they do, the columns past x=512 of
- * that buffer are redirected to the host extension plane by the renderer's
- * pack (see docs/VRAM_EXTENSION.md). The gate is what keeps a render-to-texture
+ * Decide, from the current draw area and display geometry, whether the frame's
+ * draws land in a display buffer. When they do, the columns past x=512 of that
+ * buffer are redirected to the host extension plane by the renderer's pack
+ * (see docs/VRAM_EXTENSION.md). The gate is what keeps a render-to-texture
  * pass untouched: such a pass sets a draw area that is NOT the display rect.
  *
- * A double-buffered title sets the draw area to BOTH 240-line bands
- * (WE2002: [0,240]..[681,479]) while the display scans out one of them, so the
- * Y test is containment, not equality. The X span must match exactly: that is
- * the framebuffer's width, and it is what makes the overflow columns real. */
+ * The Y span is NOT taken from the draw area alone. A double-buffered title
+ * draws one 240-line band per frame and scans out one of them, and the pack of
+ * a frame's draws can run AFTER the game flipped to the other band (the flip
+ * writes the display env and the draw env, then waits for vblank; the pack runs
+ * at present). Keying the redirect to "the band being drawn now" therefore left
+ * the OTHER band packing at guest columns - straight back over the texture
+ * pages - and, when the displayed band was not the drawn one, closed the gate
+ * entirely. So the redirect covers every band ever used as a display buffer
+ * (learned here, forgotten when the display geometry changes), and the gate
+ * only asks that the current draw area's X span is the display's. */
+#define VRAM_EXT_BANDS 4
+static uint32_t vram_ext_band_key;
+static int      vram_ext_band_key_set;
+
+/* New game / GPU reset: the learned framebuffer bands and the display key are
+ * stale (defined here because the key lives here). */
+static void vram_ext_reset_all(void) {
+    vram_ext_band_key = 0;
+    vram_ext_band_key_set = 0;
+    vram_ext_reset_bands();
+    vram_ext_set_region(0, 0, 0, 0, 0);
+}
+
 static void vram_ext_sync(void) {
     if (!vram_ext_enabled()) return;
     GpuDisplayInfo di;
     gpu_get_display_info(&di);
     vram_ext_note_present((int)di.width);
 
-    int on = 0, x0 = 0, y0 = 0, x1 = 0, y1 = 0;
-    const int disp_x1 = (int)di.display_x + (int)di.width - 1;
-    if (!di.disabled && !di.depth24 &&
-        di.width > (uint32_t)VRAM_EXT_X0 &&
-        disp_x1 < VRAM_EXT_GUEST_W &&
-        disp_x1 <= VRAM_EXT_X0 + VRAM_EXT_COLS - 1 &&
-        (int)di.display_y + (int)di.height <= 512 &&
-        (int)draw_area_left == (int)di.display_x &&
-        (int)draw_area_right == disp_x1 &&
-        (int)draw_area_top <= (int)di.display_y &&
-        (int)draw_area_bottom >= (int)(di.display_y + di.height - 1)) {
-        on = 1;
-        x0 = (int)di.display_x;
-        x1 = disp_x1;
-        y0 = (int)draw_area_top;
-        y1 = (int)draw_area_bottom;
-    } else if (di.width > (uint32_t)VRAM_EXT_X0) {
-        /* Wide display, but the draws are somewhere else: render-to-texture
-         * (or a depth24/disabled frame). Nothing is redirected; counted so the
-         * game lane can prove WE2002 never takes this branch mid-match. */
-        vram_ext_note_gate_off(1);
+    /* Bands belong to one display geometry. display_y is excluded: it flips
+     * between the two bands every frame. */
+    uint32_t key = ((uint32_t)di.display_x & 0x3FFu) |
+                   (((uint32_t)di.width & 0x7FFu) << 10) |
+                   (((uint32_t)di.height & 0x1FFu) << 21) |
+                   ((uint32_t)(di.depth24 ? 1u : 0u) << 30) |
+                   ((uint32_t)(di.disabled ? 1u : 0u) << 31);
+    if (!vram_ext_band_key_set || key != vram_ext_band_key) {
+        vram_ext_band_key = key;
+        vram_ext_band_key_set = 1;
+        vram_ext_reset_bands();
     }
-    vram_ext_set_region(on, x0, y0, x1, y1);
+
+    const int disp_x1 = (int)di.display_x + (int)di.width - 1;
+    const int wide_ok = !di.disabled && !di.depth24 &&
+                        di.width > (uint32_t)VRAM_EXT_X0 &&
+                        disp_x1 < VRAM_EXT_GUEST_W &&
+                        disp_x1 <= VRAM_EXT_X0 + VRAM_EXT_COLS - 1 &&
+                        (int)di.display_y + (int)di.height <= 512;
+    const int span_ok = wide_ok &&
+                        (int)draw_area_left == (int)di.display_x &&
+                        (int)draw_area_right == disp_x1;
+
+    if (span_ok) {
+        int band_h = (int)draw_area_bottom - (int)draw_area_top + 1;
+        /* A framebuffer band is one display height (or both stacked, when the
+         * game sets the area across the double buffer). */
+        if (band_h == (int)di.height || band_h == (int)di.height * 2)
+            vram_ext_learn_band((int)draw_area_top, (int)draw_area_bottom);
+    } else if (wide_ok) {
+        /* A draw that looks like the framebuffer (its X span is within a few
+         * pixels of the display's) but does not match: render-to-texture, or a
+         * gate bug. Counted; a texture page draw (256 wide) is not a miss. */
+        int d = (int)draw_area_right - disp_x1;
+        if (d < 0) d = -d;
+        if (d <= 8) vram_ext_note_gate_off(1);
+    }
+
+    int on = 0, y0 = 0, y1 = 0;
+    if (span_ok && vram_ext_band_rows(&y0, &y1)) on = 1;
+    vram_ext_set_region(on, on ? (int)di.display_x : 0, y0,
+                        on ? disp_x1 : 0, y1);
 }
 
 /* Debug accessors for GP1 display-range / mode (TCP gpu_state). */
