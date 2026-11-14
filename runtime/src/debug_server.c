@@ -9825,7 +9825,7 @@ static void handle_get_snapshots(int id, const char *json)
  * (15-bit only). */
 #define DISP_RING_CAP   64    /* full-VRAM entries are 1MB each; 32 frames of
                                * lookback (~0.3-0.5s) for exact-frame forensics */
-#define DISP_RING_MAX_W 640
+#define DISP_RING_MAX_W 704   /* guest 682-wide raster ([video] vram_extension) */
 #define DISP_RING_MAX_H 256
 /* Full-VRAM aux capture alongside the display: the entire 1024x512 raw VRAM
  * as the renderer sees it at this frame (GL: FBO truth; SW: CPU truth), so an
@@ -10003,7 +10003,11 @@ static void handle_screenshot_file(int id, const char *json)
         vk_renderer_sync_cpu();
     }
 
-    uint32_t w = di.width;  if (w > 640) w = 640;
+    /* [video] vram_extension: a guest 682-wide raster must not be cropped to
+     * the historical 640 screenshot cap. */
+    const uint32_t wcap = (uint32_t)(vram_ext_enabled()
+                                     ? VRAM_EXT_X0 + VRAM_EXT_COLS : 640);
+    uint32_t w = di.width;  if (w > wcap) w = wcap;
     uint32_t h = di.height; if (h > 512) h = 512;
 
     char path[512];
@@ -10061,7 +10065,11 @@ static void handle_screenshot_hires(int id, const char *json)
     int scale = gr_scale();
     if (scale < 1) scale = 1;
     uint32_t w = di.width, h = di.height;
-    if (w > 640) w = 640;
+    {
+        const uint32_t wcap = (uint32_t)(vram_ext_enabled()
+                                         ? VRAM_EXT_X0 + VRAM_EXT_COLS : 640);
+        if (w > wcap) w = wcap;
+    }
     if (h > 512) h = 512;
     uint32_t ow = w * (uint32_t)scale, oh = h * (uint32_t)scale;
 

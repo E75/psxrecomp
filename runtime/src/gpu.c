@@ -4409,6 +4409,21 @@ int gpu_display_is_depth24(void) {
     return (int)(display_depth & 1u);
 }
 
+/* One-shot: a display width that the CRTC range could not express and that the
+ * draw area supplied. Prints the raw GP1(06h) words so the derivation is
+ * checkable from the log instead of a new A/B. */
+static void vram_ext_note_width_override(uint32_t crtc_w, uint32_t draw_w,
+                                         uint32_t x1, uint32_t x2,
+                                         uint32_t hr1, uint32_t hr2) {
+    static int logged;
+    if (logged) return;
+    logged = 1;
+    fprintf(stderr, "psxrecomp: vram extension: display width %u -> %u from the "
+                    "draw area (GP1(06h) x1=%u x2=%u dots=%d hres1=%u hres2=%u)\n",
+            (unsigned)crtc_w, (unsigned)draw_w, (unsigned)x1, (unsigned)x2,
+            (x2 > x1) ? (int)(x2 - x1) : -1, (unsigned)hr1, (unsigned)hr2);
+}
+
 void gpu_get_display_info(GpuDisplayInfo* out) {
     out->display_x = display_area_x;
     out->display_y = display_area_y;
@@ -4470,6 +4485,26 @@ void gpu_get_display_info(GpuDisplayInfo* out) {
     {
         uint32_t cap = vram_ext_enabled() ? (uint32_t)VRAM_EXT_GUEST_W : 640u;
         if (w > cap) w = cap;
+    }
+
+    /* [video] vram_extension: the guest's GsDispEnv can carry a width the CRTC
+     * fields cannot express. For a 682-wide DispEnv in a 640-hres mode the
+     * guest's PutDispEnv programs a range whose X2-X1 wraps (X2 <= X1) or
+     * collapses onto the mode width, so the derivation above reports 640 - the
+     * hres maximum, not what the guest asked for. When the extension is on and
+     * the draw area is a display-buffer band wider than that, the framebuffer
+     * really is that wide: report it, so present, readback and the redirect
+     * gate all agree. Off = the historical derivation, byte-identical. */
+    if (vram_ext_enabled() && !out->depth24 && !out->disabled && h > 0 &&
+        draw_area_right >= draw_area_left) {
+        uint32_t band_h = draw_area_bottom - draw_area_top + 1u;
+        uint32_t draw_w = draw_area_right - draw_area_left + 1u;
+        if ((band_h == h || band_h == h * 2u || band_h * 2u == h) &&
+            draw_w > w && draw_w <= (uint32_t)(VRAM_EXT_X0 + VRAM_EXT_COLS)) {
+            vram_ext_note_width_override(w, draw_w, h_display_x1, h_display_x2,
+                                         hres1, hres2);
+            w = draw_w;
+        }
     }
     if (out->depth24) {
         if (screen_h > PSX_DISPLAY_PRESENT_MAX_HEIGHT)
@@ -4548,10 +4583,13 @@ static void vram_ext_gate_log(const GpuDisplayInfo *di, int ax0, int ay0,
     last_sig = sig;
     logged++;
     fprintf(stderr, "psxrecomp: vram extension gate closed: display x0=%u w=%u h=%u y0=%u "
-                    "(x1=%u) draw_area [%d,%d,%d,%d] bands=%d; failed: %s\n",
+                    "(x1=%u) draw_area [%d,%d,%d,%d] bands=%d; GP1(06h) x1=%u x2=%u "
+                    "hres1=%u hres2=%u; failed: %s\n",
             (unsigned)di->display_x, (unsigned)di->width, (unsigned)di->height,
             (unsigned)di->display_y, (unsigned)di->display_x + (unsigned)di->width - 1u,
-            ax0, ay0, ax1, ay1, vram_ext_band_rows(NULL, NULL), reason[why]);
+            ax0, ay0, ax1, ay1, vram_ext_band_rows(NULL, NULL),
+            (unsigned)h_display_x1, (unsigned)h_display_x2,
+            (unsigned)hres1, (unsigned)hres2, reason[why]);
 }
 
 static void vram_ext_sync(void) {
