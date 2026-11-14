@@ -5738,7 +5738,7 @@ static void handle_pgxp(int id, const char *json)
 static void handle_gpu_state(int id, const char *json)
 {
     (void)json;
-    char vram_ext_json[384];
+    char vram_ext_json[640];
     vram_ext_debug_json(vram_ext_json, (int)sizeof vram_ext_json);
     GpuDisplayInfo di;
     gpu_get_display_info(&di);

@@ -387,8 +387,10 @@ void vram_ext_reset_stats(void) { memset(&s_stats, 0, sizeof s_stats); }
 
 /* The debug reply path must stay small: `gpu_state` is a big object and a reply
  * that blocks the emulation thread long enough trips the starvation watchdog
- * (the query closed the connection at kickoff, four times). Keep this object
- * under ~256 bytes: no unbounded arrays, no static config echoed back. */
+ * (the query closed the connection at kickoff, four times). This object is
+ * ~430 bytes with every counter populated, so the caller's buffer must hold it
+ * whole - a truncated object is not valid JSON (the 384-byte buffer cut
+ * "gl_bypass_reason":0 and failed every harness row that reads gpu_state). */
 int vram_ext_debug_json(char *out, int cap) {
     if (!out || cap <= 0) return 0;
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
