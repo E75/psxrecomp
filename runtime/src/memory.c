@@ -2008,7 +2008,14 @@ static void render_pass_store(uint32_t addr, uint32_t val, uint32_t width) {
 }
 
 static void psx_write_word_raw(uint32_t addr, uint32_t val);
+/* Watchpoints that must name their writer: armed slots make the store
+ * funnel report {pc, ra, width} (debug_server.c). One load+branch when
+ * nothing is armed. */
+extern int g_debug_watch_slots;
+extern void debug_server_watch_store(uint32_t addr, uint8_t width, uint32_t new_val);
+
 void psx_write_word(uint32_t addr, uint32_t val) {
+    if (g_debug_watch_slots) debug_server_watch_store(addr, 4, val);
     extern void (*g_overlay_flush_pending_cycles)(void);
     if (g_overlay_flush_pending_cycles) g_overlay_flush_pending_cycles();
     if (g_psx_render_pass_active) { render_pass_store(addr, val, 4); return; }
@@ -2220,6 +2227,7 @@ static uint16_t psx_read_half_raw(uint32_t addr) {
 
 static void psx_write_half_raw(uint32_t addr, uint16_t val);
 void psx_write_half(uint32_t addr, uint16_t val) {
+    if (g_debug_watch_slots) debug_server_watch_store(addr, 2, val);
     extern void (*g_overlay_flush_pending_cycles)(void);
     if (g_overlay_flush_pending_cycles) g_overlay_flush_pending_cycles();
     if (g_psx_render_pass_active) { render_pass_store(addr, val, 2); return; }
@@ -2574,6 +2582,7 @@ uint8_t  psx_guest_read_byte(uint32_t addr) { return psx_read_byte(addr); }
 
 static void psx_write_byte_raw(uint32_t addr, uint8_t val);
 void psx_write_byte(uint32_t addr, uint8_t val) {
+    if (g_debug_watch_slots) debug_server_watch_store(addr, 1, val);
     extern void (*g_overlay_flush_pending_cycles)(void);
     if (g_overlay_flush_pending_cycles) g_overlay_flush_pending_cycles();
     if (g_psx_render_pass_active) { render_pass_store(addr, val, 1); return; }

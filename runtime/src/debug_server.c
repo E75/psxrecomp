@@ -334,14 +334,35 @@ static uint64_t        s_history_count = 0;
 static uint32_t s_snapshot_addrs[RAM_SNAPSHOT_REGIONS];
 static int      s_snapshot_active[RAM_SNAPSHOT_REGIONS];
 
-/* ---- Watchpoints ---- */
+/* ---- Watchpoints ----
+ *
+ * A watch arms one address and reports every change. The poll below can only
+ * say "it changed"; naming the WRITER needs the store itself, so memory.c's
+ * write funnel calls debug_server_watch_store() while any slot is armed. Each
+ * slot keeps the last WATCH_BURST_CAP stores (the CD mask write happens more
+ * than once per load, so a single "latest" entry hides the sequence).
+ * g_debug_watch_slots is the hot-path gate: one load + branch per store when
+ * nothing is armed. */
 #define MAX_WATCHPOINTS 8
+#define WATCH_BURST_CAP 32
+typedef struct {
+    uint32_t pc;        /* exact store PC (g_debug_last_store_pc) */
+    uint32_t ra;        /* $ra of the storing code */
+    uint32_t old_val;
+    uint32_t new_val;
+    uint32_t frame;
+    uint8_t  width;     /* 1/2/4 bytes; 0 = change seen by the poll, not a CPU store */
+} WatchBurst;
 typedef struct {
     uint32_t addr;
     uint8_t  prev_val;
     int      active;
+    uint32_t count;     /* bursts recorded (monotonic) */
+    WatchBurst burst[WATCH_BURST_CAP];
 } Watchpoint;
 static PSX_BSS Watchpoint s_watchpoints[MAX_WATCHPOINTS];
+int g_debug_watch_slots = 0;   /* nonzero while any slot is armed */
+
 
 /* ---- Write trace (Tier 1 reverse debugger) ----
  * Records every RAM write matching one of the configurable address ranges.
@@ -8025,12 +8046,47 @@ static void handle_watch(int id, const char *json)
             s_watchpoints[i].addr = addr;
             s_watchpoints[i].prev_val = psx_read_byte(addr);
             s_watchpoints[i].active = 1;
+            s_watchpoints[i].count = 0;
+            memset(s_watchpoints[i].burst, 0, sizeof(s_watchpoints[i].burst));
+            g_debug_watch_slots++;
             send_fmt("{\"id\":%d,\"ok\":true,\"slot\":%d,\"addr\":\"0x%08X\"}",
                      id, i, addr);
             return;
         }
     }
     send_err(id, "all watchpoint slots full (max 8)");
+}
+
+/* {"cmd":"watch_log"} -> every armed slot with its last WATCH_BURST_CAP stores
+ * (pc/ra/width/old/new/frame). This is the burst view: a watchpoint event shows
+ * the latest store, this shows the sequence that produced it. */
+static void handle_watch_log(int id, const char *json)
+{
+    (void)json;
+    static char buf[24 * 1024];
+    size_t pos = 0;
+    pos += (size_t)snprintf(buf + pos, sizeof(buf) - pos, "{\"id\":%d,\"ok\":true,\"slots\":[", id);
+    int written = 0;
+    for (int i = 0; i < MAX_WATCHPOINTS && pos + 256 < sizeof(buf); i++) {
+        Watchpoint* w = &s_watchpoints[i];
+        if (!w->active) continue;
+        uint32_t n = w->count < WATCH_BURST_CAP ? w->count : WATCH_BURST_CAP;
+        pos += (size_t)snprintf(buf + pos, sizeof(buf) - pos,
+                                "%s{\"slot\":%d,\"addr\":\"0x%08X\",\"count\":%u,\"entries\":[",
+                                written ? "," : "", i, w->addr, w->count);
+        for (uint32_t k = 0; k < n && pos + 160 < sizeof(buf); k++) {
+            const WatchBurst* b = &w->burst[(w->count - n + k) % WATCH_BURST_CAP];
+            pos += (size_t)snprintf(buf + pos, sizeof(buf) - pos,
+                                    "%s{\"frame\":%u,\"pc\":\"0x%08X\",\"ra\":\"0x%08X\","
+                                    "\"width\":%u,\"old\":\"0x%02X\",\"new\":\"0x%02X\"}",
+                                    k ? "," : "", b->frame, b->pc, b->ra,
+                                    (unsigned)b->width, b->old_val & 0xFFu, b->new_val & 0xFFu);
+        }
+        pos += (size_t)snprintf(buf + pos, sizeof(buf) - pos, "]}");
+        written++;
+    }
+    pos += (size_t)snprintf(buf + pos, sizeof(buf) - pos, "]}");
+    send_fmt("%s", buf);
 }
 
 static void handle_unwatch(int id, const char *json)
@@ -8044,6 +8100,7 @@ static void handle_unwatch(int id, const char *json)
     for (int i = 0; i < MAX_WATCHPOINTS; i++) {
         if (s_watchpoints[i].active && s_watchpoints[i].addr == addr) {
             s_watchpoints[i].active = 0;
+            if (g_debug_watch_slots > 0) g_debug_watch_slots--;
             send_ok(id);
             return;
         }
@@ -15941,6 +15998,7 @@ static const CmdEntry s_commands[] = {
     { "imask_trace",       handle_imask_trace },
     { "card_handoff",      handle_card_handoff },
     { "watch",             handle_watch },
+    { "watch_log",         handle_watch_log },
     { "unwatch",           handle_unwatch },
     /* wtrace — normalized verb set (parity contract with psx-beetle).
      * One slot per "lo,hi" pair. arm/disarm/disarm_all/reset/ranges/
@@ -16943,6 +17001,32 @@ void debug_server_wait_if_paused(void)
      * old `while (s_paused)` loop would have been a no-op anyway. */
 }
 
+void debug_server_watch_store(uint32_t addr, uint8_t width, uint32_t new_val)
+{
+    extern uint32_t g_debug_last_store_pc;
+    for (int i = 0; i < MAX_WATCHPOINTS; i++) {
+        Watchpoint* w = &s_watchpoints[i];
+        if (!w->active || w->addr != addr) continue;
+        WatchBurst* b = &w->burst[w->count % WATCH_BURST_CAP];
+        b->pc      = g_debug_last_store_pc;
+        b->ra      = debug_cpu_ptr ? debug_cpu_ptr->gpr[31] : 0u;
+        b->old_val = w->prev_val;
+        b->new_val = new_val;
+        b->width   = width;
+        b->frame   = (uint32_t)s_frame_count;
+        w->count++;
+        w->prev_val = (uint8_t)new_val;
+        if (s_client != SOCK_INVALID) {
+            send_fmt("{\"event\":\"watchpoint\",\"addr\":\"0x%08X\","
+                     "\"old\":\"0x%02X\",\"new\":\"0x%02X\",\"frame\":%llu,"
+                     "\"pc\":\"0x%08X\",\"ra\":\"0x%08X\",\"width\":%u}",
+                     w->addr, b->old_val & 0xFFu, b->new_val & 0xFFu,
+                     (unsigned long long)b->frame, b->pc, b->ra, (unsigned)b->width);
+        }
+        return;
+    }
+}
+
 void debug_server_check_watchpoints(void)
 {
     if (s_fmv_quiet) return;
@@ -16952,12 +17036,15 @@ void debug_server_check_watchpoints(void)
         if (!s_watchpoints[i].active) continue;
         uint8_t cur = psx_read_byte(s_watchpoints[i].addr);
         if (cur != s_watchpoints[i].prev_val) {
+            /* A change no CPU store reported: DMA/device write. width 0 says so. */
             send_fmt("{\"event\":\"watchpoint\","
                      "\"addr\":\"0x%08X\",\"old\":\"0x%02X\",\"new\":\"0x%02X\","
-                     "\"frame\":%llu}",
+                     "\"frame\":%llu,\"pc\":\"0x%08X\",\"ra\":\"0x%08X\",\"width\":0}",
                      s_watchpoints[i].addr,
                      s_watchpoints[i].prev_val, cur,
-                     (unsigned long long)s_frame_count);
+                     (unsigned long long)s_frame_count,
+                     g_debug_last_store_pc,
+                     debug_cpu_ptr ? debug_cpu_ptr->gpr[31] : 0u);
             s_watchpoints[i].prev_val = cur;
         }
     }
