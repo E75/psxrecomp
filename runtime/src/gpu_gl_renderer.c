@@ -615,6 +615,7 @@ static int           s_interp_suspended = 0;
 static int           s_interp_blend_mode = 0;
 static int           s_interp_prev = 0, s_interp_cur = 0;
 static int           s_interp_w = 0, s_interp_h = 0, s_interp_linear = 0;
+static int           s_interp_alloc_w = 0, s_interp_alloc_h = 0; /* texture size */
 static int           s_interp_src_w = 0, s_interp_src_h = 0; /* source band, S px */
 static GLuint        s_interp_fbo = 0;   /* draw target of a scaled capture */
 static int           s_interp_force_4_3 = 0, s_interp_source_path = -1;
@@ -1148,17 +1149,14 @@ static int    s_hold_linear = 0;
 
 /* Only two callers ever ask for hold-last: the netplay resim tick and the
  * rewind pause loop. Capturing unconditionally meant a full-drawable copy
- * (33 MB at 4K) plus its implicit back-buffer sync on EVERY present, for an
- * image nothing read. Capture while a consumer exists; otherwise
- * gl_renderer_present_hold_last re-presents the live VRAM band (the guest is
- * frozen when it is called, so VRAM still holds the frame).
- * Native-wide surfaces are the exception: a canonical band present cannot
- * reproduce the wide image, so keep the capture whenever one exists. */
+ * (33 MB at 4K) plus its implicit back-buffer sync on EVERY present, and the
+ * wide path did a 13.3 Mpx band copy per frame as well - for an image nothing
+ * read. Capture while a consumer exists; otherwise
+ * gl_renderer_present_hold_last re-presents the live surface (the guest is
+ * frozen when it is called, so the frame is still there). */
 static int hold_needed(void) {
     extern int psx_netplay_active(void);
-    if (psx_netplay_active() || psx_rewind_is_open()) return 1;
-    for (int i = 0; i < WIDE_MAX_SURF; i++) if (s_wide_fbo[i]) return 1;
-    return 0;
+    return psx_netplay_active() || psx_rewind_is_open();
 }
 
 /* Post-load freeze probe (main.cpp): accumulate skip/swap/dirty marks. */
@@ -1243,19 +1241,27 @@ static void letterbox_rect_aspect(int ww, int wh, int num, int den,
                                   int *x, int *y, int *w, int *h);
 static void letterbox_rect(int ww, int wh, int *x, int *y, int *w, int *h);
 
+/* Present-phase attribution kinds (defined with the frame_perf ring below; the
+ * capture path near the top uses them, hence the prototypes here). */
+#define GLPERF_SPAN_CAPTURE 0
+#define GLPERF_SPAN_BLEND   2
+static void gl_perf_span_begin(int kind);
+static void gl_perf_span_end(int kind);
+
 /* Size of a display-band capture (temporal-blend history, hold-last) whose
- * source band is sw x sh pixels at the output scale. Normally that size. In
- * the windowed high-resolution mode the band is up to 15372x4320 (8K at
- * 32:9), and copying it at full size every game frame (twice: blend history
- * and hold-last) cost more than the frame itself, only for the presenter to
- * draw it at the letterbox size. There the capture is taken at the letterbox
- * size instead (one filtered blit; the presenter then draws it 1:1), unless
- * the band is already smaller. force_4_3 picks the letterbox the present
- * uses. */
-static void hiw_capture_size(int sw, int sh, int force_4_3, int *cw, int *ch) {
+ * source band is sw x sh pixels at the output scale. The capture never needs
+ * to be larger than the rect the presenter will draw it in: the blend and the
+ * hold-last both sample it 1:1 into the letterbox. So the capture size is the
+ * letterbox size whenever the band is bigger (one filtered blit), and the band
+ * size otherwise. This applies in EVERY mode, not just the windowed one: at
+ * S=9 a 682-px-wide display has a 6138x2160 band (13.3 Mpx) while the window
+ * shows it in 3840x1351 (5.2 Mpx), and that full-size copy ran twice per frame
+ * (blend history + hold-last) - 2.5x the traffic for no visible pixels.
+ * force_4_3 picks the letterbox the present uses. */
+static void capture_size(int sw, int sh, int force_4_3, int *cw, int *ch) {
     int ww = 0, wh = 0, lx, ly, lw, lh;
     *cw = sw; *ch = sh;
-    if (!s_hiw || !s_win) return;
+    if (!s_win) return;
     SDL_GL_GetDrawableSize(s_win, &ww, &wh);
     if (ww < 1 || wh < 1) return;
     if (force_4_3) letterbox_rect_aspect(ww, wh, 4, 3, &lx, &ly, &lw, &lh);
@@ -1266,15 +1272,16 @@ static void hiw_capture_size(int sw, int sh, int force_4_3, int *cw, int *ch) {
 }
 
 /* Snapshot a native display band from an FBO when the main thread will not
- * Swap (interpolation owns the cadence). Scale-aware blit into hold tex (at
- * the presented size in the windowed high-resolution mode). */
+ * Swap (interpolation owns the cadence). Scale-aware blit into hold tex at the
+ * presented size (capture_size). */
 static void hold_capture_native_fbo(GLuint src_fbo, int dx, int dy, int dw, int dh,
                                     int force_4_3, int linear) {
     int S = s_out_scale > 0 ? s_out_scale : 1, cw, ch;
     if (!s_ctx || !src_fbo || dw < 1 || dh < 1)
         return;
-    hiw_capture_size(dw * S, dh * S, force_4_3, &cw, &ch);
+    capture_size(dw * S, dh * S, force_4_3, &cw, &ch);
     hold_ensure_tex(cw, ch);
+    gl_perf_span_begin(GLPERF_SPAN_CAPTURE);
     p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, src_fbo);
     p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, s_hold_fbo);
     glDisable(GL_SCISSOR_TEST);
@@ -1283,6 +1290,7 @@ static void hold_capture_native_fbo(GLuint src_fbo, int dx, int dy, int dw, int 
                         (cw == dw * S && ch == dh * S) || !linear ? GL_NEAREST : GL_LINEAR);
     p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, 0);
     p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, 0);
+    gl_perf_span_end(GLPERF_SPAN_CAPTURE);
     s_hold_kind = HOLD_NATIVE;
     s_hold_force_4_3 = force_4_3 ? 1 : 0;
     s_hold_linear = linear ? 1 : 0;
@@ -5676,6 +5684,7 @@ void gl_renderer_shutdown(void) {
     s_hold_tw = 0;
     s_hold_th = 0;
     s_interp_fbo = 0;   /* died with the context */
+    s_interp_alloc_w = s_interp_alloc_h = 0;   /* so do the history textures */
 }
 
 /* CPU-readout present (24-bit FMV frames and the PSX_GL_FORCE_CPU_PRESENT
@@ -5768,7 +5777,7 @@ void gl_renderer_present(const uint32_t *pixels, int src_w, int src_h, int linea
     p_glBindVertexArray(s_present_vao); glDrawArrays(GL_TRIANGLES, 0, 3);
     p_glBindVertexArray(0); p_glUseProgram(0);
     pres_record(GL_PRES_CPU, 0, 0, src_w, src_h, lx, ly, lw, lh);
-    hold_capture_drawable();
+    if (hold_needed()) hold_capture_drawable(); else hold_invalidate();
     latency_ring_mark(LAT_SWAP_BEGIN);
     gl_swap_with_osd();
     latency_ring_mark(LAT_SWAP_END);
@@ -6397,6 +6406,11 @@ typedef struct {
     double   batches;         /* flush_tex_batch draws this frame              */
     double   wide_sets;       /* glb_wide_set_target calls this frame          */
     double   fbo_creates;     /* wide FBO+tex creations this frame             */
+    double   capture_gpu_ms;  /* GPU: interp/hold band capture (first)          */
+    double   blend_gpu_ms;    /* GPU: interp blend draw (first)                 */
+    double   captures;        /* band captures this frame                       */
+    double   blends;          /* interp blend presents this frame               */
+    int      dup;             /* 1 = the present was a duplicate source frame   */
     int      wide;            /* 1 = native-wide (16:9) present, 0 = 4:3       */
     uint64_t frame;
 } GlPerfSample;
@@ -6427,9 +6441,11 @@ static double   s_pf_buf_total[GLPERF_NBUF];
 static double   s_pf_buf_pwall[GLPERF_NBUF];
 static double   s_pf_buf_prims[GLPERF_NBUF];
 static int      s_pf_buf_wide[GLPERF_NBUF];
+static int      s_pf_buf_dup[GLPERF_NBUF];
 static uint64_t s_pf_buf_frame[GLPERF_NBUF];
 static uint64_t s_pf_prims_last = 0;
 static double   s_pf_prims_pending = 0.0;
+static int      s_pf_dup_pending = 0;      /* duplicate source frame this frame */
 static double   s_pf_cw_pending[5];            /* flush_ms, wide_ms, batches, wide_sets, fbo_creates */
 static double   s_pf_buf_cw[GLPERF_NBUF][5];
 static GlPerfSample s_pf_ring[GLPERF_RING];
@@ -6438,6 +6454,35 @@ static uint64_t     s_pf_ring_seq = 0;
 /* Dynamic resolution's render-thread frame cost owns the TIME_ELAPSED target
  * while it measures (rthf_begin): frame_perf stands aside. */
 static int rthf_owns_timer(void);
+
+/* Extra present-phase attribution (capture vs blend): GL_TIMESTAMP pairs, since
+ * TIME_ELAPSED cannot nest and present_q already spans the whole present. One
+ * pair per kind per frame (the first occurrence is the dominant one); the
+ * counters say how many happened. Declared before gl_perf_init, which creates
+ * the queries. */
+static GLuint s_span_q[GLPERF_NBUF][4];
+static int    s_span_open[GLPERF_NBUF][2];
+static int    s_span_used[GLPERF_NBUF][2];
+static int    s_span_n[GLPERF_NBUF][2];
+static int    s_span_ok = 0;
+
+static void gl_perf_span_begin(int kind) {
+    if (!s_pf_on || !s_span_ok || rthf_owns_timer()) return;
+    int b = s_pf_b, k = kind >> 1;
+    s_span_n[b][k]++;
+    if (s_span_open[b][k]) return;          /* already measuring this frame */
+    p_glQueryCounter(s_span_q[b][kind], GL_TIMESTAMP);
+    s_span_open[b][k] = 1;
+}
+static void gl_perf_span_end(int kind) {
+    if (!s_pf_on || !s_span_ok || rthf_owns_timer()) return;
+    int b = s_pf_b, k = kind >> 1;
+    if (!s_span_open[b][k]) return;
+    p_glQueryCounter(s_span_q[b][kind + 1], GL_TIMESTAMP);
+    s_span_open[b][k] = 0;
+    s_span_used[b][k] = 1;
+}
+
 static void gl_perf_yield(void) {
     if (s_pf_scene_active) { p_glEndQuery(GL_TIME_ELAPSED); s_pf_scene_active = 0; }
 }
@@ -6462,6 +6507,14 @@ static void gl_perf_init(void) {
         for (int i = 0; i < GLPERF_NBUF; i++) {
             p_glGenQueries(GLPERF_MIRQ * 2, s_mq_q[i]);
             s_mq_n[i] = 0; s_mq_over[i] = 0;
+        }
+    s_span_ok = s_mq_ok;
+    if (s_span_ok)
+        for (int i = 0; i < GLPERF_NBUF; i++) {
+            p_glGenQueries(4, s_span_q[i]);
+            s_span_open[i][0] = s_span_open[i][1] = 0;
+            s_span_used[i][0] = s_span_used[i][1] = 0;
+            s_span_n[i][0] = s_span_n[i][1] = 0;
         }
     s_mq_open = 0;
     s_pf_freq = SDL_GetPerformanceFrequency();
@@ -6510,6 +6563,7 @@ static void gl_perf_present_enter(void) {
     s_pf_last_enter = now;
     s_pf_prims_pending = (double)(s_scene_prims - s_pf_prims_last);   /* prims drawn this frame */
     s_pf_prims_last = s_scene_prims;
+    s_pf_dup_pending = 0;
     s_pf_cw_pending[0] = s_cw_flush_ms;  s_pf_cw_pending[1] = s_cw_wide_ms;
     s_pf_cw_pending[2] = (double)s_cw_batches;
     s_pf_cw_pending[3] = (double)s_cw_wide_sets;
@@ -6521,6 +6575,10 @@ static void gl_perf_present_enter(void) {
     p_glBeginQuery(GL_TIME_ELAPSED, s_pf_present_q[s_pf_b]);                         /* time frame b's present */
 }
 
+/* Extra present-phase attribution (capture vs blend): see the span helpers
+ * declared with the frame_perf state above (they must exist before
+ * gl_perf_init creates their queries). */
+
 /* End of present (after SwapWindow). wide = native-wide path. */
 static void gl_perf_present_exit(int wide) {
     if (!s_pf_on || rthf_owns_timer()) return;
@@ -6531,6 +6589,7 @@ static void gl_perf_present_exit(int wide) {
     s_pf_buf_prims[s_pf_b] = s_pf_prims_pending;
     for (int ci = 0; ci < 5; ci++) s_pf_buf_cw[s_pf_b][ci] = s_pf_cw_pending[ci];
     s_pf_buf_wide[s_pf_b]  = wide;
+    s_pf_buf_dup[s_pf_b]   = s_pf_dup_pending;
     s_pf_buf_frame[s_pf_b] = s_pf_count;
     int rd = (s_pf_b + 1) % GLPERF_NBUF;   /* oldest buffer (frame count+1-NBUF), now done */
     if (s_pf_count >= (uint64_t)GLPERF_NBUF) {
@@ -6543,6 +6602,16 @@ static void gl_perf_present_exit(int wide) {
             p_glGetQueryObjectui64v(s_mq_q[rd][i * 2],     GL_QUERY_RESULT, &t0);
             p_glGetQueryObjectui64v(s_mq_q[rd][i * 2 + 1], GL_QUERY_RESULT, &t1);
             if (t1 > t0) mir += (double)(t1 - t0);
+        }
+        double span_ms[2] = { 0.0, 0.0 };
+        if (s_span_ok) {
+            for (int k = 0; k < 2; k++) {
+                if (!s_span_used[rd][k]) continue;
+                GLuint64 t0 = 0, t1 = 0;
+                p_glGetQueryObjectui64v(s_span_q[rd][k * 2],     GL_QUERY_RESULT, &t0);
+                p_glGetQueryObjectui64v(s_span_q[rd][k * 2 + 1], GL_QUERY_RESULT, &t1);
+                if (t1 > t0) span_ms[k] = (double)(t1 - t0) / 1.0e6;
+            }
         }
         GlPerfSample *s = &s_pf_ring[s_pf_ring_seq % GLPERF_RING];
         s->total_ms        = s_pf_buf_total[rd];
@@ -6558,10 +6627,18 @@ static void gl_perf_present_exit(int wide) {
         s->wide_sets       = s_pf_buf_cw[rd][3];
         s->fbo_creates     = s_pf_buf_cw[rd][4];
         s->wide            = s_pf_buf_wide[rd];
+        s->dup             = s_pf_buf_dup[rd];
+        s->capture_gpu_ms  = span_ms[0];
+        s->blend_gpu_ms    = span_ms[1];
+        s->captures        = (double)s_span_n[rd][0];
+        s->blends          = (double)s_span_n[rd][1];
         s->frame           = s_pf_buf_frame[rd];
         s_pf_ring_seq++;
     }
     s_mq_n[rd] = 0; s_mq_over[rd] = 0;   /* rd becomes the next frame's buffer */
+    s_span_used[rd][0] = s_span_used[rd][1] = 0;
+    s_span_open[rd][0] = s_span_open[rd][1] = 0;
+    s_span_n[rd][0] = s_span_n[rd][1] = 0;
     s_pf_count++;
     s_pf_b = rd;                                          /* reuse oldest for next frame */
     p_glBeginQuery(GL_TIME_ELAPSED, s_pf_scene_q[s_pf_b]); /* open next frame's scene draws */
@@ -6631,6 +6708,9 @@ int gl_frame_perf_json(char *out, int cap, int count) {
     if (count < navail) navail = count;
     static double cpu_s[GLPERF_RING], sc_s[GLPERF_RING], pr_s[GLPERF_RING];
     double cpu_sum = 0, sc_sum = 0, pr_sum = 0, dr_sum = 0;
+    double cap_sum = 0, bl_sum = 0, mir_sum = 0, prim_sum = 0;
+    double cap_max = 0, bl_max = 0, pw_sum = 0, emu_sum = 0;
+    int ndup = 0;
     uint64_t start = s_pf_ring_seq - (uint64_t)navail;
     for (int i = 0; i < navail; i++) {
         const GlPerfSample *s = &s_pf_ring[(start + i) % GLPERF_RING];
@@ -6638,6 +6718,14 @@ int gl_frame_perf_json(char *out, int cap, int count) {
         sc_s[i] = s->scene_gpu_ms; sc_sum += s->scene_gpu_ms;
         pr_s[i] = s->present_gpu_ms; pr_sum += s->present_gpu_ms;
         dr_sum += s->batches;
+        cap_sum += s->capture_gpu_ms; if (s->capture_gpu_ms > cap_max) cap_max = s->capture_gpu_ms;
+        bl_sum  += s->blend_gpu_ms;   if (s->blend_gpu_ms   > bl_max)  bl_max  = s->blend_gpu_ms;
+        mir_sum += s->mirror_gpu_ms;
+        prim_sum += s->prims;
+        ndup += s->dup;
+        pw_sum += s->present_wall_ms;
+        emu_sum += s->total_ms > s->present_wall_ms
+                       ? s->total_ms - s->present_wall_ms : 0.0;
     }
     qsort(cpu_s, (size_t)navail, sizeof(double), gfp_cmp);
     double p50 = navail ? cpu_s[(int)(navail * 0.50)] : 0.0;
@@ -6659,6 +6747,10 @@ int gl_frame_perf_json(char *out, int cap, int count) {
         "\"all\":{\"cpu_ms_avg\":%.3f,\"cpu_ms_p50\":%.3f,\"cpu_ms_p95\":%.3f,"
         "\"cpu_ms_max\":%.3f,\"scene_gpu_ms_avg\":%.3f,\"scene_gpu_ms_max\":%.3f,"
         "\"present_gpu_ms_avg\":%.3f,\"present_gpu_ms_max\":%.3f,"
+        "\"capture_gpu_ms_avg\":%.3f,\"capture_gpu_ms_max\":%.3f,"
+        "\"blend_gpu_ms_avg\":%.3f,\"blend_gpu_ms_max\":%.3f,"
+        "\"mirror_gpu_ms_avg\":%.3f,\"prims_avg\":%.0f,\"dups\":%d,"
+        "\"present_wall_ms_avg\":%.3f,\"emu_ms_avg\":%.3f,"
         "\"allocs_avg\":0.0,\"submits_avg\":%.2f,\"draws_avg\":%.1f},"
         "\"frames\":[",
         navail, s_out_scale, s_pf_on ? 1 : 0,
@@ -6666,16 +6758,27 @@ int gl_frame_perf_json(char *out, int cap, int count) {
         navail ? cpu_sum / navail : 0.0, p50, p95, mx,
         navail ? sc_sum / navail : 0.0, sc_max,
         navail ? pr_sum / navail : 0.0, pr_max,
+        navail ? cap_sum / navail : 0.0, cap_max,
+        navail ? bl_sum / navail : 0.0, bl_max,
+        navail ? mir_sum / navail : 0.0, navail ? prim_sum / navail : 0.0, ndup,
+        navail ? pw_sum / navail : 0.0, navail ? emu_sum / navail : 0.0,
         navail ? 1.0 : 0.0, navail ? dr_sum / navail : 0.0);
     for (int i = 0; i < navail; i++) {
         const GlPerfSample *s = &s_pf_ring[(start + i) % GLPERF_RING];
         o += snprintf(out + o, (size_t)(cap - o),
-            "%s{\"f\":%llu,\"cpu_ms\":%.3f,\"scene_gpu_ms\":%.3f,"
-            "\"present_gpu_ms\":%.3f,\"gpu\":%u,\"alloc\":0,\"submit\":1,"
+            "%s{\"f\":%llu,\"cpu_ms\":%.3f,\"present_wall_ms\":%.3f,"
+            "\"emu_ms\":%.3f,\"scene_gpu_ms\":%.3f,"
+            "\"present_gpu_ms\":%.3f,\"capture_gpu_ms\":%.3f,"
+            "\"blend_gpu_ms\":%.3f,\"mirror_gpu_ms\":%.3f,\"dup\":%d,\"wide\":%d,"
+            "\"gpu\":%u,\"alloc\":0,\"submit\":1,"
             "\"draws\":%u,\"geo\":%.0f,\"tex\":%u,\"blit\":0,\"sync\":0,"
             "\"wait_us\":0,\"tgt\":[%d,%d,%d,%d],\"cover\":[%d,%d,%d,%d],\"oob\":0}",
             i ? "," : "", (unsigned long long)s->frame, s->total_ms,
-            s->scene_gpu_ms, s->present_gpu_ms, s_pf_on ? 1u : 0u,
+            s->present_wall_ms,
+            s->total_ms > s->present_wall_ms ? s->total_ms - s->present_wall_ms : 0.0,
+            s->scene_gpu_ms, s->present_gpu_ms, s->capture_gpu_ms,
+            s->blend_gpu_ms, s->mirror_gpu_ms, s->dup, s->wide,
+            s_pf_on ? 1u : 0u,
             (unsigned)(s->batches > 0 ? s->batches : 0), s->prims,
             (unsigned)(s->batches > 0 ? s->batches : 0),
             s_last_dx, s_last_dy, tw, th, s_last_dx, s_last_dy, tw, th);
@@ -6815,7 +6918,7 @@ static int interp_capture(GLuint fbo, int x, int y, int w, int h,
                           int origin_x, int origin_y, int redrawn) {
     if (!s_interp_enabled || interp_suspended_now() || !fbo || w <= 0 || h <= 0) return 0;
     int sw = w * s_out_scale, sh = h * s_out_scale, pw, ph;
-    hiw_capture_size(sw, sh, force_4_3, &pw, &ph);
+    capture_size(sw, sh, force_4_3, &pw, &ph);
     int geometry_changed =
         pw != s_interp_w || ph != s_interp_h ||
         sw != s_interp_src_w || sh != s_interp_src_h ||
@@ -6832,6 +6935,7 @@ static int interp_capture(GLuint fbo, int x, int y, int w, int h,
                                         &s_interp_phase_lo, &s_interp_phase_hi);
         if (!new_frame) {
             s_interp_duplicates++;
+            s_pf_dup_pending = 1;
             return 1;
         }
         pass_note_new_frame(origin_x, origin_y, source_path, pw, ph);
@@ -6844,6 +6948,14 @@ static int interp_capture(GLuint fbo, int x, int y, int w, int h,
         s_interp_w = pw; s_interp_h = ph;
         s_interp_src_w = sw; s_interp_src_h = sh;
         s_interp_prev = s_interp_cur = 0;
+    }
+    /* Reallocate ONLY when the capture size itself changes. A display-geometry
+     * change (the VRAM extension gate opening/closing moves the display width
+     * 364 -> 512 -> 682 px) resets the history above but keeps the textures:
+     * three glTexImage2D calls of a multi-MB RGBA8 texture inside the present
+     * is a frame-time spike, and the pixel size did not change. */
+    if (pw != s_interp_alloc_w || ph != s_interp_alloc_h) {
+        s_interp_alloc_w = pw; s_interp_alloc_h = ph;
         for (int i = 0; i < 3; i++) {
             glBindTexture(GL_TEXTURE_2D, s_interp_tex[i]);
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, pw, ph, 0,
@@ -6854,12 +6966,13 @@ static int interp_capture(GLuint fbo, int x, int y, int w, int h,
     int dst = 0;
     if (s_interp_valid == 1) dst = s_interp_cur == 0 ? 1 : 0;
     else if (s_interp_valid >= 2) dst = s_interp_prev;
+    gl_perf_span_begin(GLPERF_SPAN_CAPTURE);
     p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, fbo);
     if (pw == sw && ph == sh) {
         glBindTexture(GL_TEXTURE_2D, s_interp_tex[dst]);
         glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
                             x * s_out_scale, y * s_out_scale, pw, ph);
-    } else {   /* windowed high-resolution mode: at the presented size */
+    } else {   /* capture smaller than the band: one filtered blit */
         if (!s_interp_fbo) p_glGenFramebuffers(1, &s_interp_fbo);
         p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, s_interp_fbo);
         p_glFramebufferTexture2D(PSXGL_DRAW_FRAMEBUFFER, PSXGL_COLOR_ATTACHMENT0,
@@ -6872,6 +6985,7 @@ static int interp_capture(GLuint fbo, int x, int y, int w, int h,
         p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, 0);
     }
     p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, 0);
+    gl_perf_span_end(GLPERF_SPAN_CAPTURE);
     if (s_interp_valid == 0) {
         s_interp_cur = dst;
         s_interp_valid = 1;
@@ -6908,7 +7022,7 @@ static void interp_draw_textures(GLuint prev_tex, GLuint curr_tex, float alpha,
     p_glUniform4f(s_interp_uUvRect, 0.f, 0.f, 1.f, 1.f);
     /* Interp textures hold exactly the display rect (uv_rect is 0..1), so pitch
      * == display height == s_interp_src_h rows at the output scale (the
-     * texture itself can be smaller, see hiw_capture_size). */
+     * texture itself can be smaller, see capture_size). */
     INTERP_SCANLINE(s_interp_src_h, s_interp_src_h, lh);
     p_glBindVertexArray(s_present_vao);
     glDrawArrays(GL_TRIANGLES, 0, 3);
@@ -6935,7 +7049,9 @@ static int interp_present_pair(GLuint a, GLuint b, float t, int blend_mode) {
         glClear(GL_COLOR_BUFFER_BIT);
     }
     present_bezel(ww, wh, lx, ly, lw, lh);
+    gl_perf_span_begin(GLPERF_SPAN_BLEND);
     interp_draw_textures(a, b, t, blend_mode, lx, ly, lw, lh);
+    gl_perf_span_end(GLPERF_SPAN_BLEND);
     pres_record(GL_PRES_INTERP, 0, 0, s_interp_w, s_interp_h,
                 lx, ly, lw, lh);
     s_dyn_last_swap_ticks = 0;
@@ -8182,7 +8298,7 @@ static int stereo_present(int w, int h) {
                             lx + start, ly, width, lh, 1, 1, 1);
     }
     pres_record(GL_PRES_STEREO, p->x, p->y, w, h, lx, ly, lw, lh);
-    hold_capture_drawable();
+    if (hold_needed()) hold_capture_drawable(); else hold_invalidate();
     latency_ring_mark(LAT_SWAP_BEGIN);
     gl_swap_with_osd();
     latency_ring_mark(LAT_SWAP_END);
@@ -9108,6 +9224,7 @@ static void present_bezel(int ww, int wh, int lx, int ly, int lw, int lh) {
 /* Defined with the present path below. */
 static void present_vram_impl(int disp_x, int disp_y, int w, int h, int linear,
                               int force_4_3);
+static int  present_wide_fbo_impl(int disp_x, int disp_y, int disp_h, int linear);
 
 int gl_renderer_present_hold_last(void) {
     GL_RT_SYNC("present_hold_last");
@@ -9117,8 +9234,12 @@ int gl_renderer_present_hold_last(void) {
         return 0;
     if (s_hold_kind == HOLD_NONE || !s_hold_tex) {
         /* No capture was taken (nothing asked for one at present time): the
-         * guest is frozen here, so the authoritative VRAM surface still holds
-         * the frame - present that band instead of a stale/blank image. */
+         * guest is frozen here, so the live surface still holds the frame -
+         * present it instead of a stale/blank image. Wide first: the wide
+         * surface is what the player saw. */
+        if (s_last_present_path == GL_PRES_WIDE && s_last_dw > 0 && s_last_dh > 0) {
+            if (present_wide_fbo_impl(s_last_dx, s_last_dy, s_last_dh, 1)) return 1;
+        }
         if (s_last_present_path != GL_PRES_VRAM || s_last_dw < 1 || s_last_dh < 1)
             return 0;
         present_vram_impl(s_last_dx, s_last_dy, s_last_dw, s_last_dh, 1, 0);
@@ -9477,7 +9598,12 @@ static int present_wide_fbo_impl(int disp_x, int disp_y, int disp_h, int linear)
         disp_x, disp_y,
         present_dirty_test(0, disp_y, VRAM_W - 1, disp_y + disp_h - 1));
     if (interp_pair) {
-        hold_capture_native_fbo(fbo, 0, disp_y, g_wide_w, disp_h, 0, linear);
+        /* hold-last: only for a consumer (see hold_needed) - this ran a
+         * 682x240x9 = 13.3 Mpx copy per frame for an image nothing read. */
+        if (hold_needed())
+            hold_capture_native_fbo(fbo, 0, disp_y, g_wide_w, disp_h, 0, linear);
+        else
+            hold_invalidate();
         interp_present_source_interval();
         gl_perf_present_exit(1);
         present_dirty_rect(0, disp_y, VRAM_W - 1, disp_y + disp_h - 1, 0);
@@ -9495,7 +9621,10 @@ static int present_wide_fbo_impl(int disp_x, int disp_y, int disp_h, int linear)
     pres_record(GL_PRES_WIDE, disp_x, disp_y, g_wide_w, disp_h, lx, ly, lw, lh);
     gpu_timeline_note(GTL_PRESENT, GTL_PATH_WIDE_FBO,
                       (uint32_t)disp_x | ((uint32_t)disp_y << 16));
-    hold_capture_drawable();
+    if (hold_needed())
+        hold_capture_native_fbo(fbo, 0, disp_y, g_wide_w, disp_h, 0, linear);
+    else
+        hold_invalidate();
     latency_ring_mark(LAT_SWAP_BEGIN);
     gl_swap_with_osd();
     latency_ring_mark(LAT_SWAP_END);

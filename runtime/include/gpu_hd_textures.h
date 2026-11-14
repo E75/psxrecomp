@@ -61,6 +61,14 @@ typedef struct GpuHdTextureMissDiag {
     int      footprint_key_known;   /* footprint_hash is a pack texture key */
     int      palette_key_known;     /* palette_hash is a pack palette key */
     uint64_t draws;                 /* misses recorded for this page */
+    /* Live upload residencies intersecting this page (newest first, up to 4):
+     * the rect the game ACTUALLY uploaded, which is what the key is computed
+     * from. Empty means nothing was tracked for this page at draw time. */
+    int      upload_count;
+    struct {
+        uint16_t x, y, width_words, height;
+        uint32_t hash;
+    } uploads[4];
 } GpuHdTextureMissDiag;
 int gpu_hd_textures_miss_diag(GpuHdTextureMissDiag* out, int capacity);
 /* Non-GL backends can observe native draws for dumping; replacements remain

@@ -928,7 +928,29 @@ size_t hd_texture_pack_keys(const HdTexturePack* pack,
     return count;
 }
 
-uint32_t hd_texture_crc32_words_le(const uint16_t* words, size_t word_count) {    if (!words && word_count != 0) return 0;
+size_t hd_texture_pack_uploads(const HdTexturePack* pack,
+                               HdTexturePackUpload* out,
+                               size_t capacity) {
+    if (!pack) return 0;
+    size_t count = 0;
+    /* Newest first: the most recent upload is the one a draw most likely
+     * samples, and a diagnostic wants the head of that list. */
+    for (auto it = pack->uploads.rbegin(); it != pack->uploads.rend(); ++it) {
+        if (it->fragments.empty()) continue;
+        if (out && count < capacity) {
+            out[count].hash = it->hash;
+            out[count].x = static_cast<uint16_t>(it->bounds.x);
+            out[count].y = static_cast<uint16_t>(it->bounds.y);
+            out[count].width_words = it->width;
+            out[count].height = it->height;
+        }
+        ++count;
+    }
+    return count;
+}
+
+uint32_t hd_texture_crc32_words_le(const uint16_t* words, size_t word_count) {
+    if (!words && word_count != 0) return 0;
     uint32_t crc = 0xFFFFFFFFu;
     for (size_t i = 0; i < word_count; ++i) {
         crc = crc_byte(crc, static_cast<uint8_t>(words[i] & 0xFFu));
@@ -1202,11 +1224,24 @@ int hd_texture_pack_match(HdTexturePack* pack,
         if (indexed == pack->upload_by_serial.end() || !indexed->second)
             continue;
         const Upload& upload = *indexed->second;
-        const auto record = pack->entries.find(make_key(upload.hash, palette_hash));
+        auto record = pack->entries.find(make_key(upload.hash, palette_hash));
+        if (record == pack->entries.end())
+            record = pack->entries.find(make_key(upload.hash, HD_TEXTURE_PALETTE_ANY));
         if (record == pack->entries.end()) continue;
         if (!covered_by_upload(upload, wanted)) continue;
         if (record->second.ambiguous) return HD_TEXTURE_LOOKUP_AMBIGUOUS;
-        if (candidate) return HD_TEXTURE_LOOKUP_AMBIGUOUS;
+        /* Several resident uploads can cover one query when a pack keys more
+         * than one upload geometry (a whole page plus the record that replaced
+         * part of it). Prefer the SMALLEST covering upload - the most specific
+         * one - and only call it ambiguous when two equally sized uploads
+         * disagree, so the result never depends on enumeration order. */
+        if (candidate) {
+            const unsigned area = unsigned{upload.width} * upload.height;
+            const unsigned best = unsigned{candidate->width} * candidate->height;
+            if (area == best && upload.hash != candidate->hash)
+                return HD_TEXTURE_LOOKUP_AMBIGUOUS;
+            if (area >= best) continue;
+        }
         candidate = &upload;
         candidate_entry = &record->second;
     }

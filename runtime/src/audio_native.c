@@ -34,6 +34,8 @@
 #if defined(_WIN32)
 #include <windows.h>
 #else
+#include <dirent.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -254,14 +256,18 @@ typedef struct AudioStreamState {
 static struct {
     int      inited;
     char     dir[CFG_PATH_MAX];
+    char     dir_cfg[CFG_PATH_MAX];  /* configured value, as written */
     char     dir_source[24];   /* "env" | "config" | "default" */
     char     str_dir[CFG_PATH_MAX];
+    char     str_cfg[CFG_PATH_MAX];
+    int      logged;
 
     /* CD-DA */
     AudioNativeCddaTrack tracks[CDDA_MAX_TRACKS];
     NativeWav track_wav[CDDA_MAX_TRACKS];
     int      track_count;
     int      native_on;
+    int      cdda_decoded;     /* track WAVs opened by the last configure */
     int      disc_audio_tracks;
     int      last_track;       /* 1-based disc track number, 0 = none */
 
@@ -313,31 +319,124 @@ static void iso_stem(const char* iso_path, char* out, size_t cap) {
  * (unit tests) falls back to the exe dir on first resolve. */
 static PsxPathRoots g_roots;
 static int          g_roots_ready;
+static int          g_roots_authoritative;   /* installed by main.cpp */
 
 static void resolve_dir(void);
 
 void audio_native_set_path_roots(const char* config_dir, const char* exe) {
     psx_path_roots_init(&g_roots, config_dir, exe);
     g_roots_ready = 1;
-    if (g.inited) resolve_dir();   /* roots arrived after a lazy init */
+    g_roots_authoritative = 1;
+    if (g.inited) {
+        g.logged = 0;
+        resolve_dir();   /* roots arrived after a lazy init */
+    }
+}
+
+static void ensure_roots(void) {
+    char exe[CFG_PATH_MAX];
+    if (g_roots_ready) return;
+    exe_dir(exe, sizeof exe);
+    psx_path_roots_init(&g_roots, NULL, exe);
+    g_roots_ready = 1;
+}
+
+/* Directory part of a path, without the trailing separator. */
+static void dir_of(const char* path, char* out, size_t cap) {
+    size_t n = path ? strlen(path) : 0;
+    while (n > 0 && path[n - 1] != '/' && path[n - 1] != '\\') --n;
+    if (n > 0) --n;
+    if (n == 0) { snprintf(out, cap, "."); return; }
+    if (n >= cap) n = cap - 1;
+    memcpy(out, path, n);
+    out[n] = '\0';
+}
+
+/* First anchor that holds `rel` as a real file. A directory that merely exists
+ * is NOT a candidate: an empty build-tree `assets/audio` must never shadow the
+ * checkout copy that actually holds the WAV, because docs/ASSET_PATHS.md
+ * resolves a key to an artefact. Order: game.toml project dir, exe dir, its
+ * parent, cwd (the shared rule in host_path_resolve.h). */
+static int find_audio_path(const char* rel, char* out, size_t cap) {
+    char candidate[PSX_PATH_RESOLVE_MAX];
+    const char* anchors[4];
+    int i;
+    if (!rel || !rel[0]) return 0;
+    ensure_roots();
+    if (psx_path_is_absolute(rel)) {
+        snprintf(candidate, sizeof candidate, "%s", rel);
+        psx_path_normalize(candidate);
+        if (psx_path_exists(candidate)) { snprintf(out, cap, "%s", candidate); return 1; }
+        return 0;
+    }
+    anchors[0] = g_roots.config_dir;
+    anchors[1] = g_roots.exe_dir;
+    anchors[2] = g_roots.exe_parent;
+    anchors[3] = g_roots.cwd;
+    for (i = 0; i < 4; ++i) {
+        if (!anchors[i][0] || (anchors[i][0] == '.' && anchors[i][1] == '\0'))
+            continue;   /* psx_path_normalize("") spells an empty root "." */
+        psx_path_join(candidate, sizeof candidate, anchors[i], rel);
+        psx_path_normalize(candidate);
+        if (psx_path_exists(candidate)) { snprintf(out, cap, "%s", candidate); return 1; }
+    }
+    return 0;
+}
+
+/* `<configured>/<name>` as a real file. `name` may be NULL for a file-valued
+ * key (an explicit `.raw` path). */
+static int find_audio_file(const char* configured, const char* name,
+                           char* out, size_t cap) {
+    char rel[PSX_PATH_RESOLVE_MAX];
+    if (!configured || !configured[0]) return 0;
+    if (name && name[0]) psx_path_join(rel, sizeof rel, configured, name);
+    else snprintf(rel, sizeof rel, "%s", configured);
+    return find_audio_path(rel, out, cap);
+}
+
+/* *.wav files in a directory, 0 when it is absent. Reported by `audio_state`
+ * so "the WAVs exist but nothing is native" is answerable in one query. */
+static int dir_count_wavs(const char* dir) {
+    int n = 0;
+    if (!dir || !dir[0]) return 0;
+#if defined(_WIN32)
+    WIN32_FIND_DATAA fd;
+    char pattern[CFG_PATH_MAX];
+    snprintf(pattern, sizeof pattern, "%s\\*.wav", dir);
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) ++n;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+#else
+    DIR* d = opendir(dir);
+    struct dirent* e;
+    if (!d) return 0;
+    while ((e = readdir(d)) != NULL) {
+        size_t l = strlen(e->d_name);
+        if (l > 4 && strcasecmp(e->d_name + l - 4, ".wav") == 0) ++n;
+    }
+    closedir(d);
+#endif
+    return n;
 }
 
 /* First existing candidate for a configured path, docs/ASSET_PATHS.md: the
- * game.toml project dir, the exe dir, its parent, then the cwd. main.cpp hands
- * the project root in at startup; without it (unit tests, a bare module) the
- * rule starts at the exe directory. The resolved path is recorded for the
- * `resolved_paths` command and logged once per key. */
-static void resolve_key(const char* key, const char* configured,
-                        const char* source, char* out, size_t cap) {
-    char exe[CFG_PATH_MAX];
-    if (!g_roots_ready) {
-        exe_dir(exe, sizeof exe);
-        psx_path_roots_init(&g_roots, NULL, exe);
-        g_roots_ready = 1;
-    }
+ * game.toml project dir, the exe dir, its parent, then the cwd. This is the
+ * directory-level answer used for the report fallback; the file-level lookup
+ * above decides what is actually opened. */
+static void resolve_key(const char* configured, const char* source,
+                        char* out, size_t cap) {
+    ensure_roots();
     psx_path_resolve(&g_roots, configured, out, cap);
-    psx_resolved_paths_note(key, configured, out, source);
+    (void)source;
 }
+
+static void xa_probe(void);
+static void raw_retry(void);
+static void raw_open(void);
+static void audio_native_log_sources(void);
 
 static void resolve_dir(void) {
     char configured[CFG_PATH_MAX] = "";
@@ -352,12 +451,26 @@ static void resolve_dir(void) {
         snprintf(configured, sizeof(configured), "assets/audio");
         snprintf(g.dir_source, sizeof(g.dir_source), "default");
     }
-    resolve_key("audio.cdda_dir", configured, g.dir_source, g.dir, sizeof(g.dir));
+    snprintf(g.dir_cfg, sizeof(g.dir_cfg), "%s", configured);
+    resolve_key(configured, g.dir_source, g.dir, sizeof(g.dir));
 
     if (!config_audio_key("str_raw", configured, sizeof(configured)))
         snprintf(configured, sizeof(configured), "assets/str");
-    resolve_key("audio.str_raw", configured, "config", g.str_dir,
-                sizeof(g.str_dir));
+    snprintf(g.str_cfg, sizeof(g.str_cfg), "%s", configured);
+    resolve_key(configured, "config", g.str_dir, sizeof(g.str_dir));
+
+    /* Load what the files themselves say: the movie WAV and the raw extent are
+     * known by name, so availability is decided here instead of waiting for a
+     * CD read. Each successful open re-points the reported dir at the copy that
+     * actually holds the file. */
+    xa_probe();
+    raw_retry();
+
+    if (g_roots_authoritative) {
+        psx_resolved_paths_note("audio.cdda_dir", g.dir_cfg, g.dir, g.dir_source);
+        psx_resolved_paths_note("audio.str_raw", g.str_cfg, g.str_dir, "config");
+    }
+    audio_native_log_sources();
 }
 
 void audio_native_init(void) {
@@ -393,20 +506,26 @@ void audio_native_cdda_configure(const AudioNativeCddaTrack* tracks, int count) 
     memcpy(g.tracks, tracks, (size_t)count * sizeof(tracks[0]));
     g.track_count = count;
 
-    int found = 0;
-    char stem[WAV_NAME_MAX], path[CFG_PATH_MAX];
+    int found = 0, decoded = 0;
+    char stem[WAV_NAME_MAX], name[WAV_NAME_MAX], path[CFG_PATH_MAX];
     for (int i = 0; i < count; ++i) {
         g.track_wav[i].ok = 0;
         iso_stem(tracks[i].iso_path, stem, sizeof(stem));
-        join_path(path, sizeof(path), g.dir, "");
-        snprintf(path + strlen(path), sizeof(path) - strlen(path), "%s.wav", stem);
-        if (wav_open(&g.track_wav[i], path)) { found = 1; continue; }
-        /* extract_xa.py's fallback name for a track with no matching entry. */
-        join_path(path, sizeof(path), g.dir, "");
-        snprintf(path + strlen(path), sizeof(path) - strlen(path),
-                 "cdda_track%02d.wav", i + 2);
-        if (wav_open(&g.track_wav[i], path)) { found = 1; }
+        path[0] = '\0';
+        snprintf(name, sizeof(name), "%s.wav", stem);
+        if (!find_audio_file(g.dir_cfg, name, path, sizeof(path))) {
+            /* extract_xa.py's fallback name for a track with no entry. */
+            snprintf(name, sizeof(name), "cdda_track%02d.wav", i + 2);
+            if (!find_audio_file(g.dir_cfg, name, path, sizeof(path)))
+                path[0] = '\0';
+        }
+        if (path[0] && wav_open(&g.track_wav[i], path)) {
+            if (!found) dir_of(path, g.dir, sizeof(g.dir));
+            found = 1;
+            decoded++;
+        }
     }
+    g.cdda_decoded = decoded;
 
     if (!found) {
         /* No extracted audio: leave the CD model exactly as it was. */
@@ -486,25 +605,50 @@ int audio_native_cdda_read_sector(uint32_t lba, uint8_t* out, int size) {
 
 /* ---------------------------------------------------------------- XA */
 
-void audio_native_xa_configure(uint32_t str_lba, uint32_t str_sectors,
-                               const char* iso_path) {
-    audio_native_init();
-    if (g.xa_on || !iso_path || !*iso_path) return;
-    char stem[WAV_NAME_MAX], path[CFG_PATH_MAX];
-    iso_stem(iso_path, stem, sizeof(stem));
-    join_path(path, sizeof(path), g.dir, "");
-    snprintf(path + strlen(path), sizeof(path) - strlen(path), "%s_ch01.wav", stem);
-    if (!wav_open(&g.xa, path)) return;
-    g.str_lba = str_lba;
-    g.str_sectors = str_sectors;
+/* Record an opened XA WAV as the live source. */
+static void xa_activate(const char* path) {
     g.xa_on = 1;
     g.xa_pos = 0;
     g.xa_edge = 0;
+    dir_of(path, g.dir, sizeof(g.dir));
     snprintf(g.xastream.source, sizeof(g.xastream.source), "native");
     snprintf(g.xastream.file, sizeof(g.xastream.file), "%s", g.xa.name);
     g.xastream.rate = g.xa.rate;
     g.xastream.channels = g.xa.channels;
     printf("audio: XA from %s (%s, %d Hz)\n", path, g.xa.name, g.xa.rate);
+}
+
+/* Availability at startup, before any CD read: the movie's decoded WAV is a
+ * known file name, so `audio_state` can say "native" (loaded, will be used)
+ * while `xa.active` still says whether it is playing. */
+static void xa_probe(void) {
+    char path[CFG_PATH_MAX];
+    if (g.xa_on || !g.dir_cfg[0]) return;
+    if (!find_audio_file(g.dir_cfg, "MOVIE_WE2002_STR_ch01.wav", path, sizeof(path)))
+        return;
+    if (!wav_open(&g.xa, path)) return;
+    xa_activate(path);
+}
+
+void audio_native_xa_configure(uint32_t str_lba, uint32_t str_sectors,
+                               const char* iso_path) {
+    audio_native_init();
+    if (!iso_path || !*iso_path) return;
+    if (g.xa_on) {
+        /* Already loaded by the startup probe; the ISO walk only supplies the
+         * extent the substitution guard needs. */
+        g.str_lba = str_lba;
+        g.str_sectors = str_sectors;
+        return;
+    }
+    char stem[WAV_NAME_MAX], name[WAV_NAME_MAX], path[CFG_PATH_MAX];
+    iso_stem(iso_path, stem, sizeof(stem));
+    snprintf(name, sizeof(name), "%s_ch01.wav", stem);
+    if (!find_audio_file(g.dir_cfg, name, path, sizeof(path))) return;
+    if (!wav_open(&g.xa, path)) return;
+    g.str_lba = str_lba;
+    g.str_sectors = str_sectors;
+    xa_activate(path);
 }
 
 /* Same linear resample as cdrom.c's xa_resample_to_44100 so the native stream
@@ -584,19 +728,20 @@ int audio_native_xa_fill(const int16_t* emulated, int frames, int16_t* out,
 #define STR_RAW_SECTOR  2352u
 
 /* Open the raw extent once. The header carries the LBA range, so the file also
- * works when no image is mounted to walk the ISO9660 tree. */
+ * works when no image is mounted to walk the ISO9660 tree. The configured value
+ * is a directory (`<dir>/WE2002.STR.raw`) or an explicit `.raw` file, and the
+ * file itself decides which anchor wins — an existing but empty directory is
+ * never enough. */
 static void raw_open(void) {
+    char path[CFG_PATH_MAX];
     if (g.raw_tried) return;
     g.raw_tried = 1;
 
-    char path[CFG_PATH_MAX];
-    size_t n = strlen(g.str_dir);
-    if (n > 4 && strcmp(g.str_dir + n - 4, ".raw") == 0) {
-        snprintf(path, sizeof(path), "%s", g.str_dir);
-    } else {
-        join_path(path, sizeof(path), g.str_dir, "");
-        snprintf(path + strlen(path), sizeof(path) - strlen(path), "WE2002.STR.raw");
-    }
+    size_t n = strlen(g.str_cfg);
+    const int file_key = (n > 4 && strcmp(g.str_cfg + n - 4, ".raw") == 0);
+    if (!find_audio_file(g.str_cfg, file_key ? NULL : "WE2002.STR.raw",
+                         path, sizeof(path)))
+        return;
 
     FILE* f = fopen(path, "rb");
     if (!f) return;
@@ -619,11 +764,38 @@ static void raw_open(void) {
     g.raw_start_lba = start;
     g.raw_sectors = sectors;
     g.raw_on = 1;
+    dir_of(path, g.str_dir, sizeof(g.str_dir));
     const char* base = path;
     for (const char* p = path; *p; ++p) if (*p == '/' || *p == '\\') base = p + 1;
     snprintf(g.raw_name, sizeof(g.raw_name), "%s", base);
     printf("audio: STR raw sectors from %s (%u sectors at LBA %u)\n",
            path, (unsigned)sectors, (unsigned)start);
+}
+
+/* Re-attempt the open after the path roots arrive (a first attempt may have
+ * looked in the wrong place). Keeps an already-open extent. */
+static void raw_retry(void) {
+    if (g.raw_on) return;
+    g.raw_tried = 0;
+    raw_open();
+}
+
+/* One startup line: the roots and what each stream will use. Everything is
+ * greppable under `audio:` — the acceptance run answers "why is nothing
+ * native" with `findstr audio:` on the log. */
+static void audio_native_log_sources(void) {
+    if (g.logged) return;
+    g.logged = 1;
+    printf("audio: roots cdda_dir=%s (wavs=%d, %s) str_raw=%s | "
+           "cdda=%s xa=%s str_raw=%s | files cdda=%s xa=%s raw=%s\n",
+           g.dir, dir_count_wavs(g.dir), g.dir_source, g.str_dir,
+           g.native_on ? "native" : (g.disc_audio_tracks > 0 ? "emulated-cd" : "none"),
+           g.xa_on ? "native" : "emulated-cd",
+           g.raw_on ? "native" : "disc",
+           g.cdda.file[0] ? g.cdda.file : "-",
+           g.xa_on ? g.xastream.file : "-",
+           g.raw_on ? g.raw_name : "-");
+    fflush(stdout);
 }
 
 void audio_native_str_raw_configure(uint32_t start_lba, uint32_t sectors) {
@@ -656,29 +828,37 @@ int audio_native_state_json(char* out, int cap) {
     const char* cdda_src = g.native_on ? "native"
         : (g.disc_audio_tracks > 0 ? "emulated-cd" : "none");
     const char* xa_src = g.xa_on ? "native" : "emulated-cd";
+    /* `source` = availability (the file is loaded and will be used), `active` =
+     * playing right now, `wavs` = decoded WAVs on disk in the reported dir. */
     return snprintf(out, (size_t)cap,
         "{\"cdda_dir\":\"%s\",\"cdda_dir_source\":\"%s\","
-        "\"cdda\":{\"source\":\"%s\",\"file\":\"%s\",\"rate\":%d,"
+        "\"cdda\":{\"source\":\"%s\",\"available\":%d,\"decoded\":%d,"
+        "\"file\":\"%s\",\"rate\":%d,"
         "\"channels\":%d,\"frames\":%llu,\"underruns\":%llu,\"track\":%d,"
         "\"tracks\":%d,\"disc_audio_tracks\":%d},"
-        "\"xa\":{\"source\":\"%s\",\"file\":\"%s\",\"rate\":%d,"
+        "\"xa\":{\"source\":\"%s\",\"available\":%d,"
+        "\"file\":\"%s\",\"rate\":%d,"
         "\"out_rate\":44100,\"channels\":%d,\"frames\":%llu,"
         "\"underruns\":%llu,\"active\":%d,\"str_lba\":%u},"
-        "\"str_raw\":{\"source\":\"%s\",\"file\":\"%s\",\"dir\":\"%s\","
+        "\"str_raw\":{\"source\":\"%s\",\"available\":%d,"
+        "\"file\":\"%s\",\"dir\":\"%s\","
         "\"start_lba\":%u,\"sectors\":%u,\"served\":%llu}}",
         g.dir, g.dir_source,
-        cdda_src, g.native_on ? g.cdda.file : "",
+        cdda_src, g.native_on ? 1 : 0, g.cdda_decoded,
+        g.native_on ? g.cdda.file : "",
         g.native_on ? 44100 : 0, g.native_on ? 2 : 0,
         (unsigned long long)g.cdda.frames,
         (unsigned long long)g.cdda.underruns,
         g.last_track, g.native_on ? g.track_count + 1 : 0,
         g.disc_audio_tracks,
-        xa_src, g.xa_on ? g.xastream.file : "",
+        xa_src, g.xa_on ? 1 : 0,
+        g.xa_on ? g.xastream.file : "",
         g.xa_on ? g.xa.rate : 0, g.xa_on ? g.xastream.channels : 0,
         (unsigned long long)g.xastream.frames,
         (unsigned long long)g.xastream.underruns,
         g.xa_edge, g.str_lba,
-        g.raw_on ? "native" : "disc", g.raw_on ? g.raw_name : "",
+        g.raw_on ? "native" : "disc", g.raw_on ? 1 : 0,
+        g.raw_on ? g.raw_name : "",
         g.str_dir, g.raw_start_lba, g.raw_sectors,
         (unsigned long long)g.raw_served);
 }

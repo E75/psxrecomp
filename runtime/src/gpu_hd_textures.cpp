@@ -310,26 +310,55 @@ void record_miss(const HdTextureDrawQuery& query) {
         }
     }
     miss.draws = 1;
+    /* The rects the game actually uploaded for this page: the missing piece when
+     * the CRC disagrees. Newest first, only those overlapping the page. */
+    if (session->beetle) {
+        HdTexturePackUpload uploads[16];
+        const size_t total = hd_texture_pack_uploads(session->beetle, uploads, 16);
+        const unsigned page_words = query.depth == HD_TEXTURE_DEPTH_16BPP ? 256u
+                                  : query.depth == HD_TEXTURE_DEPTH_8BPP ? 128u : 64u;
+        for (size_t i = 0; i < total && miss.upload_count < 4; ++i) {
+            const int ux = uploads[i].x, uy = uploads[i].y;
+            const int uw = uploads[i].width_words, uh = uploads[i].height;
+            if (ux + uw <= (int)query.page_x || ux >= (int)query.page_x + (int)page_words ||
+                uy + uh <= (int)query.page_y || uy >= (int)query.page_y + 256)
+                continue;
+            miss.uploads[miss.upload_count].x = uploads[i].x;
+            miss.uploads[miss.upload_count].y = uploads[i].y;
+            miss.uploads[miss.upload_count].width_words = uploads[i].width_words;
+            miss.uploads[miss.upload_count].height = uploads[i].height;
+            miss.uploads[miss.upload_count].hash = uploads[i].hash;
+            ++miss.upload_count;
+        }
+    }
     session->probes.push_back({miss.page_x, miss.page_y, miss.depth, 1});
-    /* Only a page the pack was plausibly authored for is worth printing: its
-     * palette is in the pack, a key is exact, or the page CRC shares 16+ bits
-     * with one (with a few hundred keys that is still ~1/65000 by chance). */
+    /* Always keep the first two pages (so `diag` is never empty on a run that
+     * drew textured prims), then only pages the pack was plausibly authored for:
+     * palette/CRC in the pack, or a 16+ bit CRC prefix match. */
+    const bool first_pages = session->misses.size() < 2;
     const bool interesting = miss.page_key_known || miss.footprint_key_known ||
                              miss.palette_key_known || miss.nearest_prefix_bits >= 16;
-    if (!interesting || session->misses.size() >= GPU_HD_MISS_DIAG_MAX) return;
+    if ((!interesting && !first_pages) || session->misses.size() >= GPU_HD_MISS_DIAG_MAX) return;
     session->misses.push_back(miss);
     std::fprintf(stderr,
         "psxrecomp: hd pack miss page=%u,%u depth=%u clut=%u,%u "
         "page_crc=%08X footprint_crc=%08X palette_crc=%08X "
-        "nearest=%08X-%08X (%d bits) page_key=%d footprint_key=%d palette_key=%d\n",
+        "nearest=%08X-%08X (%d bits) page_key=%d footprint_key=%d palette_key=%d"
+        " uploads=%d",
         miss.page_x, miss.page_y, miss.depth, miss.clut_x, miss.clut_y,
         miss.page_hash, miss.footprint_hash, miss.palette_hash,
         miss.nearest_texture_hash, miss.nearest_palette_hash,
         miss.nearest_prefix_bits, miss.page_key_known, miss.footprint_key_known,
-        miss.palette_key_known);
+        miss.palette_key_known, miss.upload_count);
+    for (int i = 0; i < miss.upload_count; ++i)
+        std::fprintf(stderr, " [%ux%u@%u,%u %08X]",
+                     miss.uploads[i].width_words, miss.uploads[i].height,
+                     miss.uploads[i].x, miss.uploads[i].y, miss.uploads[i].hash);
+    std::fprintf(stderr, "\n");
 }
 
-void dump_query(const HdTextureDrawQuery& query, int semi) {    if (!session->dump || session->dump_failed) return;
+void dump_query(const HdTextureDrawQuery& query, int semi) {
+    if (!session->dump || session->dump_failed) return;
     char error[256]{};
     const int status = duck_texture_pack_dump_draw(session->duck, &query, semi, error, sizeof(error));
     if (status == HD_TEXTURE_LOOKUP_FOUND) ++session->diag.dumped_textures;

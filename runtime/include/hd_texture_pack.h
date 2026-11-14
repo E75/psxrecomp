@@ -25,6 +25,12 @@ enum HdTextureLookupStatus {
     HD_TEXTURE_LOOKUP_AMBIGUOUS = 2
 };
 
+/* Palette half of a key that matches ANY live CLUT. A replacement named
+ * `<texture_hash>-ffffffff.png` applies when the game patches the palette at
+ * runtime (per-player head skin/hair, per-team kit colours), where the exact
+ * CLUT CRC cannot be known when the pack is authored. */
+#define HD_TEXTURE_PALETTE_ANY 0xFFFFFFFFu
+
 typedef struct HdTexturePackInfo {
     const char* asset_root;       /* valid until hd_texture_pack_destroy */
     const char* replacement_root; /* valid until hd_texture_pack_destroy */
@@ -98,6 +104,20 @@ typedef struct HdTexturePackKey {
 size_t hd_texture_pack_keys(const HdTexturePack* pack,
                             HdTexturePackKey* out,
                             size_t capacity);
+
+/* Diagnostic: the live upload residencies (rect + hash), newest first, so a
+ * live run can show which rectangle the game actually uploaded. Fills up to
+ * `capacity` and returns the total count. */
+typedef struct HdTexturePackUpload {
+    uint32_t hash;
+    uint16_t x, y;          /* VRAM word coords of the upload origin */
+    uint16_t width_words;
+    uint16_t height;
+} HdTexturePackUpload;
+
+size_t hd_texture_pack_uploads(const HdTexturePack* pack,
+                               HdTexturePackUpload* out,
+                               size_t capacity);
 
 /* Standard reflected IEEE CRC-32 (polynomial 0xEDB88320, initial/final XOR
  * 0xFFFFFFFF), feeding each uint16_t explicitly low byte then high byte. */

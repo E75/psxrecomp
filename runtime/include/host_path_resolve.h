@@ -123,15 +123,19 @@ static inline void psx_path_roots_init(PsxPathRoots *roots, const char *config_d
         snprintf(roots->exe_dir, sizeof roots->exe_dir, "%s", exe_dir);
         snprintf(roots->exe_parent, sizeof roots->exe_parent, "%s/..", exe_dir);
     }
-    psx_path_normalize(roots->config_dir);
-    psx_path_normalize(roots->exe_dir);
-    psx_path_normalize(roots->exe_parent);
+    /* Normalize only what was set: psx_path_normalize("") spells ".", which
+     * would turn an unset config_dir into a first candidate relative to the
+     * cwd - ahead of the exe anchors. That made a bare `assets/audio` resolve
+     * to an empty build-tree directory instead of the real one. */
+    if (roots->config_dir[0]) psx_path_normalize(roots->config_dir);
+    if (roots->exe_dir[0]) psx_path_normalize(roots->exe_dir);
+    if (roots->exe_parent[0]) psx_path_normalize(roots->exe_parent);
 #ifdef _WIN32
     if (_getcwd(roots->cwd, sizeof roots->cwd) == NULL) roots->cwd[0] = '\0';
 #else
     if (getcwd(roots->cwd, sizeof roots->cwd) == NULL) roots->cwd[0] = '\0';
 #endif
-    psx_path_normalize(roots->cwd);
+    if (roots->cwd[0]) psx_path_normalize(roots->cwd);
 }
 
 /* Resolve one configured path. `out` always receives the result (empty only for

@@ -10303,18 +10303,31 @@ static void handle_hd_pack(int id, const char *json)
      * to native art, with the CRC the pack would have needed. */
     GpuHdTextureMissDiag misses[GPU_HD_MISS_DIAG_MAX];
     const int miss_count = gpu_hd_textures_miss_diag(misses, GPU_HD_MISS_DIAG_MAX);
-    char diag[4096];
+    char diag[8192];
     int used = 0;
     diag[0] = 0;
     for (int i = 0; i < miss_count && i < GPU_HD_MISS_DIAG_MAX; ++i) {
         const GpuHdTextureMissDiag *m = &misses[i];
-        const int n = snprintf(diag + used, sizeof(diag) - (size_t)used,
+        char uploads[512];
+        int uused = 0;
+        uploads[0] = 0;
+        for (int u = 0; u < m->upload_count && u < 4; ++u) {
+            const int n = snprintf(uploads + uused, sizeof(uploads) - (size_t)uused,
+                "%s{\"x\":%u,\"y\":%u,\"w\":%u,\"h\":%u,\"hash\":\"%08x\"}",
+                uused ? "," : "", m->uploads[u].x, m->uploads[u].y,
+                m->uploads[u].width_words, m->uploads[u].height,
+                m->uploads[u].hash);
+            if (n <= 0 || (size_t)n >= sizeof(uploads) - (size_t)uused) break;
+            uused += n;
+        }
+        char entry[1024];
+        const int n = snprintf(entry, sizeof(entry),
             "%s{\"page_x\":%u,\"page_y\":%u,\"depth\":%u,\"clut_x\":%u,"
             "\"clut_y\":%u,\"uv\":[%u,%u,%u,%u],\"page_crc\":\"%08x\","
             "\"footprint_crc\":\"%08x\",\"palette_crc\":\"%08x\","
             "\"nearest\":\"%08x-%08x\",\"nearest_bits\":%d,"
             "\"page_key\":%s,\"footprint_key\":%s,\"palette_key\":%s,"
-            "\"draws\":%llu}",
+            "\"draws\":%llu,\"uploads\":[%s]}",
             used ? "," : "", m->page_x, m->page_y, m->depth, m->clut_x, m->clut_y,
             m->u_first, m->u_last, m->v_first, m->v_last, m->page_hash,
             m->footprint_hash, m->palette_hash, m->nearest_texture_hash,
@@ -10322,8 +10335,12 @@ static void handle_hd_pack(int id, const char *json)
             m->page_key_known ? "true" : "false",
             m->footprint_key_known ? "true" : "false",
             m->palette_key_known ? "true" : "false",
-            (unsigned long long)m->draws);
-        if (n <= 0 || (size_t)n >= sizeof(diag) - (size_t)used) break;
+            (unsigned long long)m->draws, uploads);
+        /* Append whole entries only: a truncated fragment would be invalid JSON. */
+        if (n <= 0 || (size_t)n >= sizeof(entry) ||
+            (size_t)used + (size_t)n >= sizeof(diag))
+            break;
+        memcpy(diag + used, entry, (size_t)n + 1);
         used += n;
     }
     send_fmt("{\"id\":%d,\"ok\":true,\"backend\":\"%s\",\"hd_pack_loaded\":%s,"
