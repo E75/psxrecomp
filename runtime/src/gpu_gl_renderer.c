@@ -2661,10 +2661,14 @@ static void pack_flush(void) {
 
     int x1 = x + w - 1, y1 = y + h - 1;
     int gx0, gy0, gx1, gy1;
-    vram_ext_note_pack_rect(x, y, x1, y1);
-    if (!vram_ext_region(&gx0, &gy0, &gx1, &gy1)) {
-        pack_rect(x, y, x1, y1, 0);
-    } else {
+    if (vram_ext_region(&gx0, &gy0, &gx1, &gy1)) {
+        /* The band rows are the framebuffer: redirect the whole overflow span
+         * even when this dirty rect is narrower (a tile-by-tile frame, or a
+         * pack triggered by a texture sample before the right of the frame was
+         * drawn). Packing extra columns only re-reads the target, which is
+         * authoritative for the band; the guest columns stay untouched. */
+        if (y1 >= gy0 && y <= gy1 && gx1 > x1) x1 = gx1;
+        vram_ext_note_pack_rect(x, y, x1, y1);
         /* Rows outside the framebuffer band: no redirect (texture writes). */
         pack_rect(x, y, x1, gy0 - 1, 0);
         pack_rect(x, gy1 + 1, x1, y1, 0);
@@ -2679,6 +2683,9 @@ static void pack_flush(void) {
          * a render-to-texture pass or a VRAM copy wrote inside the band rows)
          * stay guest too. */
         pack_rect(gx1 + 1 > x ? gx1 + 1 : x, by0, x1, by1, 0);
+    } else {
+        vram_ext_note_pack_rect(x, y, x1, y1);
+        pack_rect(x, y, x1, y1, 0);
     }
 
     p_glBindVertexArray(0);

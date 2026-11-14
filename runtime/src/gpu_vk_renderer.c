@@ -3401,6 +3401,19 @@ static void pack_flush(void) {
     int gx0, gy0, gx1, gy1;
     if (vram_ext_region(&gx0, &gy0, &gx1, &gy1)) {
         ex0 = VRAM_EXT_X0; ex1 = gx1; ey0 = gy0; ey1 = gy1;
+        /* The band rows are the framebuffer: redirect the whole overflow span
+         * even when this dirty rect is narrower (a tile-by-tile frame, or a
+         * pack triggered by a texture sample before the right of the frame was
+         * drawn). Only inside the band: outside it those columns are texture
+         * pages and must stay guest. Re-clipped to the window target. */
+        if (y >= gy0 && y1 <= gy1 && gx1 > x1) {
+            int nx = x, ny = y, nx1 = gx1, ny1 = y1;
+            if (tgt_clip(&nx, &ny, &nx1, &ny1)) {
+                x = nx; y = ny; x1 = nx1; y1 = ny1;
+                w = x1 - x + 1;
+                h = y1 - y + 1;
+            }
+        }
     }
     vram_ext_note_pack_rect(x, y, x1, y1);
     VkCommandBuffer cb = begin_oneshot();

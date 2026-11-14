@@ -267,8 +267,18 @@ static inline uint16_t blend_pixels(uint16_t back, uint16_t front, int mode) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Pixel write — central functions with mask + semi-trans             */
+/* Pixel write - central functions with mask + semi-trans             */
 /* ------------------------------------------------------------------ */
+
+/* [video] vram_extension: a DRAW into the native VRAM of the wide
+ * framebuffer's overflow columns goes to the host extension plane instead, so
+ * the guest texture pages at x 512..681 survive. Present-side mirrors (hi-res,
+ * wide) keep their own buffer; uploads never come through here. Returns the
+ * extension-plane index, or -1 when the pixel stays in guest VRAM. */
+static inline int native_plane_index(const RTarget *t, int x, int y) {
+    if (t->buf != g_vram || t->s != 1) return -1;
+    return vram_ext_plane_index(x, y);
+}
 
 /* Write an opaque (untextured) pixel with semi-transparency if enabled */
 static inline void put_opaque(const RTarget *t, int x, int y, uint16_t color) {
@@ -276,22 +286,27 @@ static inline void put_opaque(const RTarget *t, int x, int y, uint16_t color) {
     if (x < t->cx1 || x > t->cx2 || y < t->cy1 || y > t->cy2) return;
 
     int idx = y * t->w + x;
+    int plane = native_plane_index(t, x, y);
+    uint16_t *dst = plane >= 0 ? &vram_ext_host()[plane] : &t->buf[idx];
 
     /* Mask bit check: don't overwrite if dest has bit 15 set */
-    if (g_mask_check_bit && (t->buf[idx] & 0x8000)) return;
+    if (g_mask_check_bit && (*dst & 0x8000)) return;
 
     /* Semi-transparency: for untextured primitives, always blend when flag set */
     if (g_semi_trans_enabled) {
-        color = blend_pixels(t->buf[idx], color, g_semi_trans_mode);
+        color = blend_pixels(*dst, color, g_semi_trans_mode);
     }
 
     /* Mask bit set: force bit 15 on written pixel */
     if (g_mask_set_bit) color |= 0x8000;
 
-    t->buf[idx] = color;
-    /* Canonical VRAM only (hi-res / wide mirrors are present-side). */
-    if (t->buf == g_vram)
+    *dst = color;
+    if (plane >= 0) {
+        vram_ext_note_cpu_redirect(1);
+    } else if (t->buf == g_vram) {
+        /* Canonical VRAM only (hi-res / wide mirrors are present-side). */
         gpu_vram_dirty_mark_row((uint32_t)y);
+    }
 }
 
 /* Write a textured pixel — semi-trans only if texel bit 15 is set */
@@ -305,9 +320,11 @@ static inline void put_textured(const RTarget *t, int x, int y, uint16_t texel,
     if (texel == 0x0000) return;
 
     int idx = y * t->w + x;
+    int plane = native_plane_index(t, x, y);
+    uint16_t *dst = plane >= 0 ? &vram_ext_host()[plane] : &t->buf[idx];
 
     /* Mask bit check */
-    if (g_mask_check_bit && (t->buf[idx] & 0x8000)) return;
+    if (g_mask_check_bit && (*dst & 0x8000)) return;
 
     /* Color modulation: multiply texel by vertex color unless raw texture */
     uint16_t color;
@@ -327,15 +344,18 @@ static inline void put_textured(const RTarget *t, int x, int y, uint16_t texel,
 
     /* Semi-transparency: for textured primitives, only blend if texel has bit 15 */
     if (g_semi_trans_enabled && (texel & 0x8000)) {
-        color = blend_pixels(t->buf[idx], color, g_semi_trans_mode);
+        color = blend_pixels(*dst, color, g_semi_trans_mode);
     }
 
     /* Mask bit set */
     if (g_mask_set_bit) color |= 0x8000;
 
-    t->buf[idx] = color;
-    if (t->buf == g_vram)
+    *dst = color;
+    if (plane >= 0) {
+        vram_ext_note_cpu_redirect(1);
+    } else if (t->buf == g_vram) {
         gpu_vram_dirty_mark_row((uint32_t)y);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -730,10 +750,14 @@ void sw_copy_rect(int src_x, int src_y, int dst_x, int dst_y, int w, int h) {
             int dx = (dst_x + col) & (VRAM_WIDTH - 1);
             uint16_t pix = row_buf[col];
             /* Copy applies mask bit settings */
-            if (g_mask_check_bit && (g_vram[dy * VRAM_WIDTH + dx] & 0x8000))
+            int cplane = vram_ext_plane_index(dx, dy);
+            uint16_t *cdst = cplane >= 0 ? &vram_ext_host()[cplane]
+                                         : &g_vram[dy * VRAM_WIDTH + dx];
+            if (g_mask_check_bit && (*cdst & 0x8000))
                 continue;
             if (g_mask_set_bit) pix |= 0x8000;
-            g_vram[dy * VRAM_WIDTH + dx] = pix;
+            *cdst = pix;
+            if (cplane >= 0) vram_ext_note_cpu_redirect(1);
 
             if (hr_rows) {
                 int hdx_base = dx * s;

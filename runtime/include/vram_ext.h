@@ -89,6 +89,9 @@ uint16_t *vram_ext_host(void);
  * column that went into GUEST VRAM instead (must be 0; >0 means the pack wrote
  * over a texture page). */
 void vram_ext_note_pack_rect(int x0, int y0, int x1, int y1);
+/* A CPU-rasterizer draw pixel redirected into the extension plane (software
+ * backend / a GL fallback frame). Counted as a present-side redirect. */
+void vram_ext_note_cpu_redirect(uint64_t pixels);
 /* A texture fetch must never resolve through the redirect: pass 1 if a texture
  * or upload path resolved a coordinate through vram_ext_map_x(). Every texture
  * path in the tree passes the canonical guest plane, so this stays 0 and

@@ -271,6 +271,8 @@ static struct {
     uint64_t readback_bytes;
     uint64_t gate_off_frames;
     uint64_t presents;
+    uint64_t pack_calls;
+    int      pack_max_x1;              /* widest pack rect right edge seen */
     int      present_width;
 } s_stats;
 
@@ -294,9 +296,23 @@ void vram_ext_note_texture_read(int remapped) {
  * overwrote a texture page). The second number is the assertion. */
 void vram_ext_note_pack_rect(int x0, int y0, int x1, int y1) {
     if (x0 > x1 || y0 > y1) return;
+    s_stats.pack_calls++;
+    if (x1 > s_stats.pack_max_x1) s_stats.pack_max_x1 = x1;
     int gx0 = x0 > VRAM_EXT_X0 ? x0 : VRAM_EXT_X0;
-    if (gx0 > x1) return;
-
+    if (gx0 > x1) {
+        /* One-shot: the pack ran but its rect never reached the split, so the
+         * framebuffer's overflow columns were not redirected. Names the rect,
+         * the region and the bands for the next run. */
+        static int logged;
+        if (!logged && s_reg_on) {
+            logged = 1;
+            fprintf(stderr, "psxrecomp: vram extension: pack rect [%d,%d,%d,%d] "
+                            "below the split (%d); region [%d,%d,%d,%d] bands=%d\n",
+                    x0, y0, x1, y1, VRAM_EXT_X0,
+                    s_reg_x0, s_reg_y0, s_reg_x1, s_reg_y1, s_band_n);
+        }
+        return;
+    }
     uint64_t in_band = 0;
     for (int i = 0; i < s_band_n; i++) {
         int cy0 = y0 > s_band[i].y0 ? y0 : s_band[i].y0;
@@ -313,8 +329,23 @@ void vram_ext_note_pack_rect(int x0, int y0, int x1, int y1) {
             redirected = (uint64_t)(cx1 - gx0 + 1) * (uint64_t)(cy1 - cy0 + 1);
     }
     s_stats.present_reads_remapped += redirected;
-    if (in_band > redirected)
+    if (in_band > redirected) {
+        static int logged_rows;
         s_stats.guest_pack_pixels += in_band - redirected;
+        if (!logged_rows && s_reg_on) {
+            logged_rows = 1;
+            fprintf(stderr, "psxrecomp: vram extension: pack rect [%d,%d,%d,%d] "
+                            "writes %llu framebuffer px into guest VRAM; region "
+                            "[%d,%d,%d,%d] bands=%d\n",
+                    x0, y0, x1, y1,
+                    (unsigned long long)(in_band - redirected),
+                    s_reg_x0, s_reg_y0, s_reg_x1, s_reg_y1, s_band_n);
+        }
+    }
+}
+
+void vram_ext_note_cpu_redirect(uint64_t pixels) {
+    s_stats.present_reads_remapped += pixels;
 }
 
 void vram_ext_reset_stats(void) { memset(&s_stats, 0, sizeof s_stats); }
@@ -337,12 +368,15 @@ int vram_ext_debug_json(char *out, int cap) {
                     "\"present_reads_remapped\":%llu,"
                     "\"texture_reads_remapped\":%llu,"
                     "\"guest_pack_pixels\":%llu,"
-                    "\"gate_off_frames\":%llu,\"present_width\":%d}",
+                    "\"gate_off_frames\":%llu,\"present_width\":%d,"
+                    "\"pack_calls\":%llu,\"pack_max_x1\":%d}",
                     vram_ext_enabled(), vram_ext_driving(), s_backend,
                     on, x0, y0, x1, y1, bands, by0, by1,
                     (unsigned long long)s_stats.present_reads_remapped,
                     (unsigned long long)s_stats.texture_reads_remapped,
                     (unsigned long long)s_stats.guest_pack_pixels,
                     (unsigned long long)s_stats.gate_off_frames,
-                    s_stats.present_width);
+                    s_stats.present_width,
+                    (unsigned long long)s_stats.pack_calls,
+                    s_stats.pack_max_x1);
 }
