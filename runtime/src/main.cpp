@@ -1481,6 +1481,15 @@ static int           g_frame_generation_pref = 0;
 static int           g_present_thread_slots = 3;
 static int           s_render_thread_tried = 0;
 static int           g_video_vsync        = 1;
+/* [video] frame_rate: the presented frame rate the frame-rate enhancement asks
+ * for at a normal start (docs/FRAME_RATE.md). 60 = the OpenGL presenter blends
+ * this title's 30 Hz flips up to 60 presents/s; 30 = the game's own flips.
+ * A mod's activation may still switch it at runtime (F key, TCP frame_rate). */
+static int           g_video_frame_rate   = 60;
+/* The frame-rate enhancement's boot request (docs/FRAME_RATE.md): a mod's
+ * activation arms it before the window exists, apply_frame_rate_boot() resolves
+ * it against the final backend. Cleared at every session start. */
+static int           s_frame_rate_boot_hz = 0;
 static int           g_frame_interpolation = 0;
 static int           g_frame_interpolation_fps = 0;
 static int           g_frame_interpolation_blend =
@@ -1762,6 +1771,7 @@ static void reset_mod_owned_presentation(void) {
     g_bezel_path.clear();
     g_frame_interpolation_blend = g_frame_interpolation_blend_default;
     g_frame_interpolation_source = PSX_MOD_FRAME_SOURCE_VBLANK;
+    s_frame_rate_boot_hz = 0;
     /* The PGXP mod's request: only this session's activation may set it; the
      * renderer setup takes it and combines it with the [video] baseline
      * (pgxp_session.h). */
@@ -3784,6 +3794,55 @@ static void apply_present_cadence(void) {
         (void)SDL_RenderSetVSync(sdl_renderer, interval != 0 ? 1 : 0);
     latency_ring_set_present_mode(interval);
 #endif
+}
+
+/* Resolve s_frame_rate_boot_hz against the backend that will actually run. */
+static void apply_frame_rate_boot(void) {
+    if (!s_frame_rate_boot_hz) return;
+    /* [video] frame_rate = 30 is the user's opt-out; the blend path is OpenGL
+     * only, so a Vulkan/software backend keeps the game's own cadence. */
+    const int on = g_video_frame_rate >= 60 && g_video_renderer == 1;
+    g_frame_interpolation = on ? 1 : 0;
+    g_frame_interpolation_fps = on ? s_frame_rate_boot_hz : 0;
+    if (on) g_video_vsync = 0;
+}
+
+/* Boot-time frame-rate request from a mod's activation, before the window and
+ * the renderer exist: arm the presenter's temporal blend at `hz` without
+ * touching the backend choice. psx_mod_set_frame_interpolation() forces OpenGL
+ * (the only backend with the blend path), which is wrong for a mod that merely
+ * *prefers* 60 FPS: a Vulkan/software selection must stand. `hz` is 0 (the
+ * game's own flips) or 60. Returns 1 when the blend is armed for this run. */
+extern "C" int psx_frame_rate_boot(uint32_t hz) {
+    if (hz != 0 && hz != 60) return 0;
+    s_frame_rate_boot_hz = (int)hz;
+    apply_frame_rate_boot();
+    const int on = g_frame_interpolation && g_frame_interpolation_fps > 0;
+    if (on) {
+        std::printf("psxrecomp: frame rate: %d FPS presentation "
+                    "(blending the guest's flips; game logic stays stock)\n",
+                    g_frame_interpolation_fps);
+    } else if (hz) {
+        std::printf("psxrecomp: frame rate %u FPS needs the OpenGL renderer "
+                    "(selected backend %d); presenting the game's own flips\n",
+                    (unsigned)hz, g_video_renderer);
+    }
+    return on;
+}
+
+/* Resolved frame-rate presentation state, for a mod's own diagnostics and the
+ * debug server's `frame_rate` command (docs/FRAME_RATE.md). Any pointer may be
+ * NULL. `target_hz` 0 means "follow the display refresh"; `supported` is 1 only
+ * while the OpenGL presenter is the live backend. */
+extern "C" void psx_frame_rate_state(int *enabled, int *target_hz,
+                                     double *host_hz, int *source,
+                                     int *config_hz, int *supported) {
+    if (enabled)   *enabled   = g_frame_interpolation ? 1 : 0;
+    if (target_hz) *target_hz = g_frame_interpolation_fps;
+    if (host_hz)   *host_hz   = g_host_refresh_hz;
+    if (source)    *source    = g_frame_interpolation_source;
+    if (config_hz) *config_hz = g_video_frame_rate;
+    if (supported) *supported = g_gl_active ? 1 : 0;
 }
 
 /* Live frame-rate switch for a mod hotkey: 0 = the guest's own flips at stock cadence, >= 60 = the presenter
@@ -16101,6 +16160,7 @@ int main(int argc, char** argv) {
                         psx_guest_cycle_scale_config());
             g_present_thread = gc.runtime.video_present_thread ? 1 : 0;
             g_video_vsync       = gc.runtime.video_vsync;
+            g_video_frame_rate  = gc.runtime.video_frame_rate;
             g_frame_interpolation = gc.runtime.video_frame_interpolation ? 1 : 0;
             g_frame_interpolation_fps = gc.runtime.video_frame_interpolation_fps;
             g_fmv_skip_total_table = gc.runtime.video_fmv_skip_total_table;
@@ -18191,6 +18251,9 @@ int main(int argc, char** argv) {
      * including BIOS instances that have no [game]-block config. */
     if (cli_debug_port >= 0) debug_port      = (uint16_t)cli_debug_port;
     if (cli_renderer   >= 0) g_video_renderer = cli_renderer;
+    /* A --renderer override lands after mod activation: re-arm the frame-rate
+     * boot request against the final backend (docs/FRAME_RATE.md). */
+    apply_frame_rate_boot();
     if (cli_window_title)    window_title     = cli_window_title;
     if (cli_memcard_dir) {
         memcard_dir = std::filesystem::path(cli_memcard_dir);

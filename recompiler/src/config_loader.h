@@ -663,6 +663,12 @@ struct RuntimeConfig {
     int                   video_vsync             = 1;
     bool                  video_frame_interpolation = false;
     int                   video_frame_interpolation_fps = 0; // 0 = display refresh
+    // frame_rate: the presented frame rate the frame-rate enhancement asks for
+    // at a normal start, for a title that flips once per second VBlank (30 Hz).
+    // 60 (default) = the OpenGL presenter blends the flips up to 60 presents/s;
+    // 30 = the game's own flips (opt-out). The game logic stays at stock speed
+    // either way. See docs/FRAME_RATE.md.
+    int                   video_frame_rate = 60;
     // offer_frame_interpolation: expose the generic interpolation controls
     // through recomp-ui Settings. Defaults true for compatibility. A game
     // migrating interpolation into its mod catalog sets this false; stale

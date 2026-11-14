@@ -8724,6 +8724,23 @@ static void handle_gl_interp(int id, const char *json)
              (unsigned long long)sc[4], lead[0], lead[1]);
 }
 
+/* frame_rate: the frame-rate enhancement's live state and switch
+ * (docs/FRAME_RATE.md). {"cmd":"frame_rate","hz":60|30} switches the presenter
+ * (60 = blend this title's 30 Hz flips up to 60 presents/s, 30 = the game's own
+ * cadence); no "hz" is a read-only report. The game's plugin owns the
+ * semantics, so the SDL F key and this command stay one state. */
+static void handle_frame_rate(int id, const char *json)
+{
+    extern int we2002_frame_rate_debug_json(const char *json, char *out, int cap);
+    char buf[512];
+    const int n = we2002_frame_rate_debug_json(json, buf, (int)sizeof buf);
+    if (n < 0 || n >= (int)sizeof buf) {
+        send_err(id, "frame_rate: refused (needs the OpenGL presenter, not netplay, hz 30|60)");
+        return;
+    }
+    send_fmt("{\"id\":%d,\"ok\":true,%s}", id, buf);
+}
+
 /* render_pass_stats: host-timed render passes (docs/RENDER_PASSES.md).
  * Counters are per mod session; `dropped` counts device stores a pass tried
  * to make (SPU key-ons, CD, timers, ...), which never reach the device. */
@@ -15895,6 +15912,7 @@ static const CmdEntry s_commands[] = {
     { "gl_frame_perf",     handle_gl_frame_perf },
     { "gl_ws_ablate",      handle_gl_ws_ablate },
     { "gl_interp",         handle_gl_interp },
+    { "frame_rate",        handle_frame_rate },
     { "render_pass_stats", handle_render_pass_stats },
     { "openxr_stats", handle_openxr_stats },
     { "openxr_views", handle_openxr_views },

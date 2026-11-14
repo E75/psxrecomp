@@ -946,6 +946,14 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
             rt.video_offer_frame_interpolation =
                 toml::find<bool>(video, "offer_frame_interpolation");
         }
+        if (video.contains("frame_rate")) {
+            const auto hz = toml::find<int64_t>(video, "frame_rate");
+            if (hz != 30 && hz != 60)
+                throw std::runtime_error(fmt::format(
+                    "[video] frame_rate must be 60 (blend the game's flips up "
+                    "to 60 presents/s) or 30 (the game's own cadence): {}", hz));
+            rt.video_frame_rate = static_cast<int>(hz);
+        }
         if (video.contains("aspect_ratio")) {
             const auto mode = toml::find<std::string>(video, "aspect_ratio");
             int n = 0, d = 0;
