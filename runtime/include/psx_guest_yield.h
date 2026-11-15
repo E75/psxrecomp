@@ -13,8 +13,7 @@
  *   Advances guest time to the next VBlank edge (device servicing included, so
  *   every timer/CD/DMA deadline in between is met exactly as if the guest had
  *   spun), then delivers the pending interrupt through the same path a guest
- *   block leader uses: EPC is the guest $ra, the handler runs, and a
- *   same-thread resume restores the interrupted GPRs. Returns 1 when guest time
+ *   block leader uses and returns to the C body. Returns 1 when guest time
  *   advanced, 0 when it refused (no CPU, frozen guest time, already inside an
  *   exception, or re-entered from a handler).
  *
@@ -26,6 +25,25 @@
  *
  *   The caller re-checks its guest condition after the call; a helper that
  *   returned 0 must not be retried in a tight loop (nothing can progress).
+ *
+ * Host-continuation contract (docs/YIELD_CONTINUATION.md)
+ *   A dispatcher-entered C body has no guest resume point, and the delivery has
+ *   no "run until pc" semantics to satisfy: the value handed to
+ *   psx_check_interrupts_at() is only a CANDIDATE EPC. With
+ *   PSX_C_BODY_YIELD=1 (or we_yield_set_c_body_yield(1), default off) the yield
+ *   hands the delivery NO guest resume PC instead of the C frame's stale $ra,
+ *   so the delivery selects the legacy host sentinel PSX_EXC_SENTINEL_PC
+ *   (0x80000048) as EPC: the ISR's RFE stops at the host instead of entering
+ *   guest code, the epilogue restores the interrupted GPRs and returns, and the
+ *   yield restores cpu->pc to the value the caller had. Without the flag the
+ *   historical path (stale $ra as EPC) is kept bit-for-bit, so the boot can A/B
+ *   the two.
+ *
+ *   Cost when on: one delivery per yield, exactly the cycles the advance
+ *   charged (the same amount a real spin would have consumed to the edge), and
+ *   no guest-visible difference beyond the ISR the spin was waiting for. Not
+ *   resumable: if the yielded ISR switches threads the scheduler escapes and
+ *   the C frame is abandoned (the trace line prints "enter" without "return").
  *
  * we_wait_guest_word(cpu, addr, mask, want, max_vblanks)
  *   The whole loop, bounded: yield until (word & mask) == want, at most
@@ -44,6 +62,26 @@ extern "C" {
 #endif
 
 struct CPUState;
+
+/* A/B switch for the host-continuation contract. PSX_C_BODY_YIELD=1 (or any
+ * value not starting with '0') turns it on; unset/0 keeps the historical
+ * behaviour. Latched on first query; we_yield_set_c_body_yield() overrides it
+ * (game.toml [runtime] c_body_yield, wired by the host). */
+int  we_yield_c_body_yield_enabled(void);
+void we_yield_set_c_body_yield(int on);
+
+/* Counters for the boot A/B (docs/YIELD_CONTINUATION.md). */
+typedef struct WeYieldStats {
+    uint64_t yields;             /* calls that advanced guest time */
+    uint64_t deliveries;         /* hardware deliveries observed during yields */
+    uint64_t legacy_resume;      /* plausible $ra handed over as EPC (flag off) */
+    uint64_t pc_restored;        /* cpu->pc put back to the C body's value */
+    uint64_t refused_no_cpu;
+    uint64_t refused_nested;
+    uint64_t refused_frozen;
+    uint64_t refused_exception;
+} WeYieldStats;
+void we_yield_stats(WeYieldStats *out);
 
 uint32_t we_yield_until_vblank(struct CPUState* cpu);
 int we_wait_guest_word(struct CPUState* cpu, uint32_t addr, uint32_t mask,

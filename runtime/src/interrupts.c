@@ -2317,7 +2317,16 @@ void psx_check_interrupts_at(CPUState* cpu, uint32_t resume_pc) {
      * stored into the thread's TCB architecturally by the BIOS handler, and a
      * later thread switch resumes on it (the PC=0 class). Only substituted when
      * the value is not a plausible guest PC, so guest edges are unchanged. */
-    if (g_psx_guest_call_depth != 0 && !psx_guest_pc_plausible(resume_pc)) {
+    /* A C-body yield (psx_guest_yield.h) delivers through the legacy host
+     * sentinel on purpose: it has no guest resume point, so substituting the
+     * enclosing host call's continuation here would resume guest code and
+     * abandon the yielding C frame. Consume-on-read, so a longjmp out of the
+     * delivery (thread switch) cannot leave the flag armed. */
+    extern int g_psx_host_continuation;
+    const int host_continuation = g_psx_host_continuation;
+    g_psx_host_continuation = 0;
+    if (!host_continuation && g_psx_guest_call_depth != 0 &&
+        !psx_guest_pc_plausible(resume_pc)) {
         /* This is the host call's return boundary (the dispatch passes the call
          * sentinel here): the callee returned. Record it positively - see
          * psx_guest_call.h. */

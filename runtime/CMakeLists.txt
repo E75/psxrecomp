@@ -1652,6 +1652,13 @@ if(BUILD_TESTING)
              WORKING_DIRECTORY
                  ${CMAKE_CURRENT_BINARY_DIR}/sio_card_protocol_scratch)
 
+    # C-body yield: the host-continuation contract (docs/YIELD_CONTINUATION.md).
+    # Includes src/psx_guest_yield.c verbatim and models the delivery's EPC
+    # selection, so it needs no runtime link.
+    add_executable(yield_continuation_test tests/test_yield_continuation.c)
+    target_include_directories(yield_continuation_test PRIVATE include)
+    add_test(NAME yield_continuation_test COMMAND yield_continuation_test)
+
     # POSIX-only: dlopen()s a fixture .so out of a synthetic cache tree, so it
     # cannot link under MinGW/MSVC (-ldl). run_overlay_posix_test.sh already
     # stages the cache tree, builds the fixture and the test, and runs it — so
