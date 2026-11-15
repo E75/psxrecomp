@@ -14,6 +14,13 @@ struct CPUState;
 void psx_snapshot_host_call_begin(void);
 void psx_snapshot_host_call_end(void);
 void psx_snapshot_host_call_reset(void);
+/* Read/restore the latch above. A structured escape (the exception sentinel or
+ * the scheduler) unwinds a psx_mod_call_guest_ex in flight and skips its
+ * psx_snapshot_host_call_end(), leaving the latch raised - which silently
+ * disables snapshot safety (psx_irq_resume_context_snapshot_safe_at) forever.
+ * A host-continuation delivery (psx_guest_yield.h) saves and restores it. */
+unsigned psx_snapshot_host_call_depth(void);
+void psx_snapshot_host_call_depth_set(unsigned depth);
 
 /* IRQ bit positions in I_STAT/I_MASK */
 #define IRQ_VBLANK  0

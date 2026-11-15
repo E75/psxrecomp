@@ -125,11 +125,35 @@ uint32_t we_yield_until_vblank(struct CPUState* cpu)
          * guest PC of its own, so cpu->pc is put back to the value the caller
          * had - the live host chain IS the continuation. */
         const uint32_t saved_dirty_pc = g_dirty_safe_resume_pc;
+        /* Depth/state latches an escape would leave raised. The sentinel exit
+         * longjmps out of the handler, which skips psx_mod_call_guest_ex()'s
+         * epilogue (mod_guest_services.c 220-221): the guest call frame and the
+         * snapshot-safety latch it raised there are never unwound. Measured on
+         * the live boot: depth grew by one across every yield (#2 2->3, #3
+         * 4->5, #4 7->8) until later calls were mis-nested and the boot wedged.
+         * psx_check_interrupts already restores its own g_psx_dispatch_depth for
+         * this exact reason (interrupts.c 1885-1891); these two are ours. The
+         * abandoned s_call_resume[]/s_sentinel[] slots above the restored depth
+         * are safe: every index < depth is rewritten by the next enter. */
+        const int saved_call_depth = g_psx_guest_call_depth;
+        const unsigned saved_snap_depth = psx_snapshot_host_call_depth();
+
         g_dirty_safe_resume_pc = 0;
         g_psx_host_continuation = 1;
         psx_check_interrupts_at(cpu, 0u);
         g_psx_host_continuation = 0;
         g_dirty_safe_resume_pc = saved_dirty_pc;
+
+        /* Invariant: depth out == depth in, whether the delivery ran a nested
+         * ISR, refused, or found nothing pending. */
+        if (g_psx_guest_call_depth != saved_call_depth) {
+            g_psx_guest_call_depth = saved_call_depth;
+            s_stats.call_depth_restored++;
+        }
+        if (psx_snapshot_host_call_depth() != saved_snap_depth) {
+            psx_snapshot_host_call_depth_set(saved_snap_depth);
+            s_stats.snapshot_depth_restored++;
+        }
         if (cpu->pc != entry_pc) {
             cpu->pc = entry_pc;
             s_stats.pc_restored++;

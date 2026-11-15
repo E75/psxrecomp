@@ -654,6 +654,10 @@ void psx_snapshot_host_call_end(void) {
     if (s_snapshot_host_call_depth) --s_snapshot_host_call_depth;
 }
 void psx_snapshot_host_call_reset(void) { s_snapshot_host_call_depth = 0; }
+unsigned psx_snapshot_host_call_depth(void) { return s_snapshot_host_call_depth; }
+void psx_snapshot_host_call_depth_set(unsigned depth) {
+    s_snapshot_host_call_depth = depth;
+}
 
 uint32_t psx_irq_resume_context_snapshot_pc(void)
 {

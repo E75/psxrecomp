@@ -45,6 +45,12 @@
  *   resumable: if the yielded ISR switches threads the scheduler escapes and
  *   the C frame is abandoned (the trace line prints "enter" without "return").
  *
+ *   Depth invariant: g_psx_guest_call_depth and the snapshot-safety latch are
+ *   the same on return as on entry, always. The host-sentinel exit unwinds a
+ *   psx_mod_call_guest_ex() the ISR had in flight without running its epilogue,
+ *   so both would otherwise grow by one per yield until later calls were
+ *   mis-nested (measured on the live boot: 2->3, 4->5, 7->8, then wedge).
+ *
  * we_wait_guest_word(cpu, addr, mask, want, max_vblanks)
  *   The whole loop, bounded: yield until (word & mask) == want, at most
  *   max_vblanks VBlank edges (0 = check once without yielding). Returns 1 when
@@ -76,6 +82,8 @@ typedef struct WeYieldStats {
     uint64_t deliveries;         /* hardware deliveries observed during yields */
     uint64_t legacy_resume;      /* plausible $ra handed over as EPC (flag off) */
     uint64_t pc_restored;        /* cpu->pc put back to the C body's value */
+    uint64_t call_depth_restored;     /* g_psx_guest_call_depth unwound from an escape */
+    uint64_t snapshot_depth_restored; /* psx_snapshot_host_call_depth likewise */
     uint64_t refused_no_cpu;
     uint64_t refused_nested;
     uint64_t refused_frozen;

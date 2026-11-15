@@ -76,6 +76,12 @@ static int      s_isr_probe;          /* make the ISR call the yield */
 static int      s_isr_probe_ret;
 static int      s_reenter_probe;      /* make the delivery call the yield first */
 static int      s_reenter_probe_ret;
+static int      s_isr_abandoned_calls;/* host calls the ISR leaves in flight */
+static unsigned s_snapshot_depth;     /* psx_snapshot_host_call_* latch */
+
+/* The snapshot-safety latch (interrupts.c psx_snapshot_host_call_begin/end). */
+unsigned psx_snapshot_host_call_depth(void) { return s_snapshot_depth; }
+void psx_snapshot_host_call_depth_set(unsigned depth) { s_snapshot_depth = depth; }
 
 uint32_t psx_read_word(uint32_t addr)
 {
@@ -121,6 +127,18 @@ static void fake_isr(struct CPUState *cpu)
     s_i_stat = 0u;                       /* handler acked I_STAT */
     cpu->pc = s_epc_installed;           /* ReturnFromException: jr k0 (+ rfe) */
     s_isr_exit_pc = cpu->pc;
+    /* The handler also runs guest code that makes a host call. Its
+     * ReturnFromException longjmps back to psx_check_interrupts, which skips
+     * psx_mod_call_guest_ex()'s epilogue (mod_guest_services.c 220-221): the
+     * call frame and the snapshot latch it raised are never unwound. This is
+     * the measured leak (live boot: depth 2->3, 4->5, 7->8, then wedge). */
+    {
+        int n;
+        for (n = 0; n < s_isr_abandoned_calls; n++) {
+            s_snapshot_depth++;          /* psx_snapshot_host_call_begin() */
+            g_psx_guest_call_depth++;    /* psx_guest_call_enter() */
+        }
+    }
     if (s_isr_probe) {
         s_isr_probe = 0;
         s_isr_probe_ret = (int)we_yield_until_vblank(cpu);
@@ -253,6 +271,9 @@ static void machine_init(uint32_t pc, uint32_t ra, uint32_t sp,
     s_isr_probe_ret = -1;
     s_reenter_probe = 0;
     s_reenter_probe_ret = -1;
+    s_isr_abandoned_calls = 1;       /* every delivery leaves one host call */
+    g_psx_guest_call_depth = 0;
+    s_snapshot_depth = 0;
     s_yield_depth = 0;
 }
 
@@ -307,9 +328,13 @@ static void test_sentinel_delivery_returns(void)
     CHECK(s_watch_word == 0u);                   /* the word the spin waited on */
     CHECK(psx_get_cycle_count() - before == to_edge);  /* credited once, no more */
     CHECK(s_yield_depth == 0);
+    CHECK(g_psx_guest_call_depth == 0);   /* enter depth == return depth */
+    CHECK(s_snapshot_depth == 0u);        /* snapshot latch likewise */
     we_yield_stats(&st);
     CHECK(st.yields == 1);
     CHECK(st.deliveries == 1);
+    CHECK(st.call_depth_restored == 1);   /* the ISR's abandoned call unwound */
+    CHECK(st.snapshot_depth_restored == 1);
     CHECK(st.pc_restored == 0);   /* cpu->pc was already 0: nothing to put back */
 }
 
@@ -329,6 +354,10 @@ static void test_legacy_ra_is_the_wedge(void)
     CHECK(s_isr_runs == 1);
     CHECK(s_cpu.pc == 0x8004C288u);               /* guest resumes there, not C */
     CHECK(s_watch_word == 0u);
+    /* Flag off keeps the historical path byte for byte, leak included: this is
+     * the A/B baseline, and it must not silently become the fixed path. */
+    CHECK(g_psx_guest_call_depth == 1);           /* one call left in flight */
+    CHECK(s_snapshot_depth == 1u);
     we_yield_set_c_body_yield(1);
 }
 
@@ -341,11 +370,14 @@ static void test_second_yield(void)
 
     CHECK(we_yield_until_vblank(&s_cpu) == 1);
     CHECK(s_isr_runs == 1);
+    CHECK(g_psx_guest_call_depth == 0);
     CHECK(we_yield_until_vblank(&s_cpu) == 1);
     CHECK(s_isr_runs == 2);                       /* the next edge raised it again */
     CHECK(s_deliver_calls == 2);
     CHECK(s_cpu.pc == 0u);
     CHECK(s_cpu.gpr[31] == 0x8004C288u);
+    CHECK(g_psx_guest_call_depth == 0);            /* flat across both yields */
+    CHECK(s_snapshot_depth == 0u);
 }
 
 static void test_nested_yield(void)
@@ -366,6 +398,8 @@ static void test_nested_yield(void)
     we_yield_stats(&after);
     CHECK(after.refused_nested == before.refused_nested + 1u);
     CHECK(after.deliveries == before.deliveries + 1u);
+    CHECK(g_psx_guest_call_depth == 0);           /* nested refusal: unchanged */
+    CHECK(after.call_depth_restored == before.call_depth_restored + 1u);
 
     printf("T5  a yield from inside the ISR returns 0 as well\n");
     machine_init(0u, 0x8004C288u, 0x801FFEE0u, 1u, 1u << IRQ_VBLANK,
@@ -376,6 +410,7 @@ static void test_nested_yield(void)
     CHECK(s_isr_probe_ret == 0);
     CHECK(s_isr_runs == 1);
     CHECK(s_cpu.pc == 0u);
+    CHECK(g_psx_guest_call_depth == 0);           /* in-ISR refusal: unchanged */
 
     printf("T6  the depth counter is clear again after every return\n");
     machine_init(0u, 0x8004C288u, 0x801FFEE0u, 1u, 1u << IRQ_VBLANK,
@@ -384,9 +419,12 @@ static void test_nested_yield(void)
     s_yield_depth = 1;                            /* forced re-entry */
     CHECK(we_yield_until_vblank(&s_cpu) == 0);
     CHECK(s_deliver_calls == 0);
+    CHECK(g_psx_guest_call_depth == 0);
     s_yield_depth = 0;
     CHECK(we_yield_until_vblank(&s_cpu) == 1);
     CHECK(s_isr_runs == 1);
+    CHECK(g_psx_guest_call_depth == 0);
+    CHECK(s_yield_depth == 0);
 }
 
 static void test_no_delivery(void)
@@ -406,16 +444,19 @@ static void test_no_delivery(void)
     CHECK(s_cpu.pc == 0u);
     CHECK(s_cpu.gpr[31] == 0x8004C288u);
     CHECK(g_irq_deliver_count == 0u);
+    CHECK(g_psx_guest_call_depth == 0);   /* no delivery: nothing to unwind */
+    CHECK(s_snapshot_depth == 0u);
 }
 
 static void test_refusals(void)
 {
-    WeYieldStats st;
+    WeYieldStats before, after;
 
     printf("T8  frozen guest time and in-exception refuse without advancing\n");
     machine_init(0u, 0x8004C288u, 0x801FFEE0u, 1u, 1u << IRQ_VBLANK,
                  1u << IRQ_VBLANK);
     we_yield_set_c_body_yield(1);
+    we_yield_stats(&before);
 
     g_psx_guest_time_frozen = 1;
     CHECK(we_yield_until_vblank(&s_cpu) == 0);
@@ -428,9 +469,12 @@ static void test_refusals(void)
     CHECK(psx_get_cycle_count() == 0u);
     s_in_exception = 0;
 
-    we_yield_stats(&st);
-    CHECK(st.refused_frozen == 1);
-    CHECK(st.refused_exception == 1);
+    CHECK(g_psx_guest_call_depth == 0);
+    CHECK(s_snapshot_depth == 0u);
+    we_yield_stats(&after);
+    CHECK(after.refused_frozen == before.refused_frozen + 1u);
+    CHECK(after.refused_exception == before.refused_exception + 1u);
+    CHECK(after.call_depth_restored == before.call_depth_restored); /* no delivery */
 }
 
 static void test_wait_word(void)
@@ -441,6 +485,8 @@ static void test_wait_word(void)
     we_yield_set_c_body_yield(1);
     CHECK(we_wait_guest_word(&s_cpu, s_watch_addr, 0xFFFFu, 0u, 3u) == 1);
     CHECK(s_isr_runs == 1);
+    CHECK(g_psx_guest_call_depth == 0);
+    CHECK(s_snapshot_depth == 0u);
 
     printf("T10 we_wait_guest_word: an unset word times out after max_vblanks\n");
     machine_init(0u, 0x8004C288u, 0x801FFEE0u, 1u, 1u << IRQ_VBLANK,
@@ -448,11 +494,51 @@ static void test_wait_word(void)
     we_yield_set_c_body_yield(1);
     CHECK(we_wait_guest_word(&s_cpu, 0x8005FD60u, 0xFFFFu, 2u, 2u) == 0);
     CHECK(s_isr_runs == 2);
+    CHECK(g_psx_guest_call_depth == 0);   /* two deliveries, still flat */
+    CHECK(s_snapshot_depth == 0u);
+}
+
+static void test_depth_flat_loop(void)
+{
+    WeYieldStats before, after;
+    const int entry_depth = 4;      /* the C body sits inside a host-call chain */
+    int i;
+
+    printf("T12 8 consecutive yields: depth flat at %d, GPRs intact each time\n",
+           entry_depth);
+    machine_init(0u, 0x8004C288u, 0x801FFEE0u, 1u, 1u << IRQ_VBLANK,
+                 1u << IRQ_VBLANK);
+    we_yield_set_c_body_yield(1);
+    g_psx_guest_call_depth = entry_depth;
+    s_snapshot_depth = 0u;
+    s_isr_abandoned_calls = 2;      /* each delivery abandons TWO host calls */
+    we_yield_stats(&before);
+
+    for (i = 0; i < 8; i++) {
+        s_watch_word = 1u;          /* armed before every yield */
+        CHECK(we_yield_until_vblank(&s_cpu) == 1);
+        CHECK(g_psx_guest_call_depth == entry_depth);  /* enter depth == return */
+        CHECK(s_snapshot_depth == 0u);
+        CHECK(s_cpu.pc == 0u);
+        CHECK(s_cpu.gpr[31] == 0x8004C288u);
+        CHECK(s_cpu.gpr[29] == 0x801FFEE0u);
+        CHECK(s_cpu.gpr[2] == 0u);
+        CHECK(s_watch_word == 0u);  /* the ISR ran this iteration */
+        CHECK(s_isr_runs == i + 1);
+        CHECK(s_yield_depth == 0);
+        /* The host-continuation guard held: no resume PC substituted even at
+         * depth 4 (interrupts.c 2328 would otherwise hand over 0x80100000). */
+        CHECK(s_candidate == 0u);
+    }
+    we_yield_stats(&after);
+    CHECK(after.call_depth_restored == before.call_depth_restored + 8u);
+    CHECK(after.snapshot_depth_restored == before.snapshot_depth_restored + 8u);
+    /* Without the restore this would be 4 + 8*2 = 20: the live-boot leak. */
+    CHECK(g_psx_guest_call_depth == entry_depth);
 }
 
 static void test_sentinel_distinct(void)
-{
-    printf("T11 the host stop token is not the host-call sentinel\n");
+{    printf("T11 the host stop token is not the host-call sentinel\n");
     CHECK(PSX_EXC_SENTINEL_PC != 0x8F000000u);
     CHECK((PSX_EXC_SENTINEL_PC & 0x1FFFFFFFu) < PSX_TEST_RAM_BYTES);
     /* The delivery never accepts 0x8F000000 as EPC either: it is not RAM and
@@ -475,6 +561,7 @@ int main(void)
     test_refusals();
     test_wait_word();
     test_sentinel_distinct();
+    test_depth_flat_loop();
 
     printf("%d checks, %d failure(s)\n", s_checks, s_failures);
     return s_failures ? 1 : 0;
