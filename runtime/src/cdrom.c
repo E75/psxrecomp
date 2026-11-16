@@ -1543,6 +1543,34 @@ static int read_sector_at(int min, int sec, int sect) {
     record_sector_history(lba, history_size, mode_reg, have_raw,
                           history_bytes, &delivery);
     trace_cdrom('S', 0, (uint32_t)lba, 0);
+    {   /* PSX_TRACE_SECTOR=<path>: every sector the drive delivers, file-side
+         * (survives a wedged debug server). Used to answer "does LBA 400 ever
+         * arrive" for the INIT.BIN load - docs/BOOT_BLOCKERS.md 9.0. */
+        static FILE *sfp;
+        static int sinit;
+        if (!sinit) {
+            const char *e = getenv("PSX_TRACE_SECTOR");
+            sinit = 1;
+            if (e && *e) sfp = fopen(e, "w");
+        }
+        if (sfp) {
+            { extern uint32_t psx_read_word(uint32_t);
+              fprintf(sfp, "frame=%u lba=%d size=%d setloc=%d ram110000=%08X "
+                           "hdr=%08X,%08X,%08X exp=%d cnt=%d dst=%08X sz=%X obuf=%08X\n",
+                      (unsigned)s_frame_count, lba, last_sector_size,
+                      s_setloc_lba, psx_read_word(0x80110000u),
+                      psx_read_word(0x806597E0u), psx_read_word(0x806597E4u),
+                      psx_read_word(0x806597E8u),
+                      (int)psx_read_word(0x8005FE28u), (int)psx_read_word(0x8005FE1Cu),
+                      psx_read_word(0x8005FE10u), psx_read_word(0x8005FE18u),
+                      psx_read_word(0x806597E0u)); 
+              fprintf(sfp, "   ch3: madr=%08X bcr=%08X chcr=%08X dpcr=%08X dicr=%08X\n",
+                      psx_read_word(0x1F8010B0u), psx_read_word(0x1F8010B4u),
+                      psx_read_word(0x1F8010B8u), psx_read_word(0x1F8010F0u),
+                      psx_read_word(0x1F8010F4u)); }
+            fflush(sfp);
+        }
+    }
     if (!delivery.data_delivered) {
         trace_cdrom('s', 0,
                     ((uint32_t)delivery.xa_file << 24) |

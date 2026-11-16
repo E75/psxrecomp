@@ -113,6 +113,7 @@ uint32_t we_yield_until_vblank(struct CPUState* cpu)
 
     const uint32_t entry_pc = cpu->pc;
     yield_trace("enter", cpu);
+    psx_sr_trace("yield_entry", cpu);
 
     /* Deliver what the advance raised. The VBlank handler is what clears the
      * game's flip-request word, so this is the step the C spin was missing. */
@@ -139,10 +140,12 @@ uint32_t we_yield_until_vblank(struct CPUState* cpu)
         const unsigned saved_snap_depth = psx_snapshot_host_call_depth();
 
         g_dirty_safe_resume_pc = 0;
+        psx_sr_trace("before_deliver", cpu);
         g_psx_host_continuation = 1;
         psx_check_interrupts_at(cpu, 0u);
         g_psx_host_continuation = 0;
         g_dirty_safe_resume_pc = saved_dirty_pc;
+        psx_sr_trace("after_deliver", cpu);
 
         /* Invariant: depth out == depth in, whether the delivery ran a nested
          * ISR, refused, or found nothing pending. */

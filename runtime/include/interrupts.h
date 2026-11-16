@@ -169,3 +169,8 @@ void psx_restore_state_escape(void);
 #endif
 
 #endif /* PSXRECOMP_INTERRUPTS_H */
+
+/* WE_TRACE_SR=<path>: SR bit-by-bit (IEc/IEp/KUc/KUp/IM/CU0) plus the window
+ * flag, host-continuation flag and current TCB at each step of a hardware
+ * delivery. Diagnostic only (no-op when the env var is unset). */
+void psx_sr_trace(const char *tag, const struct CPUState *cpu);

@@ -780,6 +780,45 @@ void interrupts_cosim_dump(uint32_t *csv, int *inexc) {
 }
 
 /* ===== Fix B: faithful exception-return escape state (see psx_runtime.h) ===== */
+
+/* WE_TRACE_SR=<path>: SR bit-by-bit at every step of a hardware delivery, with
+ * the window flag and the current thread. The C-body yield's delivery is the
+ * only place where a host C frame is the continuation, so the SR contract there
+ * has to be visible: docs/BOOT_BLOCKERS.md 9.0 (frames 110-118). */
+static FILE *s_sr_fp;
+static int s_sr_init, s_sr_n;
+static const struct CPUState *s_sr_cpu;
+static int s_sr_arm;
+extern uint64_t s_frame_count;
+extern int g_psx_host_continuation;
+void psx_sr_trace(const char *tag, const struct CPUState *cpu)
+{
+    if (!s_sr_init) {
+        const char *e = getenv("WE_TRACE_SR");
+        s_sr_init = 1;
+        if (e && *e) s_sr_fp = fopen(e, "w");
+    }
+    if (!s_sr_fp || s_sr_n >= 20000) return;
+    /* Only the C-body delivery is interesting here: a yield arms the window and
+     * the delivery marks every step until it returns. */
+    if (strcmp(tag, "before_deliver") == 0) s_sr_arm = 1;
+    if (!s_sr_arm) return;
+    s_sr_n++;
+    const uint32_t sr = cpu->cop0[COP0_SR];
+    uint32_t pcb = 0, tcb = 0;
+    { extern uint32_t psx_read_word(uint32_t); pcb = psx_read_word(0x108u);
+      tcb = pcb ? psx_read_word(pcb & 0x1FFFFFFFu) : 0u; }
+    fprintf(s_sr_fp,
+            "%-13s SR=%08X IEc=%u IEp=%u KUc=%u KUp=%u IM=%02X CU0=%u "
+            "in_exc=%d nest=%d hcont=%d pc=%08X epc=%08X tcb=%08X frame=%u\n",
+            tag, sr, (sr >> 0) & 1u, (sr >> 2) & 1u, (sr >> 1) & 1u, (sr >> 3) & 1u,
+            (sr >> 10) & 0x3Fu, (sr >> 28) & 1u, in_exception, exception_nest_depth,
+            g_psx_host_continuation, cpu->pc, cpu->cop0[COP0_EPC], tcb,
+            (unsigned)s_frame_count);
+    fflush(s_sr_fp);
+    if (strcmp(tag, "after_deliver") == 0) s_sr_arm = 0;
+}
+
 int      g_rfe_escape_pending = 0;
 int      g_exc_escape_reason  = PSX_EXC_ESCAPE_NONE;
 uint32_t g_exception_real_epc = 0;
@@ -794,6 +833,7 @@ extern void psx_exception_longjmp(void);
  * resumes at its own PC. */
 void psx_rfe_mark_escape(void) {
     if (!in_exception) return;
+    psx_sr_trace("rfe_mark", s_sr_cpu);
     /* Arm on EVERY handler-window RFE, including LEGACY_SENTINEL deliveries.
      * The old blanket decline assumed a sentinel delivery always resumes AT
      * the sentinel — but a handler that switches threads (the guest's own
@@ -812,6 +852,7 @@ void psx_rfe_mark_escape(void) {
  * real resume EPC). If an RFE armed the escape inside the synchronous handler,
  * longjmp back to psx_check_interrupts (cpu->pc preserved across the longjmp). */
 void psx_rfe_escape_check(CPUState* cpu) {
+    psx_sr_trace("rfe_check", cpu);
     /* The kernel's ReturnFromException loads the resume PC from the thread's TCB
      * into k0 (`lw k0,128(k1)`) and jumps to it. A host-initiated guest call has no
      * guest PC of its own, so a slot saved by the runtime scheduler can hold 0
@@ -1632,6 +1673,7 @@ irq_deliver_eval:
      * of clearing it (a nested level-2 exit must leave level-1 flagged). */
     int prev_in_exception = in_exception;
     in_exception = 1;
+    psx_sr_trace("exc_take", cpu);
     exception_nest_depth++;
     exception_entries_total++;
     uint32_t pre_handler_istat = i_stat;  /* snapshot for cooldown decision */
@@ -2147,6 +2189,7 @@ irq_deliver_eval:
 
     /* Nested delivery: a level-2 exit must leave level-1 flagged. */
     in_exception = prev_in_exception;
+    psx_sr_trace("epilogue", cpu);
     if (exception_nest_depth > 0) exception_nest_depth--;
 
     /* Adaptive cooldown: if the handler acknowledged the interrupt (cleared
@@ -2207,6 +2250,7 @@ irq_deliver_eval:
      * switches threads by fiber). */
     if (prev_in_exception == 0 && psx_hle_scheduler_enabled() &&
         entry_tcb != 0u && exit_tcb != 0u && entry_tcb != exit_tcb) {
+    psx_sr_trace("switch_probe", cpu);
         extern uint32_t psx_read_word(uint32_t addr);   /* memory.c (plain RAM read) */
         uint32_t new_state = psx_read_word(exit_tcb & 0x1FFFFFFFu);
         if (new_state == 0x4000u) {   /* the new current thread must be runnable */
@@ -2339,6 +2383,8 @@ void psx_check_interrupts_at(CPUState* cpu, uint32_t resume_pc) {
         if (host != 0u) resume_pc = host;
     }
     s_compiled_interrupt_resume_pc = resume_pc;
+    s_sr_cpu = cpu;
+    psx_sr_trace("at_entry", cpu);
     psx_check_interrupts(cpu); /* flushes load-charge batch on entry */
     s_compiled_interrupt_resume_pc = prev;
 }
