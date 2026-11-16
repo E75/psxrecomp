@@ -266,6 +266,23 @@ static void raise_dma_irq_on_master_edge(uint32_t before) {
     }
 }
 
+
+/* PSX_TRACE_CDDMA=<path>: file-side log of the CH3 (CD->RAM) transfers, from the
+ * arm to the finish, with the sector state at both ends. Answers "did the
+ * module read's DMA land" for the frame-116 boot wedge
+ * (docs/BOOT_BLOCKERS.md 9.0). No-op when the env var is unset. */
+static FILE *s_cddma_fp;
+static int s_cddma_init;
+static FILE *cddma_file(void)
+{
+    if (!s_cddma_init) {
+        const char *e = getenv("PSX_TRACE_CDDMA");
+        s_cddma_init = 1;
+        if (e && *e) s_cddma_fp = fopen(e, "w");
+    }
+    return s_cddma_fp;
+}
+
 static void start_cdrom_dma_capture(uint32_t requested_words) {
     CDROMDebugState s;
     cdrom_debug_snapshot(&s);
@@ -292,6 +309,21 @@ static void start_cdrom_dma_capture(uint32_t requested_words) {
     cdrom_dma_active_entry.sector_available_start =
         (uint8_t)(s.sector_available ? 1 : 0);
     cdrom_dma_history_active = 1;
+    {   FILE *f = cddma_file();
+        if (f) {
+            fprintf(f, "arm seq=%llu frame=%u madr=%08X bcr=%08X chcr=%08X words=%u "
+                       "avail=%u pos=%d lba=%d reading=%d\n",
+                    (unsigned long long)cdrom_dma_active_entry.seq,
+                    (unsigned)cdrom_dma_active_entry.frame_start,
+                    (unsigned)cdrom_dma_active_entry.start_addr,
+                    (unsigned)cdrom_dma_active_entry.bcr,
+                    (unsigned)cdrom_dma_active_entry.chcr,
+                    (unsigned)requested_words,
+                    (unsigned)(s.sector_available ? 1u : 0u),
+                    s.sector_read_pos, s.last_sector_lba, s.reading);
+            fflush(f);
+        }
+    }
 }
 
 static void record_cdrom_dma_word(uint32_t word) {
@@ -331,6 +363,22 @@ static void finish_cdrom_dma_capture(uint32_t final_addr, uint8_t completed) {
     cdrom_dma_history[
         cdrom_dma_active_entry.seq % DMA_CDROM_HISTORY_CAP] =
         cdrom_dma_active_entry;
+    {   FILE *f = cddma_file();
+        if (f) {
+            fprintf(f, "end seq=%llu frame=%u final_addr=%08X completed=%u "
+                       "pos_end=%d avail_end=%u first=%08X,%08X,%08X\n",
+                    (unsigned long long)cdrom_dma_active_entry.seq,
+                    (unsigned)cdrom_dma_active_entry.frame_end,
+                    (unsigned)cdrom_dma_active_entry.final_addr,
+                    (unsigned)completed,
+                    cdrom_dma_active_entry.sector_read_pos_end,
+                    (unsigned)cdrom_dma_active_entry.sector_available_end,
+                    cdrom_dma_active_entry.first_words[0],
+                    cdrom_dma_active_entry.first_words[1],
+                    cdrom_dma_active_entry.first_words[2]);
+            fflush(f);
+        }
+    }
     cdrom_dma_history_active = 0;
 }
 
