@@ -3172,6 +3172,20 @@ uint32_t cdrom_dma_read(void) {
     return val;
 }
 
+void cdrom_dma_probe(unsigned *bfrd, unsigned *rb_avail, unsigned *pos_ok,
+                     unsigned *request, unsigned *ring_read,
+                     unsigned *ring_write, int *rb_size, int *rb_pos)
+{
+    if (bfrd) *bfrd = (request_reg & CDROM_REQUEST_BFRD) ? 1u : 0u;
+    if (rb_avail) *rb_avail = rb_available() ? 1u : 0u;
+    if (pos_ok) *pos_ok = (RB_.pos + 4 <= RB_.size) ? 1u : 0u;
+    if (request) *request = request_reg;
+    if (ring_read) *ring_read = (unsigned)s_ring_read;
+    if (ring_write) *ring_write = (unsigned)s_ring_write;
+    if (rb_size) *rb_size = RB_.size;
+    if (rb_pos) *rb_pos = RB_.pos;
+}
+
 int cdrom_dma_ready(void) {
     if (request_reg & CDROM_REQUEST_BFRD) ring_note_starved();
     return (request_reg & CDROM_REQUEST_BFRD) && rb_available() &&

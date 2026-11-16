@@ -273,6 +273,7 @@ static void raise_dma_irq_on_master_edge(uint32_t before) {
  * (docs/BOOT_BLOCKERS.md 9.0). No-op when the env var is unset. */
 static FILE *s_cddma_fp;
 static int s_cddma_init;
+static int s_cddma_probe_pending;
 static FILE *cddma_file(void)
 {
     if (!s_cddma_init) {
@@ -281,6 +282,21 @@ static FILE *cddma_file(void)
         if (e && *e) s_cddma_fp = fopen(e, "w");
     }
     return s_cddma_fp;
+}
+
+
+static void cddma_probe_line(const char *tag, unsigned seq)
+{
+    FILE *f = cddma_file();
+    if (!f) return;
+    unsigned bfrd = 0, avail = 0, pos_ok = 0, rr = 0, r = 0, w = 0;
+    int size = 0, pos = 0;
+    cdrom_dma_probe(&bfrd, &avail, &pos_ok, &rr, &r, &w, &size, &pos);
+    fprintf(f, "%-4s seq=%u request=%02X bfrd=%u rb_avail=%u pos_ok=%u "
+               "ring_read=%u ring_write=%u size=%d pos=%d ready=%u\n",
+            tag, seq, rr, bfrd, avail, pos_ok, r, w, size, pos,
+            (unsigned)cdrom_dma_ready());
+    fflush(f);
 }
 
 static void start_cdrom_dma_capture(uint32_t requested_words) {
@@ -322,8 +338,10 @@ static void start_cdrom_dma_capture(uint32_t requested_words) {
                     (unsigned)(s.sector_available ? 1u : 0u),
                     s.sector_read_pos, s.last_sector_lba, s.reading);
             fflush(f);
+            cddma_probe_line("armp", (unsigned)cdrom_dma_active_entry.seq);
         }
     }
+    s_cddma_probe_pending = 1;
 }
 
 static void record_cdrom_dma_word(uint32_t word) {
@@ -1324,6 +1342,10 @@ uint32_t dma_cycles_to_deliverable_irq(uint32_t i_mask) {
 }
 
 void dma_advance(uint32_t cycles) {
+    if (s_cddma_probe_pending && dma_cdrom_transfer_active()) {
+        s_cddma_probe_pending = 0;
+        cddma_probe_line("adv", (unsigned)cdrom_dma_active_entry.seq);
+    }
     if (cycles == 0) return;
     g_dma_exec_depth++;   /* async to-RAM DMA writes below run through psx_write_word */
     advance_mdec_channel(0, cycles);

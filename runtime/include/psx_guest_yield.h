@@ -65,6 +65,16 @@
 
 #ifdef __cplusplus
 extern "C" {
+
+/* Advance guest time WITHOUT delivering an interrupt, and return 1 if time
+ * moved. A decompiled body that waits on a *device* (the CD's ch3 DMA, a
+ * transfer the runtime services from psx_advance_cycles) needs its cycles to
+ * charge even when it runs inside an exception handler, where we_yield refuses
+ * (a delivery there would nest an exception inside the ISR). This is the
+ * device-time half of a yield with none of the delivery: docs/BOOT_BLOCKERS.md
+ * 9.0, the INIT.BIN copy in cd_unk_800447cc. */
+uint32_t we_idle_cycles(uint32_t cycles);
+
 #endif
 
 struct CPUState;

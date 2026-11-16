@@ -187,3 +187,12 @@ int we_wait_guest_word(struct CPUState* cpu, uint32_t addr, uint32_t mask,
     }
     return 0;
 }
+
+uint32_t we_idle_cycles(uint32_t cycles)
+{
+    if (cycles == 0u) return 0u;
+    if (g_psx_guest_time_frozen) return 0u;
+    const uint64_t before = psx_get_cycle_count();
+    psx_advance_cycles(cycles);
+    return psx_get_cycle_count() != before ? 1u : 0u;
+}

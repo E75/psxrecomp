@@ -350,3 +350,10 @@ void cdrom_debug_clear_sector_history(void);
 #endif
 
 #endif /* PSXRECOMP_CDROM_H */
+
+/* Diagnostic (docs/BOOT_BLOCKERS.md 9.0): evaluate cdrom_dma_ready()'s three
+ * sub-terms separately so the CH3 DMA stall names its own cause. Any out
+ * pointer may be NULL. */
+void cdrom_dma_probe(unsigned *bfrd, unsigned *rb_avail, unsigned *pos_ok,
+                     unsigned *request, unsigned *ring_read,
+                     unsigned *ring_write, int *rb_size, int *rb_pos);
