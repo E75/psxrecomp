@@ -275,6 +275,14 @@ static int32_t ws_disp_x(void);
 static int32_t ws_disp_w(void);
 static int32_t ws_disp_h(void);
 static void ws_clear_all_reveal_margins(void);
+/* Native match raster (gpu_ws_set_match_raster): the 2D HUD keeps its own
+ * layout there (definition with the arm, use at the rect/sprite sites). */
+static int32_t ws_match_raster_shift(void);
+static int32_t ws_match_raster_hud_shift(int32_t x, int32_t y,
+                                        int32_t w, int32_t h);
+/* Armed width of the native wide match frame (0 = not armed). Declared here
+ * because the guest-cull hooks below key on it. */
+static int ws_match_raster_w;
 
 /* Gameplay vs full-2D screen. Character/billboard prims tag (psx_ws_sprite_tag)
  * within the last couple of frames => the actor render funnel is running =>
@@ -1091,6 +1099,22 @@ void gpu_ws_set_cull_keep_sites(const uint32_t *addresses,
     }
 }
 uint32_t psx_ws_cull_keep_result(uint32_t vanilla, uint32_t forced) {
+    /* Native match raster: the frame is 682 wide but the guest still runs its
+     * 512-wide graph, so its own keep/reject sites (the player window
+     * `0x218 < (ushort)(sx + 0x110)`, i.e. drawn for sx in [-16, 520], and the
+     * world-space cone) would drop an entity that stands in the +-85 px the
+     * wide frame now shows - the player pops in only once he crosses into the
+     * guest's 4:3 window. The wide frame widens the guest's own submission
+     * window with it, so every entity the frame covers is drawn (the draw-area
+     * clip still bounds the pixels). The recompiler-emitted sites are the same
+     * ones the squash/native-wide margin drives; here the trigger is the armed
+     * raster, so a stock 512 frame keeps vanilla byte-for-byte. */
+    if (ws_match_raster_w) {
+        if (!vanilla && forced) {
+            psx_mod_counter_add("we2002.widescreen.native-raster.player-cull-kept", 1);
+        }
+        return forced ? 1u : 0u;
+    }
     return psx_ws_x_margin() > 0 ? (forced ? 1u : 0u) : vanilla;
 }
 int psx_ws_cull_keep_site(uint32_t pc, uint32_t instr, uint32_t vanilla,
@@ -5869,6 +5893,7 @@ static void gp0_exec_mono_rect(void) {
         }
     }
     x0 += ws_nw_hud_shift(x0, w);   /* native-wide HUD corner re-anchor (no-op else) */
+    x0 += ws_match_raster_hud_shift(x0, y0, w, h);  /* wide 2D HUD: own layout (no-op else) */
     x0 += draw_offset_x; y0 += draw_offset_y;
     if (draw_area_out_rect(x0, y0, w, h)) return;
     gr_set_semi_transparency(semi_trans, (int)semi_transparency);
@@ -5985,6 +6010,7 @@ static void gp0_exec_textured_rect(void) {
         }
     }
     x0 += ws_nw_hud_shift(x0, w);   /* native-wide HUD corner re-anchor (no-op else) */
+    x0 += ws_match_raster_hud_shift(x0, y0, w, h);  /* wide 2D HUD: own layout (no-op else) */
 
     x0 += draw_offset_x; y0 += draw_offset_y;
     const int dw = (ws_w && ws_w != w) ? ws_w : w;
@@ -6006,6 +6032,7 @@ static void gp0_exec_mono_dot(void) {
     parse_vertex(gp0_cmd_buf[1], &x, &y);
     { int dot_h = 1; ws_sprt_fixed_transform(&x, &y, 1, &dot_h); }   /* auto_ui squash; no-op when unadmitted */
     x += ws_nw_hud_shift(x, 1);
+    x += ws_match_raster_hud_shift(x, y, 1, 1);
     x += draw_offset_x; y += draw_offset_y;
     if (draw_area_out_point(x, y)) return;
     gr_set_semi_transparency(semi_trans, (int)semi_transparency);
@@ -6021,6 +6048,7 @@ static void gp0_exec_textured_dot(void) {
     parse_vertex(gp0_cmd_buf[1], &x0, &y0);
     { int dot_h = 1; (void)ws_sprt_fixed_transform(&x0, &y0, 1, &dot_h); }  /* position only; 1px stays 1px */
     x0 += ws_nw_hud_shift(x0, 1);
+    x0 += ws_match_raster_hud_shift(x0, y0, 1, 1);
     x0 += draw_offset_x; y0 += draw_offset_y;
     int u0 = gp0_cmd_buf[2] & 0xFF;
     int v0 = (gp0_cmd_buf[2] >> 8) & 0xFF;
@@ -6041,6 +6069,7 @@ static void gp0_exec_textured_8x8(void) {
     int ws_h = 8;
     int ws_w = ws_sprt_fixed_transform(&x0, &y0, 8, &ws_h);
     x0 += ws_nw_hud_shift(x0, 8);   /* native-wide HUD corner re-anchor (no-op else) */
+    x0 += ws_match_raster_hud_shift(x0, y0, 8, 8);  /* wide 2D HUD: own layout (no-op else) */
     x0 += draw_offset_x; y0 += draw_offset_y;
     const int dw = (ws_w && ws_w != 8) ? ws_w : 8;
     if (draw_area_out_rect(x0, y0, dw, ws_h)) return;
@@ -6067,6 +6096,7 @@ static void gp0_exec_mono_8x8(void) {
     int ws_h = 8;
     int ws_w = ws_sprt_fixed_transform(&x0, &y0, 8, &ws_h);
     x0 += ws_nw_hud_shift(x0, 8);
+    x0 += ws_match_raster_hud_shift(x0, y0, 8, 8);
     x0 += draw_offset_x; y0 += draw_offset_y;
     {
         int dw = (ws_w && ws_w != 8) ? ws_w : 8;
@@ -6094,6 +6124,7 @@ static void gp0_exec_textured_16x16(void) {
     int ws_h = 16;
     int ws_w = host_tile ? 0 : ws_sprt_fixed_transform(&x0, &y0, 16, &ws_h);
     if (!host_tile) x0 += ws_nw_hud_shift(x0, 16);
+    if (!host_tile) x0 += ws_match_raster_hud_shift(x0, y0, 16, 16);
     x0 += draw_offset_x; y0 += draw_offset_y;
     int u0 = gp0_cmd_buf[2] & 0xFF;
     int v0 = (gp0_cmd_buf[2] >> 8) & 0xFF;
@@ -6213,7 +6244,6 @@ static void gp0_exec_texture_window(void) {
  * centred on the stock window's centre so no edge moves.
  */
 #define WS_MATCH_STOCK_W 512u
-static int ws_match_raster_w;
 
 /* Dot-clock divider for the visible-width derivation (keep in step with the
  * table in gpu_get_display_info). */
@@ -6310,6 +6340,61 @@ static int32_t ws_match_raster_shift(void) {
     if (draw_area_left != display_area_x) return 0;
     if (draw_area_right != (uint32_t)ws_match_raster_w - 1u) return 0;
     return ((int32_t)ws_match_raster_w - (int32_t)WS_MATCH_STOCK_W) / 2;
+}
+
+/* ---- Native match raster: the 2D HUD gets its own layout --------------------
+ *
+ * The arm above translates EVERY primitive of the display band by +off (the
+ * draw offset), so the 4:3-authored 2D HUD is composited centred in the wide
+ * frame: a 682-wide frame then shows the score bar and the name plates inset
+ * from the edges by the reveal, on bare pitch either side. That is the stock
+ * layout translated, not a layout for the frame.
+ *
+ * A wide frame's HUD anchors to the frame edges, so a HUD element keeps the
+ * distance to its own frame edge that it had in 4:3: the translate is removed
+ * for an outer-third element (-off on the left, +off on the right) and kept for
+ * a centre-relative one (the radar and any centred popup), which stays centred
+ * because the frame is symmetric. It is a pure additive X shift on the prim's
+ * own X: widths, heights, texels and glyphs are never scaled, so nothing is
+ * squashed or stretched. Proven keyed on the armed raster and the stock 512
+ * frame's thirds, so a stock 512x240 frame is byte-identical (shift 0).
+ *
+ * Coordinate space: with the arm live the guest still authors its 4:3 frame, so
+ * a 2D prim's X is relative to the stock display centre (0 = stock centre, the
+ * ±256 half-frame) and its Y is relative to the band centre; the thirds are the
+ * stock frame's, ±512/6 from the centre. Only the rows the title actually uses
+ * for its 2D HUD are re-anchored (gpu_ws_set_match_hud_bands); world sprites
+ * that happen to be 2D prims (the pitch/stand tiles) live in the middle rows
+ * and are never touched. */
+static int ws_match_hud_top_h;      /* HUD rows: a prim ending at/above this row */
+static int ws_match_hud_bottom_y;   /* ...or starting at/below this row          */
+#define WS_MATCH_STOCK_H 240
+
+void gpu_ws_set_match_hud_bands(int top_h, int bottom_y) {
+    ws_match_hud_top_h = top_h > 0 ? top_h : 0;
+    ws_match_hud_bottom_y = bottom_y > 0 ? bottom_y : 0;
+}
+
+int gpu_ws_match_hud_band(int *top_h, int *bottom_y) {
+    if (top_h) *top_h = ws_match_hud_top_h;
+    if (bottom_y) *bottom_y = ws_match_hud_bottom_y;
+    return ws_match_hud_bottom_y > ws_match_hud_top_h;
+}
+
+static int32_t ws_match_raster_hud_shift(int32_t x, int32_t y,
+                                        int32_t w, int32_t h) {
+    if (!ws_match_raster_w) return 0;
+    if (ws_match_hud_bottom_y <= ws_match_hud_top_h) return 0;
+    int32_t off = ws_match_raster_shift();
+    if (off <= 0) return 0;
+    int32_t band_y = y + (int32_t)(WS_MATCH_STOCK_H / 2);
+    if (!(band_y + h <= ws_match_hud_top_h || band_y >= ws_match_hud_bottom_y))
+        return 0;
+    int32_t cx2 = 2 * x + w;                       /* 2*centre, no half lost   */
+    int32_t third2 = (int32_t)WS_MATCH_STOCK_W / 3; /* 2*(512/6)               */
+    if (cx2 < -third2) return -off;                /* left third  -> left edge */
+    if (cx2 > third2) return off;                  /* right third -> right edge*/
+    return 0;                                      /* middle third -> centred  */
 }
 
 static void gp0_exec_draw_area_tl(void) {
@@ -7661,6 +7746,7 @@ static void gp0_dispatch_command(uint8_t opcode) {
             int ws_h = 16;
             int ws_w = ws_sprt_fixed_transform(&x0, &y0, 16, &ws_h);
             x0 += ws_nw_hud_shift(x0, 16);
+            x0 += ws_match_raster_hud_shift(x0, y0, 16, 16);
             x0 += draw_offset_x; y0 += draw_offset_y;
             gr_set_semi_transparency(semi_trans, (int)semi_transparency);
             gr_draw_flat_rect(x0, y0, (ws_w && ws_w != 16) ? ws_w : 16, ws_h,
