@@ -215,6 +215,9 @@ static int     s_setloc_lba = -1;  /* LBA captured at SetLoc time */
 static int     setloc_seek_far;
 static int     setloc_pending;   /* a Setloc has been issued and not consumed */
 
+/* docs/BOOT_BLOCKERS.md 9.0: Setloc/seek/Read timeline (defined far below). */
+static void sl_line(const char *tag);
+
 /* Read state */
 static int reading;
 static int read_min, read_sec, read_sect;
@@ -2187,6 +2190,7 @@ static void exec_command(uint8_t cmd) {
             setloc_pending = 1;
             setloc_seek_far = (abs(current_lba - s_setloc_lba) > 16) ? 1 : 0;
             warm_route_on_setloc(s_setloc_lba);
+            sl_line("setloc");
         }
         response_push(stat_reg);
         set_irq(CDIRQ_ACK);
@@ -2198,8 +2202,10 @@ static void exec_command(uint8_t cmd) {
             set_irq(CDIRQ_ERROR);
             break;
         }
-        if (read_continues_current_stream()) break;   /* ACKed inside */
+        sl_line("read-cmd");
+        if (read_continues_current_stream()) { sl_line("read-cont"); break; }
         start_read_stream(cmd);
+        sl_line("read-new");
         response_push(stat_reg);
         set_irq(CDIRQ_ACK);
         break;
@@ -2629,7 +2635,8 @@ static void process_pending(uint32_t cycles) {
         stat_reg &= ~CDSTAT_SEEK;
         stat_reg |= CDSTAT_READ;   /* PSX-CD-003: GT1 waits for READ after seek */
         setloc_seek_far = 0;
-    setloc_pending = 0;
+        sl_line("seek-done");
+        setloc_pending = 0;
         response_push(stat_reg);
         set_irq(CDIRQ_COMPLETE);
         fire_cdrom_irq();
@@ -3184,6 +3191,30 @@ void cdrom_dma_probe(unsigned *bfrd, unsigned *rb_avail, unsigned *pos_ok,
     if (ring_write) *ring_write = (unsigned)s_ring_write;
     if (rb_size) *rb_size = RB_.size;
     if (rb_pos) *rb_pos = RB_.pos;
+}
+
+
+/* PSX_TRACE_SETLOC=<path>: the Setloc/seek/Read command trio with the drive
+ * position, so "did a newer Setloc survive the previous seek's completion" is
+ * a measurement, not a guess (docs/BOOT_BLOCKERS.md 9.0). No-op when unset. */
+static FILE *s_sl_fp;
+static int s_sl_init;
+static void sl_line(const char *tag)
+{
+    if (!s_sl_init) {
+        const char *e = getenv("PSX_TRACE_SETLOC");
+        s_sl_init = 1;
+        if (e && *e) s_sl_fp = fopen(e, "w");
+    }
+    if (!s_sl_fp) return;
+    fprintf(s_sl_fp,
+            "%-10s pend=%d setloc=%d seek=%02d:%02d:%02d read=%02d:%02d:%02d "
+            "reading=%d last=%d irq=%02X stat=%02X frame=%u\n",
+            tag, setloc_pending, s_setloc_lba,
+            seek_min, seek_sec, seek_sect,
+            read_min, read_sec, read_sect, reading, last_sector_lba,
+            irq_flag, stat_reg, (unsigned)s_frame_count);
+    fflush(s_sl_fp);
 }
 
 int cdrom_dma_ready(void) {
