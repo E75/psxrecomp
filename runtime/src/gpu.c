@@ -6187,6 +6187,109 @@ static void gp0_exec_texture_window(void) {
     gr_set_texture_window(texture_window_value);
 }
 
+/* ---- Native match raster (we2002.widescreen.native-raster) ---------------
+ * The match runs its own stock 512 graph (guest path, docs/WIDESCREEN_PROOF.md
+ * 1-2), so the draw env, the GTE OFX and the CRTC all describe a 4:3 frame and
+ * the match re-asserts them from its DISPENV on every flip:
+ *
+ *   GP1(06h) = 2560 dots  -> 512 px at 5 dots/px  (the CRTC read window)
+ *   GP0(E4)  = 511        -> the draw-area clip
+ *   GP0(E5)  = OFX 256    -> the projection centre, via the draw offset
+ *
+ * A 682-wide frame therefore needs all three moved together: a 512 read window
+ * over a 682 clip draws 170 columns nobody sees, a 682 window over a 512 clip
+ * crops the world, and either one without the +85 shift off-centres it. They
+ * move in one arm: gp1_h_display_range() widens the read window AND the clip of
+ * the display band it belongs to; gp0_exec_draw_area_br() widens the clip again
+ * when it arrives after the range, and gp0_exec_draw_offset() adds the shift to
+ * that band's offset. Whichever write lands second completes the pair, so no
+ * presented frame has one without the other.
+ *
+ * The target width is armed by the mod (gpu_ws_set_match_raster, 0 = disarmed)
+ * only for the guest-path match. The span is derived with the same psx-spx
+ * formula gpu_get_display_info() uses - ((dots/cycles)+2) & ~3 - so a literal
+ * 682/512 ratio (3410 dots) would read 684 px and put two blank plane columns
+ * on the right; the span that derives exactly 682 is 3400 dots, and it is
+ * centred on the stock window's centre so no edge moves.
+ */
+#define WS_MATCH_STOCK_W 512u
+static int ws_match_raster_w;
+
+/* Dot-clock divider for the visible-width derivation (keep in step with the
+ * table in gpu_get_display_info). */
+static uint32_t ws_match_crtc_cycles(void) {
+    static const uint32_t cyc[4] = { 10u, 8u, 5u, 4u };
+    return hres2 ? 7u : cyc[hres1 & 3u];
+}
+
+/* The draw-area clip of the displayed band, widened to ws_match_raster_w.
+ * Only a clip that IS that band moves: same left edge as the display buffer and
+ * the stock 512-px span. A render-to-texture clip (a 320-wide tile page, a
+ * sub-rect) is never touched. Returns 1 when it changed; the caller refreshes
+ * the renderer and the VRAM-extension gate. */
+static int ws_match_raster_widen_clip(void) {
+    if (!ws_match_raster_w) return 0;
+    if (draw_area_left != display_area_x) return 0;
+    if (draw_area_right + 1u - draw_area_left != WS_MATCH_STOCK_W) return 0;
+    if (draw_area_right >= (uint32_t)ws_match_raster_w - 1u) return 0;
+    draw_area_right = (uint32_t)ws_match_raster_w - 1u;
+    psx_mod_counter_add("we2002.widescreen.native-raster.hle-clip", 1);
+    return 1;
+}
+
+/* GP1(06h) value, re-expressed for the wide read window. The written span is
+ * recognised by what it *derives* (the stock 512-px match width), not by a
+ * writer pc or a spelling, so the C path and the guest path both hit it. */
+static uint32_t ws_match_raster_range(uint32_t val) {
+    if (!ws_match_raster_w) return val;
+    uint32_t x1 = val & 0xFFFu, x2 = (val >> 12) & 0xFFFu;
+    if (x2 <= x1) return val;
+    uint32_t cycles = ws_match_crtc_cycles();
+    uint32_t span = x2 - x1;
+    if ((((span / cycles) + 2u) & ~3u) != WS_MATCH_STOCK_W) return val;
+    uint32_t target = ((uint32_t)ws_match_raster_w - 2u) * cycles;
+    if (target <= span) return val;
+    uint32_t pad = (target - span) / 2u;
+    if (pad >= x1) return val;
+    uint32_t nx1 = x1 - pad, nx2 = x2 + pad;
+    psx_mod_counter_add("we2002.widescreen.native-raster.hle-range", 1);
+    return (val & 0xFFF00000u) | nx1 | (nx2 << 12);
+}
+
+/* Arm/disarm the arm. The mod calls this from its vblank, armed only while the
+ * match really runs the guest 512 graph (scenes 1/2/5, phase != 0) - so the
+ * guest's 384x480 menu modes and a future 682 C path (which owns its own
+ * geometry) are never double-driven by a stale flag. */
+void gpu_ws_set_match_raster(int width) {
+    int next = (width > 0 && width <= 1024) ? width : 0;
+    if (next == ws_match_raster_w) return;
+    ws_match_raster_w = next;
+    if (!ws_match_raster_w) return;
+    if (ws_match_raster_widen_clip()) {
+        gr_set_draw_area((int)draw_area_left, (int)draw_area_top,
+                         (int)draw_area_right, (int)draw_area_bottom);
+        split_trace_note_draw_area();
+        vram_ext_sync();
+    }
+}
+
+/* The projection shift that makes a 682-wide frame symmetric.
+ *
+ * The guest keeps its 4:3 GTE projection (OFX 256) and re-asserts it every
+ * frame, so the wide frame is produced the way the GPU defines it: the same
+ * projected world, translated +85 px, under a 682-wide clip. Moving the draw
+ * offset is exactly "OFX 341" for every primitive (the GTE's screen offset and
+ * the GPU's draw offset are both added after the perspective divide), and it
+ * moves the 4:3-authored 2D HUD to the centre of the wide frame instead of
+ * squashing anything. Only the display band moves: a render-to-texture pass
+ * (different clip) keeps its own offset. */
+static int32_t ws_match_raster_shift(void) {
+    if (!ws_match_raster_w) return 0;
+    if (draw_area_left != display_area_x) return 0;
+    if (draw_area_right != (uint32_t)ws_match_raster_w - 1u) return 0;
+    return ((int32_t)ws_match_raster_w - (int32_t)WS_MATCH_STOCK_W) / 2;
+}
+
 static void gp0_exec_draw_area_tl(void) {
     /* 0xE3 — Set Drawing Area Top-Left
      * Bits 0-9: X
@@ -6209,6 +6312,7 @@ static void gp0_exec_draw_area_br(void) {
     uint32_t param = gp0_cmd_buf[0] & 0x00FFFFFFu;
     draw_area_right  = param & 0x3FF;
     draw_area_bottom = (param >> 10) & 0x3FF;
+    ws_match_raster_widen_clip();  /* native match raster: clip follows the read window */
     split_trace_note_draw_area();
     vram_ext_sync();      /* draw area changed: re-derive the overflow gate */
     gr_set_draw_area((int)draw_area_left, (int)draw_area_top,
@@ -6223,6 +6327,13 @@ static void gp0_exec_draw_offset(void) {
     uint32_t param = gp0_cmd_buf[0] & 0x00FFFFFFu;
     draw_offset_x = sign_extend(param & 0x7FFu, 11);
     draw_offset_y = sign_extend((param >> 11) & 0x7FFu, 11);
+    {
+        int32_t shift = ws_match_raster_shift();
+        if (shift > 0) {
+            draw_offset_x += shift;
+            psx_mod_counter_add("we2002.widescreen.native-raster.hle-offset", 1);
+        }
+    }
     if (draw_offset_y < g_doff_min_this) g_doff_min_this = draw_offset_y;
     if (draw_offset_y > g_doff_max_this) g_doff_max_this = draw_offset_y;
     g_doff_cnt_this++;
@@ -7889,8 +8000,15 @@ static void gp1_h_display_range(uint32_t val) {
     /* GP1(06h): Horizontal display range
      * bits 0-11: X1
      * bits 12-23: X2 */
+    val = ws_match_raster_range(val);   /* native match raster: 4:3 span -> wide span */
     h_display_x1 = val & 0xFFF;
     h_display_x2 = (val >> 12) & 0xFFF;
+    if (ws_match_raster_widen_clip()) { /* ...and its clip, in the same write */
+        split_trace_note_draw_area();
+        vram_ext_sync();
+        gr_set_draw_area((int)draw_area_left, (int)draw_area_top,
+                         (int)draw_area_right, (int)draw_area_bottom);
+    }
     {   /* PSX_TRACE_GP1RANGE=<path>: who sets the display width, with the
          * caller - the match re-asserts its own DISPENV (docs/BOOT_BLOCKERS.md
          * 9.0), so the writer and its layer must be known, not guessed. */
