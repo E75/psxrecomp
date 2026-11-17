@@ -142,6 +142,8 @@ static void deliver_host_continuation(struct CPUState *cpu, uint32_t entry_pc)
     }
 }
 
+static int s_wait_at_edge = -1;   /* -1 = not latched (PSX_WAIT_AT_EDGE) */
+
 int we_wait_interrupt(struct CPUState* cpu, uint32_t budget_cycles)
 {
     if (!cpu) return 0;
@@ -149,6 +151,10 @@ int we_wait_interrupt(struct CPUState* cpu, uint32_t budget_cycles)
     if (g_psx_guest_time_frozen) return 0;
     if (psx_get_in_exception()) return 0;        /* ISR: use we_idle_cycles */
     if (!we_yield_c_body_yield_enabled()) return 0;   /* legacy path stays */
+    if (s_wait_at_edge < 0) {
+        const char *e = getenv("PSX_WAIT_AT_EDGE");
+        s_wait_at_edge = (e && e[0] && e[0] != '0') ? 1 : 0;
+    }
 
     uint32_t spent = 0;
     for (;;) {
@@ -158,8 +164,14 @@ int we_wait_interrupt(struct CPUState* cpu, uint32_t budget_cycles)
         if (psx_interrupt_delivery_needed(cpu)) break;
         if (spent >= budget_cycles) return 0;
         {
-            uint32_t step = budget_cycles - spent;
-            if (step > 4096u) step = 4096u;
+            /* Advance to the NEXT EVENT DEADLINE, not by a fixed step: the same
+             * boundary kind the compiled backend checks at (vblank/timer/CD/SPU
+             * service edge). A fixed 4096-cycle step can stop *inside* a device
+             * service slice, and a delivery there re-enters the guest driver with
+             * the kernel half-updated (the ADEL at 0x80002924, 9.0). */
+            uint32_t step = psx_idle_cycles_to_next_observable_event();
+            if (step == 0u) step = 1u;
+            if (step > budget_cycles - spent) step = budget_cycles - spent;
             if (!we_idle_cycles(step)) return 0;
             spent += step;
         }
@@ -170,6 +182,18 @@ int we_wait_interrupt(struct CPUState* cpu, uint32_t budget_cycles)
         s_stats.yields++;
         s_yield_seq++;
         const uint64_t before = psx_get_cycle_count();
+
+        /* A/B (docs/BOOT_BLOCKERS.md 9.0): PSX_WAIT_AT_EDGE=1 makes this wait
+         * deliver only at the vblank edge, i.e. byte-for-byte the point
+         * we_yield_until_vblank delivers at, through the SAME shared delivery
+         * helper. If that variant stays clean the shared path is innocent and
+         * the point of delivery is what matters; if it ADELs too, the refactor
+         * is the defect. */
+        if (s_wait_at_edge) {
+            uint32_t to_edge = interrupts_cycles_to_vblank();
+            if (to_edge) psx_advance_cycles(to_edge);
+        }
+
         const uint32_t entry_pc = cpu->pc;
         yield_trace("enter", cpu);
         deliver_host_continuation(cpu, entry_pc);
