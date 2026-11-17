@@ -84,6 +84,16 @@ uint64_t vk_renderer_pres_total(void) { return 0; }
 int  vk_renderer_pres_get(uint64_t seq, VkPresEvent *out) { (void)seq; (void)out; return 0; }
 void vk_renderer_hd_pack_changed(void) {}
 const GpuRenderBackend *vk_backend_get(void) { return 0; }
+/* The 60 fps temporal presenter (docs/VULKAN_PARITY.md). A build without the
+ * Vulkan SDK runs the software/GL path, so the Vulkan twin is inert - but the
+ * symbols must exist or a GL-only build fails to link. */
+void vk_renderer_set_interpolation(int e, double hz, double t, double src, int m) {
+    (void)e; (void)hz; (void)t; (void)src; (void)m;
+}
+void vk_renderer_set_interpolation_blend(int mode) { (void)mode; }
+void vk_renderer_set_interpolation_suspended(int s) { (void)s; }
+void vk_renderer_set_interpolation_source(int s) { (void)s; }
+int  vk_renderer_interpolation_owns_cadence(void) { return 0; }
 
 #else  /* PSX_HAVE_VULKAN */
 
