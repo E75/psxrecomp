@@ -5169,14 +5169,14 @@ static void set_default_controller_mapping_into(ControllerMap& map) {
     apply_sources_to_map(map, "down",     "dpdown");
     apply_sources_to_map(map, "left",     "dpleft");
     apply_sources_to_map(map, "right",    "dpright");
-    apply_sources_to_map(map, "cross",    "a");
-    apply_sources_to_map(map, "circle",   "b");
+    apply_sources_to_map(map, "cross",    "b");
+    apply_sources_to_map(map, "circle",   "a");
     apply_sources_to_map(map, "square",   "x");
     apply_sources_to_map(map, "triangle", "y");
     apply_sources_to_map(map, "l1",       "leftshoulder");
-    apply_sources_to_map(map, "r1",       "rightshoulder");
+    apply_sources_to_map(map, "r1",       "righttrigger");
     apply_sources_to_map(map, "l2",       "lefttrigger");
-    apply_sources_to_map(map, "r2",       "righttrigger");
+    apply_sources_to_map(map, "r2",       "rightshoulder");
     apply_sources_to_map(map, "l3",       "leftstick");
     apply_sources_to_map(map, "r3",       "rightstick");
     apply_sources_to_map(map, "start",    "start");
@@ -5215,14 +5215,14 @@ static std::string default_input_ini_text(void) {
         "down = dpdown\n"
         "left = dpleft\n"
         "right = dpright\n"
-        "cross = a\n"
-        "circle = b\n"
+        "cross = b\n"
+        "circle = a\n"
         "square = x\n"
         "triangle = y\n"
         "l1 = leftshoulder\n"
-        "r1 = rightshoulder\n"
+        "r1 = righttrigger\n"
         "l2 = lefttrigger\n"
-        "r2 = righttrigger\n"
+        "r2 = rightshoulder\n"
         "l3 = leftstick\n"
         "r3 = rightstick\n"
         "start = start\n"
@@ -5590,9 +5590,9 @@ static bool controller_source_pressed_h(SDL_GameController* h, const ControllerS
 }
 
 /* Keyboard -> PSX button word for `player` (1 or 2), via the configurable
- * keybinds.ini map (psx_keybinds). Defaults reproduce the old hardcoded layout
- * (arrows=d-pad, X/S/Z/A=Cross/Circle/Square/Triangle, Q/W/E/R=L1/R1/L2/R2,
- * Return=Start, RShift=Select) plus T/Y=L3/R3 stick clicks. */
+ * keybinds.ini map (psx_keybinds). Defaults are WE2002's FIFA-style layout:
+ * arrows=d-pad, S/A/D/W=Circle/Cross/Square/Triangle, Q/E=L1/R1, R/Z=L2/R2,
+ * Return=Start, RShift=Select, T/Y=L3/R3 stick clicks. */
 static uint16_t pad_from_keyboard(int player) {
     const Uint8* keys = SDL_GetKeyboardState(NULL);
     return psx_keybinds_pad_word(keys, player);
@@ -6224,8 +6224,8 @@ static int host_pad_layer(uint16_t* buttons, uint8_t st[4], uint8_t* lt,
 /* The host layer's PSX word expressed as the Xbox-layout SDL buttons a
  * default-mapped gamepad would press (L2/R2 are trigger axes). */
 static const struct { int sdl; uint16_t psx; } kHostLayerButtons[] = {
-    { SDL_CONTROLLER_BUTTON_A, PAD_CROSS },
-    { SDL_CONTROLLER_BUTTON_B, PAD_CIRCLE },
+    { SDL_CONTROLLER_BUTTON_A, PAD_CIRCLE },
+    { SDL_CONTROLLER_BUTTON_B, PAD_CROSS },
     { SDL_CONTROLLER_BUTTON_X, PAD_SQUARE },
     { SDL_CONTROLLER_BUTTON_Y, PAD_TRIANGLE },
     { SDL_CONTROLLER_BUTTON_BACK, PAD_SELECT },
@@ -6233,7 +6233,7 @@ static const struct { int sdl; uint16_t psx; } kHostLayerButtons[] = {
     { SDL_CONTROLLER_BUTTON_LEFTSTICK, PAD_L3 },
     { SDL_CONTROLLER_BUTTON_RIGHTSTICK, PAD_R3 },
     { SDL_CONTROLLER_BUTTON_LEFTSHOULDER, PAD_L1 },
-    { SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, PAD_R1 },
+    { SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, PAD_R2 },
     { SDL_CONTROLLER_BUTTON_DPAD_UP, PAD_UP },
     { SDL_CONTROLLER_BUTTON_DPAD_DOWN, PAD_DOWN },
     { SDL_CONTROLLER_BUTTON_DPAD_LEFT, PAD_LEFT },
@@ -7226,6 +7226,15 @@ static void sample_headless_pad_into_sio(int override) {
         sio_set_pad_state_slot(1, 0xFFFFu);
         return;
     }
+#ifndef PSX_NO_DEBUG_TOOLS
+    /* Synthetic host input (input_event / pad_event): run the SAME offline
+     * resolution a windowed keyboard/controller uses, instead of the neutral
+     * word. Without an injection the headless sampler stays deterministic. */
+    if (psx_keybinds_has_injected() || debug_server_virtual_pad_active()) {
+        sample_pad_into_sio(override);
+        return;
+    }
+#endif
 #ifdef PSX_COSIM
     /* Input-driven cosim (EXPERIMENTAL): the coordinator sets a HELD pad state via the
      * `setpad` TCP command; the headless sampler applies it every frame so the same

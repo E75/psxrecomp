@@ -41,22 +41,26 @@
 
 /* ── Defaults ─────────────────────────────────────────────────────────────── */
 /*
- * Every player slot uses the framework's historical hardcoded keyboard mapping
- * (pad_from_keyboard / pad_sticks_for in main.cpp):
+ * WE2002's shipped FIFA-style keyboard layout. The WE2002 pad actions are
+ * Circle = pass/pressure (also menu OK), Square = shoot, Triangle = low
+ * cross/through, Cross = high cross/lob/slide, R1 = sprint, L1 = switch,
+ * R2 = special. Arrows move; Return starts; Right Shift selects.
  *   D-pad: Arrow keys      Start: Return     Select: Right Shift
- *   Cross: X   Circle: S   Square: Z   Triangle: A
- *   L1: Q  R1: W  L2: E  R2: R  L3: T  R3: Y
+ *   Cross: A   Circle: S   Square: D   Triangle: W
+ *   L1: Q  R1: E  L2: R  R2: Z  L3: T  R3: Y
  *   Left analog stick: Arrow keys
  *   Right analog stick: unbound
- * Simultaneous multi-keyboard play still requires distinct binds per slot.
+ * Every value is an SDL_Scancode (physical key), never a keycode/character, so
+ * the letters stay in the same place on non-US layouts. Simultaneous
+ * multi-keyboard play still requires distinct binds per slot.
  */
 #define PSXKB_PLAYER_DEFAULTS { \
     .up = SDL_SCANCODE_UP, .down = SDL_SCANCODE_DOWN, \
     .left = SDL_SCANCODE_LEFT, .right = SDL_SCANCODE_RIGHT, \
-    .cross = SDL_SCANCODE_X, .circle = SDL_SCANCODE_S, \
-    .square = SDL_SCANCODE_Z, .triangle = SDL_SCANCODE_A, \
-    .l1 = SDL_SCANCODE_Q, .r1 = SDL_SCANCODE_W, \
-    .l2 = SDL_SCANCODE_E, .r2 = SDL_SCANCODE_R, \
+    .cross = SDL_SCANCODE_A, .circle = SDL_SCANCODE_S, \
+    .square = SDL_SCANCODE_D, .triangle = SDL_SCANCODE_W, \
+    .l1 = SDL_SCANCODE_Q, .r1 = SDL_SCANCODE_E, \
+    .l2 = SDL_SCANCODE_R, .r2 = SDL_SCANCODE_Z, \
     .l3 = SDL_SCANCODE_T, .r3 = SDL_SCANCODE_Y, \
     .start = SDL_SCANCODE_RETURN, .select = SDL_SCANCODE_RSHIFT, \
     .ls_up = SDL_SCANCODE_UP, .ls_down = SDL_SCANCODE_DOWN, \
@@ -81,6 +85,39 @@ static const PsxKeyBinds s_default_binds = PSXKB_DEFAULTS;
  * Primary OR alt asserts the input; both persist to keybinds.ini as
  * "primary, alt" on one line. */
 static PsxKeyBinds       s_alt_binds;
+
+/* Synthetic keyboard events (tests / debug injection): an explicit overlay
+ * ORed into every keyboard read. `s_injected_any` gates the array read, so an
+ * unused overlay costs one test per resolved binding. */
+static uint8_t s_injected_keys[PSXKB_MOUSE_SC_BASE];
+static int     s_injected_any;
+
+void psx_keybinds_inject_key(SDL_Scancode sc, int down) {
+    const int i = (int)sc;
+    if (i <= 0 || i >= PSXKB_MOUSE_SC_BASE) return;
+    s_injected_keys[i] = down ? 1 : 0;
+    if (down) s_injected_any = 1;
+    else {
+        s_injected_any = 0;
+        for (int k = 1; k < PSXKB_MOUSE_SC_BASE; k++)
+            if (s_injected_keys[k]) { s_injected_any = 1; break; }
+    }
+}
+
+void psx_keybinds_clear_injected(void) {
+    memset(s_injected_keys, 0, sizeof(s_injected_keys));
+    s_injected_any = 0;
+}
+
+int psx_keybinds_injected_held(SDL_Scancode sc) {
+    const int i = (int)sc;
+    if (!s_injected_any || i <= 0 || i >= PSXKB_MOUSE_SC_BASE) return 0;
+    return s_injected_keys[i] != 0;
+}
+
+int psx_keybinds_has_injected(void) {
+    return s_injected_any;
+}
 
 typedef struct {
     const char *name;   /* ini key */
@@ -326,6 +363,7 @@ static void load_ini(const char *path) {
 /* ── Public API ───────────────────────────────────────────────────────────── */
 
 void psx_keybinds_init(const char *exe_path) {
+    psx_keybinds_clear_injected();
     derive_ini_path(exe_path);
     FILE *test = fopen(s_ini_path, "r");
     if (test) { fclose(test); load_ini(s_ini_path); }
@@ -377,6 +415,9 @@ static int held_sc(const uint8_t *keys, SDL_Scancode sc, int slot) {
     } else {
         down = sc != SDL_SCANCODE_UNKNOWN && (int)sc >= 0 &&
             (int)sc < SDL_NUM_SCANCODES && keys[sc];
+        /* Synthetic key event (debug/test): same slot as a physical key. */
+        if (!down && s_injected_any)
+            down = psx_keybinds_injected_held(sc);
     }
     if (psx_keybinds_control_suppressed(slot + 1, sc)) {
         if (!down) psx_keybinds_release_control(slot + 1, sc);

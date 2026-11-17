@@ -200,6 +200,9 @@ void debug_server_check_watchpoints(void);
 int debug_server_get_input_override(void);
 /* Port-2 override word (set_input/press "port":2), or -1. */
 int debug_server_get_input_override_port2(void);
+/* 1 while pad_event owns an SDL virtual game controller (headless host-input
+ * gate: the headless sampler then runs the normal offline pad path). */
+int debug_server_virtual_pad_active(void);
 
 /* Optional analog-stick override set alongside set_input (lx/ly/rx/ry,
  * 0..255, 0x80 = centre). Returns 1 and fills st[lx,ly,rx,ry] when armed,

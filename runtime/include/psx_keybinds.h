@@ -102,6 +102,19 @@ void psx_keybinds_sticks(const uint8_t *keys, int player, uint8_t out[4]);
  * the hybrid pad-mode auto-switch: a D-pad press flips the pad to digital). */
 int psx_keybinds_dpad_active(const uint8_t *keys, int player);
 
+/* ── Synthetic key events (tests / debug injection, no device) ────────────── */
+/* An explicit per-scancode overlay ORed into every keyboard read below (pad
+ * word, stick folds, D-pad activity). It is the same input the SDL keyboard
+ * state would report, so a synthetic key and a physical key converge before the
+ * binding test; it is consumed by the pad path only, not by host hotkeys. The
+ * debug server's `input_event` command calls these. Zero cost when unused: the
+ * overlay index is only read after the `s_injected_any` gate. */
+void psx_keybinds_inject_key(SDL_Scancode sc, int down);
+void psx_keybinds_clear_injected(void);
+int  psx_keybinds_injected_held(SDL_Scancode sc);
+/* True while at least one synthetic key is down (headless host-input gate). */
+int  psx_keybinds_has_injected(void);
+
 /* ── Rebind API (launcher Controls page) ──────────────────────────────────── */
 /* Buttons are indexed 0..PSX_KB_COUNT-1 (see PsxKeybindButton). Scancodes, not
  * keycodes (keybinds.ini stores SDL scancode names). Players are 1-based. */

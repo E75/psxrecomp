@@ -78,6 +78,8 @@ Columns: **N** = native, **D** = DuckStation oracle.
 | `watch` | ✓ | ✓ | `addr` | Set byte-level memory watchpoint (fires per-frame on change) |
 | `unwatch` | ✓ | ✓ | `addr` | Remove memory watchpoint |
 | `set_input` | ✓ | ✓ | `buttons`, optional `frames`, optional `lx`, `ly`, `rx`, `ry`, `pad_type`, optional `port` | Override pad1 buttons and optional analog axes (PS1 inverted bitmask, 0 = pressed; axes 0-255). Debug builds also accept `pad_type` (0 digital, 1 DualShock, 2 JogCon) to test an emulated device identity. Holds until `clear_input` on both backends; pass `frames=N` (beetle) to auto-release after N frames. Runtime: `layer="host"` instead arms a virtual P1 gamepad (`buttons`, `lx`..`ry`, `lt`/`rt` 0-255) that feeds the normal offline input path (controller source, title pad transform, trigger values) and host shortcut polling, also headless; a plain override still wins while armed; `clear_input` disarms it. `port=2` (psx-runtime) drives pad 2 instead (digital buttons; plugs a digital pad into port 2 while driven) for headless two-player modes; `press` takes `port` too |
+| `input_event` |  |  | `scancode`, `down`, optional `player`, optional `clear` | Inject one synthetic KEYBOARD event into the title's keybinds mapper (no physical device, no pad-register write). `scancode` is an SDL scancode name (`"S"`, `"Return"`, `"Right Shift"`), i.e. the physical key. The overlay is ORed into the same scancode read the SDL keyboard state feeds and survives until `down:0` or `clear`; replies with the resulting active-low pad word. Used to prove the keyboard layout end to end (`docs/INPUT.md`) |
+| `pad_event` |  |  | `button` or `axis`, `down`/`value`, optional `clear` | Attach one SDL virtual game controller (Xbox layout) and press/release one button, or set one axis (e.g. `"axis":"righttrigger","value":32767`). Goes through `input.ini` and the normal controller mapper, so no physical pad is needed. `clear` releases every button/axis. Used to prove the Xbox map (`docs/INPUT.md`) |
 | `clear_input` | ✓ | ✓ | optional `port` | Remove input and analog axis overrides (`port` 1 or 2 clears one port; default both) |
 | `rewind_status` | ✓ |   | — | Local Rewind: `enabled`, `open`, `title_blocked` (`psx_mod_set_rewind_blocked`) and `snaps` held in the ring |
 | `turbo` | ✓ |   | `enabled` | Enable/disable TCP-controlled frontend turbo for fast-forward validation |
@@ -480,9 +482,9 @@ between Play and TCP availability.
 
 ## Complete command index (generated)
 
-**371 commands registered** — 358 on the native server (`runtime/src/debug_server.c`), 61 on the Beetle server (`runtime/src/beetle_debug_server.c`).
+**373 commands registered** — 360 on the native server (`runtime/src/debug_server.c`), 61 on the Beetle server (`runtime/src/beetle_debug_server.c`).
 
-74 of 371 have prose above; **297 are index-only**. An index-only command still works — it just has no description here yet. Send it `{"cmd":"<name>"}` and read the reply, or find its `handle_*` function in the server source.
+76 of 373 have prose above; **297 are index-only**. An index-only command still works — it just has no description here yet. Send it `{"cmd":"<name>"}` and read the reply, or find its `handle_*` function in the server source.
 
 Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this block has drifted from the code.
 
@@ -648,6 +650,7 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `host_profile` | ✓ |  |  |
 | `idle_skip` | ✓ |  |  |
 | `imask_trace` | ✓ |  |  |
+| `input_event` | ✓ |  | ✓ |
 | `input_route_append` | ✓ |  |  |
 | `input_route_clear` | ✓ |  |  |
 | `input_route_start` | ✓ |  |  |
@@ -704,6 +707,7 @@ Regenerate with `python tools/gen_tcp_commands.py`; `--check` fails if this bloc
 | `overlay_shadow_dump` | ✓ |  |  |
 | `overlay_static_entries` | ✓ |  | ✓ |
 | `pace_state` | ✓ |  |  |
+| `pad_event` | ✓ |  | ✓ |
 | `pad_status` | ✓ | ✓ |  |
 | `parity_ctl` | ✓ | ✓ |  |
 | `parity_dump` | ✓ | ✓ |  |

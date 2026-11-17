@@ -72,6 +72,7 @@
 #include "frame_fingerprint.h"
 #include "psx_segment_miss.h"
 #include "psx_rewind.h"
+#include "psx_keybinds.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -8125,6 +8126,119 @@ static uint8_t clamp_u8_arg(int v, uint8_t dflt) {
     return (uint8_t)(v > 255 ? 255 : v);
 }
 
+/* ── Synthetic host input (test seam, no physical device) ────────────────────
+ * input_event {"scancode":"S","down":1[,"player":1]}: feeds the keyboard layer
+ * through psx_keybinds' overlay, i.e. the same place a physical key enters the
+ * binding test. This is NOT set_input: nothing writes the pad register; the
+ * runtime's own mapper builds the word.
+ * pad_event {"button":"a","down":1} / {"axis":"righttrigger","value":32767}:
+ * attaches one SDL virtual game controller (a real SDL device, default Xbox
+ * mapping) and presses it, so the gamepad -> input.ini mapper runs unmodified.
+ * clear:1 on either command releases everything. */
+static SDL_Joystick *s_virtual_pad;
+static SDL_JoystickID s_virtual_pad_id;
+
+static int ensure_virtual_pad(void)
+{
+    if (s_virtual_pad) return 1;
+    SDL_VirtualJoystickDesc desc;
+    SDL_INIT_INTERFACE(&desc);
+    desc.type = SDL_JOYSTICK_TYPE_GAMECONTROLLER;
+    desc.vendor_id = 0x045e;   /* Microsoft */
+    desc.product_id = 0x02fd;  /* Xbox One controller */
+    desc.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+    desc.naxes = SDL_GAMEPAD_AXIS_COUNT;
+    desc.button_mask = (1u << SDL_GAMEPAD_BUTTON_COUNT) - 1u;
+    desc.axis_mask = (1u << SDL_GAMEPAD_AXIS_COUNT) - 1u;
+    desc.name = "PSXRecomp synthetic pad";
+    s_virtual_pad_id = SDL_AttachVirtualJoystick(&desc);
+    if (!s_virtual_pad_id) return 0;
+    s_virtual_pad = SDL_OpenJoystick(s_virtual_pad_id);
+    return s_virtual_pad != NULL;
+}
+
+int debug_server_virtual_pad_active(void) {
+    return s_virtual_pad != NULL;
+}
+
+static void handle_input_event(int id, const char *json)
+{
+    char val[64];
+    const int player = json_get_int(json, "player", 1);
+    if (json_get_int(json, "clear", 0) != 0) {
+        psx_keybinds_clear_injected();
+        send_ok(id);
+        return;
+    }
+    if (!json_get_str(json, "scancode", val, sizeof(val))) {
+        send_err(id, "missing scancode");
+        return;
+    }
+    const SDL_Scancode sc = SDL_GetScancodeFromName(val);
+    if (sc == SDL_SCANCODE_UNKNOWN) {
+        send_err(id, "unknown scancode");
+        return;
+    }
+    const int down = json_get_int(json, "down", 1) != 0;
+    psx_keybinds_inject_key(sc, down);
+    send_fmt("{\"id\":%d,\"ok\":true,\"scancode\":\"%s\",\"value\":%d,"
+             "\"down\":%s,\"pad\":\"0x%04X\"}\n",
+             id, SDL_GetScancodeName(sc), (int)sc, down ? "true" : "false",
+             psx_keybinds_pad_word(SDL_GetKeyboardState(NULL), player));
+}
+
+static void handle_pad_event(int id, const char *json)
+{
+    char val[64];
+    if (json_get_int(json, "clear", 0) != 0) {
+        if (s_virtual_pad) {
+            for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; b++)
+                SDL_SetJoystickVirtualButton(s_virtual_pad,
+                                             (SDL_GamepadButton)b, 0);
+            for (int a = 0; a < SDL_GAMEPAD_AXIS_COUNT; a++)
+                SDL_SetJoystickVirtualAxis(s_virtual_pad,
+                                           (SDL_GamepadAxis)a, 0);
+        }
+        send_ok(id);
+        return;
+    }
+    if (!ensure_virtual_pad()) {
+        send_err(id, SDL_GetError());
+        return;
+    }
+    if (json_get_str(json, "button", val, sizeof(val))) {
+        const SDL_GamepadButton b = SDL_GetGamepadButtonFromString(val);
+        if ((int)b < 0 || b >= SDL_GAMEPAD_BUTTON_COUNT) {
+            send_err(id, "unknown gamepad button");
+            return;
+        }
+        const int down = json_get_int(json, "down", 1) != 0;
+        SDL_SetJoystickVirtualButton(s_virtual_pad, b, down != 0);
+        send_fmt("{\"id\":%d,\"ok\":true,\"button\":\"%s\",\"down\":%s,"
+                 "\"instance\":%u}\n",
+                 id, SDL_GetGamepadStringForButton(b),
+                 down ? "true" : "false", (unsigned)s_virtual_pad_id);
+        return;
+    }
+    if (json_get_str(json, "axis", val, sizeof(val))) {
+        const SDL_GamepadAxis a = SDL_GetGamepadAxisFromString(val);
+        if ((int)a < 0 || a >= SDL_GAMEPAD_AXIS_COUNT) {
+            send_err(id, "unknown gamepad axis");
+            return;
+        }
+        int v = json_get_int(json, "value", 32767);
+        if (v < -32768) v = -32768;
+        if (v > 32767) v = 32767;
+        SDL_SetJoystickVirtualAxis(s_virtual_pad, a, (Sint16)v);
+        send_fmt("{\"id\":%d,\"ok\":true,\"axis\":\"%s\",\"value\":%d,"
+                 "\"instance\":%u}\n",
+                 id, SDL_GetGamepadStringForAxis(a), v,
+                 (unsigned)s_virtual_pad_id);
+        return;
+    }
+    send_err(id, "missing button or axis");
+}
+
 static void handle_set_input(int id, const char *json)
 {
     char val_str[32];
@@ -8295,6 +8409,7 @@ static void handle_clear_input(int id, const char *json)
     s_host_buttons = 0xFFFF;
     s_host_axes[0] = s_host_axes[1] = s_host_axes[2] = s_host_axes[3] = 0x80;
     s_host_lt = s_host_rt = 0;
+    psx_keybinds_clear_injected();
     send_ok(id);
 }
 
@@ -16109,6 +16224,8 @@ static const CmdEntry s_commands[] = {
     { "fmv_state",         handle_fmv_state },
     { "mdec_trace_clear",  handle_mdec_trace_clear },
     { "set_input",         handle_set_input },
+    { "input_event",       handle_input_event },
+    { "pad_event",         handle_pad_event },
     { "press",             handle_press },
     { "pad_status",        handle_pad_status },
     { "rewind_status",     handle_rewind_status },
