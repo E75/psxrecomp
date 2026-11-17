@@ -2640,6 +2640,7 @@ static const HiwTile *hiw_ensure(int x0, int x1) {
 }
 
 /* ---- coherency: hr FBO -> raw mirror (pack) ------------------------------ */
+static double cw_ms(void);   /* wall clock for the cost counters (below) */
 /* One pack draw over a guest-coord rect. `off` shifts the destination window
  * (and therefore gl_FragCoord) right by that many texels while the shader
  * subtracts it again, so the SOURCE stays at the guest coordinate and only the
@@ -2659,6 +2660,18 @@ static void pack_flush(void) {
     /* A generated frame draws into its own surfaces: the raw mirror keeps
      * the real VRAM (its pack dirt is restored afterwards). */
     if (s_fg_drawing) return;
+    /* Perf attribution (like gl_ws_ablate): PSX_VRAM_EXT_PACK=0 drops the pack
+     * so the frame cost can be measured with and without it. Never a shipping
+     * mode - the raw mirror goes stale, so the next texture fetch samples old
+     * VRAM. It is a probe, and the picture is not expected to be right. */
+    {   static int on = -1;
+        if (on < 0) {
+            const char *e = getenv("PSX_VRAM_EXT_PACK");
+            on = !(e && e[0] == '0');
+        }
+        if (!on) { rect_clear(&s_pack_dirty); return; }
+    }
+    double pack_t0 = cw_ms();
     hiw_flush_queue();   /* queued window draws sample the raw mirror as it is now */
     int x = s_pack_dirty.x0, y = s_pack_dirty.y0;
     int w = s_pack_dirty.x1 - s_pack_dirty.x0 + 1;
@@ -2675,6 +2688,7 @@ static void pack_flush(void) {
         glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, PSXGL_RED_INTEGER,
                        GL_UNSIGNED_SHORT, s_vram + (size_t)y * VRAM_W + x);
         glPixelStorei(PSXGL_UNPACK_ROW_LENGTH, 0);
+        vram_ext_note_pack_time(cw_ms() - pack_t0);
         return;
     }
 
@@ -2722,6 +2736,7 @@ static void pack_flush(void) {
     p_glUseProgram(0);
     glDisable(GL_SCISSOR_TEST);
     p_glBindFramebuffer(PSXGL_FRAMEBUFFER, 0);
+    vram_ext_note_pack_time(cw_ms() - pack_t0);
 }
 
 /* Make sure the raw mirror is current for a textured draw that samples the
@@ -2787,10 +2802,13 @@ static void ensure_cpu(void) {
                  s_vram + (size_t)ry * VRAM_W + rx);
     glPixelStorei(PSXGL_PACK_ROW_LENGTH, 0);
     /* [video] vram_extension: the raw mirror's extension columns hold the wide
-     * framebuffer's overflow, which guest VRAM never contains. */
+     * framebuffer's overflow, which guest VRAM never contains. The plane starts
+     * at host column VRAM_EXT_HOST_X0 (1024), NOT at VRAM_EXT_OFFSET (512):
+     * 512..681 of the mirror are guest texture columns, and reading those into
+     * the plane made the CPU present / screenshot show stale textures. */
     if (vram_ext_driving()) {
         glPixelStorei(PSXGL_PACK_ROW_LENGTH, VRAM_EXT_COLS);
-        glReadPixels(VRAM_EXT_OFFSET, 0, VRAM_EXT_COLS, VRAM_H,
+        glReadPixels(VRAM_EXT_HOST_X0, 0, VRAM_EXT_COLS, VRAM_H,
                      PSXGL_RED_INTEGER, GL_UNSIGNED_SHORT, vram_ext_host());
         glPixelStorei(PSXGL_PACK_ROW_LENGTH, 0);
         vram_ext_note_readback((uint64_t)VRAM_EXT_COLS * VRAM_H * 2);
@@ -4515,7 +4533,7 @@ static void glb_fill_rect(int x,int y,int w,int h,uint16_t c){
      * columns is a DRAW, not an upload - it must reach the FBO (and from there
      * the extension plane) without touching the guest texture pages. */
     int gx0, gy0, gx1, gy1;
-    if (w > 0 && h > 0 && vram_ext_region(&gx0, &gy0, &gx1, &gy1)) {
+    if (w > 0 && h > 0 && vram_ext_draw_gate(&gx0, &gy0, &gx1, &gy1)) {
         int ox0 = x > VRAM_EXT_X0 ? x : VRAM_EXT_X0;
         int ox1 = (x + w - 1) < gx1 ? (x + w - 1) : gx1;
         int oy0 = y > gy0 ? y : gy0;

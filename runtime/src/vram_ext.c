@@ -171,8 +171,29 @@ int vram_ext_driving(void) {
 
 /* ------------------------------------------------------------- region ---- */
 
+/* Two things, and the difference is the fix for the striped-HUD regression:
+ *
+ *   s_reg_on   - the LIVE gate: the draw area being set up right now is the
+ *                wide display buffer. gpu.c toggles this per GP0(E3/E4) /
+ *                GP1(06h) write, so it is true and false several times inside
+ *                one frame (the match re-asserts its env every flip, and the
+ *                register arm widens the clip in a second write).
+ *   s_arc_on   - the STICKY geometry: the last rect that passed the span test.
+ *                It is what the pack (render target -> raw mirror) and the
+ *                display read split with.
+ *
+ * Using the live gate for the pack was the regression: a pack that ran while
+ * the gate happened to be closed packed the whole dirty rect - including the
+ * wide framebuffer's overflow columns 512..681 - into GUEST VRAM, overwriting
+ * the texture pages and CLUTs that paletted sprites sample (vertical stripes
+ * in HUD text and kits). The geometry persists exactly like the learned bands
+ * (they answer the same question for rows) and is dropped only on a GPU reset
+ * by vram_ext_reset_bands; a 4:3 screen cannot draw past its own clip, so a
+ * stale arc cannot capture a 4:3 frame's pixels. */
 static int s_reg_on;
 static int s_reg_x0, s_reg_y0, s_reg_x1, s_reg_y1;
+static int s_arc_on;
+static int s_arc_x0, s_arc_y0, s_arc_x1, s_arc_y1;
 
 /* -------------------------------------------------------------- bands ---- */
 /* Every row band that has been a display buffer with the current display
@@ -206,7 +227,10 @@ void vram_ext_learn_band(int y0, int y1) {
     s_band_n = 1;
 }
 
-void vram_ext_reset_bands(void) { s_band_n = 0; }
+/* Bands and the sticky framebuffer geometry live and die together: gpu.c calls
+ * this on a GPU reset (savestate load, soft reset), where the plane is scratch
+ * and nothing from the old display may be redirected any more. */
+void vram_ext_reset_bands(void) { s_band_n = 0; vram_ext_clear_region(); }
 
 int vram_ext_band_rows(int *y0, int *y1) {
     if (s_band_n <= 0) return 0;
@@ -222,17 +246,34 @@ int vram_ext_band_rows(int *y0, int *y1) {
 
 void vram_ext_set_region(int on, int x0, int y0, int x1, int y1) {
     s_reg_on = on ? 1 : 0;
-    s_reg_x0 = x0; s_reg_y0 = y0; s_reg_x1 = x1; s_reg_y1 = y1;
+    if (!on) return;                 /* a non-framebuffer draw: keep the arc */
     /* The plane is finite: never let a wider display push the redirect past it
      * (a >704-wide framebuffer would need a bigger VRAM_EXT_COLS). */
-    if (s_reg_x1 > VRAM_EXT_X0 + VRAM_EXT_COLS - 1)
-        s_reg_x1 = VRAM_EXT_X0 + VRAM_EXT_COLS - 1;
-    if (s_reg_x0 < 0) s_reg_x0 = 0;
-    if (s_reg_y0 < 0) s_reg_y0 = 0;
-    if (s_reg_y1 > 511) s_reg_y1 = 511;
+    if (x1 > VRAM_EXT_X0 + VRAM_EXT_COLS - 1)
+        x1 = VRAM_EXT_X0 + VRAM_EXT_COLS - 1;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (y1 > 511) y1 = 511;
+    s_reg_x0 = x0; s_reg_y0 = y0; s_reg_x1 = x1; s_reg_y1 = y1;
+    s_arc_on = 1;
+    s_arc_x0 = x0; s_arc_y0 = y0; s_arc_x1 = x1; s_arc_y1 = y1;
+}
+
+void vram_ext_clear_region(void) {
+    s_reg_on = 0;
+    s_arc_on = 0;
 }
 
 int vram_ext_region(int *x0, int *y0, int *x1, int *y1) {
+    if (!s_arc_on || !vram_ext_driving()) return 0;
+    if (x0) *x0 = s_arc_x0;
+    if (y0) *y0 = s_arc_y0;
+    if (x1) *x1 = s_arc_x1;
+    if (y1) *y1 = s_arc_y1;
+    return 1;
+}
+
+int vram_ext_draw_gate(int *x0, int *y0, int *x1, int *y1) {
     if (!s_reg_on || !vram_ext_driving()) return 0;
     if (x0) *x0 = s_reg_x0;
     if (y0) *y0 = s_reg_y0;
@@ -242,9 +283,9 @@ int vram_ext_region(int *x0, int *y0, int *x1, int *y1) {
 }
 
 int vram_ext_plane_index(int x, int y) {
-    if (!s_reg_on || !vram_ext_driving()) return -1;
-    if (x < VRAM_EXT_X0 || x > s_reg_x1) return -1;
-    if (y < s_reg_y0 || y > s_reg_y1) return -1;
+    if (!s_arc_on || !vram_ext_driving()) return -1;
+    if (x < VRAM_EXT_X0 || x > s_arc_x1) return -1;
+    if (y < s_arc_y0 || y > s_arc_y1) return -1;
     if (y < 0 || y >= 512) return -1;
     return y * VRAM_EXT_COLS + (x - VRAM_EXT_X0);
 }
@@ -275,6 +316,7 @@ static struct {
     uint64_t pack_calls;
     uint64_t pack_passes;
     uint64_t pack_pixels;
+    double   pack_ms;                  /* CPU wall inside the pack calls */
     uint64_t gl_bypass_frames;
     int      gl_bypass_reason;
     int      pack_max_x1;              /* widest pack rect right edge seen */
@@ -310,33 +352,38 @@ void vram_ext_note_pack_rect(int x0, int y0, int x1, int y1) {
      * assertion. Without this clamp the GL pack rect (which spans the full
      * 1024-wide dirty rect) made guest_pack_pixels permanently non-zero. */
     int gx1 = x1;
-    if (s_reg_on && gx1 > s_reg_x1) gx1 = s_reg_x1;
+    if (s_arc_on && gx1 > s_arc_x1) gx1 = s_arc_x1;
     if (gx0 > gx1) {
         /* One-shot: the pack ran but its rect never reached the split, so the
          * framebuffer's overflow columns were not redirected. Names the rect,
          * the region and the bands for the next run. */
         static int logged;
-        if (!logged && s_reg_on) {
+        if (!logged && s_arc_on) {
             logged = 1;
             fprintf(stderr, "psxrecomp: vram extension: pack rect [%d,%d,%d,%d] "
                             "below the split (%d); region [%d,%d,%d,%d] bands=%d\n",
                     x0, y0, x1, y1, VRAM_EXT_X0,
-                    s_reg_x0, s_reg_y0, s_reg_x1, s_reg_y1, s_band_n);
+                    s_arc_x0, s_arc_y0, s_arc_x1, s_arc_y1, s_band_n);
         }
         return;
     }
+    /* Rows the redirect covers: the union of the learned bands (they can
+     * overlap - a band learned at 0..239 and another at 0..479 - and a per-band
+     * loop counted the shared rows twice, which made this assertion fire on a
+     * correct pack). The arc always covers the union. */
     uint64_t in_band = 0;
-    for (int i = 0; i < s_band_n; i++) {
-        int cy0 = y0 > s_band[i].y0 ? y0 : s_band[i].y0;
-        int cy1 = y1 < s_band[i].y1 ? y1 : s_band[i].y1;
+    int by0, by1;
+    if (vram_ext_band_rows(&by0, &by1)) {
+        int cy0 = y0 > by0 ? y0 : by0;
+        int cy1 = y1 < by1 ? y1 : by1;
         if (cy0 <= cy1)
-            in_band += (uint64_t)(gx1 - gx0 + 1) * (uint64_t)(cy1 - cy0 + 1);
+            in_band = (uint64_t)(gx1 - gx0 + 1) * (uint64_t)(cy1 - cy0 + 1);
     }
     uint64_t redirected = 0;
-    if (s_reg_on && vram_ext_driving()) {
-        int cy0 = y0 > s_reg_y0 ? y0 : s_reg_y0;
-        int cy1 = y1 < s_reg_y1 ? y1 : s_reg_y1;
-        int cx1 = gx1 < s_reg_x1 ? gx1 : s_reg_x1;
+    if (s_arc_on && vram_ext_driving()) {
+        int cy0 = y0 > s_arc_y0 ? y0 : s_arc_y0;
+        int cy1 = y1 < s_arc_y1 ? y1 : s_arc_y1;
+        int cx1 = gx1 < s_arc_x1 ? gx1 : s_arc_x1;
         if (cx1 >= gx0 && cy0 <= cy1)
             redirected = (uint64_t)(cx1 - gx0 + 1) * (uint64_t)(cy1 - cy0 + 1);
     }
@@ -344,14 +391,14 @@ void vram_ext_note_pack_rect(int x0, int y0, int x1, int y1) {
     if (in_band > redirected) {
         static int logged_rows;
         s_stats.guest_pack_pixels += in_band - redirected;
-        if (!logged_rows && s_reg_on) {
+        if (!logged_rows && s_arc_on) {
             logged_rows = 1;
             fprintf(stderr, "psxrecomp: vram extension: pack rect [%d,%d,%d,%d] "
                             "writes %llu framebuffer px into guest VRAM; region "
                             "[%d,%d,%d,%d] bands=%d\n",
                     x0, y0, x1, y1,
                     (unsigned long long)(in_band - redirected),
-                    s_reg_x0, s_reg_y0, s_reg_x1, s_reg_y1, s_band_n);
+                    s_arc_x0, s_arc_y0, s_arc_x1, s_arc_y1, s_band_n);
         }
     }
 }
@@ -363,6 +410,10 @@ void vram_ext_note_cpu_redirect(uint64_t pixels) {
 void vram_ext_note_pack_passes(uint64_t passes, uint64_t pixels) {
     s_stats.pack_passes += passes;
     s_stats.pack_pixels += pixels;
+}
+
+void vram_ext_note_pack_time(double ms) {
+    if (ms > 0.0) s_stats.pack_ms += ms;
 }
 
 /* A frame the GL GPU raster did not draw. One query answers "is the GPU path
@@ -394,13 +445,14 @@ void vram_ext_reset_stats(void) { memset(&s_stats, 0, sizeof s_stats); }
 int vram_ext_debug_json(char *out, int cap) {
     if (!out || cap <= 0) return 0;
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
-    int on = s_reg_on && vram_ext_driving();
-    if (on) { x0 = s_reg_x0; y0 = s_reg_y0; x1 = s_reg_x1; y1 = s_reg_y1; }
+    int on = s_arc_on && vram_ext_driving();
+    if (on) { x0 = s_arc_x0; y0 = s_arc_y0; x1 = s_arc_x1; y1 = s_arc_y1; }
     int by0 = 0, by1 = 0;
     int bands = vram_ext_band_rows(&by0, &by1);
     return snprintf(out, (size_t)cap,
                     "{\"enabled\":%d,\"driving\":%d,\"backend\":%d,"
                     "\"region_on\":%d,\"region\":[%d,%d,%d,%d],"
+                    "\"gate_open\":%d,"
                     "\"bands\":%d,\"band_rows\":[%d,%d],"
                     "\"present_reads_remapped\":%llu,"
                     "\"pack_redirect_pixels\":%llu,"
@@ -409,10 +461,11 @@ int vram_ext_debug_json(char *out, int cap) {
                     "\"guest_pack_pixels\":%llu,"
                     "\"gate_off_frames\":%llu,\"present_width\":%d,"
                     "\"pack_calls\":%llu,\"pack_max_x1\":%d,"
-                    "\"pack_passes\":%llu,\"pack_pixels\":%llu,"
+                    "\"pack_passes\":%llu,\"pack_pixels\":%llu,\"pack_ms\":%.3f,"
                     "\"gl_bypass_frames\":%llu,\"gl_bypass_reason\":%d}",
                     vram_ext_enabled(), vram_ext_driving(), s_backend,
-                    on, x0, y0, x1, y1, bands, by0, by1,
+                    on, x0, y0, x1, y1, s_reg_on,
+                    bands, by0, by1,
                     (unsigned long long)(s_stats.pack_redirect_pixels +
                                          s_stats.cpu_redirect_pixels),
                     (unsigned long long)s_stats.pack_redirect_pixels,
@@ -425,6 +478,7 @@ int vram_ext_debug_json(char *out, int cap) {
                     s_stats.pack_max_x1,
                     (unsigned long long)s_stats.pack_passes,
                     (unsigned long long)s_stats.pack_pixels,
+                    s_stats.pack_ms,
                     (unsigned long long)s_stats.gl_bypass_frames,
                     s_stats.gl_bypass_reason);
 }
