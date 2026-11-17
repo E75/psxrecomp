@@ -348,6 +348,7 @@ static uint32_t s_input_route_count = 0;
 static uint32_t s_input_route_index = 0;
 static uint32_t s_input_route_remaining = 0;
 static int      s_input_route_active = 0;
+static uint64_t s_input_route_start_at = 0;   /* frame-anchored start, 0 = next */
 
 /* ---- Frontend turbo override ---- */
 static volatile int s_turbo_enabled = 0;
@@ -8453,6 +8454,7 @@ static void handle_input_route_clear(int id, const char *json)
     s_input_route_count = 0;
     s_input_route_index = 0;
     s_input_route_remaining = 0;
+    s_input_route_start_at = 0;
     send_ok(id);
 }
 
@@ -8481,7 +8483,6 @@ static void handle_input_route_append(int id, const char *json)
 
 static void handle_input_route_start(int id, const char *json)
 {
-    (void)json;
     if (s_input_route_count == 0) {
         send_err(id, "input route is empty"); return;
     }
@@ -8492,9 +8493,19 @@ static void handle_input_route_start(int id, const char *json)
     s_input_route_index = 0;
     s_input_route_remaining = s_input_route[0].frames;
     s_input_route_active = 1;
-    send_fmt("{\"id\":%d,\"ok\":true,\"steps\":%u,\"start_frame\":%llu}\n",
+    /* Optional frame-anchored start: the first step is consumed on the first
+     * call with s_frame_count >= at_frame. Without it the command's landing
+     * frame decides the input phase (measured: a one-frame shift between
+     * otherwise identical runs, which invalidates a byte-for-byte parity A/B).
+     * A frame in the past or 0 means "the next call" (historical behaviour). */
+    s_input_route_start_at = (uint64_t)json_get_int(json, "at_frame", 0);
+    if (s_input_route_start_at && s_frame_count < s_input_route_start_at)
+        s_input_route_remaining = s_input_route[0].frames;
+    send_fmt("{\"id\":%d,\"ok\":true,\"steps\":%u,\"start_frame\":%llu,"
+             "\"at_frame\":%llu}\n",
              id, (unsigned)s_input_route_count,
-             (unsigned long long)s_frame_count);
+             (unsigned long long)s_frame_count,
+             (unsigned long long)s_input_route_start_at);
 }
 
 static void handle_input_route_stop(int id, const char *json)
@@ -8502,7 +8513,22 @@ static void handle_input_route_stop(int id, const char *json)
     (void)json;
     s_input_route_active = 0;
     s_input_route_remaining = 0;
+    s_input_route_start_at = 0;
     send_ok(id);
+}
+
+/* Live [timing] guest_cycle_scale for a scale A/B in ONE process.
+ *   {"cmd":"gcs"} / {"cmd":"gcs","scale":2}
+ * The rate is a boot config otherwise, so a cross-process A/B also varies the
+ * boot/load path; this makes the scale the only difference. */
+static void handle_gcs(int id, const char *json)
+{
+    int scale = json_get_int(json, "scale", -1);
+    if (scale >= 1 && scale <= 64)
+        psx_guest_cycle_scale_set((uint32_t)scale);
+    send_fmt("{\"id\":%d,\"ok\":true,\"scale\":%u,\"config\":%u}\n",
+             id, (unsigned)psx_guest_cycle_scale(),
+             (unsigned)psx_guest_cycle_scale_config());
 }
 
 static void handle_input_route_status(int id, const char *json)
@@ -16287,6 +16313,7 @@ static const CmdEntry s_commands[] = {
     { "clear_input",       handle_clear_input },
     { "input_route_clear", handle_input_route_clear },
     { "input_route_append",handle_input_route_append },
+    { "gcs",               handle_gcs },
     { "input_route_start", handle_input_route_start },
     { "input_route_stop",  handle_input_route_stop },
     { "input_route_status",handle_input_route_status },
@@ -17323,6 +17350,9 @@ int debug_server_is_connected(void)
 
 int debug_server_get_input_override(void)
 {
+    if (s_input_route_active && s_input_route_start_at &&
+        s_frame_count < s_input_route_start_at)
+        return 0xFFFF;   /* armed, not started: all buttons released */
     if (s_input_route_active && s_input_route_index < s_input_route_count) {
         int current = (int)s_input_route[s_input_route_index].buttons;
         if (s_input_route_remaining > 0 && --s_input_route_remaining == 0) {
