@@ -4945,14 +4945,28 @@ static void present_set_scanline(GLint uOn, GLint uStr, GLint uLines,
                          (pitch), (disp), (oh))
 
 /* Display aspect for the present letterbox. Default 4:3 (native). When a wide
- * aspect is configured the 4:3 frame is stretched into it — paired with the
+ * aspect is configured the 4:3 frame is stretched into it - paired with the
  * GTE X-squash (gte_set_display_aspect) this nets a wider field of view. */
 static int s_aspect_num = 4, s_aspect_den = 3;
+/* Present-only aspect override (0:0 = follow the configured one). A natively
+ * wide raster (the guest frame itself is 682x240, not a 4:3 frame stretched)
+ * carries its own aspect, so the letterbox must use THAT: presenting it into
+ * the configured 4:3 would stretch it vertically. Set by main.cpp from
+ * gpu_present_native_aspect(), i.e. from the raster the GPU is producing, not
+ * from a config key. */
+static int s_present_num = 0, s_present_den = 0;
 
 void gl_renderer_set_display_aspect(int num, int den) {
     GL_RT_SYNC("set_display_aspect");
     if (num <= 0 || den <= 0) { num = 4; den = 3; }
     s_aspect_num = num; s_aspect_den = den;
+}
+
+void gl_renderer_set_present_aspect(int num, int den) {
+    if (num <= 0 || den <= 0) { num = 0; den = 0; }
+    if (num == s_present_num && den == s_present_den) return;   /* per frame */
+    GL_RT_SYNC("set_present_aspect");
+    s_present_num = num; s_present_den = den;
 }
 
 /* Scanline post-process toggle (host display setting). strength is the depth of
@@ -5006,7 +5020,10 @@ static void letterbox_rect_aspect(int ww, int wh, int num, int den,
     *w = dw; *h = dh;
 }
 static void letterbox_rect(int ww, int wh, int *x, int *y, int *w, int *h) {
-    letterbox_rect_aspect(ww, wh, s_aspect_num, s_aspect_den, x, y, w, h);
+    if (s_present_num > 0)
+        letterbox_rect_aspect(ww, wh, s_present_num, s_present_den, x, y, w, h);
+    else
+        letterbox_rect_aspect(ww, wh, s_aspect_num, s_aspect_den, x, y, w, h);
 }
 
 static GLuint make_tex(GLenum internal, int w, int h, GLenum fmt, GLenum type) {
@@ -9069,18 +9086,29 @@ static void gl_swap_with_osd(void) {
             int wrote = 0;
             SDL_GL_GetDrawableSize(s_win, &ww, &wh);
             if (ww > 0 && wh > 0) {
-                uint8_t *rows = (uint8_t *)malloc((size_t)ww * wh * 3);
-                uint8_t *flip = rows ? (uint8_t *)malloc((size_t)ww * wh * 3) : NULL;
+                /* The shot is the PRESENTED IMAGE, not the window: a letterboxed
+                 * present (a natively wide frame in a 4:3 window, FMV
+                 * pillarbox) is cropped to its letterbox rect, so the PNG's own
+                 * dimensions carry the presented aspect ("live.present_aspect"
+                 * reads them, and a 682x240 frame shot at 480 px is 480x270).
+                 * When the image fills the drawable the rect is (0,0,ww,wh) and
+                 * nothing changes. */
+                int lx = 0, ly = 0, lw = ww, lh = wh;
+                letterbox_rect(ww, wh, &lx, &ly, &lw, &lh);
+                if (lw <= 0 || lh <= 0) { lx = 0; ly = 0; lw = ww; lh = wh; }
+                const int gl_y = wh - (ly + lh);   /* GL rows start at the bottom */
+                uint8_t *rows = (uint8_t *)malloc((size_t)lw * lh * 3);
+                uint8_t *flip = rows ? (uint8_t *)malloc((size_t)lw * lh * 3) : NULL;
                 if (rows && flip) {
                     glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                    glReadPixels(0, 0, ww, wh, GL_RGB, GL_UNSIGNED_BYTE, rows);
-                    for (int y = 0; y < wh; y++)
-                        memcpy(flip + (size_t)y * ww * 3,
-                               rows + (size_t)(wh - 1 - y) * ww * 3,
-                               (size_t)ww * 3);
+                    glReadPixels(lx, gl_y, lw, lh, GL_RGB, GL_UNSIGNED_BYTE, rows);
+                    for (int y = 0; y < lh; y++)
+                        memcpy(flip + (size_t)y * lw * 3,
+                               rows + (size_t)(lh - 1 - y) * lw * 3,
+                               (size_t)lw * 3);
                     FILE *pf = fopen(shot_path, "wb");
                     if (pf) {
-                        wrote = png_write_rgb(pf, flip, (uint32_t)ww, (uint32_t)wh);
+                        wrote = png_write_rgb(pf, flip, (uint32_t)lw, (uint32_t)lh);
                         fclose(pf);
                     }
                 }

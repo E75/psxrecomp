@@ -9046,13 +9046,29 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
         w = di.width; h = di.height;
         present_h = psx_display_present_height(
             di.depth24, h, di.screen_height);
+        /* Native wide raster (gpu_ws_set_match_raster): the guest frame itself
+         * is 682x240, so it presents at its OWN aspect. The startup clamp still
+         * forces the configured aspect to 4:3 (it protects the legacy
+         * GTE-squash path), and presenting a natively wide frame into it
+         * stretched the picture vertically by 4/3 - the same user-rejected
+         * squash in the other direction. The aspect comes from the raster the
+         * GPU is producing, not from game.toml, so a 4:3 frame stretched into
+         * 16:9 (the legacy path) keeps the configured aspect. */
+        int nw_num = 0, nw_den = 0;
+        const bool nw_frame = gpu_present_native_aspect(&nw_num, &nw_den) != 0;
+        if (g_gl_active)
+            gl_renderer_set_present_aspect(nw_frame ? nw_num : 0,
+                                           nw_frame ? nw_den : 0);
         /* 4:3-pinned frames: the pre-game BIOS boot, plus (once engaged) every
          * frame the widescreen layer presents native — FMV video and full-2D
          * menu/title screens. gpu_ws_present_native_43() is the single source
          * of truth, shared with the GTE/GPU squash so content and present stay
          * locked: we squash IFF we stretch. depth24 always classifies as FMV
-         * even if the ws layer is not engaged yet (4:3 titles). */
-        fmv_frame = di.depth24 || !g_ws_engaged || gpu_ws_present_native_43() != 0;
+         * even if the ws layer is not engaged yet (4:3 titles). A natively
+         * wide frame is NOT that case: it is a game frame whose pixels are
+         * already 16:9, so it presents wide with no squash. */
+        fmv_frame = di.depth24 || (!g_ws_engaged && !nw_frame) ||
+                    gpu_ws_present_native_43() != 0;
         /* MDEC movies are already decoded at their authored cadence and are
          * CPU/upload heavy. High-refresh crossfades only contend with decoding
          * and can starve audio, so present native-4:3/MDEC phases directly.

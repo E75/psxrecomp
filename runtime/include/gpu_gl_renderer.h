@@ -247,6 +247,11 @@ int gl_renderer_present_wide_fbo(int disp_x, int disp_y, int disp_h, int linear)
  * stretches the 4:3 frame; pair with gte_set_display_aspect (cpu_state.h)
  * for the widescreen field-of-view hack. */
 void gl_renderer_set_display_aspect(int num, int den);
+/* Present-only override of the letterbox aspect (0:0 = follow the configured
+ * one). A natively wide raster carries its own aspect (682x240 on the PS1's
+ * 0.625 pixel aspect is 341:192), so it is letterboxed at that aspect inside
+ * whatever window exists instead of being stretched into the configured one. */
+void gl_renderer_set_present_aspect(int num, int den);
 
 /* Scanline post-process (host display setting). on toggles the effect; strength
  * (0..1) is the depth of the dark gap between PS1 scanlines. Applied at the

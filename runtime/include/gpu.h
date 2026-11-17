@@ -306,6 +306,17 @@ int gpu_ws_configured_x_reveal(void);
 int  ws_nw_present_width(void);
 /* Display width (native px) the native-wide margins are derived from. */
 int  gpu_ws_display_width(void);
+/* Native match raster (register arm, `gpu_ws_set_match_raster`): the width the
+ * guest's 240-line match mode is widened to, 0 when disarmed. A fact about the
+ * frame the GPU is producing, not about any config key. */
+int  gpu_ws_match_raster_width(void);
+/* The aspect the CURRENT frame has by its own pixels, when that frame is a
+ * natively wide raster: 5*width : 8*height (PS1 240-line pixels are 0.625 wide,
+ * so 682x240 is 341:192 = 16:9 and 512x240 is exactly 4:3). Returns 1 and the
+ * reduced ratio for a wide frame, 0 when no natively wide frame is up - the
+ * caller then uses the configured display aspect, which is also what the
+ * legacy GTE-squash present needs (a 4:3 frame stretched into 16:9). */
+int  gpu_present_native_aspect(int *num, int *den);
 void gpu_ws_set_netplay_local_viewport(int enabled, int slot);
 int  gpu_ws_netplay_local_viewport_base_x(void);
 int  gpu_ws_netplay_local_viewport_width(void);
