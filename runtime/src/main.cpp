@@ -9059,6 +9059,16 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
         if (g_gl_active)
             gl_renderer_set_present_aspect(nw_frame ? nw_num : 0,
                                            nw_frame ? nw_den : 0);
+        /* The Vulkan presenter keeps its own aspect state (`s_aspect_num/den`),
+         * seeded from the startup-clamped global. A natively wide frame must be
+         * presented at ITS aspect there too, or the shipped Vulkan build
+         * letterboxes 682x240 into the clamped 4:3 and the picture is stretched
+         * vertically by 4/3 - the same defect the GL path just lost. Passing 0/0
+         * restores the configured aspect for menus, FMV and the legacy
+         * GTE-squash path. */
+        if (!g_gl_active)
+            vk_renderer_set_display_aspect(nw_frame ? nw_num : g_video_aspect_num,
+                                           nw_frame ? nw_den : g_video_aspect_den);
         /* 4:3-pinned frames: the pre-game BIOS boot, plus (once engaged) every
          * frame the widescreen layer presents native — FMV video and full-2D
          * menu/title screens. gpu_ws_present_native_43() is the single source
