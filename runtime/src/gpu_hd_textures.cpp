@@ -570,8 +570,22 @@ extern "C" void gpu_hd_textures_track_upload(int x, int y, int width, int height
         for (int col = 0; col < width; ++col)
             applied[static_cast<size_t>(row) * width + col] =
                 native_vram[((y + row) & 511) * 1024 + ((x + col) & 1023)];
+    /* PSXRECOMP_HD_TRACE_UPLOADS=1: one stderr line per tracked upload with the
+     * CRC-32 pack key it creates. Authoring aid: the key a replacement PNG must
+     * carry is not derivable from the disc file when the page is post-processed,
+     * and `hd_pack` only reports uploads for pages its miss diagnostic keeps. */
+    static int trace_uploads = -1;
+    if (trace_uploads < 0) {
+        const char* value = std::getenv("PSXRECOMP_HD_TRACE_UPLOADS");
+        trace_uploads = value && value[0] && value[0] != '0';
+    }
+    uint32_t texture_hash = 0;
     hd_texture_pack_track_upload(session->beetle, x & 1023, y & 511, width, height,
-                                 applied.get(), count, nullptr);
+                                 applied.get(), count, &texture_hash);
+    if (trace_uploads) {
+        std::fprintf(stderr, "psxrecomp: hd upload %dx%d@%d,%d hash=%08x\n",
+                     width, height, x & 1023, y & 511, texture_hash);
+    }
     duck_texture_pack_track_upload(session->duck, x & 1023, y & 511, width, height,
                                    native_vram, kVramWords);
 }
@@ -595,6 +609,30 @@ extern "C" int gpu_hd_textures_acquire_draw(uint16_t tp, uint16_t cx, uint16_t c
             return 0;
         }
         ++session->diag.matched_draws;
+        /* PSXRECOMP_HD_TRACE_MATCH=1: name the keys that actually matched, once
+         * per distinct key. Authoring aid: "overrides > 0" alone does not say
+         * which texture was replaced. */
+        static int trace_match = -1;
+        if (trace_match < 0) {
+            const char* value = std::getenv("PSXRECOMP_HD_TRACE_MATCH");
+            trace_match = value && value[0] && value[0] != '0';
+        }
+        if (trace_match) {
+            static uint32_t seen[32];
+            static int seen_count = 0;
+            bool known = false;
+            for (int i = 0; i < seen_count; ++i)
+                if (seen[i] == match.entry.texture_hash) known = true;
+            if (!known && seen_count < 32) {
+                seen[seen_count++] = match.entry.texture_hash;
+                std::fprintf(stderr,
+                             "psxrecomp: hd match %08x-%08x page=%d,%d depth=%u uv=%d,%d..%d,%d upload=%ux%u\n",
+                             match.entry.texture_hash, match.entry.palette_hash,
+                             query.page_x, query.page_y, query.depth,
+                             query.u_first, query.v_first, query.u_last, query.v_last,
+                             match.upload_width_words, match.upload_height);
+            }
+        }
         hd_texture_pack_request_decode(session->beetle, match.entry.texture_hash, match.entry.palette_hash);
         if (hd_texture_pack_acquire_decoded(session->beetle, match.entry.texture_hash,
                                           match.entry.palette_hash, &lease->beetle) != HD_TEXTURE_LOOKUP_FOUND) return 0;
