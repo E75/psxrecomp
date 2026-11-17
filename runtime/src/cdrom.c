@@ -216,6 +216,7 @@ static int     setloc_seek_far;
 static int     setloc_pending;   /* a Setloc has been issued and not consumed */
 
 /* docs/BOOT_BLOCKERS.md 9.0: Setloc/seek/Read timeline (defined far below). */
+static void pend_line(const char *tag, int lba);
 static void sl_line(const char *tag);
 
 /* Read state */
@@ -1936,6 +1937,7 @@ static int deliver_read_sector(void) {
     response_push(stat_reg);
     /* Delivered immediately: this INT1 announces the slot just filled. */
     s_ring_read = s_ring_write;
+    pend_line("deliver", last_sector_lba);
     set_irq(CDIRQ_DATA_READY);
     fire_cdrom_irq();
     s_dataready_fires++;
@@ -3215,6 +3217,31 @@ static void sl_line(const char *tag)
             read_min, read_sec, read_sect, reading, last_sector_lba,
             irq_flag, stat_reg, (unsigned)s_frame_count);
     fflush(s_sl_fp);
+}
+
+
+/* PSX_TRACE_PEND=<path>: the pended-INT1 accounting (docs/BOOT_BLOCKERS.md 9.0).
+ * Logs every INT1 presentation attempt with the pend depth, how late the pending
+ * presentation was and whether a parked sector was replaced */
+static FILE *s_pend_fp;
+static int s_pend_init;
+static void pend_line(const char *tag, int lba)
+{
+    if (!s_pend_init) {
+        const char *e = getenv("PSX_TRACE_PEND");
+        s_pend_init = 1;
+        if (e && *e) s_pend_fp = fopen(e, "w");
+    }
+    if (!s_pend_fp) return;
+    int64_t due = (int64_t)pending_present_due - (int64_t)psx_cycle_count;
+    fprintf(s_pend_fp,
+            "%-8s frame=%u lba=%d dataready=%u due=%lld int1_pended=%llu "
+            "int1_lost=%llu pending_now=%u seq=%llu\n",
+            tag, (unsigned)s_frame_count, lba, (unsigned)pending_dataready,
+            (long long)due, (unsigned long long)s_int1_pended,
+            (unsigned long long)s_int1_lost, (unsigned)pending_dataready,
+            (unsigned long long)s_cd_timing_pending_seq);
+    fflush(s_pend_fp);
 }
 
 int cdrom_dma_ready(void) {
