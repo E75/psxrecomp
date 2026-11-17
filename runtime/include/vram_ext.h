@@ -37,6 +37,7 @@ extern "C" {
 #define VRAM_EXT_COLS    192    /* extension plane width (guest 512..703) */
 #define VRAM_EXT_HOST_W  (VRAM_EXT_GUEST_W + VRAM_EXT_COLS)  /* 1216 */
 #define VRAM_EXT_OFFSET  512    /* host x = guest x + VRAM_EXT_OFFSET */
+#define VRAM_EXT_HOST_X0 (VRAM_EXT_X0 + VRAM_EXT_OFFSET)     /* 1024: first plane column */
 
 typedef enum {
     VRAM_EXT_BACKEND_NONE     = 0,
@@ -58,10 +59,25 @@ int  vram_ext_driving(void);
 
 /* The framebuffer rect whose overflow columns are redirected, in guest
  * coordinates. gpu.c sets it whenever the draw area or the display geometry
- * changes; on == 0 means "this frame draws somewhere else" (render-to-texture,
- * 4:3 display, depth24, display off) and nothing is redirected. */
+ * changes; on == 0 means "the draw that is arriving now is not the
+ * framebuffer" (render-to-texture, 4:3 display, depth24, display off).
+ *
+ * The GEOMETRY is sticky: a gate that closes for one command (the match
+ * re-asserts its display env every flip, and the register arm widens the clip
+ * in a second write) must not make the pack forget which rows/columns are the
+ * wide framebuffer, or the very next pack writes the framebuffer back into the
+ * guest texture pages. So `on == 1` refreshes the geometry, `on == 0` only
+ * closes the draw gate, and the geometry survives like the learned bands until
+ * a GPU reset (vram_ext_reset_bands clears both). */
 void vram_ext_set_region(int on, int x0, int y0, int x1, int y1);
+void vram_ext_clear_region(void);
+/* The framebuffer geometry (sticky): what the pack redirects and what the
+ * display/readback paths read from the plane. */
 int  vram_ext_region(int *x0, int *y0, int *x1, int *y1);
+/* The live per-draw gate: 1 only while the draw area currently being set up IS
+ * the wide display buffer. Draw-time redirect decisions (a CPU-rasterized
+ * fill, a VRAM copy) use this; the pack must use vram_ext_region(). */
+int  vram_ext_draw_gate(int *x0, int *y0, int *x1, int *y1);
 
 /* Framebuffer row bands. A double-buffered title draws one 240-line band per
  * frame and scans out one of them, and the pack of a frame's draws can run
@@ -74,7 +90,8 @@ void vram_ext_reset_bands(void);
 int  vram_ext_band_rows(int *y0, int *y1);   /* union of the learned bands */
 
 /* Per-pixel rule: extension-plane index (row * VRAM_EXT_COLS + col) for a
- * guest pixel that belongs in the extension, else -1. */
+ * guest pixel that belongs in the extension, else -1. Uses the sticky
+ * framebuffer geometry (a plane pixel is the frame, not a draw in progress). */
 int  vram_ext_plane_index(int x, int y);
 /* Host column for guest x at row y (x + VRAM_EXT_OFFSET when redirected). */
 int  vram_ext_map_x(int x, int y);
@@ -94,6 +111,10 @@ void vram_ext_note_pack_rect(int x0, int y0, int x1, int y1);
 void vram_ext_note_cpu_redirect(uint64_t pixels);
 /* One pack pass (a draw/dispatch) and its fragment count, for the cost check. */
 void vram_ext_note_pack_passes(uint64_t passes, uint64_t pixels);
+/* CPU wall time a backend spent inside one pack call (ms). The pack is the
+ * guest->plane copy: the render target's band rows into guest VRAM (columns
+ * 0..511), the extension plane (512..681) and the past-edge texture columns. */
+void vram_ext_note_pack_time(double ms);
 /* GL only: a frame where the GPU raster was bypassed (CPU rasterizer drew, the
  * GPU present no-opped). reason: 1 = no context, 2 = raster not ok, 3 = depth24
  * skip, 4 = dual-raster authority, 5 = HD native authority, 6 = frame-gen draw. */
