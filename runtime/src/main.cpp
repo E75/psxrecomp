@@ -98,6 +98,7 @@ extern "C" void psx_event_step_conservative_env_init(void);
 #define RECOMP_AUDIO_DRC_IMPL
 #include "recomp_audio_drc.h"
 #include "memcard.h"
+#include "boot_path.h"
 #include "debug_server.h"
 #include "host_sampler.h"
 #include "crash_trace.h"
@@ -15834,6 +15835,10 @@ int main(int argc, char** argv) {
     bool saves_auto_create_cards = true;
     bool saves_format_on_corrupt = true;
     bool saves_slot2             = true;
+    /* [saves] seed_option_file: write <assets>/option_seed.bin into slot 1 on
+     * the first run, so the game's "create option file?" prompt never runs.
+     * The card model lives in src/mods/boot_path.c; off means inert. */
+    bool saves_seed_option_file  = false;
     /* [assets] native disc sector source. */
     std::string assets_disc_dir;
     bool        assets_preload         = true;
@@ -16020,6 +16025,7 @@ int main(int argc, char** argv) {
             saves_auto_create_cards = gc.runtime.saves.auto_create_cards;
             saves_format_on_corrupt = gc.runtime.saves.format_on_corrupt;
             saves_slot2             = gc.runtime.saves.slot2;
+            saves_seed_option_file  = gc.runtime.saves.seed_option_file;
             assets_disc_dir         = resolve_path_key(
                 "assets.disc_dir", gc.runtime.assets.disc_dir_configured.c_str(),
                 gc.runtime.assets.disc_dir.string().c_str(), "config");
@@ -18856,6 +18862,56 @@ session_reboot:
                 break;
             default:
                 break;
+            }
+        }
+    }
+    /* WE2002 "just play" start path: seed the game's own option record
+     * (BISLPM-87056WEW-OPT) into slot 1 on the first run, so the "no option
+     * file" branch - the create/format prompt - never runs. The record comes
+     * from <exe>/assets/option_seed.bin, is validated by the callee (0x4000
+     * bytes, header 'S','C',0x11,0x02) and is never written over an existing
+     * option file. Inert unless [saves] seed_option_file is on. */
+    we2002_boot_configure(saves_seed_option_file ? 1 : 0);
+    if (saves_seed_option_file) {
+        static const char kOptionSeed[] = "assets/option_seed.bin";
+        char seed_path[PSX_PATH_RESOLVE_MAX];
+        uint8_t seed[0x4000];
+        uint8_t card[MEMCARD_SIZE];
+        size_t seed_len = 0;
+        We2002BootSeedReport seeded{};
+        std::FILE* fp = nullptr;
+
+        if (psx_path_resolve(&g_path_roots, kOptionSeed, seed_path,
+                             sizeof seed_path) &&
+            (fp = std::fopen(seed_path, "rb")) != nullptr) {
+            seed_len = std::fread(seed, 1, sizeof seed, fp);
+            std::fclose(fp);
+            if (seed_len != sizeof seed) {
+                std::fprintf(stderr, "psxrecomp: %s is %zu bytes, expected %zu; "
+                             "option seed skipped\n",
+                             seed_path, seed_len, sizeof seed);
+                seed_len = 0;
+            }
+        } else {
+            std::fprintf(stderr, "psxrecomp: %s not found; [saves] "
+                         "seed_option_file asked for it\n", kOptionSeed);
+        }
+        if (seed_len == sizeof seed && memcard_export_raw(0, card) == 0 &&
+            we2002_boot_apply(card, sizeof card, seed, seed_len, &seeded) ==
+                WE2002_BOOT_CARD_READY) {
+            if (seeded.seeded) {
+                if (memcard_import_raw(0, card) == 0)
+                    std::fprintf(stdout, "psxrecomp: option seed written to card 1 "
+                                 "(%d bytes, %d blocks used, %d free)\n",
+                                 seeded.wrote_bytes, seeded.blocks_used,
+                                 seeded.free_blocks);
+                else
+                    std::fprintf(stderr, "psxrecomp: option seed written to the "
+                                 "card image but card 1 could not store it\n");
+            } else if (seeded.blocks_used > 0) {
+                std::fprintf(stdout, "psxrecomp: card 1 already holds the option "
+                             "file (%d blocks); seed not applied\n",
+                             seeded.blocks_used);
             }
         }
     }

@@ -191,6 +191,10 @@ struct SavesConfig {
     bool auto_create_cards = true;   // create <memcard_dir>/cardN.mcd when absent
     bool format_on_corrupt = true;   // rewrite a short/corrupt image
     bool slot2             = true;   // keep slot 2 inserted
+    // [saves] seed_option_file: write <assets>/option_seed.bin into slot 1 on
+    // the first run, so the game's "create option file?" prompt never runs.
+    // Inert unless the game links runtime/boot_path.c and reads the key.
+    bool seed_option_file  = false;
 };
 
 // [assets] -- native disc asset provider (runtime/src/asset_provider.c). Serves

@@ -390,6 +390,8 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
             rt.saves.format_on_corrupt = toml::find<bool>(sv, "format_on_corrupt");
         if (sv.contains("slot2"))
             rt.saves.slot2 = toml::find<bool>(sv, "slot2");
+        if (sv.contains("seed_option_file"))
+            rt.saves.seed_option_file = toml::find<bool>(sv, "seed_option_file");
     }
     if (cfg.contains("assets")) {
         const toml::value& av = toml::find(cfg, "assets");
