@@ -6273,6 +6273,28 @@ void gpu_ws_set_match_raster(int width) {
     }
 }
 
+int gpu_ws_match_raster_width(void) { return ws_match_raster_w; }
+
+/* The natively wide frame's own aspect (see gpu.h). PS1 240-line pixels are
+ * 0.625 viewport pixels wide, so a frame's display aspect is
+ * (5*width):(8*height): 682x240 -> 341:192 (1.776, 16:9) and 512x240 -> 4:3.
+ * Only a frame the arm actually widened qualifies; 480-line menu modes and
+ * depth24 video keep the configured aspect. */
+int gpu_present_native_aspect(int *num, int *den) {
+    if (!ws_match_raster_w) return 0;
+    GpuDisplayInfo di;
+    gpu_get_display_info(&di);
+    if (di.disabled || di.depth24) return 0;
+    if ((int)di.width != ws_match_raster_w || di.height != 240u) return 0;
+    int n = (int)di.width * 5, d = (int)di.height * 8;
+    int a = n, b = d;
+    while (b) { int t = a % b; a = b; b = t; }
+    if (a < 1) a = 1;
+    if (num) *num = n / a;
+    if (den) *den = d / a;
+    return 1;
+}
+
 /* The projection shift that makes a 682-wide frame symmetric.
  *
  * The guest keeps its 4:3 GTE projection (OFX 256) and re-asserts it every
