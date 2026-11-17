@@ -3694,6 +3694,11 @@ static void sync_guest_cadence_to_video_standard(void) {
                                       (double)g_frame_interpolation_fps,
                                       1000.0 / g_frame_period_ms,
                                       g_frame_interpolation_blend);
+    if (g_frame_interpolation && g_vk_active)
+        vk_renderer_set_interpolation(g_frame_interpolation, g_host_refresh_hz,
+                                      (double)g_frame_interpolation_fps,
+                                      1000.0 / g_frame_period_ms,
+                                      g_frame_interpolation_blend);
 #endif
 }
 
@@ -3765,6 +3770,9 @@ static int present_should_wall_pace(void) {
     if (g_frame_interpolation && g_gl_active &&
         gl_renderer_interpolation_owns_cadence())
         return 0;
+    if (g_frame_interpolation && g_vk_active &&
+        vk_renderer_interpolation_owns_cadence())
+        return 0;
     /* Run the pacer even when driver vsync is SUPPOSED to own the cadence.
      *
      * Skipping it here trusts the swap to block, and a swap that does not
@@ -3800,9 +3808,12 @@ static void apply_present_cadence(void) {
 /* Resolve s_frame_rate_boot_hz against the backend that will actually run. */
 static void apply_frame_rate_boot(void) {
     if (!s_frame_rate_boot_hz) return;
-    /* [video] frame_rate = 30 is the user's opt-out; the blend path is OpenGL
-     * only, so a Vulkan/software backend keeps the game's own cadence. */
-    const int on = g_video_frame_rate >= 60 && g_video_renderer == 1;
+    /* [video] frame_rate = 30 is the user's opt-out; both GPU backends have the
+     * temporal presenter (GL first, Vulkan since 2026-11-17), so a renderer
+     * request keeps it. Software has no blend and is resolved away again after
+     * the context exists (see the GL/Vulkan init blocks). */
+    const int on = g_video_frame_rate >= 60 &&
+                   (g_video_renderer == 1 || g_video_renderer == 2);
     g_frame_interpolation = on ? 1 : 0;
     g_frame_interpolation_fps = on ? s_frame_rate_boot_hz : 0;
     if (on) g_video_vsync = 0;
@@ -3810,10 +3821,10 @@ static void apply_frame_rate_boot(void) {
 
 /* Boot-time frame-rate request from a mod's activation, before the window and
  * the renderer exist: arm the presenter's temporal blend at `hz` without
- * touching the backend choice. psx_mod_set_frame_interpolation() forces OpenGL
- * (the only backend with the blend path), which is wrong for a mod that merely
- * *prefers* 60 FPS: a Vulkan/software selection must stand. `hz` is 0 (the
- * game's own flips) or 60. Returns 1 when the blend is armed for this run. */
+ * touching the backend choice. psx_mod_set_frame_interpolation() forces OpenGL,
+ * which is wrong for a mod that merely *prefers* 60 FPS: a Vulkan/software
+ * selection must stand. `hz` is 0 (the game's own flips) or 60. Returns 1 when
+ * the blend is armed for this run. */
 extern "C" int psx_frame_rate_boot(uint32_t hz) {
     if (hz != 0 && hz != 60) return 0;
     s_frame_rate_boot_hz = (int)hz;
@@ -3824,8 +3835,9 @@ extern "C" int psx_frame_rate_boot(uint32_t hz) {
                     "(blending the guest's flips; game logic stays stock)\n",
                     g_frame_interpolation_fps);
     } else if (hz) {
-        std::printf("psxrecomp: frame rate %u FPS needs the OpenGL renderer "
-                    "(selected backend %d); presenting the game's own flips\n",
+        std::printf("psxrecomp: frame rate %u FPS needs a GPU renderer with the "
+                    "temporal presenter (selected backend %d); presenting the "
+                    "game's own flips\n",
                     (unsigned)hz, g_video_renderer);
     }
     return on;
@@ -3843,23 +3855,31 @@ extern "C" void psx_frame_rate_state(int *enabled, int *target_hz,
     if (host_hz)   *host_hz   = g_host_refresh_hz;
     if (source)    *source    = g_frame_interpolation_source;
     if (config_hz) *config_hz = g_video_frame_rate;
-    if (supported) *supported = g_gl_active ? 1 : 0;
+    if (supported) *supported = (g_gl_active || g_vk_active) ? 1 : 0;
 }
 
 /* Live frame-rate switch for a mod hotkey: 0 = the guest's own flips at stock cadence, >= 60 = the presenter
- * blends the guest's flips up to that rate. OpenGL only; the activation-time psx_mod_set_frame_interpolation()
- * cannot be used after the window exists. */
+ * blends the guest's flips up to that rate. Any GPU backend with the temporal presenter (OpenGL, Vulkan);
+ * the activation-time psx_mod_set_frame_interpolation() cannot be used after the window exists. */
 extern "C" int psx_mod_set_frame_rate_live(uint32_t fps) {
 #ifndef PSX_SDL_NO_RENDER
-    if ((fps != 0 && (fps < 60 || fps > 1000)) || !g_gl_active || psx_netplay_active()) return 0;
+    if ((fps != 0 && (fps < 60 || fps > 1000)) ||
+        (!g_gl_active && !g_vk_active) || psx_netplay_active()) return 0;
     g_frame_interpolation = fps ? 1 : 0;
     g_frame_interpolation_fps = (int)fps;
     if (fps) g_video_vsync = 0;
     apply_present_cadence();
-    gl_renderer_set_interpolation(g_frame_interpolation, g_host_refresh_hz, (double)fps,
-                                  g_frame_period_ms > 0.0 ? 1000.0 / g_frame_period_ms : 59.94,
-                                  g_frame_interpolation_blend);
+    const double src_hz = g_frame_period_ms > 0.0 ? 1000.0 / g_frame_period_ms : 59.94;
+    if (g_gl_active)
+        gl_renderer_set_interpolation(g_frame_interpolation, g_host_refresh_hz,
+                                      (double)fps, src_hz,
+                                      g_frame_interpolation_blend);
+    if (g_vk_active)
+        vk_renderer_set_interpolation(g_frame_interpolation, g_host_refresh_hz,
+                                      (double)fps, src_hz,
+                                      g_frame_interpolation_blend);
     gl_renderer_set_interpolation_source(g_frame_interpolation_source);
+    if (g_vk_active) vk_renderer_set_interpolation_source(g_frame_interpolation_source);
     return 1;
 #else
     (void)fps;
@@ -9084,9 +9104,11 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
          * and can starve audio, so present native-4:3/MDEC phases directly.
          * The classification catches the transition frame before the first
          * decode; the activity stamp also covers authentic 4:3 configurations. */
-        if (g_gl_active)
-            gl_renderer_set_interpolation_suspended(
-                fmv_frame || mdec_recently_active(2));
+        if (g_gl_active || g_vk_active) {
+            const int susp = (fmv_frame || mdec_recently_active(2)) ? 1 : 0;
+            if (g_gl_active) gl_renderer_set_interpolation_suspended(susp);
+            if (g_vk_active) vk_renderer_set_interpolation_suspended(susp);
+        }
         const bool game_view =
             netplay_game_local_view(di, &gv_x, &gv_y, &gv_w, &gv_h);
         const int local_viewport_slot =
@@ -19290,6 +19312,20 @@ session_reboot:
         if (!g_vk_active) gr_set_backend(GR_BACKEND_SOFTWARE);
         if (!netplay_cpu_auth_gpu())
             g_video_scale = gr_scale();
+        /* Arm the temporal presenter on the live Vulkan backend. A failed
+         * context clears the request: the software present has no blend and
+         * `frame_rate` must report 30, not a phantom 60. */
+        if (g_vk_active) {
+            const double src_hz = g_frame_period_ms > 0.0
+                                ? 1000.0 / g_frame_period_ms : 30.0;
+            vk_renderer_set_interpolation(g_frame_interpolation, g_host_refresh_hz,
+                                          (double)g_frame_interpolation_fps,
+                                          src_hz, g_frame_interpolation_blend);
+            vk_renderer_set_interpolation_source(g_frame_interpolation_source);
+        } else {
+            g_frame_interpolation = 0;
+            g_frame_interpolation_fps = 0;
+        }
     }
     latency_ring_set_backend(g_vk_active ? "vulkan" : g_gl_active ? "opengl" : "software");
     latency_ring_set_present_mode(present_effective_swap_interval());

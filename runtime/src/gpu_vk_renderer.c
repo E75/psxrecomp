@@ -58,6 +58,7 @@
 #include "gpu_hd_textures.h"
 #include "vk_hd_pack.h"
 #include "latency_ring.h"
+#include "frame_interpolation.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -79,6 +80,8 @@ void vk_renderer_set_present_mode(int m){(void)m;}
 void vk_renderer_set_display_aspect(int n,int d){(void)n;(void)d;}
 int  vk_perf_json(char *out,int cap,int count){(void)count; return cap>2?snprintf(out,cap,"[]"):0;}
 int  vk_frame_perf_json(char *out,int cap,int count){(void)count; return cap>2?snprintf(out,cap,"{}"):0;}
+uint64_t vk_renderer_pres_total(void) { return 0; }
+int  vk_renderer_pres_get(uint64_t seq, VkPresEvent *out) { (void)seq; (void)out; return 0; }
 void vk_renderer_hd_pack_changed(void) {}
 const GpuRenderBackend *vk_backend_get(void) { return 0; }
 
@@ -366,7 +369,10 @@ static VkImage          s_sc_images[8];
 static int              s_present_mode_req = 1;   /* 1 tear-free, 0 IMMEDIATE, -1 MAILBOX */
 
 /* Per-frame sync (double-buffered command recording). */
-#define VK_FRAMES 2
+#define VK_FRAMES 3      /* in-flight frames; 2 stalled the emu thread on the
+                          * second 60 fps sub-present (each present waits the
+                          * frame fence), so the temporal presenter could not
+                          * sustain two presents per guest interval */
 static VkCommandBuffer  s_cmd[VK_FRAMES];
 static VkSemaphore      s_sem_acquire[VK_FRAMES];
 static VkSemaphore      s_sem_render[VK_FRAMES];
@@ -543,6 +549,37 @@ static uint32_t perf_elapsed_us(uint64_t start) {
     uint64_t frequency = SDL_GetPerformanceFrequency();
     uint64_t ticks = SDL_GetPerformanceCounter() - start;
     return frequency ? (uint32_t)(ticks * 1000000u / frequency) : 0;
+}
+
+/* ---- always-on present ring (backend-neutral pacing reading) -------------
+ * One record per swapchain present, including interpolation sub-presents.
+ * Same event shape as gl_present_ring so tools/we/perf.py and acceptance can
+ * diff t_us for both backends without a branch per field. */
+#define VK_PRES_RING 4096
+static VkPresEvent s_pres_ring[VK_PRES_RING];
+static uint64_t    s_pres_seq;
+
+static void pres_record(int path, int dx, int dy, int w, int h,
+                        int lx, int ly, int lw, int lh) {
+    static uint64_t pres_freq;
+    if (!pres_freq) { pres_freq = SDL_GetPerformanceFrequency(); if (!pres_freq) pres_freq = 1; }
+    VkPresEvent *e = &s_pres_ring[s_pres_seq % VK_PRES_RING];
+    e->frame = (uint32_t)s_present_idx;
+    e->path  = (uint8_t)path;
+    e->t_ms  = (uint32_t)SDL_GetTicks();
+    e->t_us  = (uint64_t)((double)SDL_GetPerformanceCounter() * 1.0e6 / (double)pres_freq);
+    e->dx = dx; e->dy = dy; e->w = w; e->h = h;
+    e->lx = lx; e->ly = ly; e->lw = lw; e->lh = lh;
+    s_pres_seq++;
+}
+
+uint64_t vk_renderer_pres_total(void) { return s_pres_seq; }
+int vk_renderer_pres_get(uint64_t seq, VkPresEvent *out) {
+    if (seq >= s_pres_seq) return 0;
+    const VkPresEvent *e = &s_pres_ring[seq % VK_PRES_RING];
+    if (e->t_us == 0 || seq + VK_PRES_RING <= s_pres_seq) return 0;  /* overwritten */
+    *out = *e;
+    return 1;
 }
 
 /* Timestamp q0: first command buffer of the frame (scene start). Safe to call
@@ -1214,6 +1251,8 @@ static int create_swapchain(void) {
 
 static void pp_release_swapchain(void);
 static void pp_destroy_all(void);
+static void ri_release_swapchain(void);
+static void ri_destroy_all(void);
 static void vfx_release_swapchain(void);   /* [video] volumetrics, same lifetime */
 
 static void destroy_swapchain(void) {
@@ -2287,6 +2326,13 @@ int vk_renderer_init_context(SDL_Window *win) {
     if (s_vfx_fog || s_vfx_shafts)
         fprintf(stdout, "psxrecomp: vfx: armed fog=%d lightshafts=%d\n",
                 s_vfx_fog, s_vfx_shafts);
+    /* The effects are applied by the PRESENT pass (fog mixes the depth proxy,
+     * shafts compose an extra pass). The temporal blend has its own present and
+     * would silently drop them, so the effects keep the plain presenter. */
+    if (s_vfx_fog || s_vfx_shafts) {
+        vk_renderer_set_interpolation_suspended(1);
+        vk_log("volumetrics armed: the 60 fps temporal presenter is suspended");
+    }
     /* Render target: the default is the whole VRAM (the pre-windowing mode).
      * PSX_VK_TGT=window selects the windowed target for measurement; it is not
      * the default because it loses the frame on the AMD driver (see
@@ -2771,6 +2817,7 @@ static void pp_release_swapchain(void) {
     if (s_pp_pipe) { p_vkDestroyPipeline(s_dev, s_pp_pipe, NULL); s_pp_pipe = VK_NULL_HANDLE; }
     if (s_pp_rp)   { p_vkDestroyRenderPass(s_dev, s_pp_rp, NULL); s_pp_rp = VK_NULL_HANDLE; }
     vfx_release_swapchain();   /* post image + fog/shaft pipelines are format-bound */
+    ri_release_swapchain();    /* temporal-blend pipeline is render-pass-bound */
 }
 
 static void pp_destroy_all(void) {
@@ -2782,6 +2829,7 @@ static void pp_destroy_all(void) {
     if (s_pp_fs)   { p_vkDestroyShaderModule(s_dev, s_pp_fs, NULL); s_pp_fs = VK_NULL_HANDLE; }
     if (s_pp_near) { p_vkDestroySampler(s_dev, s_pp_near, NULL); s_pp_near = VK_NULL_HANDLE; }
     if (s_pp_lin)  { p_vkDestroySampler(s_dev, s_pp_lin, NULL); s_pp_lin = VK_NULL_HANDLE; }
+    ri_destroy_all();   /* temporal-blend images/sets/layouts/shaders */
     s_pp_failed = 0;
 }
 
@@ -3184,6 +3232,13 @@ static int vfx_present_draw(VkCommandBuffer cb, uint32_t idx, uint32_t fr,
                             VkImageView src_view, int linear, const VkOffset3D dst[2],
                             float u0, float v0, float u1, float v1) {
     if ((!s_vfx_fog && !s_vfx_shafts) || s_vfx_failed) return 0;
+    /* The effect pipelines build against the swapchain present render pass and
+     * its framebuffers (s_pp_rp / pp_framebuffer). With the effects armed this
+     * function REPLACES pp_draw, so nothing has created them yet - the first
+     * frame then failed every pipeline, latched s_vfx_failed and silently fell
+     * back to the plain blit (armed effects, zero pixels changed, vfx_ms 0).
+     * Create the present-pass objects first, exactly like pp_draw does. */
+    if (!pp_init_device_objects() || !pp_init_swapchain_objects()) return 0;
     if (!vfx_init_device() || !vfx_init_swapchain()) {
         s_vfx_failed = 1;
         fprintf(stdout, "psxrecomp: vfx: present chain unavailable, using the plain present\n");
@@ -3274,6 +3329,431 @@ static int vfx_present_draw(VkCommandBuffer cb, uint32_t idx, uint32_t fr,
     return 1;
 }
 
+/* ---- temporal 60 fps presenter (the GL interp twin) ----------------------
+ * One capture of the displayed image per guest flip into a ping-pong history
+ * image, then N presents per guest interval: each present crossfades the two
+ * newest captures at the schedule's alpha. Guest logic, timers and audio are
+ * untouched - this is presentation time only. Mirrors gpu_gl_renderer.c:
+ *   captures   interp_capture            -> ri_capture
+ *   schedule   interp_present_source_interval -> ri_present_source_interval
+ *   blend      interp_draw_textures/INTERP_FS -> ri_present/interp.frag
+ *   cadence    gl_renderer_interpolation_owns_cadence -> vk_..._owns_cadence
+ */
+#define VK_RI_IMGS 3
+static VkImage        s_ri_img[VK_RI_IMGS];
+static VkDeviceMemory s_ri_mem[VK_RI_IMGS];
+static VkImageView    s_ri_view[VK_RI_IMGS];
+static VkImageLayout  s_ri_layout[VK_RI_IMGS];
+static int s_ri_alloc_w, s_ri_alloc_h;
+static VkShaderModule s_ri_fs;
+static VkDescriptorSetLayout s_ri_dsl;
+static VkDescriptorPool s_ri_pool;
+static VkDescriptorSet  s_ri_ds[VK_FRAMES];
+static VkPipelineLayout s_ri_pl;
+static VkPipeline       s_ri_pipe;
+typedef struct { float alpha; int mode; } RiPush;
+
+static int    s_ri_enabled, s_ri_suspended, s_ri_blend, s_ri_hold, s_ri_source;
+static double s_ri_host_hz, s_ri_target_hz, s_ri_source_hz;
+static FrameInterpolationSchedule s_ri_sched;
+static FrameFlipTracker s_ri_flip;
+static int    s_ri_valid, s_ri_cur, s_ri_prev;
+static int    s_ri_w, s_ri_h;             /* history image (capture) size */
+static int    s_ri_src_w, s_ri_src_h;     /* source band at internal scale */
+static int    s_ri_force43, s_ri_linear, s_ri_path;
+static int    s_ri_ox = -1, s_ri_oy = -1;
+static double s_ri_lo = 0.0, s_ri_hi = 1.0;
+static uint64_t s_ri_captures, s_ri_swaps, s_ri_dups;
+static int    s_ri_logged;
+
+static void ri_release_swapchain(void);
+static void ri_destroy_all(void);
+
+static int ri_active(void) {
+    /* The [video] volumetrics passes ARE the present (fog mixes the depth
+     * proxy; shafts compose a second fullscreen pass). The temporal blend has
+     * its own present and would silently drop them, so an armed effect set
+     * keeps the plain presenter - the same rule as the FMV suspension, but
+     * keyed on the config instead of a per-frame classification. */
+    return s_ctx_ok && s_ri_enabled && !s_ri_suspended &&
+           !(s_vfx_fog || s_vfx_shafts);
+}
+
+static void ri_invalidate(void) {
+    s_ri_valid = 0;
+    s_ri_cur = s_ri_prev = 0;
+    s_ri_src_w = s_ri_src_h = 0;
+    s_ri_path = -1;
+    s_ri_force43 = 0;
+    s_ri_ox = s_ri_oy = -1;
+    s_ri_lo = 0.0; s_ri_hi = 1.0;
+    frame_interpolation_schedule_reset(&s_ri_sched);
+    frame_flip_tracker_reset(&s_ri_flip);
+}
+
+static void ri_free_images(void) {
+    for (int i = 0; i < VK_RI_IMGS; i++) {
+        if (s_ri_view[i]) p_vkDestroyImageView(s_dev, s_ri_view[i], NULL);
+        if (s_ri_img[i])  p_vkDestroyImage(s_dev, s_ri_img[i], NULL);
+        if (s_ri_mem[i])  p_vkFreeMemory(s_dev, s_ri_mem[i], NULL);
+        s_ri_view[i] = VK_NULL_HANDLE; s_ri_img[i] = VK_NULL_HANDLE;
+        s_ri_mem[i] = VK_NULL_HANDLE; s_ri_layout[i] = VK_IMAGE_LAYOUT_UNDEFINED;
+    }
+    s_ri_alloc_w = s_ri_alloc_h = 0;
+    s_ri_w = s_ri_h = 0;
+    s_ri_valid = 0;
+}
+
+/* Capture size: the letterbox rect when it is smaller than the source band
+ * (one filtered blit), exactly like the GL capture_size(). At S=9 a 682-px
+ * display is 6138x2160 while the window shows it in ~2784x1566; capturing the
+ * band costs 2.5x the traffic for pixels nothing displays. */
+static void ri_capture_size(int sw, int sh, int force43, int *cw, int *ch) {
+    *cw = sw; *ch = sh;
+    if (s_sc_extent.width < 1 || s_sc_extent.height < 1) return;
+    VkOffset3D d[2];
+    letterbox((int)s_sc_extent.width, (int)s_sc_extent.height,
+              force43 ? 4 : s_aspect_num, force43 ? 3 : s_aspect_den, d);
+    int lw = d[1].x - d[0].x, lh = d[1].y - d[0].y;
+    if (lw > 0 && lh > 0 && (int64_t)lw * lh < (int64_t)sw * sh) { *cw = lw; *ch = lh; }
+}
+
+static int ri_ensure(int w, int h) {
+    if (s_ri_alloc_w == w && s_ri_alloc_h == h && s_ri_img[0]) return 1;
+    ri_free_images();
+    if (w < 1 || h < 1) return 0;
+    for (int i = 0; i < VK_RI_IMGS; i++) {
+        if (!make_image(VK_FORMAT_R8G8B8A8_UNORM, w, h,
+                        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                        VK_IMAGE_ASPECT_COLOR_BIT,
+                        &s_ri_img[i], &s_ri_mem[i], &s_ri_view[i])) {
+            ri_free_images();
+            return 0;
+        }
+        s_ri_layout[i] = VK_IMAGE_LAYOUT_UNDEFINED;
+    }
+    s_ri_alloc_w = w; s_ri_alloc_h = h;
+    s_ri_valid = 0;
+    return 1;
+}
+
+/* Sampleable after the capture; written again on the next capture, so the
+ * write barrier comes from SHADER_READ (the previous blend read it). */
+static void ri_layout_to(VkCommandBuffer cb, int i, VkImageLayout want) {
+    if (s_ri_layout[i] == want) return;
+    VkImageMemoryBarrier b = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    b.oldLayout = s_ri_layout[i]; b.newLayout = want;
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = s_ri_img[i];
+    b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    b.subresourceRange.levelCount = 1; b.subresourceRange.layerCount = 1;
+    VkPipelineStageFlags ss = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    VkPipelineStageFlags ds = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    if (want == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+        b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        if (s_ri_layout[i] == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            ss = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        }
+    } else {
+        b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        ss = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        ds = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    }
+    p_vkCmdPipelineBarrier(cb, ss, ds, 0, 0, NULL, 0, NULL, 1, &b);
+    s_ri_layout[i] = want;
+}
+
+static int ri_init(void) {
+    if (!pp_init_device_objects() || !pp_init_swapchain_objects()) return 0;
+    if (!s_ri_fs) {
+        s_ri_fs = make_module(spv_interp_frag, spv_interp_frag_size);
+        if (!s_ri_fs) return 0;
+    }
+    if (!s_ri_dsl) {
+        VkDescriptorSetLayoutBinding b[2] = {
+            { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL },
+            { 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL } };
+        VkDescriptorSetLayoutCreateInfo dci = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        dci.bindingCount = 2; dci.pBindings = b;
+        if (p_vkCreateDescriptorSetLayout(s_dev, &dci, NULL, &s_ri_dsl) != VK_SUCCESS) return 0;
+    }
+    if (!s_ri_pool) {
+        VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_FRAMES * 2 };
+        VkDescriptorPoolCreateInfo pci = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        pci.maxSets = VK_FRAMES; pci.poolSizeCount = 1; pci.pPoolSizes = &ps;
+        if (p_vkCreateDescriptorPool(s_dev, &pci, NULL, &s_ri_pool) != VK_SUCCESS) return 0;
+        for (int i = 0; i < VK_FRAMES; i++) {
+            VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+            ai.descriptorPool = s_ri_pool; ai.descriptorSetCount = 1; ai.pSetLayouts = &s_ri_dsl;
+            if (p_vkAllocateDescriptorSets(s_dev, &ai, &s_ri_ds[i]) != VK_SUCCESS) return 0;
+        }
+    }
+    if (!s_ri_pl) {
+        VkPushConstantRange pr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(RiPush) };
+        VkPipelineLayoutCreateInfo li = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        li.setLayoutCount = 1; li.pSetLayouts = &s_ri_dsl;
+        li.pushConstantRangeCount = 1; li.pPushConstantRanges = &pr;
+        if (p_vkCreatePipelineLayout(s_dev, &li, NULL, &s_ri_pl) != VK_SUCCESS) return 0;
+    }
+    if (s_ri_pipe) return 1;
+    VkShaderModule vs = s_pp_vs;   /* present.vert: fullscreen triangle */
+    if (!vs) return 0;
+    VkPipelineShaderStageCreateInfo st[2] = {
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO },
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO } };
+    st[0].stage = VK_SHADER_STAGE_VERTEX_BIT;   st[0].module = vs; st[0].pName = "main";
+    st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module = s_ri_fs; st[1].pName = "main";
+    VkPipelineVertexInputStateCreateInfo vin = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo vp = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+    vp.viewportCount = 1; vp.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo rs = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+    rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE; rs.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendAttachmentState ba = {0};
+    ba.colorWriteMask = 0xF;
+    VkPipelineColorBlendStateCreateInfo cb = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+    cb.attachmentCount = 1; cb.pAttachments = &ba;
+    VkDynamicState dyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dy = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+    dy.dynamicStateCount = 2; dy.pDynamicStates = dyn;
+    VkGraphicsPipelineCreateInfo ci = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+    ci.stageCount = 2; ci.pStages = st;
+    ci.pVertexInputState = &vin; ci.pInputAssemblyState = &ia;
+    ci.pViewportState = &vp; ci.pRasterizationState = &rs;
+    ci.pMultisampleState = &ms; ci.pColorBlendState = &cb; ci.pDynamicState = &dy;
+    ci.layout = s_ri_pl; ci.renderPass = s_pp_rp;
+    if (p_vkCreateGraphicsPipelines(s_dev, VK_NULL_HANDLE, 1, &ci, NULL, &s_ri_pipe) != VK_SUCCESS) {
+        s_ri_pipe = VK_NULL_HANDLE;
+        return 0;
+    }
+    return 1;
+}
+
+/* Capture one displayed image into the history ping-pong. Returns 1 when the
+ * temporal presenter owns this guest interval (the caller must run the
+ * sub-present loop instead of the plain present). */
+static int ri_capture(VkImage src, VkImageLayout *src_layout,
+                      int dx, int dy, int dw, int dh, int linear,
+                      int force43, int path, int ox, int oy) {
+    if (!ri_active()) return 0;
+    if (!s_ready || !src || dw < 1 || dh < 1) return 0;
+    const int S = s_scale;
+    int sw = dw * S, sh = dh * S, cw = sw, ch = sh;
+    ri_capture_size(sw, sh, force43, &cw, &ch);
+    int geometry_changed = (cw != s_ri_w || ch != s_ri_h ||
+                            sw != s_ri_src_w || sh != s_ri_src_h ||
+                            path != s_ri_path || force43 != s_ri_force43);
+    if (geometry_changed) {
+        ri_invalidate();
+        s_ri_w = cw; s_ri_h = ch;
+        s_ri_src_w = sw; s_ri_src_h = sh;
+        s_ri_path = path; s_ri_force43 = force43;
+    }
+    int new_frame = frame_flip_is_new_frame(
+        geometry_changed, s_ri_valid == 0, s_perf_cur.draws > 0, ox, oy,
+        s_ri_ox, s_ri_oy);
+    s_ri_ox = ox; s_ri_oy = oy;
+    (void)frame_flip_tracker_vblank(&s_ri_flip, new_frame, &s_ri_lo, &s_ri_hi);
+    if (!new_frame) { s_ri_dups++; return 1; }
+    if (!ri_ensure(cw, ch)) return 0;
+
+    int dst = 0;
+    if (s_ri_valid == 1) dst = s_ri_cur == 0 ? 1 : 0;
+    else if (s_ri_valid >= 2) dst = s_ri_prev;
+
+    VkCommandBuffer cb = begin_oneshot();
+    /* Source: canonical target or the wide surface, both parked by the caller
+     * in their usual layout. Leave the canonical target in TRANSFER_SRC (the
+     * plain present does the same); restore the wide surface for its next
+     * geometry pass. */
+    int is_vram = (src == s_vram_img);
+    if (is_vram) vram_to(cb, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    else img_to(cb, src, src_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    ri_layout_to(cb, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+    VkImageBlit blit = {0};
+    blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    blit.srcSubresource.layerCount = 1;
+    blit.srcOffsets[0].x = dx * S;              blit.srcOffsets[0].y = dy * S;
+    blit.srcOffsets[1].x = (dx + dw) * S;       blit.srcOffsets[1].y = (dy + dh) * S;
+    blit.srcOffsets[1].z = 1;
+    blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    blit.dstSubresource.layerCount = 1;
+    blit.dstOffsets[1].x = cw; blit.dstOffsets[1].y = ch; blit.dstOffsets[1].z = 1;
+    int downscale = (cw != sw || ch != sh);
+    p_vkCmdBlitImage(cb, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                     s_ri_img[dst], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                     1, &blit, (downscale && linear) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+    ri_layout_to(cb, dst, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (!is_vram) img_to(cb, src, src_layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    end_oneshot(cb);
+
+    if (s_ri_valid == 0) { s_ri_cur = dst; s_ri_valid = 1; }
+    else { s_ri_prev = s_ri_cur; s_ri_cur = dst; s_ri_valid = 2; }
+    s_ri_linear = linear;
+    s_ri_captures++;
+    return 1;
+}
+
+/* Sleep to a schedule deadline with the runtime's waitable-timer sleep (the
+ * GL presenter uses the same one; SDL_Delay's 1 ms granularity overshot every
+ * sub-present). */
+extern void psx_host_sleep_ms(unsigned ms);
+
+static void ri_wait_until(uint64_t deadline, uint64_t freq) {
+    if (!deadline || !freq) return;
+    for (;;) {
+        uint64_t now = SDL_GetPerformanceCounter();
+        if (now >= deadline) return;
+        uint64_t remain = deadline - now;
+        uint32_t ms = (uint32_t)((remain * 1000u) / freq);
+        if (ms > 1) psx_host_sleep_ms(ms - 1);
+    }
+}
+
+static int ri_present(float alpha) {
+    if (!ri_active() || s_ri_valid < 1) return 0;
+    if (!ri_init()) return 0;
+    VkImage sc; VkCommandBuffer cb; uint32_t idx, fr;
+    latency_ring_mark(LAT_SWAP_BEGIN);
+    if (!acquire_present(&sc, &cb, &idx, &fr)) { latency_ring_mark(LAT_SWAP_END); return 0; }
+    VkFramebuffer fb = pp_framebuffer(idx);
+    if (!fb) { latency_ring_mark(LAT_SWAP_END); return 0; }
+
+    VkImageView pv = s_ri_view[s_ri_prev], cv = s_ri_view[s_ri_cur];
+    VkDescriptorImageInfo ii[2] = {
+        { s_pp_lin, pv, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+        { s_pp_lin, cv, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL } };
+    VkWriteDescriptorSet w[2] = { { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET },
+                                  { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET } };
+    for (int i = 0; i < 2; i++) {
+        w[i].dstSet = s_ri_ds[fr]; w[i].dstBinding = (uint32_t)i;
+        w[i].descriptorCount = 1;
+        w[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[i].pImageInfo = &ii[i];
+    }
+    p_vkUpdateDescriptorSets(s_dev, 2, w, 0, NULL);
+
+    VkOffset3D dst[2];
+    letterbox((int)s_sc_extent.width, (int)s_sc_extent.height,
+              s_ri_force43 ? 4 : s_aspect_num, s_ri_force43 ? 3 : s_aspect_den, dst);
+    VkClearValue clear = {0};
+    clear.color.float32[3] = 1.0f;
+    VkRenderPassBeginInfo bi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    bi.renderPass = s_pp_rp; bi.framebuffer = fb;
+    bi.renderArea.extent = s_sc_extent;
+    bi.clearValueCount = 1; bi.pClearValues = &clear;
+    p_vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
+    VkViewport view = { (float)dst[0].x, (float)dst[0].y,
+                        (float)(dst[1].x - dst[0].x), (float)(dst[1].y - dst[0].y),
+                        0.0f, 1.0f };
+    VkRect2D sci = { { dst[0].x, dst[0].y },
+                     { (uint32_t)(dst[1].x - dst[0].x),
+                       (uint32_t)(dst[1].y - dst[0].y) } };
+    p_vkCmdSetViewport(cb, 0, 1, &view);
+    p_vkCmdSetScissor(cb, 0, 1, &sci);
+    p_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_ri_pipe);
+    p_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_ri_pl, 0, 1,
+                              &s_ri_ds[fr], 0, NULL);
+    RiPush pc = { alpha, s_ri_blend };
+    p_vkCmdPushConstants(cb, s_ri_pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
+    perf_draw(cb, 3, 1, 0, 0);
+    p_vkCmdEndRenderPass(cb);
+    finish_present(cb, sc, idx, fr);
+    latency_ring_mark(LAT_SWAP_END);
+    s_ri_swaps++;
+    pres_record(VK_PRES_INTERP, 0, 0, s_ri_w, s_ri_h,
+                dst[0].x, dst[0].y, dst[1].x - dst[0].x, dst[1].y - dst[0].y);
+    return 1;
+}
+
+/* One guest interval -> N host presents, ending at the interval's deadline so
+ * the guest runs at its own cadence (the GL interp_present_source_interval). */
+static void ri_present_source_interval(void) {
+    uint64_t freq = SDL_GetPerformanceFrequency();
+    if (!freq) return;
+    uint64_t now = SDL_GetPerformanceCounter();
+    if (!frame_interpolation_schedule_begin_phase(
+            &s_ri_sched, now, freq, s_ri_source_hz, s_ri_target_hz,
+            s_ri_lo, s_ri_hi))
+        return;
+    uint64_t deadline = 0;
+    float alpha = 0.0f;
+    while (frame_interpolation_schedule_next(&s_ri_sched, SDL_GetPerformanceCounter(),
+                                             &deadline, &alpha)) {
+        ri_wait_until(deadline, freq);
+        if (!ri_present(alpha)) break;
+    }
+    ri_wait_until(frame_interpolation_schedule_end(&s_ri_sched), freq);
+}
+
+/* ---- public presenter API (mirrors the gl_renderer_* twins) -------------- */
+void vk_renderer_set_interpolation(int enabled, double host_hz, double target_hz,
+                                   double source_hz, int blend_mode) {
+    double effective_hz = target_hz > 0.0 ? target_hz : host_hz;
+    if (effective_hz < source_hz) effective_hz = source_hz;
+    int active = (enabled && source_hz >= 1.0 && source_hz <= 1000.0 &&
+                  effective_hz >= source_hz && effective_hz <= 1000.0) ? 1 : 0;
+    if (active != s_ri_enabled || source_hz != s_ri_source_hz ||
+        effective_hz != s_ri_target_hz)
+        ri_invalidate();
+    s_ri_enabled = active;
+    s_ri_host_hz = host_hz;
+    s_ri_target_hz = active ? effective_hz : 0.0;
+    s_ri_source_hz = active ? source_hz : 0.0;
+    s_ri_blend = blend_mode == 1 ? 1 : 0;
+    s_ri_hold = blend_mode == 2 ? 1 : 0;
+    if (active && !s_ri_logged)
+        fprintf(stdout, "psxrecomp: vulkan: temporal frame blending enabled: "
+                "%.1f presents/s from %.3f guest frames/s (%s; no motion "
+                "vectors)\n", effective_hz, source_hz,
+                s_ri_hold ? "hold" : s_ri_blend ? "change-adaptive blend"
+                                                : "linear blend");
+    if (!active && s_ri_logged)
+        fprintf(stdout, "psxrecomp: vulkan: temporal frame blending disabled\n");
+    s_ri_logged = active;
+}
+
+void vk_renderer_set_interpolation_blend(int blend_mode) {
+    s_ri_blend = blend_mode == 1 ? 1 : 0;
+    s_ri_hold = blend_mode == 2 ? 1 : 0;
+}
+
+void vk_renderer_set_interpolation_suspended(int suspended) {
+    suspended = suspended ? 1 : 0;
+    if (suspended != s_ri_suspended) ri_invalidate();
+    s_ri_suspended = suspended;
+}
+
+void vk_renderer_set_interpolation_source(int source) {
+    source = source == 1 ? 1 : 0;
+    if (source != s_ri_source) ri_invalidate();
+    s_ri_source = source;
+}
+
+int vk_renderer_interpolation_owns_cadence(void) {
+    return ri_active();
+}
+
+static void ri_release_swapchain(void) {
+    if (s_ri_pipe) { p_vkDestroyPipeline(s_dev, s_ri_pipe, NULL); s_ri_pipe = VK_NULL_HANDLE; }
+    s_ri_valid = 0;
+}
+
+static void ri_destroy_all(void) {
+    ri_release_swapchain();
+    ri_free_images();
+    if (s_ri_fs)   { p_vkDestroyShaderModule(s_dev, s_ri_fs, NULL); s_ri_fs = VK_NULL_HANDLE; }
+    if (s_ri_pool) { p_vkDestroyDescriptorPool(s_dev, s_ri_pool, NULL); s_ri_pool = VK_NULL_HANDLE; }
+    if (s_ri_pl)   { p_vkDestroyPipelineLayout(s_dev, s_ri_pl, NULL); s_ri_pl = VK_NULL_HANDLE; }
+    if (s_ri_dsl)  { p_vkDestroyDescriptorSetLayout(s_dev, s_ri_dsl, NULL); s_ri_dsl = VK_NULL_HANDLE; }
+}
+
 int vk_renderer_present_vram(int disp_x, int disp_y, int w, int h,
                              int linear, int force_4_3) {
     if (!s_ctx_ok) return 0;
@@ -3282,7 +3762,14 @@ int vk_renderer_present_vram(int disp_x, int disp_y, int w, int h,
      * present CB wait on it in queue order. No vkQueueWaitIdle here: the scene
      * of frame N+1 may overlap present N (the per-present sync was the frame
      * hitch — see docs/RENDERING_ROADMAP.md A.3#2). */
-    flush_tex_batch(); flush_geometry(); flush_work();
+    flush_tex_batch(); flush_geometry();
+    /* Temporal 60 fps: snapshot the just-drawn frame into the history
+     * ping-pong BEFORE the batch is submitted. When it returns 1 the
+     * presenter owns this guest interval and runs the sub-present loop below
+     * instead of one swap. */
+    int ri_pair = ri_capture(s_vram_img, &s_vram_layout, disp_x, disp_y, w, h,
+                             linear, force_4_3, 0, disp_x, disp_y);
+    flush_work();
     {   /* PSX_VK_DUMP_TGT diagnostic: periodic full target dump (every 240
          * presents) so the target can be read while the game runs. */
         static int dump_calls;
@@ -3294,6 +3781,13 @@ int vk_renderer_present_vram(int disp_x, int disp_y, int w, int h,
      * when a shot is actually pending. */
     shot_serve(disp_x, disp_y, w, h, NULL,
                force_4_3 ? 4 : s_aspect_num, force_4_3 ? 3 : s_aspect_den);
+    if (ri_pair) {
+        /* The schedule sleeps to each output deadline and to the end of the
+         * guest interval, so the guest keeps its own cadence. */
+        ri_present_source_interval();
+        perf_snapshot_present();
+        return 1;
+    }
     VkImage sc; VkCommandBuffer cb; uint32_t idx, fr;
     /* The displayed rect must be inside the window target; grow (once, at a
      * buffer flip into a new area) before the frame is recorded. */
@@ -3331,6 +3825,8 @@ int vk_renderer_present_vram(int disp_x, int disp_y, int w, int h,
         finish_present(cb, sc, idx, fr);
         latency_ring_mark(LAT_SWAP_END);
         perf_snapshot_present();
+        pres_record(VK_PRES_VRAM, disp_x, disp_y, w, h, dst[0].x, dst[0].y,
+                    dst[1].x - dst[0].x, dst[1].y - dst[0].y);
         return 1;
     }
 
@@ -3360,6 +3856,8 @@ int vk_renderer_present_vram(int disp_x, int disp_y, int w, int h,
     finish_present(cb, sc, idx, fr);
     latency_ring_mark(LAT_SWAP_END);
     perf_snapshot_present();
+    pres_record(VK_PRES_VRAM, disp_x, disp_y, w, h, dst[0].x, dst[0].y,
+                dst[1].x - dst[0].x, dst[1].y - dst[0].y);
     return 1;
 }
 
@@ -3381,6 +3879,8 @@ void vk_renderer_present_blank(void) {
     finish_present(cb, sc, idx, fr);
     latency_ring_mark(LAT_SWAP_END);
     perf_snapshot_present();
+    pres_record(VK_PRES_BLANK, 0, 0, 0, 0, 0, 0,
+                (int)s_sc_extent.width, (int)s_sc_extent.height);
 }
 
 /* Present an ARGB8888 image (24-bit FMV / display-disabled clear) letterboxed.
@@ -3484,6 +3984,8 @@ void vk_renderer_present_cpu(const uint32_t *pixels, int src_w, int src_h,
     p_vkQueueWaitIdle(s_queue);
     latency_ring_mark(LAT_SWAP_END);
     perf_snapshot_present();
+    pres_record(VK_PRES_CPU, 0, 0, src_w, src_h, dst[0].x, dst[0].y,
+                dst[1].x - dst[0].x, dst[1].y - dst[0].y);
 }
 
 /* GPU-direct native-wide present: blit the displayed buffer's wide surface
@@ -3498,9 +4000,19 @@ int vk_renderer_present_wide(int disp_x, int disp_y, int disp_h, int linear) {
         if (s_wide_img[k] && s_wide_base[k] == disp_x) { i = k; break; }
     if (i < 0) return 0;
     flush_cpu_upload();
-    flush_tex_batch(); flush_geometry(); flush_work();   /* present waits in queue order */
+    flush_tex_batch(); flush_geometry();
+    /* Temporal 60 fps on the wide surface: snapshot the wide band, then let the
+     * presenter own the interval (the wide aspect is already the window's). */
+    int ri_pair = ri_capture(s_wide_img[i], &s_wide_layout[i], 0, disp_y,
+                             s_wide_w, disp_h, linear, 0, 1, disp_x, disp_y);
+    flush_work();   /* present waits in queue order */
     VkImage sc; VkCommandBuffer cb; uint32_t idx, fr;
     latency_ring_mark(LAT_SWAP_BEGIN);
+    if (ri_pair) {
+        ri_present_source_interval();
+        perf_snapshot_present();
+        return 1;
+    }
     if (!acquire_present(&sc, &cb, &idx, &fr)) { latency_ring_mark(LAT_SWAP_END); return 1; }
 
     int S = s_scale;
@@ -3528,6 +4040,8 @@ int vk_renderer_present_wide(int disp_x, int disp_y, int disp_h, int linear) {
         finish_present(cb, sc, idx, fr);
         latency_ring_mark(LAT_SWAP_END);
         perf_snapshot_present();
+        pres_record(VK_PRES_WIDE, 0, disp_y, s_wide_w, disp_h,
+                    dst[0].x, dst[0].y, dst[1].x - dst[0].x, dst[1].y - dst[0].y);
         return 1;
     }
 
@@ -3560,6 +4074,8 @@ int vk_renderer_present_wide(int disp_x, int disp_y, int disp_h, int linear) {
     finish_present(cb, sc, idx, fr);
     latency_ring_mark(LAT_SWAP_END);
     perf_snapshot_present();
+    pres_record(VK_PRES_WIDE, 0, disp_y, s_wide_w, disp_h,
+                dst[0].x, dst[0].y, dst[1].x - dst[0].x, dst[1].y - dst[0].y);
     return 1;
 }
 
@@ -4397,6 +4913,7 @@ static void vkb_set_scale(int scale) {
     s_scale = scale;
     if (!s_ready) return;
     flush_tex_batch(); flush_geometry(); gpu_sync();
+    ri_invalidate();   /* capture size changes with the scale */
     if (s_tgt_ready) {
         int x0 = s_tx0, y0 = s_ty0, x1 = s_tx0 + s_tw - 1, y1 = s_ty0 + s_th - 1;
         tgt_destroy();
@@ -4575,6 +5092,7 @@ static void vkb_ext_clear(void) {
 
 void vk_renderer_restage_vram_after_savestate(void) {
     if (!s_ctx_ok || !s_vram) return;
+    ri_invalidate();   /* a restored frame must not crossfade the old one */
     s_up_nrects = 0;
     rect_clear(&s_d24_skip_fb);
     s_depth24_skip_up = 0;
