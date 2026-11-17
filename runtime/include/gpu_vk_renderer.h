@@ -62,6 +62,18 @@ void vk_renderer_restage_vram_after_savestate(void);
 void vk_renderer_set_present_mode(int mode);
 void vk_renderer_set_display_aspect(int num, int den);
 
+/* Temporal 60 fps presenter: blend each pair of the guest's flips into two
+ * presents (the Vulkan twin of gl_renderer_set_interpolation). Presentation
+ * only - guest logic, timers and audio keep their own cadence. */
+void vk_renderer_set_interpolation(int enabled, double host_hz, double target_hz,
+                                   double source_hz, int blend_mode);
+void vk_renderer_set_interpolation_blend(int blend_mode);
+void vk_renderer_set_interpolation_suspended(int suspended);
+void vk_renderer_set_interpolation_source(int source);
+/* 1 while this presenter owns the frame deadline (main.cpp's pacer stands
+ * down, exactly like gl_renderer_interpolation_owns_cadence). */
+int  vk_renderer_interpolation_owns_cadence(void);
+
 /* Per-frame GPU/CPU timing + op counters (debug server "vk_frame_perf"): a JSON
  * array of up to `count` samples, oldest..newest, each with the frame index,
  * CPU frame time, GPU scene/present time from timestamp queries, allocs,
@@ -72,6 +84,22 @@ int  vk_frame_perf_json(char *out, int cap, int count);
  * env config). Drops materialized overrides and re-applies the CLUT-row
  * overrides to the GPU VRAM mirror. Safe to call when no pack is loaded. */
 void vk_renderer_hd_pack_changed(void);
+
+/* Always-on present ring (debug server "vk_present_ring"), the Vulkan twin of
+ * gl_present_ring: EVERY swap the presenter performs, including interpolation
+ * sub-presents. This is the backend-neutral pacing reading (t_us diffs). */
+enum { VK_PRES_VRAM = 0, VK_PRES_WIDE = 1, VK_PRES_CPU = 2,
+       VK_PRES_BLANK = 3, VK_PRES_INTERP = 4 };
+typedef struct VkPresEvent {
+    uint32_t frame;      /* guest present index the swap belongs to */
+    uint8_t  path;       /* VK_PRES_* */
+    uint32_t t_ms;
+    uint64_t t_us;       /* monotonic microseconds at the swap */
+    int dx, dy, w, h;    /* source rect (native VRAM px) */
+    int lx, ly, lw, lh;  /* letterbox rect (window px) */
+} VkPresEvent;
+uint64_t vk_renderer_pres_total(void);
+int      vk_renderer_pres_get(uint64_t seq, VkPresEvent *out);
 
 #ifdef __cplusplus
 }

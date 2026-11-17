@@ -11202,6 +11202,42 @@ static void handle_gl_present_ring(int id, const char *json)
     free(buf);
 }
 
+/* Vulkan present ring: the backend-neutral twin of gl_present_ring. One event
+ * per swapchain present (interpolation sub-presents included) so pacing can be
+ * measured with the same t_us diffs on both backends.
+ *   {"cmd":"vk_present_ring","n":600}
+ * -> events: [seq, frame, path, t_ms, [dx,dy,w,h], [lx,ly,lw,lh], t_us] */
+static void handle_vk_present_ring(int id, const char *json)
+{
+    static const char *path_name[5] = { "vram", "wide", "cpu", "blank", "interp" };
+    int n = json_get_int(json, "n", 300);
+    if (n < 1) n = 1;
+    if (n > 4096) n = 4096;
+    uint64_t total = vk_renderer_pres_total();
+    uint64_t start = total > (uint64_t)n ? total - (uint64_t)n : 0;
+    int bufsz = 96 + n * 96;
+    char *buf = (char *)malloc((size_t)bufsz);
+    if (!buf) { send_err(id, "alloc failed"); return; }
+    int pos = snprintf(buf, bufsz,
+                       "{\"id\":%d,\"ok\":true,\"total\":%llu,\"now_ms\":%u,\"events\":[",
+                       id, (unsigned long long)total, (unsigned)SDL_GetTicks());
+    int first = 1;
+    for (uint64_t s = start; s < total && pos < bufsz - 160; s++) {
+        VkPresEvent e;
+        if (!vk_renderer_pres_get(s, &e)) continue;
+        pos += snprintf(buf + pos, bufsz - pos,
+                        "%s[%llu,%u,\"%s\",%u,[%d,%d,%d,%d],[%d,%d,%d,%d],%llu]",
+                        first ? "" : ",", (unsigned long long)s, e.frame,
+                        e.path < 5 ? path_name[e.path] : "?", e.t_ms,
+                        e.dx, e.dy, e.w, e.h, e.lx, e.ly, e.lw, e.lh,
+                        (unsigned long long)e.t_us);
+        first = 0;
+    }
+    pos += snprintf(buf + pos, bufsz - pos, "]}");
+    send_fmt("%s", buf);
+    free(buf);
+}
+
 /* Present-classification ring (all backends; see present_ring.h): how each
  * present was classified — 4:3 pillarbox / native-wide / canonical — and
  * whether a native-wide present fell back to the canonical width (the
@@ -16104,6 +16140,7 @@ static const CmdEntry s_commands[] = {
     { "vram_peek",         handle_vram_peek },
     { "gl_coh_ring",       handle_gl_coh_ring },
     { "gl_present_ring",   handle_gl_present_ring },
+    { "vk_present_ring",   handle_vk_present_ring },
     { "present_ring",      handle_present_ring },
     { "gpu_timeline",      handle_gpu_timeline },
     { "nclip_stats",       handle_nclip_stats },
