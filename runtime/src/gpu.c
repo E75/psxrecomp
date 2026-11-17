@@ -7891,6 +7891,28 @@ static void gp1_h_display_range(uint32_t val) {
      * bits 12-23: X2 */
     h_display_x1 = val & 0xFFF;
     h_display_x2 = (val >> 12) & 0xFFF;
+    {   /* PSX_TRACE_GP1RANGE=<path>: who sets the display width, with the
+         * caller - the match re-asserts its own DISPENV (docs/BOOT_BLOCKERS.md
+         * 9.0), so the writer and its layer must be known, not guessed. */
+        static FILE *rfp;
+        static int rinit;
+        if (!rinit) {
+            const char *e = getenv("PSX_TRACE_GP1RANGE");
+            rinit = 1;
+            if (e && *e) rfp = fopen(e, "w");
+        }
+        if (rfp) {
+            extern uint32_t g_debug_last_store_pc;
+            extern uint32_t g_debug_current_func_addr;
+            printf("%s %u x1=%u x2=%u w=%u pc=%08X func=%08X\n", "__GP1RANGE__",
+                   (unsigned)s_frame_count, (unsigned)(val & 0xFFF),
+                   (unsigned)((val >> 12) & 0xFFF),
+                   (unsigned)(((val >> 12) & 0xFFF) - (val & 0xFFF)),
+                   (unsigned)g_debug_last_store_pc,
+                   (unsigned)g_debug_current_func_addr);
+            fflush(stdout);
+        }
+    }
 }
 
 static void gp1_v_display_range(uint32_t val) {
