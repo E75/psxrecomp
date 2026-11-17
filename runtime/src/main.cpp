@@ -9065,8 +9065,12 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
          * letterboxes 682x240 into the clamped 4:3 and the picture is stretched
          * vertically by 4/3 - the same defect the GL path just lost. Passing 0/0
          * restores the configured aspect for menus, FMV and the legacy
-         * GTE-squash path. */
-        if (!g_gl_active)
+         * GTE-squash path.
+         *
+         * Guarded on `g_vk_active`, NOT on `!g_gl_active`: a Vulkan build also
+         * creates a GL context (the fallback), so `g_gl_active` is true there and
+         * an `else` branch would silently skip the shipped backend. */
+        if (g_vk_active)
             vk_renderer_set_display_aspect(nw_frame ? nw_num : g_video_aspect_num,
                                            nw_frame ? nw_den : g_video_aspect_den);
         /* 4:3-pinned frames: the pre-game BIOS boot, plus (once engaged) every
