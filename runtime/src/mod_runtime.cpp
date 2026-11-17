@@ -1815,6 +1815,21 @@ bool mod_runtime_prepare_resources(const std::filesystem::path& disc_path, std::
 
 bool mod_runtime_verify_session_plan_fp(std::string* error);
 
+/* True when an installed package's [[target]] can match on the whole-image
+ * SHA-256. That is the only consumer of the digest; without one, hashing the
+ * disc at boot buys nothing (see mod_runtime_commit). */
+static bool catalog_targets_disc_sha256(const ModPackageManager& manager) {
+    for (const auto& [id, versions] : manager.packages()) {
+        (void)id;
+        for (const auto& [version, package] : versions) {
+            (void)version;
+            for (const ModTarget& target : package.targets)
+                if (!target.disc_sha256.empty()) return true;
+        }
+    }
+    return false;
+}
+
 static void note_disc(RuntimeMods& s, const std::filesystem::path& disc_path) {
     if (disc_path == s.disc_path) return;
     std::string hash_error, digest;
@@ -1964,9 +1979,20 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* err
          host_file_identity(resolve_disc_path(disc_path).data, inputs.data_identity));
 #endif
 #if !defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
-    if (disc_path != s.disc_path)
+    const bool disc_changed = disc_path != s.disc_path;
+#else
+    const bool disc_changed = true;
 #endif
-    {
+    /* The whole-image SHA-256 exists to let a package match on the exact disc
+     * (`[[target]] disc_sha256`). A catalog whose targets never name one cannot
+     * use the digest, so hashing 300 MB at every boot is pure startup cost -
+     * measured 1.5 s on the retail image (host_launch_timings `disc_hash`).
+     * Resolve with the empty digest exactly as the portable fingerprint path
+     * already does; matching targets with no disc_sha256 are unaffected. */
+    bool hash_disc = disc_changed && catalog_targets_disc_sha256(s.manager);
+    if (!hash_disc)
+        psx_mod_counter_add("startup.disc_hash_skipped", 1);
+    if (hash_disc) {
         std::string hash_error, digest;
 #if defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
         const bool hashed = save_selection
@@ -1977,9 +2003,9 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* err
 #endif
         if (!hashed && s.cached_prepare) return false;
         if (!hashed) digest.clear();
-        s.disc_path = disc_path;
         s.disc_sha256 = std::move(digest);
     }
+    s.disc_path = disc_path;
     if (!mod_runtime_prepare_resources(disc_path, error)) return false;
 #if defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
     inputs.stable = dependency_files(s, disc_path, inputs.dependencies);
