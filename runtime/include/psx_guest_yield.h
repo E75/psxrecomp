@@ -105,6 +105,23 @@ uint32_t we_yield_until_vblank(struct CPUState* cpu);
 int we_wait_guest_word(struct CPUState* cpu, uint32_t addr, uint32_t mask,
                        uint32_t want, uint32_t max_vblanks);
 
+
+/* Interrupt-granularity wait for a decompiled C body (docs/BOOT_BLOCKERS.md 9.0).
+ *
+ * Advances guest device time in small steps and, the moment a deliverable
+ * interrupt exists (psx_interrupt_delivery_needed), delivers it through the
+ * same host-continuation contract we_yield_until_vblank uses, then returns 1.
+ * Unlike a vblank yield this does not wait for the next frame edge, so a sector
+ * INT1 is serviced as soon as the drive raises it - one attempt then costs a
+ * fraction of a sector time instead of two frames.
+ *
+ * Returns 0 when the budget is exhausted (no interrupt was raised in it), when
+ * guest time is frozen, when called from inside an exception handler (use
+ * we_idle_cycles there), when re-entered from a handler, or when
+ * PSX_C_BODY_YIELD is off. Never spins past the budget.
+ */
+int we_wait_interrupt(struct CPUState* cpu, uint32_t budget_cycles);
+
 #ifdef __cplusplus
 }
 #endif

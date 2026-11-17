@@ -195,6 +195,24 @@ static void test_deliver(struct CPUState *cpu, uint32_t candidate)
     }
 }
 
+/* The runtime's SR tracer (interrupts.c) is diagnostic-only; the harness does
+ * not model COP0, so it is a no-op here. */
+/* Deliverability: the harness raises an interrupt before a case and clears it
+ * in test_deliver, so "something is pending" is modelled by s_test_irq_pending.
+ * A case that wants no delivery leaves it 0, which is what the budget-exhausted
+ * assertions rely on. */
+int s_test_irq_pending;
+int psx_interrupt_delivery_needed(const struct CPUState *cpu)
+{
+    (void)cpu;
+    return s_test_irq_pending;
+}
+
+void psx_sr_trace(const char *tag, const struct CPUState *cpu)
+{
+    (void)tag; (void)cpu;
+}
+
 void psx_check_interrupts_at(struct CPUState *cpu, uint32_t resume_pc)
 {
     int host_continuation;
@@ -537,6 +555,74 @@ static void test_depth_flat_loop(void)
     CHECK(g_psx_guest_call_depth == entry_depth);
 }
 
+
+static void test_wait_interrupt(void)
+{
+    uint64_t before;
+
+    printf("T13 we_wait_interrupt: a pending IRQ is delivered inside the budget\n");
+    machine_init(0u, 0x8004C288u, 0x801FFEE0u, 1u, 1u << IRQ_VBLANK,
+                 1u << IRQ_VBLANK);
+    we_yield_set_c_body_yield(1);
+    s_test_irq_pending = 1;                 /* deliverable from the first step */
+    CHECK(we_wait_interrupt(&s_cpu, 4096u) == 1);
+    CHECK(s_deliver_calls == 1);
+    CHECK(s_epc_installed == PSX_EXC_SENTINEL_PC);
+    CHECK(s_isr_runs == 1);
+    CHECK(s_candidate == 0u);               /* host continuation, no resume PC */
+    CHECK(s_cpu.pc == 0u);
+    CHECK(g_psx_guest_call_depth == 0);
+    CHECK(s_yield_depth == 0);
+    s_test_irq_pending = 0;
+
+    printf("T14 we_wait_interrupt: budget exhausted returns 0, charges the budget\n");
+    machine_init(0u, 0x8004C288u, 0x801FFEE0u, 1u, 1u << IRQ_VBLANK,
+                 1u << IRQ_VBLANK);
+    we_yield_set_c_body_yield(1);
+    before = psx_get_cycle_count();
+    CHECK(we_wait_interrupt(&s_cpu, 8192u) == 0);
+    CHECK(psx_get_cycle_count() - before == 8192u);
+    CHECK(s_deliver_calls == 0);
+    CHECK(s_isr_runs == 0);
+    CHECK(g_psx_guest_call_depth == 0);
+
+    printf("T15 we_wait_interrupt: frozen, in-ISR and flag-off refuse with 0\n");
+    machine_init(0u, 0x8004C288u, 0x801FFEE0u, 1u, 1u << IRQ_VBLANK,
+                 1u << IRQ_VBLANK);
+    we_yield_set_c_body_yield(1);
+    s_test_irq_pending = 1;
+    g_psx_guest_time_frozen = 1;
+    CHECK(we_wait_interrupt(&s_cpu, 4096u) == 0);
+    CHECK(psx_get_cycle_count() == 0u);
+    g_psx_guest_time_frozen = 0;
+    s_in_exception = 1;
+    CHECK(we_wait_interrupt(&s_cpu, 4096u) == 0);
+    CHECK(psx_get_cycle_count() == 0u);
+    s_in_exception = 0;
+    we_yield_set_c_body_yield(0);
+    CHECK(we_wait_interrupt(&s_cpu, 4096u) == 0);
+    CHECK(psx_get_cycle_count() == 0u);
+    we_yield_set_c_body_yield(1);
+    s_test_irq_pending = 0;
+    CHECK(s_deliver_calls == 0);
+    CHECK(g_psx_guest_call_depth == 0);
+
+    printf("T16 we_wait_interrupt: depth flat across repeated deliveries\n");
+    machine_init(0u, 0x8004C288u, 0x801FFEE0u, 1u, 1u << IRQ_VBLANK,
+                 1u << IRQ_VBLANK);
+    we_yield_set_c_body_yield(1);
+    g_psx_guest_call_depth = 4;     /* inside a host-call chain */
+    s_snapshot_depth = 0u;
+    s_test_irq_pending = 1;
+    for (int i = 0; i < 4; i++) {
+        CHECK(we_wait_interrupt(&s_cpu, 4096u) == 1);
+        CHECK(g_psx_guest_call_depth == 4);
+        CHECK(s_snapshot_depth == 0u);
+    }
+    CHECK(s_deliver_calls == 4);
+    s_test_irq_pending = 0;
+}
+
 static void test_sentinel_distinct(void)
 {    printf("T11 the host stop token is not the host-call sentinel\n");
     CHECK(PSX_EXC_SENTINEL_PC != 0x8F000000u);
@@ -561,6 +647,7 @@ int main(void)
     test_refusals();
     test_wait_word();
     test_sentinel_distinct();
+    test_wait_interrupt();
     test_depth_flat_loop();
 
     printf("%d checks, %d failure(s)\n", s_checks, s_failures);

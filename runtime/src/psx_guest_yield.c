@@ -35,6 +35,9 @@
 #include "psx_cycles.h"
 #include "psx_guest_call.h"
 
+/* Defined at the bottom of this file; used by the interrupt-granularity wait. */
+uint32_t we_idle_cycles(uint32_t cycles);
+
 extern uint32_t psx_read_word(uint32_t addr);
 /* dirty_ram_interp.c: the interpreter's committed resume PC. It takes priority
  * over the compiled latch in the delivery's EPC selection, so a C-body yield
@@ -94,6 +97,88 @@ static void yield_trace(const char *what, const struct CPUState *cpu)
             what, (unsigned long long)s_yield_seq, cpu->pc, cpu->gpr[31],
             cpu->gpr[29], g_psx_guest_call_depth);
     fflush(stderr);
+}
+
+
+/* Deliver one pending interrupt through the C-body contract (host sentinel
+ * EPC, GPR/depth/snapshot restore). Shared by we_yield_until_vblank and
+ * we_wait_interrupt so the two cannot drift. */
+static void deliver_host_continuation(struct CPUState *cpu, uint32_t entry_pc)
+{
+    /* Host-continuation contract: hand the delivery NO guest resume PC, so it
+     * selects the legacy host sentinel as EPC and stops at the host instead of
+     * entering guest code. The epilogue then restores every GPR; cpu->pc is put
+     * back to the value the caller had - the live host chain IS the
+     * continuation. */
+    const uint32_t saved_dirty_pc = g_dirty_safe_resume_pc;
+    /* Depth/state latches an escape would leave raised: the sentinel exit
+     * longjmps out of the handler and skips psx_mod_call_guest_ex()'s epilogue
+     * (mod_guest_services.c 220-221), so the guest call frame and the
+     * snapshot-safety latch are unwound here instead. */
+    const int saved_call_depth = g_psx_guest_call_depth;
+    const unsigned saved_snap_depth = psx_snapshot_host_call_depth();
+
+    g_dirty_safe_resume_pc = 0;
+    psx_sr_trace("before_deliver", cpu);
+    g_psx_host_continuation = 1;
+    psx_check_interrupts_at(cpu, 0u);
+    g_psx_host_continuation = 0;
+    g_dirty_safe_resume_pc = saved_dirty_pc;
+    psx_sr_trace("after_deliver", cpu);
+
+    /* Invariant: depth out == depth in, whether the delivery ran a nested ISR,
+     * refused, or found nothing pending. */
+    if (g_psx_guest_call_depth != saved_call_depth) {
+        g_psx_guest_call_depth = saved_call_depth;
+        s_stats.call_depth_restored++;
+    }
+    if (psx_snapshot_host_call_depth() != saved_snap_depth) {
+        psx_snapshot_host_call_depth_set(saved_snap_depth);
+        s_stats.snapshot_depth_restored++;
+    }
+    if (cpu->pc != entry_pc) {
+        cpu->pc = entry_pc;
+        s_stats.pc_restored++;
+    }
+}
+
+int we_wait_interrupt(struct CPUState* cpu, uint32_t budget_cycles)
+{
+    if (!cpu) return 0;
+    if (s_yield_depth) return 0;                 /* re-entered from a handler */
+    if (g_psx_guest_time_frozen) return 0;
+    if (psx_get_in_exception()) return 0;        /* ISR: use we_idle_cycles */
+    if (!we_yield_c_body_yield_enabled()) return 0;   /* legacy path stays */
+
+    uint32_t spent = 0;
+    for (;;) {
+        /* Check before charging: a body that has just been told a sector is
+         * ready must not have to burn a step first, and a frozen clock must
+         * still deliver what is already pending. */
+        if (psx_interrupt_delivery_needed(cpu)) break;
+        if (spent >= budget_cycles) return 0;
+        {
+            uint32_t step = budget_cycles - spent;
+            if (step > 4096u) step = 4096u;
+            if (!we_idle_cycles(step)) return 0;
+            spent += step;
+        }
+    }
+    {
+
+        s_yield_depth = 1;
+        s_stats.yields++;
+        s_yield_seq++;
+        const uint64_t before = psx_get_cycle_count();
+        const uint32_t entry_pc = cpu->pc;
+        yield_trace("enter", cpu);
+        deliver_host_continuation(cpu, entry_pc);
+        yield_trace("return", cpu);
+        s_yield_depth = 0;
+        s_stats.deliveries++;
+        (void)before;
+        return 1;   /* one interrupt delivered */
+    }
 }
 
 uint32_t we_yield_until_vblank(struct CPUState* cpu)
