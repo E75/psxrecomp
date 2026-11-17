@@ -109,6 +109,8 @@ static int s_aspect_num = 4, s_aspect_den = 3;
 
 void vk_renderer_set_display_aspect(int num, int den) {
     if (num <= 0 || den <= 0) { num = 4; den = 3; }
+    if (num != s_aspect_num || den != s_aspect_den)
+        fprintf(stdout, "psxrecomp: vulkan: present aspect %d:%d\n", num, den);
     s_aspect_num = num; s_aspect_den = den;
 }
 
@@ -1254,8 +1256,14 @@ static int create_sync(void) {
  * Draws and the presented rect GROW the target (union, up to the whole VRAM);
  * CPU uploads and VRAM copies only touch the part inside it — the raw mirror
  * always receives those exactly, so texturing and readback stay complete. */
+/* The full-VRAM render target is the shipped mode. The windowed target
+ * (s_tgt_full_env == 0) is kept for measurement, but it renders only the
+ * framebuffer fill on the AMD driver after a resize: the frame's draws never
+ * reach the image the present reads, while the SAME frame is correct with the
+ * full target (target dumps + present_shot in docs/VULKAN_PARITY.md). Do not
+ * make it the default again until that is root-caused. */
 static int s_tgt_ready;      /* target images exist */
-static int s_tgt_full_env;   /* PSX_VK_TGT=full: never shrink (A/B, docs) */
+static int s_tgt_full_env;   /* whole-VRAM target (default) */
 
 static int make_image(VkFormat fmt, int w, int h, VkImageUsageFlags usage,
                       VkImageAspectFlags aspect,
@@ -1472,29 +1480,14 @@ static int tgt_create(int x0, int y0, int x1, int y1) {
                          s_vram_img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                          1, &blit, VK_FILTER_NEAREST);
         /* Stencil (mask bits) + depth: straight image copy, same format. */
-        if (old_ds) {
-            VkImageMemoryBarrier sb = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-            sb.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            sb.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            sb.srcQueueFamilyIndex = sb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            sb.image = old_ds;
-            sb.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-            sb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            sb.subresourceRange.aspectMask = DS_ASPECT;
-            sb.subresourceRange.levelCount = 1; sb.subresourceRange.layerCount = 1;
-            p_vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &sb);
-            VkImageCopy ic = {0};
-            ic.srcSubresource.aspectMask = DS_ASPECT; ic.srcSubresource.layerCount = 1;
-            ic.dstSubresource.aspectMask = DS_ASPECT; ic.dstSubresource.layerCount = 1;
-            ic.srcOffset.x = (cx0 - ox0) * S; ic.srcOffset.y = (cy0 - oy0) * S;
-            ic.dstOffset.x = (cx0 - x0) * S;  ic.dstOffset.y = (cy0 - y0) * S;
-            ic.extent.width = (uint32_t)((cx1 + 1 - cx0) * S);
-            ic.extent.height = (uint32_t)((cy1 + 1 - cy0) * S);
-            ic.extent.depth = 1;
-            p_vkCmdCopyImage(cb, old_ds, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                             s_ds_img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &ic);
-        }
+        /* Stencil (mask bits): the NEW image was already cleared to 0 above.
+         * Do NOT copy the old stencil: it is per-frame framebuffer state, and
+         * an overwrite/grow that happens while a frame is in flight copied a
+         * partially written mask into the new target. Once a single mask bit
+         * came across wrong every CHECK draw fails (the stencil test is always
+         * enabled), which is exactly the "only the fill renders" state seen
+         * after a windowed-target resize. The fresh target starts with a clear
+         * mask, like the GL FBO that is reallocated at the same point. */
     }
     vram_to(cb, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     {
@@ -1658,7 +1651,7 @@ static int du_intersect(int *x0, int *y0, int *x1, int *y1) {
 static int tgt_require(int x0, int y0, int x1, int y1) {
     if (tgt_contains(x0, y0, x1, y1)) return 1;
     if (!s_ctx_ok || !s_ready) return 0;
-    if (s_tgt_full_env) {   /* PSX_VK_TGT=full: whole-VRAM target (A/B) */
+    if (s_tgt_full_env) {   /* whole-VRAM target (the default) */
         if (!tgt_contains(0, 0, VRAM_W - 1, VRAM_H - 1)) {
             int first = !s_tgt_ready;
             gpu_sync();
@@ -1939,23 +1932,44 @@ static int create_render_targets(void) {
 
     /* Descriptor pool + sets: ds_tex (1) + ds_pack (1) + blit ring (BLIT_DESC_RING). */
     {
+        /* Budget = exactly what is allocated below: ds_tex has TWO combined
+         * image samplers (raw mirror + HD override), ds_pack has one storage
+         * image, each of the BLIT_DESC_RING sets has one combined sampler.
+         * Allocating a pool to its exact size made p_vkAllocateDescriptorSets
+         * fail on the AMD RX 9070 driver (VK_ERROR_OUT_OF_POOL_MEMORY on the
+         * last blit sets) and the backend fell back to software with only
+         * `vulkan: blit set alloc` in the log. Keep headroom AND report the
+         * VkResult: a silent fallback here looks exactly like a working Vulkan
+         * build on every other line, so a failure must name its code. */
+        const uint32_t kPoolHeadroom = 8;
         VkDescriptorPoolSize sizes[2] = {
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, BLIT_DESC_RING + 2 },
-            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          1 } };
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, BLIT_DESC_RING + 2 + kPoolHeadroom },
+            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          1 + kPoolHeadroom } };
         VkDescriptorPoolCreateInfo pci = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-        pci.maxSets = BLIT_DESC_RING + 2; pci.poolSizeCount = 2; pci.pPoolSizes = sizes;
-        if (p_vkCreateDescriptorPool(s_dev, &pci, NULL, &s_dpool) != VK_SUCCESS) return vk_die("desc pool");
+        pci.maxSets = BLIT_DESC_RING + 2 + kPoolHeadroom;
+        pci.poolSizeCount = 2; pci.pPoolSizes = sizes;
+        if (p_vkCreateDescriptorPool(s_dev, &pci, NULL, &s_dpool) != VK_SUCCESS)
+            return vk_die("desc pool");
         VkDescriptorSetLayout layouts[2] = { s_dsl_tex, s_dsl_pack };
         VkDescriptorSet *sets[2] = { &s_ds_tex, &s_ds_pack };
         for (int i = 0; i < 2; i++) {
             VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
             ai.descriptorPool = s_dpool; ai.descriptorSetCount = 1; ai.pSetLayouts = &layouts[i];
-            if (p_vkAllocateDescriptorSets(s_dev, &ai, sets[i]) != VK_SUCCESS) return vk_die("desc set alloc");
+            VkResult r = p_vkAllocateDescriptorSets(s_dev, &ai, sets[i]);
+            if (r != VK_SUCCESS) {
+                fprintf(stdout, "psxrecomp: vulkan: descriptor set %d alloc -> VkResult %d\n", i, (int)r);
+                return vk_die("desc set alloc");
+            }
         }
         for (int i = 0; i < BLIT_DESC_RING; i++) {
             VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
             ai.descriptorPool = s_dpool; ai.descriptorSetCount = 1; ai.pSetLayouts = &s_dsl_blit;
-            if (p_vkAllocateDescriptorSets(s_dev, &ai, &s_ds_blit_ring[i]) != VK_SUCCESS) return vk_die("blit set alloc");
+            VkResult r = p_vkAllocateDescriptorSets(s_dev, &ai, &s_ds_blit_ring[i]);
+            if (r != VK_SUCCESS) {
+                fprintf(stdout, "psxrecomp: vulkan: blit set %d/%d alloc -> VkResult %d\n",
+                        i, BLIT_DESC_RING, (int)r);
+                return vk_die("blit set alloc");
+            }
         }
         /* ds_tex: raw mirror sampled + the dummy override image. ds_pack: hr
          * sampled + raw storage; the hr side is (re)written by
@@ -2273,12 +2287,16 @@ int vk_renderer_init_context(SDL_Window *win) {
     if (s_vfx_fog || s_vfx_shafts)
         fprintf(stdout, "psxrecomp: vfx: armed fog=%d lightshafts=%d\n",
                 s_vfx_fog, s_vfx_shafts);
-    /* PSX_VK_TGT=full pins the target to the whole VRAM (A/B measurement and
-     * an escape hatch if a title writes outside its displayed buffers). */
+    /* Render target: the default is the whole VRAM (the pre-windowing mode).
+     * PSX_VK_TGT=window selects the windowed target for measurement; it is not
+     * the default because it loses the frame on the AMD driver (see
+     * docs/VULKAN_PARITY.md). */
     {
         const char *tgt = getenv("PSX_VK_TGT");
-        s_tgt_full_env = (tgt && (tgt[0] == 'f' || tgt[0] == 'F'));
-        if (s_tgt_full_env) vk_log("PSX_VK_TGT=full: whole-VRAM render target");
+        const int want_window = tgt && (tgt[0] == 'w' || tgt[0] == 'W');
+        s_tgt_full_env = want_window ? 0 : 1;
+        if (want_window) vk_log("PSX_VK_TGT=window: windowed render target "
+                                "(diagnostic; loses frames on AMD)");
     }
 
     s_ctx_ok = 1;
@@ -2573,20 +2591,20 @@ static void letterbox(int sw, int sh, int aw, int ah, VkOffset3D off[2]) {
 }
 
 /* ---- present shot (diagnostic readback) --------------------------------- */
-/* present_shot under Vulkan. The swapchain present has no readback hook, so the
- * frame is REBUILT on the CPU: the displayed region is decoded from the (just
- * synced) CPU VRAM mirror and scaled into the same letterboxed rect the present
- * blit uses, so the PNG carries the presented aspect. Called from every present
- * path; it claims a staged request only, so a normal frame never pays for a
- * readback (the rule that keeps this diagnostic-only).
+/* present_shot under Vulkan: read the windowed render target back and write the
+ * picture rect the present would blit, so the PNG is the PRESENTED IMAGE — same
+ * content, same aspect and same internal (SSAA) resolution as the GL capture
+ * (which reads its FBO). The earlier version rebuilt the frame from the CPU
+ * VRAM mirror at native resolution: it was 15-bit quantised, could be stale,
+ * and carried only native details, so `live.shot`'s colour count and the
+ * `live.plane` scanout comparison measured the mirror instead of the present.
  *
  * `argb` non-NULL = the already-composed CPU frame (24-bit FMV present); passed
  * as-is because the packed RGB888 bytes have no VRAM coordinates to decode from.
  *
- * Gaps vs the GL capture: the OSD toast/rewind/savestate overlays (consumed by
- * vk_osd_blit in the same command buffer) and the native-wide margins (they
- * live only on the GPU wide surface) are not in the mirror, and the pixels are
- * native VRAM resolution rather than the internal (SSAA) resolution. */
+ * Remaining gap vs GL: the OSD toast/rewind/savestate overlays are consumed by
+ * vk_osd_blit in the present command buffer, after this readback. */
+static uint8_t *vk_target_rgba(int *out_w, int *out_h);   /* below */
 static void shot_serve(int dx, int dy, int dw, int dh,
                        const uint32_t *argb, int aspect_num, int aspect_den)
 {
@@ -2595,15 +2613,15 @@ static void shot_serve(int dx, int dy, int dw, int dh,
     char path[512];
     if (!present_shot_take(path, (int)sizeof(path))) return;
 
-    /* 15-bit frames present from the GPU VRAM image, so pull it down first.
-     * NEVER sync on 24-bit: the readback clobbers the packed RGB888 bytes the
-     * CPU present just staged (same rule as main.cpp's depth24 present). */
-    if (!argb) vk_renderer_sync_cpu();
+    /* The GPU frame is authoritative for 15-bit presents. NEVER sync the CPU
+     * mirror on 24-bit: that readback clobbers the packed RGB888 bytes the CPU
+     * present just staged (same rule as main.cpp's depth24 present). */
+    uint8_t *tgt = NULL;
+    int tw = 0, th = 0;
+    if (!argb) tgt = vk_target_rgba(&tw, &th);
 
     int cw = (int)s_sc_extent.width, ch = (int)s_sc_extent.height;
     if (cw <= 0 || ch <= 0) { cw = dw > 0 ? dw : 1; ch = dh > 0 ? dh : 1; }
-    uint8_t *rgb = (uint8_t *)calloc((size_t)cw * (size_t)ch * 3u, 1u);  /* black margins */
-    if (!rgb) { present_shot_done(0); return; }
 
     VkOffset3D dst[2];
     letterbox(cw, ch, aspect_num > 0 ? aspect_num : 4,
@@ -2617,26 +2635,44 @@ static void shot_serve(int dx, int dy, int dw, int dh,
         dst[1].y = dst[0].y + content_h;
     }
 
+    /* The PNG is the PRESENTED IMAGE, not the window: write only the picture
+     * rect the swapchain blit fills, so its own dimensions are the presented
+     * aspect. The GL capture crops the same way (present_snapshot), and the
+     * acceptance row `live.present_aspect` reads these dimensions. Writing the
+     * full window here made a correctly letterboxed 341:192 present report the
+     * window's 4:3 forever (480x360 instead of 480x270). */
+    int pw = dst[1].x - dst[0].x;
+    int ph = dst[1].y - dst[0].y;
+    if (pw < 1) pw = 1;
+    if (ph < 1) ph = 1;
+    uint8_t *rgb = (uint8_t *)calloc((size_t)pw * (size_t)ph * 3u, 1u);
+    if (!rgb) { free(tgt); present_shot_done(0); return; }
+
     GpuDisplayInfo di;
     memset(&di, 0, sizeof di);
     di.display_x = (uint32_t)(dx < 0 ? 0 : dx);
     di.display_y = (uint32_t)(dy < 0 ? 0 : dy);
 
-    int tw = dst[1].x - dst[0].x, th = dst[1].y - dst[0].y;
-    if (tw > 0 && th > 0 && dw > 0 && dh > 0) {
-        for (int y = 0; y < th; y++) {
-            int cy = dst[0].y + y;
-            if (cy < 0 || cy >= ch) continue;
-            uint32_t sy = (uint32_t)((int64_t)y * dh / th);
-            uint8_t *row = rgb + ((size_t)cy * (size_t)cw + (size_t)dst[0].x) * 3u;
-            for (int x = 0; x < tw; x++, row += 3) {
-                uint32_t sx = (uint32_t)((int64_t)x * dw / tw);
+    if (dw > 0 && dh > 0) {
+        const int S = s_scale;
+        for (int y = 0; y < ph; y++) {
+            uint32_t sy = (uint32_t)((int64_t)y * dh / ph);
+            uint8_t *row = rgb + (size_t)y * (size_t)pw * 3u;
+            for (int x = 0; x < pw; x++, row += 3) {
+                uint32_t sx = (uint32_t)((int64_t)x * dw / pw);
                 if (argb) {
                     uint32_t p = argb[(size_t)sy * (size_t)dw + sx];
                     row[0] = (uint8_t)(p >> 16);
                     row[1] = (uint8_t)(p >> 8);
                     row[2] = (uint8_t)p;
+                } else if (tgt && sx + (uint32_t)dx < (uint32_t)s_tw &&
+                           sy + (uint32_t)dy < (uint32_t)s_th) {
+                    const size_t tx = (size_t)((sx + (uint32_t)dx) * (uint32_t)S);
+                    const size_t ty = (size_t)((sy + (uint32_t)dy) * (uint32_t)S);
+                    const uint8_t *p = tgt + (ty * (size_t)tw + tx) * 4u;
+                    row[0] = p[0]; row[1] = p[1]; row[2] = p[2];
                 } else {
+                    /* No target (boot / init failure): native VRAM decode. */
                     gpu_display_pixel_rgb(&di, sx, sy, &row[0], &row[1], &row[2]);
                 }
             }
@@ -2645,9 +2681,60 @@ static void shot_serve(int dx, int dy, int dw, int dh,
 
     int wrote = 0;
     FILE *pf = fopen(path, "wb");
-    if (pf) { wrote = png_write_rgb(pf, rgb, (uint32_t)cw, (uint32_t)ch); fclose(pf); }
+    if (pf) { wrote = png_write_rgb(pf, rgb, (uint32_t)pw, (uint32_t)ph); fclose(pf); }
     free(rgb);
+    free(tgt);
     present_shot_done(wrote);
+}
+
+/* Copy the windowed target down to RGBA8 (target texels: s_tw*S x s_th*S).
+ * Caller frees. Used by the present_shot readback and the diagnostic dump. */
+static uint8_t *vk_target_rgba(int *out_w, int *out_h) {
+    if (!s_tgt_ready || !s_vram_img) return NULL;
+    int S = s_scale, w = s_tw, h = s_th;
+    if (w <= 0 || h <= 0) return NULL;
+    size_t bytes = (size_t)w * S * (size_t)h * S * 4u;
+    VkBuffer buf; VkDeviceMemory mem; void *map;
+    if (!make_staging((VkDeviceSize)bytes, &buf, &mem, &map)) return NULL;
+    VkCommandBuffer cb = begin_oneshot();
+    img_to(cb, s_vram_img, &s_vram_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    VkBufferImageCopy rc = {0};
+    rc.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    rc.imageSubresource.layerCount = 1;
+    rc.imageExtent.width = (uint32_t)(w * S);
+    rc.imageExtent.height = (uint32_t)(h * S);
+    rc.imageExtent.depth = 1;
+    rc.bufferRowLength = (uint32_t)(w * S);
+    p_vkCmdCopyImageToBuffer(cb, s_vram_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &rc);
+    end_oneshot(cb);
+    gpu_sync();
+    uint8_t *rgba = (uint8_t *)malloc(bytes);
+    if (rgba) memcpy(rgba, map, bytes);
+    free_staging(buf, mem);
+    if (rgba) { if (out_w) *out_w = w * S; if (out_h) *out_h = h * S; }
+    return rgba;
+}
+
+/* PSX_VK_DUMP_TGT=<png>: one-shot diagnostic dump of the windowed render
+ * target, at native resolution. Used to tell "the GPU never drew it" from
+ * "the present/pack lost it" — no other readback exposes the target. */
+static void vk_dump_target(const char *path) {
+    int tw = 0, th = 0;
+    uint8_t *src = vk_target_rgba(&tw, &th);
+    if (!src) return;
+    int S = s_scale, w = tw / (S > 0 ? S : 1), h = th / (S > 0 ? S : 1);
+    uint8_t *rgb = (uint8_t *)malloc((size_t)w * (size_t)h * 3u);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            const uint8_t *p = src + (((size_t)y * S * (size_t)tw) + (size_t)x * S) * 4u;
+            uint8_t *o = rgb + ((size_t)y * (size_t)w + (size_t)x) * 3u;
+            o[0] = p[0]; o[1] = p[1]; o[2] = p[2];
+        }
+    FILE *pf = fopen(path, "wb");
+    if (pf) { png_write_rgb(pf, rgb, (uint32_t)w, (uint32_t)h); fclose(pf); }
+    free(rgb); free(src);
+    fprintf(stdout, "psxrecomp: vulkan: target dump %s (%dx%d, target origin %d,%d)\n",
+            path, w, h, s_tx0, s_ty0);
 }
 
 /* ---- opaque swapchain present pass --------------------------------------- */
@@ -3196,6 +3283,12 @@ int vk_renderer_present_vram(int disp_x, int disp_y, int w, int h,
      * of frame N+1 may overlap present N (the per-present sync was the frame
      * hitch — see docs/RENDERING_ROADMAP.md A.3#2). */
     flush_tex_batch(); flush_geometry(); flush_work();
+    {   /* PSX_VK_DUMP_TGT diagnostic: periodic full target dump (every 240
+         * presents) so the target can be read while the game runs. */
+        static int dump_calls;
+        const char *dp = getenv("PSX_VK_DUMP_TGT");
+        if (dp && *dp && (++dump_calls % 240) == 0) vk_dump_target(dp);
+    }
     /* present_shot: serve a staged capture from the VRAM this blit is about to
      * read, before the swap (see shot_serve). It forces its own readback drain
      * when a shot is actually pending. */
@@ -4266,7 +4359,12 @@ static void ensure_cpu(void) {
     if (ext_live) {
         rc.bufferOffset = (VkDeviceSize)guest_bytes;
         rc.bufferRowLength = VRAM_EXT_COLS;
-        rc.imageOffset.x = VRAM_EXT_OFFSET; rc.imageOffset.y = 0;
+        /* The raw mirror is VRAM_EXT_HOST_W wide: guest columns 0..1023, then
+         * the extension plane at host column VRAM_EXT_HOST_X0 = 1024. Reading
+         * at VRAM_EXT_OFFSET (512) loaded guest texture pages into the plane —
+         * the frame's right columns showed textures (the GL path fixed the
+         * same read). */
+        rc.imageOffset.x = VRAM_EXT_HOST_X0; rc.imageOffset.y = 0;
         rc.imageExtent.width = VRAM_EXT_COLS;
         p_vkCmdCopyImageToBuffer(cb, s_raw_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &rc);
     }
@@ -4463,7 +4561,9 @@ static void vkb_ext_clear(void) {
     VkBufferImageCopy rc = {0};
     rc.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     rc.imageSubresource.layerCount = 1;
-    rc.imageOffset.x = VRAM_EXT_OFFSET;
+    rc.imageOffset.x = VRAM_EXT_HOST_X0;   /* 1024, not VRAM_EXT_OFFSET: the
+                                            * guest texture columns 512..703
+                                            * must not be zeroed */
     rc.imageExtent.width = VRAM_EXT_COLS;
     rc.imageExtent.height = VRAM_H;
     rc.imageExtent.depth = 1;
