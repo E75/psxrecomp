@@ -18355,6 +18355,13 @@ session_reboot:
         g_video_renderer = 1;
     }
 #endif
+    /* The stub fallback above is the last change to the backend before the
+     * window exists, so it is also the last chance to resolve a mod's boot-time
+     * frame-rate request against the backend that will actually run. Without
+     * this the request was resolved against the requested (Vulkan) backend at
+     * activation, refused, and a GL fallback kept the game at 30 presents/s
+     * with `[video] frame_rate = 60` (docs/FRAME_RATE.md). */
+    apply_frame_rate_boot();
     /* Netplay: CPU VRAM is digest/snap authority. Prefer dual-raster OpenGL
      * (SW@1× + GL@settings SSAA FBO present, never glReadPixels). Vulkan
      * present not yet cpu-auth — fall back to a software window. */
