@@ -11131,7 +11131,9 @@ static void handle_gl_coh_ring(int id, const char *json)
  * before the swap. Always-on capture; this just reads a window.
  *   {"cmd":"gl_present_ring","n":600}
  * -> events: [seq, frame, path, t_ms, [dx,dy,w,h], [lx,ly,lw,lh],
- *             [r,g,b], glerr] */
+ *             [r,g,b], glerr, [src_r,src_g,src_b,src_valid], t_us]
+ *    t_us (appended bit): monotonic microseconds at the swap, so a reader can
+ *    diff consecutive presents for the pacing acceptance (16.67 +- 0.3 ms). */
 extern uint64_t gl_renderer_pres_total(void);
 
 static void handle_gl_present_ring(int id, const char *json)
@@ -11153,12 +11155,13 @@ static void handle_gl_present_ring(int id, const char *json)
         GlPresEvent e;
         if (!gl_renderer_pres_get(s, &e)) continue;
         pos += snprintf(buf + pos, bufsz - pos,
-                        "%s[%llu,%u,\"%s\",%u,[%d,%d,%d,%d],[%d,%d,%d,%d],[%u,%u,%u],%u,[%u,%u,%u,%u]]",
+                        "%s[%llu,%u,\"%s\",%u,[%d,%d,%d,%d],[%d,%d,%d,%d],[%u,%u,%u],%u,[%u,%u,%u,%u],%llu]",
                         first ? "" : ",", (unsigned long long)s, e.frame,
                         e.path < 6 ? path_name[e.path] : "?", e.t_ms,
                         e.dx, e.dy, e.w, e.h, e.lx, e.ly, e.lw, e.lh,
                         e.px_r, e.px_g, e.px_b, e.glerr,
-                        e.src_r, e.src_g, e.src_b, e.src_valid);
+                        e.src_r, e.src_g, e.src_b, e.src_valid,
+                        (unsigned long long)e.t_us);
         first = 0;
     }
     pos += snprintf(buf + pos, bufsz - pos, "]}");

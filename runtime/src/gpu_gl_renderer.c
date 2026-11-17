@@ -1351,9 +1351,15 @@ static void pres_record(int path, int dx, int dy, int w, int h,
         const char *cfg = getenv("PSX_GL_PRESENT_PROBE");
         probe_pixels = (cfg && cfg[0] == '1') ? 1 : 0;
     }
+    static uint64_t pres_freq = 0;
+    if (!pres_freq) { pres_freq = SDL_GetPerformanceFrequency(); if (!pres_freq) pres_freq = 1; }
     GlPresEvent *e = &s_pres_ring[s_pres_seq % GL_PRES_RING_CAP];
     e->frame = (uint32_t)s_frame_count;
     e->t_ms  = (uint32_t)SDL_GetTicks();
+    /* Sub-ms present stamp: the pacing acceptance (16.67 +- 0.3 ms) cannot be
+     * checked from the 1 ms wall clock. Ring readers diff consecutive t_us. */
+    e->t_us  = (uint64_t)((double)SDL_GetPerformanceCounter() * 1.0e6 /
+                          (double)pres_freq);
     e->path  = (uint8_t)path;
     e->glerr = probe_pixels ? (uint16_t)glGetError() : 0;
     e->dx = (int16_t)dx; e->dy = (int16_t)dy;

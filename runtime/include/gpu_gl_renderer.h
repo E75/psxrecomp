@@ -439,6 +439,7 @@ enum {
 typedef struct {
     uint32_t frame;        /* s_frame_count at swap                        */
     uint32_t t_ms;         /* SDL_GetTicks() at swap                       */
+    uint64_t t_us;         /* monotonic microseconds at swap (present pacing) */
     uint8_t  path;         /* GL_PRES_*                                    */
     uint8_t  px_r, px_g, px_b; /* backbuffer sample at letterbox centre    */
     uint16_t glerr;        /* glGetError() drained just before the swap    */
