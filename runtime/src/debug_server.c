@@ -208,6 +208,31 @@ static inline void fp_record_mmio(uint32_t addr, uint32_t val, uint32_t pc)
     psx_fp_record_mmio(&s_fp, addr, val, pc);
 }
 
+/* ---- hot-path probe latch (PSX_HOTPATH_PROBES) ---------------------------
+ * The debug-tools build used to keep three diagnostic families always on so a
+ * probe could read history it never armed: the per-store catch-all write
+ * rings, the per-block-leader cycle/pc observer, and the per-function-entry
+ * profile rings. Measured with the host sampler at the match
+ * (docs/PROFILE_26MS.md) they were ~15% of the frame: 27.96 -> 23.66 ms p50
+ * with them off, same binary, same run. They are OFF by default now, and a
+ * debug command that reads one of the rings arms them for the rest of the
+ * session (debug_server_command_wants_hotpath_probes below), so an interactive
+ * probe sees every event from the moment it asks. Start the process with
+ * PSX_HOTPATH_PROBES=1 to restore the old always-on history (crash triage:
+ * crash_trace reads the fn/fp rings after the fact). Guest state is untouched
+ * either way: the gate only skips observer writes.
+ */
+static int s_hotpath_probes = -1;
+static int hotpath_probes_on(void)
+{
+    if (s_hotpath_probes < 0) {
+        const char *e = getenv("PSX_HOTPATH_PROBES");
+        s_hotpath_probes = (e && e[0] == '1') ? 1 : 0;
+    }
+    return s_hotpath_probes;
+}
+static void hotpath_probes_arm(void) { s_hotpath_probes = 1; }
+
 static void fp_snapshot(uint32_t frame)
 {
     FpEntry *e = &s_fp_ring[s_fp_head];
@@ -2098,6 +2123,7 @@ void debug_server_log_call_entry(uint32_t func_addr) {
     g_psx_recent_fn[g_psx_recent_fn_i++ & (PSX_RECENT_FN_CAP - 1u)] = func_addr;
     psx_native_stack_guard(func_addr);   /* runs in debug AND release (before the early-return) */
 #endif
+    if (!hotpath_probes_on()) return;    /* PSX_HOTPATH_PROBES=0: pacing run */
     if (s_fmv_quiet) return;
     ls_suppress_begin();
     if (s_synth_recurse_armed) { s_synth_recurse_armed = 0; psx_synth_recurse(0); }
@@ -2698,6 +2724,7 @@ void debug_server_cyc_observe(uint32_t block_leader_phys) {
     return;
 #else
     if (s_fmv_quiet) return;
+    if (!hotpath_probes_on()) return;   /* PSX_HOTPATH_PROBES=0: pacing run */
     uint32_t phys = block_leader_phys & 0x1FFFFFFFu;
     /* ND debug: PSX_ND_WOOD_CLEAR80=1 clears model+184 bit0x80 at the flag-load
      * leader so 0x5CF/'cras' models enter NdIntroWoodBatchSetup's textured path.
@@ -5442,6 +5469,8 @@ static void handle_geom_correction(int id, const char *json)
  * over a window of the ring: {"cmd":"host_profile","since":SEQ} or
  * {"cmd":"host_profile","frames":N} (the last N guest frames), optional
  * "pass":1 (only samples inside render passes) / "pass":0 (outside), "top":K.
+ * K may be up to 4096: most compiled-guest bodies sit on a few samples each,
+ * so a smaller cap reports the dense helpers and hides the game code.
  * Addresses are executable-relative; tools/host_profile.py names them. Take
  * "seq" from one reply as "since" of the next to profile what ran between. */
 static void handle_host_profile(int id, const char *json)
@@ -5456,7 +5485,11 @@ static void handle_host_profile(int id, const char *json)
     const int pass = json_get_int(json, "pass", -1);
     int top = json_get_int(json, "top", 60);
     if (top < 1) top = 1;
-    if (top > 400) top = 400;
+    /* The match's guest bodies are spread over thousands of addresses (a few
+     * samples each), so a 400-bin cap silently dropped ~1/3 of the samples and
+     * biased every profile towards dense runtime helpers. Let a caller ask for
+     * the whole 4096-bin table; the reply is heap-formatted by send_fmt. */
+    if (top > 4096) top = 4096;
     uint64_t from = since >= 0 ? (uint64_t)since : oldest;
     if (from < oldest) from = oldest;
     uint32_t frame_lo = 0;
@@ -11525,6 +11558,7 @@ void debug_server_trace_write_check(uint32_t phys, uint32_t old_val,
     /* Render passes are rolled back; keep them out of the live timeline's
      * fingerprints and write traces (docs/RENDER_PASSES.md). */
     if (g_psx_render_pass_active) return;
+    if (!hotpath_probes_on()) return;   /* PSX_HOTPATH_PROBES=0: pacing run */
     if (s_fmv_quiet) {
         if (psx_fp_write_eligible(phys, psx_ram_live_bytes())) psx_fp_note_quiet(&s_fp);
         return;
@@ -15797,7 +15831,8 @@ static void handle_phase_profile(int id, const char *json)
              "\"gpu_samples\":%u,\"gpu_share\":%.4f,"
              "\"other_samples\":%u,\"other_share\":%.4f,"
              "\"exc_samples\":%u,\"exc_share\":%.4f,"
-             "\"samples_total\":%llu,\"interp_total\":%llu}",
+             "\"samples_total\":%llu,\"interp_total\":%llu,"
+             "\"hotpath_probes\":%d}",
              id, window, tot,
              itp, tot ? (double)itp / (double)tot : 0.0,
              nat, tot ? (double)nat / (double)tot : 0.0,
@@ -15806,7 +15841,8 @@ static void handle_phase_profile(int id, const char *json)
              oth, tot ? (double)oth / (double)tot : 0.0,
              exc, tot ? (double)exc / (double)tot : 0.0,
              (unsigned long long)s_phase_samples_all,
-             (unsigned long long)s_phase_interp_all);
+             (unsigned long long)s_phase_interp_all,
+             hotpath_probes_on());
 }
 
 /* phase_hot: top guest functions by native wall-time samples (cumulative
@@ -15976,8 +16012,24 @@ static void handle_warm_cd_route(int id, const char *json)
     send_fmt("{\"id\":%d,\"ok\":true,%s}\n", id, body);
 }
 
+/* "hotpath": read or set the hot-path probe latch.
+ *   {"cmd":"hotpath"}            -> {probes, env}
+ *   {"cmd":"hotpath","probes":0} -> set (0 fast / 1 always-on rings)
+ * A same-process A/B (load a state, run with probes 1, reload, run with 0)
+ * turns it off here without restarting, so the comparison cannot be blamed on
+ * the load path (docs/PROFILE_26MS.md). */
+static void handle_hotpath(int id, const char *json)
+{
+    int v = json_get_int(json, "probes", -1);
+    if (v == 0 || v == 1) s_hotpath_probes = v;
+    const char *e = getenv("PSX_HOTPATH_PROBES");
+    send_fmt("{\"id\":%d,\"ok\":true,\"probes\":%d,\"env\":\"%s\"}",
+             id, hotpath_probes_on(), e ? e : "");
+}
+
 static const CmdEntry s_commands[] = {
     { "phase_profile",     handle_phase_profile },
+    { "hotpath",           handle_hotpath },
     { "starv_ring",        handle_starv_ring },
     { "data_shards",       handle_data_shards },
     { "vsync_query_hle",   handle_vsync_query_hle },
@@ -16353,6 +16405,26 @@ static const CmdEntry s_commands[] = {
     { NULL, NULL }
 };
 
+/* A command that consumes one of the gated hot-path rings arms them for the
+ * rest of the session (see hotpath_probes_on). Prefix match, so wtrace_arm /
+ * wtrace_all_dump / fntrace_arm / cyc_watch_dump / record_frame_dump all hit.
+ * phase_hot and ce_profile keep working without it: g_psx_last_fn_entry and
+ * the stack-guard ring are outside the gate. */
+static int command_reads_hotpath_rings(const char *cmd)
+{
+    static const char *const prefixes[] = {
+        "wtrace", "cyc_watch", "pc_probe", "fntrace", "fn_", "call_trace",
+        "sreg_trace", "card_mgr_trace", "record_frame", "record_reads",
+        "lockstep", "stack_profile", "dispatch_tail", "xprobe", "devtrace",
+        "frame_fingerprint"
+    };
+    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
+        const size_t n = strlen(prefixes[i]);
+        if (strncmp(cmd, prefixes[i], n) == 0) return 1;
+    }
+    return 0;
+}
+
 static void process_command(const char *line)
 {
     char cmd[64];
@@ -16365,6 +16437,8 @@ static void process_command(const char *line)
     }
 
     int id = json_get_int(line, "id", 0);
+
+    if (command_reads_hotpath_rings(cmd)) hotpath_probes_arm();
 
     for (const CmdEntry *e = s_commands; e->name; e++) {
         if (strcmp(cmd, e->name) == 0) {
