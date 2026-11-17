@@ -518,7 +518,15 @@ static int           s_hd_native_authority = 0;
 static int           s_hd_probation;
 static int           s_hd_pending;
 static int           s_hd_probation_frames;
+static int           s_hd_probe_limit;
+static int           s_hd_retry_countdown;
 #define HD_PROBATION_FRAMES 180   /* ~3 s at 60 Hz, then stay on the GPU path */
+/* A pack authored for a match page (kit/head/pitch) is loaded at boot and draws
+ * no matching page until the match starts, long after the one-shot window. Keep
+ * re-probing briefly so that pack can still promote; a pack that never matches
+ * only pays the probe cost for a few frames every HD_PROBE_RETRY_FRAMES. */
+#define HD_PROBE_RETRY_FRAMES 300 /* ~5 s at 60 Hz */
+#define HD_PROBE_RETRY_WINDOW 30  /* ~0.5 s of draw queries */
 static int           s_req_scale = 1;      /* requested before context init */
 /* Driver limits queried at init: min(GL_MAX_TEXTURE_SIZE,
  * GL_MAX_RENDERBUFFER_SIZE, GL_MAX_VIEWPORT_DIMS); 0 before init. */
@@ -5890,6 +5898,7 @@ void gl_renderer_set_hd_texture_mode(int on) {
     on = on ? 1 : 0;
     if (!on) {
         s_hd_probation = 0; s_hd_pending = 0; s_hd_probation_frames = 0;
+        s_hd_probe_limit = 0; s_hd_retry_countdown = 0;
         hd_authority_apply(0);
         return;
     }
@@ -5909,6 +5918,8 @@ void gl_renderer_set_hd_texture_mode(int on) {
     if (!s_hd_probation) {
         s_hd_probation = 1;
         s_hd_probation_frames = 0;
+        s_hd_probe_limit = HD_PROBATION_FRAMES;
+        s_hd_retry_countdown = 0;
         fprintf(stdout, "psxrecomp: HD pack loaded: probing for matches before "
                         "entering HD native authority (the GPU path stays active)\n");
         fflush(stdout);
@@ -9341,6 +9352,15 @@ static void present_vram_impl(int disp_x, int disp_y, int w, int h, int linear,
     /* HD pack match gate: promote to native authority only when a replacement
      * actually matched, otherwise give up and keep the GPU path (a pack with 0
      * matches used to force the CPU path and pause the render thread). */
+    if (!s_hd_probation && !s_hd_native_authority &&
+        gpu_hd_textures_replacements_enabled()) {
+        if (s_hd_retry_countdown > 0 && --s_hd_retry_countdown == 0) {
+            s_hd_probation = 1;
+            s_hd_probation_frames = 0;
+            s_hd_probe_limit = HD_PROBE_RETRY_WINDOW;
+            s_hd_pending = 0;
+        }
+    }
     if (s_hd_probation) {
         if (s_hd_pending) {
             s_hd_probation = 0; s_hd_pending = 0;
@@ -9348,12 +9368,13 @@ static void present_vram_impl(int disp_x, int disp_y, int w, int h, int linear,
             fprintf(stdout, "psxrecomp: HD pack matched a page: HD native authority "
                             "on (VRAM from the CPU rasterizer, GPU image presentation)\n");
             fflush(stdout);
-        } else if (++s_hd_probation_frames > HD_PROBATION_FRAMES) {
+        } else if (++s_hd_probation_frames > s_hd_probe_limit) {
             s_hd_probation = 0; s_hd_probation_frames = 0;
+            s_hd_retry_countdown = HD_PROBE_RETRY_FRAMES;
             fprintf(stdout, "psxrecomp: HD pack loaded but 0 pages matched in %d "
-                            "frames: staying on the GPU path (no HD native "
-                            "authority, render thread keeps running)\n",
-                    HD_PROBATION_FRAMES);
+                            "frames: staying on the GPU path (retrying every %d "
+                            "frames)\n",
+                    s_hd_probe_limit, HD_PROBE_RETRY_FRAMES);
             fflush(stdout);
         }
     }
