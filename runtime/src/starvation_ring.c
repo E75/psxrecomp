@@ -340,7 +340,11 @@ void starvation_watchdog_check(void) {
              * directly writes the same report an SEH would, tagged with this
              * origin — a silent exit code 3 becomes a full post-mortem. */
             psx_crash_trace_dump("starvation_watchdog", NULL);
-            PSX_EXIT_TRACE_TERMINATE("starvation_watchdog", 3, detail);
+            /* The line above already named the termination; this only ends it
+             * with the same hard exit the watchdog always used. */
+            fprintf(stderr, "starvation_watchdog: terminating (3)\n");
+            fflush(stderr);
+            psx_exit_trace_hard_exit(3);
         }
         /* exit_trace never returns; keep the compiler honest. */
 #if defined(_WIN32)
