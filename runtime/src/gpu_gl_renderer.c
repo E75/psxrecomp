@@ -298,6 +298,10 @@ static void gnd_before_prim(uint16_t texpage, uint16_t cx, uint16_t cy, double a
 static void gnd_trace_prim(const int *xs, const int *ys, const int *us,
                            const int *vs, uint16_t tp, uint16_t cx,
                            uint16_t cy, double area);
+static void gnd_trace_flat(GLenum mode, const int *xs, const int *ys,
+                           const uint16_t *cs, int n);
+static int  gnd_apron_flat(const int *xs, const int *ys,
+                           const uint16_t *cs, uint16_t *out);
 static PFN_glGenRenderbuffers  p_glGenRenderbuffers;
 static PFN_glDeleteRenderbuffers p_glDeleteRenderbuffers;
 static PFN_glBindRenderbuffer  p_glBindRenderbuffer;
@@ -3772,6 +3776,16 @@ static void line_to_quad(const float *v, float *q) {
  * or GL_LINES; verts are (x, y, r, g, b, a) tuples with colors as 1555. */
 static void gpu_geometry(GLenum mode, const int *xs, const int *ys,
                          const uint16_t *cs, int n, int semi) {
+    /* PSX_GROUND_TRACE also logs the untextured path: the apron beyond the
+     * hoardings is a flat polygon (docs/WIDE_GROUND.md 8). */
+    gnd_trace_flat(mode, xs, ys, cs, n);
+    /* [video] wide_ground_apron: recolour the apron's flat polygon to the
+     * pitch's mean grass. The tan is not a texel and not a textured
+     * modulation (8.1-8.3), so this is the only surface to change. */
+    uint16_t apron_cs[3];
+    if (mode == GL_TRIANGLES && n == 3 &&
+        gnd_apron_flat(xs, ys, cs, apron_cs))
+        cs = apron_cs;
     flush_tex_batch();   /* flat prim: drain textured draws first (order + program) */
     flush_cpu_upload();  /* also drains flat batch if an upload was pending */
     mark_prim_dirty(xs, ys, n, 0 /* flat */);
@@ -5103,6 +5117,101 @@ static void gnd_trace_prim(const int *xs, const int *ys, const int *us,
         else
             fprintf(s_gnd_trace, " X X");
     }
+    fputc('\n', s_gnd_trace);
+}
+
+/* ---- [video] wide_ground_apron: the apron recolour ------------------------
+ * The ground beyond the hoardings is one large untextured flat polygon (the
+ * tireless measurements in docs/WIDE_GROUND.md 8.1-8.3: no tan texel on the
+ * pages the apron's prims report, and no textured prim's modulation produces
+ * it; the colour is within +-2 of (150,120,90) over the whole corner while the
+ * grass varies +-10). So the patch recolours that polygon and nothing else.
+ *
+ * Predicate (all must hold; no draw index anywhere):
+ *   - a flat triangle (the guest submits the apron as GL_TRIANGLES, n = 3);
+ *   - the wide match raster is armed (stock 4:3 and menus untouched);
+ *   - wide and short: bbox width >= 100 px, height <= 100 px;
+ *   - warm brown: mean 5-bit r > g+2, g > b+1 and r >= 11, and not dark
+ *     (a player boot, a shadow, a board are either small, grey or unbright).
+ * The replacement is the pitch's measured mean grass RGB (88,116,60) - the
+ * same constant tier 1 uses; no mow variation, because the stripes belong to
+ * the pitch and the apron is beyond them.
+ * Switch: wide_ground_apron in game.toml, read once (default on). */
+static int gnd_apron_on = -1;
+
+static int gnd_apron_read(void)
+{
+    if (gnd_apron_on >= 0) return gnd_apron_on;
+    gnd_apron_on = 1;                       /* default on */
+    FILE *f = fopen("game.toml", "r");
+    char line[256];
+    int in_video = 0;
+    if (!f) return gnd_apron_on;
+    while (fgets(line, sizeof line, f)) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '[') { in_video = strncmp(p, "[video]", 7) == 0; continue; }
+        if (!in_video || strncmp(p, "wide_ground_apron", 17) != 0) continue;
+        p = strchr(p, '=');
+        if (!p) continue;
+        p++;
+        while (*p == ' ' || *p == '\t') p++;
+        gnd_apron_on = strncmp(p, "true", 4) == 0 || strncmp(p, "1", 1) == 0;
+    }
+    fclose(f);
+    return gnd_apron_on;
+}
+
+/* Exported for the predicate self-test (tests/apron_selftest.c). */
+int gl_ground_apron_predicate(const int *xs, const int *ys,
+                              const uint16_t *cs, uint16_t *out)
+{
+    if (!gnd_apron_read()) return 0;
+    if (gpu_ws_match_raster_width() <= 512) return 0;
+    if (!s_gnd.on) return 0;
+    int ymin = ys[0], ymax = ys[0], xmin = xs[0], xmax = xs[0];
+    for (int i = 1; i < 3; i++) {
+        if (ys[i] < ymin) ymin = ys[i];
+        if (ys[i] > ymax) ymax = ys[i];
+        if (xs[i] < xmin) xmin = xs[i];
+        if (xs[i] > xmax) xmax = xs[i];
+    }
+    if (ymax - ymin > 100 || xmax - xmin < 100) return 0;
+    int r = 0, g = 0, b = 0;
+    for (int i = 0; i < 3; i++) {
+        r += cs[i] & 0x1F; g += (cs[i] >> 5) & 0x1F; b += (cs[i] >> 10) & 0x1F;
+    }
+    r /= 3; g /= 3; b /= 3;
+    if (!(r > g + 2 && g > b + 1 && r >= 11)) return 0;
+    if (out) {
+        const uint16_t grass = (uint16_t)(11 | (14 << 5) | (7 << 10));
+        out[0] = out[1] = out[2] = grass;
+    }
+    return 1;
+}
+
+static int gnd_apron_flat(const int *xs, const int *ys,
+                          const uint16_t *cs, uint16_t *out)
+{
+    int hit = gl_ground_apron_predicate(xs, ys, cs, out);
+    if (hit && !rth_replaying())
+        psx_mod_counter_add(
+            "we2002.widescreen.native-raster.ground-apron-flat", 1);
+    return hit;
+}
+
+/* Untextured/flat counterpart of gnd_trace_prim: same file, same frame
+ * separators, kind "F", with the 15-bit colour per vertex. Only triangles and
+ * quads are useful (lines come through here too). */
+static void gnd_trace_flat(GLenum mode, const int *xs, const int *ys,
+                           const uint16_t *cs, int n)
+{
+    gnd_trace_open();
+    if (!s_gnd_trace || n < 3) return;
+    const char *k = mode == GL_TRIANGLES ? "T" : "L";
+    fprintf(s_gnd_trace, "F %d %d %s %d", s_gnd_frame_no, s_gnd_seq++, k, n);
+    for (int i = 0; i < n; i++)
+        fprintf(s_gnd_trace, " %d %d %04X", xs[i], ys[i], cs[i]);
     fputc('\n', s_gnd_trace);
 }
 
