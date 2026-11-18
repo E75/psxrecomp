@@ -15906,10 +15906,9 @@ int main(int argc, char** argv) {
      * the first run, so the game's "create option file?" prompt never runs.
      * The card model lives in src/mods/boot_path.c; off means inert. */
     bool saves_seed_option_file  = false;
-    /* [saves] skip_card_slot_screen: answer the boot card-slot panel with slot
-     * 1 (src/mods/we2002_no_card_slot.c). On by default: a PC always has the
-     * card in slot 1. false = stock boot, the panel waits for CIRCLE. */
-    bool saves_skip_card_slot_screen = true;
+    /* [saves] skip_card_slot_screen: 1 = zero-frame (the game's own panel-exit
+     * stores), 2 = press CIRCLE on its first frame, 0 = raw. */
+    int saves_skip_card_slot_screen = 1;
     /* [assets] native disc sector source. */
     std::string assets_disc_dir;
     bool        assets_preload         = true;
@@ -18953,7 +18952,7 @@ session_reboot:
     we2002_boot_configure(saves_seed_option_file ? 1 : 0);
     /* [saves] skip_card_slot_screen: the card panel between the intro and the
      * option-file load screen. Same "just play" path; inert unless on. */
-    we2002_card_slot_configure(saves_skip_card_slot_screen ? 1 : 0);
+    we2002_card_slot_configure(saves_skip_card_slot_screen);
     if (saves_seed_option_file) {
         static const char kOptionSeed[] = "assets/option_seed.bin";
         char seed_path[PSX_PATH_RESOLVE_MAX];
