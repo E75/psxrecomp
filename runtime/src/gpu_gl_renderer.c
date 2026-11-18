@@ -295,6 +295,13 @@ static void flush_tex_batch(void); /* textured-prim batch — defined below, flu
 static void flush_flat_batch(void); /* flat/gouraud GEO batch (MotK starfield 0x68 dots) */
 static void gnd_vote(uint16_t texpage, uint16_t cx, uint16_t cy, double area);
 static void gnd_before_prim(uint16_t texpage, uint16_t cx, uint16_t cy, double area);
+static void gnd_trace_prim(const int *xs, const int *ys, const int *us,
+                           const int *vs, uint16_t tp, uint16_t cx,
+                           uint16_t cy, double area);
+static void gnd_trace_flat(GLenum mode, const int *xs, const int *ys,
+                           const uint16_t *cs, int n);
+static int  gnd_apron_flat(const int *xs, const int *ys,
+                           const uint16_t *cs, uint16_t *out);
 static PFN_glGenRenderbuffers  p_glGenRenderbuffers;
 static PFN_glDeleteRenderbuffers p_glDeleteRenderbuffers;
 static PFN_glBindRenderbuffer  p_glBindRenderbuffer;
@@ -3769,6 +3776,16 @@ static void line_to_quad(const float *v, float *q) {
  * or GL_LINES; verts are (x, y, r, g, b, a) tuples with colors as 1555. */
 static void gpu_geometry(GLenum mode, const int *xs, const int *ys,
                          const uint16_t *cs, int n, int semi) {
+    /* PSX_GROUND_TRACE also logs the untextured path: the apron beyond the
+     * hoardings is a flat polygon (docs/WIDE_GROUND.md 8). */
+    gnd_trace_flat(mode, xs, ys, cs, n);
+    /* [video] wide_ground_apron: recolour the apron's flat polygon to the
+     * pitch's mean grass. The tan is not a texel and not a textured
+     * modulation (8.1-8.3), so this is the only surface to change. */
+    uint16_t apron_cs[3];
+    if (mode == GL_TRIANGLES && n == 3 &&
+        gnd_apron_flat(xs, ys, cs, apron_cs))
+        cs = apron_cs;
     flush_tex_batch();   /* flat prim: drain textured draws first (order + program) */
     flush_cpu_upload();  /* also drains flat batch if an upload was pending */
     mark_prim_dirty(xs, ys, n, 0 /* flat */);
@@ -4022,6 +4039,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
         double area = (ax * by - ay * bx) * 0.5;
         if (area < 0.0) area = -area;
         if (area >= 256.0) gnd_before_prim(texpage, clut_x, clut_y, area);
+        gnd_trace_prim(xs, ys, us, vs, texpage, clut_x, clut_y, area);
     }
 
     flush_cpu_upload();   /* if a CPU->VRAM upload is pending it flushes the batch first */
@@ -4570,6 +4588,9 @@ typedef struct {
     int32_t  projh;         /* GTE projection plane distance H              */
     uint16_t texpage;       /* pitch texture page word (auto-detected)      */
     uint16_t clut_x, clut_y;
+    uint16_t crowd_tp;      /* stand/crowd page (tier 3 dressing)           */
+    uint16_t crowd_x, crowd_y;
+    double   crowd_area;    /* its winning area (per frame vote)            */
     int      page_frames;   /* frames the page identity has been stable     */
 } GndCam;
 static GndCam   s_gnd;
@@ -4626,7 +4647,17 @@ static int      s_gnd_drawing;   /* re-entrancy guard (plane -> prims)      */
 static void gnd_vote(uint16_t texpage, uint16_t cx, uint16_t cy, double area)
 {
     if (!s_gnd.on || area <= 0.0) return;
-    if (!gnd_page_is_grass(texpage, cx, cy)) return;
+    if (!gnd_page_is_grass(texpage, cx, cy)) {
+        /* Not the pitch: the biggest non-green page is the stand/crowd band
+         * the tier-3 dressing uses where the guest leaves a gap. */
+        if (area >= 3000.0 && area > s_gnd.crowd_area) {
+            s_gnd.crowd_area = area;
+            s_gnd.crowd_tp = texpage;
+            s_gnd.crowd_x = cx;
+            s_gnd.crowd_y = cy;
+        }
+        return;
+    }
     for (int i = 0; i < s_gnd_nvote; i++) {
         if (s_gnd_vote[i].tp == texpage && s_gnd_vote[i].cx == cx
             && s_gnd_vote[i].cy == cy) {
@@ -4697,7 +4728,7 @@ void gl_ground_set(int on, const int16_t rot[9], const int32_t tr[3],
                    int ofx, int ofy, int projh)
 {
     int was = s_gnd.on;
-    s_gnd.on = on < 0 ? 0 : (on > 2 ? 2 : on);
+    s_gnd.on = on < 0 ? 0 : (on > 3 ? 3 : on);
     if (rot) memcpy(s_gnd.rt, rot, sizeof s_gnd.rt);
     if (tr)  memcpy(s_gnd.tr, tr, sizeof s_gnd.tr);
     s_gnd.ofx = ofx; s_gnd.ofy = ofy; s_gnd.projh = projh;
@@ -4729,6 +4760,189 @@ static void gnd_view(double wx, double wz, double *vx, double *vy, double *vz)
     *vz = (double)s_gnd.tr[2]
         + ((double)s_gnd.rt[6] * wx + (double)s_gnd.rt[8] * wz) / r0;
 }
+
+/* Screen point of the draw band -> world point on the ground plane (y = 0).
+ * Inverse of the projection above: the view ray through the pixel is
+ * (sx-OFX, sy-OFY, H), and world = C + t * R^T * ray, with C = -R^T * TR.
+ * Returns 0 for a ray that does not go down (above the horizon). */
+static int gnd_ground_at(int sx, int sy, double *wx, double *wz)
+{
+    const double s = 4096.0;
+    const int shift = (gpu_ws_match_raster_width() - 512) / 2;
+    const double dx = (double)(sx - shift) - (double)s_gnd.ofx;
+    const double dy = (double)(sy - s_area_y1) - (double)s_gnd.ofy;
+    const double H = (double)s_gnd.projh;
+    const int16_t *rt = s_gnd.rt;
+    const int32_t *tr = s_gnd.tr;
+    const double dxw = ((double)rt[0] * dx + (double)rt[3] * dy + (double)rt[6] * H) / s;
+    const double dyw = ((double)rt[1] * dx + (double)rt[4] * dy + (double)rt[7] * H) / s;
+    const double dzw = ((double)rt[2] * dx + (double)rt[5] * dy + (double)rt[8] * H) / s;
+    const double cx = -((double)rt[0] * tr[0] + (double)rt[3] * tr[1]
+                        + (double)rt[6] * tr[2]) / s;
+    const double cy = -((double)rt[1] * tr[0] + (double)rt[4] * tr[1]
+                        + (double)rt[7] * tr[2]) / s;
+    const double cz = -((double)rt[2] * tr[0] + (double)rt[5] * tr[1]
+                        + (double)rt[8] * tr[2]) / s;
+    if (dyw < 1e-3) return 0;           /* ray level or up: no ground hit */
+    const double t = -cy / dyw;
+    *wx = cx + t * dxw;
+    *wz = cz + t * dzw;
+    return 1;
+}
+
+/* Tier 3 apron-skip experiment: kept for the record, DISABLED.
+ *
+ * Is this guest prim the outer ground the wide frame shows as the tan apron /
+ * black band? Those are thin strips on the ground plane beyond the pitch, so
+ * all three vertices unproject onto y = 0 in a ring outside the touch/goal
+ * lines. Measured 2026-11-18 at tier 3: it did remove the apron, but it also
+ * dropped guest geometry at the frame corner (a bright patch of the layer's
+ * ring showed through where the stand had been, runs/ground/t12_00.png), and
+ * the replacement ring does not match the guest's shading there. So tier 3
+ * ships the stand band only and leaves the apron to the guest; the exact
+ * requirement for the skip is in docs/WIDE_GROUND.md 7. */
+#if 0
+#define GND_APRON_MAX_H   80
+#define GND_APRON_MIN_X 13500.0
+#define GND_APRON_MIN_Z  8800.0
+#define GND_APRON_MAX_R 30000.0
+static int gnd_skip_prim(const int *xs, const int *ys)
+{
+    if (s_gnd.on < 3 || s_gnd_drawing || !s_gnd.valid) return 0;
+    if (gpu_ws_match_raster_width() <= 512) return 0;
+    int ymin = ys[0], ymax = ys[0], xmin = xs[0], xmax = xs[0];
+    for (int i = 1; i < 3; i++) {
+        if (ys[i] < ymin) ymin = ys[i];
+        if (ys[i] > ymax) ymax = ys[i];
+        if (xs[i] < xmin) xmin = xs[i];
+        if (xs[i] > xmax) xmax = xs[i];
+    }
+    if (ymax - ymin > GND_APRON_MAX_H || xmax - xmin < 40) return 0;
+    double wx[3], wz[3];
+    for (int i = 0; i < 3; i++) {
+        if (!gnd_ground_at(xs[i], ys[i], &wx[i], &wz[i])) return 0;
+        const int outside = fabs(wx[i]) > GND_APRON_MIN_X
+                         || fabs(wz[i]) > GND_APRON_MIN_Z;
+        if (!outside) return 0;
+        if (fabs(wx[i]) > GND_APRON_MAX_R || fabs(wz[i]) > GND_APRON_MAX_R)
+            return 0;
+    }
+    for (int i = 0; i < 3; i++) {
+        for (int j = i + 1; j < 3; j++) {
+            double dx = wx[i] - wx[j], dz = wz[i] - wz[j];
+            if (dx * dx + dz * dz > 8000.0 * 8000.0) return 0;
+        }
+    }
+    return 1;
+}
+#endif
+
+#if 0  /* tier 3 stadium bowl: not shipped, see the apron-skip note */
+/* ---- tier 3: stadium bowl ------------------------------------------------
+ * A stand band in world space, just outside the guest's hoardings, textured
+ * with the game's own crowd page (the largest non-green textured page in the
+ * frame, s_gnd.crowd_tp). It is drawn at the frame clear, under the scene, so
+ * the guest's own stands and boards cover it where they exist and it fills
+ * the band only where the guest draws nothing. Flat dressing, not modelled
+ * stands: no roof, no tiers, no crowd motion. */
+static void gnd_view3(double wx, double wy, double wz,
+                      double *vx, double *vy, double *vz)
+{
+    const double r0 = 4096.0;
+    *vx = (double)s_gnd.tr[0]
+        + ((double)s_gnd.rt[0] * wx + (double)s_gnd.rt[1] * wy
+           + (double)s_gnd.rt[2] * wz) / r0;
+    *vy = (double)s_gnd.tr[1]
+        + ((double)s_gnd.rt[3] * wx + (double)s_gnd.rt[4] * wy
+           + (double)s_gnd.rt[5] * wz) / r0;
+    *vz = (double)s_gnd.tr[2]
+        + ((double)s_gnd.rt[6] * wx + (double)s_gnd.rt[7] * wy
+           + (double)s_gnd.rt[8] * wz) / r0;
+}
+
+static void gnd_emit_tex(const double sx[3], const double sy[3],
+                         const double su[3], const double sv[3],
+                         const double idz[3], int wide,
+                         uint16_t tp, uint16_t cx, uint16_t cy)
+{
+    int xs[3], ys[3], us[3], vs[3];
+    float q[3];
+    for (int i = 0; i < 3; i++) {
+        xs[i] = (int)floor(sx[i] + 0.5);
+        ys[i] = (int)floor(sy[i] + 0.5);
+        us[i] = (int)floor(su[i] + 0.5);
+        vs[i] = (int)floor(sv[i] + 0.5);
+    }
+    double qm = idz[0] > idz[1] ? idz[0] : idz[1];
+    if (idz[2] > qm) qm = idz[2];
+    if (qm <= 0.0) return;
+    q[0] = (float)(idz[0] / qm); q[1] = (float)(idz[1] / qm);
+    q[2] = (float)(idz[2] / qm);
+    if ((xs[0] < -8 && xs[1] < -8 && xs[2] < -8) ||
+        (xs[0] > wide + 8 && xs[1] > wide + 8 && xs[2] > wide + 8)) return;
+    int lim[4] = { 0, 0, 255, 255 };
+    float col[9] = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
+    glb_set_perspective_triangle(1, q[0], q[1], q[2]);
+    gpu_textured_triangle(xs, ys, us, vs, col, tp, cx, cy, 0, -1, lim);
+    glb_set_perspective_triangle(0, 0.0f, 0.0f, 0.0f);
+    s_gnd_tris++;
+}
+
+static void gnd_wall(double ax, double az, double bx, double bz, double h,
+                     int shift, int wide)
+{
+    const double top = -h;                 /* y is down: negative is up */
+    const double len = sqrt((bx - ax) * (bx - ax) + (bz - az) * (bz - az));
+    double sx[4], sy[4], su[4], sv[4], idz[4];
+    for (int e = 0; e < 2; e++) {
+        for (int t = 0; t < 2; t++) {
+            const double wx = e ? bx : ax, wz = e ? bz : az;
+            const double wy = t ? top : 0.0;
+            double vx, vy, vz;
+            gnd_view3(wx, wy, wz, &vx, &vy, &vz);
+            if (vz < GND_NEAR) return;     /* wall behind the camera */
+            const int k = e * 2 + t;
+            sx[k] = (double)s_gnd.ofx + vx * (double)s_gnd.projh / vz + shift;
+            sy[k] = (double)s_gnd.ofy + vy * (double)s_gnd.projh / vz;
+            su[k] = len / 600.0 * (e ? 1.0 : 0.0);
+            sv[k] = t ? 0.0 : 120.0;
+            idz[k] = 1.0 / vz;
+        }
+    }
+    /* 0 a-bottom, 1 a-top, 2 b-bottom, 3 b-top */
+    {
+        const double x[3] = { sx[0], sx[1], sx[2] };
+        const double y[3] = { sy[0], sy[1], sy[2] };
+        const double u[3] = { su[0], su[1], su[2] };
+        const double v[3] = { sv[0], sv[1], sv[2] };
+        const double z[3] = { idz[0], idz[1], idz[2] };
+        gnd_emit_tex(x, y, u, v, z, wide, s_gnd.crowd_tp,
+                     s_gnd.crowd_x, s_gnd.crowd_y);
+    }
+    {
+        const double x[3] = { sx[1], sx[3], sx[2] };
+        const double y[3] = { sy[1], sy[3], sy[2] };
+        const double u[3] = { su[1], su[3], su[2] };
+        const double v[3] = { sv[1], sv[3], sv[2] };
+        const double z[3] = { idz[1], idz[3], idz[2] };
+        gnd_emit_tex(x, y, u, v, z, wide, s_gnd.crowd_tp,
+                     s_gnd.crowd_x, s_gnd.crowd_y);
+    }
+}
+
+static void gnd_draw_dressing(int wide)
+{
+    if (s_gnd.on < 3 || !s_gnd.crowd_tp) return;
+    const int shift = (wide - 512) / 2;
+    const double H = 4200.0;    /* 17.5 m of stand */
+    const double Zx = 15000.0, Zz = 10500.0;
+    gnd_wall(-Zx, -Zz,  Zx, -Zz, H, shift, wide);
+    gnd_wall(-Zx,  Zz,  Zx,  Zz, H, shift, wide);
+    gnd_wall(-Zx, -Zz, -Zx,  Zz, H, shift, wide);
+    gnd_wall( Zx, -Zz,  Zx,  Zz, H, shift, wide);
+}
+
+#endif
 
 typedef struct { double wx, wz, vx, vy, vz; } GndPt;
 
@@ -4845,18 +5059,164 @@ static void gnd_draw(int wide)
                 gnd_tri(poly, 0, i, i + 1, shift, wide);
         }
     }
+    /* Tier 3's stand band and the apron skip are NOT shipped: both were
+     * implemented and measured, and both damaged the frame (docs/WIDE_GROUND.md
+     * 7). Tier 3 currently draws exactly the tier-2 plane. */
+#if 0
+    gnd_draw_dressing(wide);
+#endif
     s_mask_check = smc; s_mask_set = sms;
     s_tw_mask_x = tw0; s_tw_mask_y = tw1; s_tw_off_x = tw2; s_tw_off_y = tw3;
     s_selected_bank_tex = bank; s_selected_bank_live_clut = live_clut;
 }
 
-/* Called from every textured prim before it is submitted. Two jobs:
- *   - vote its page (area-weighted) so the pitch page is known;
- *   - draw the plane at the LAST possible moment that is still under the
- *     pitch: the first green-page prim large enough to be a ground tile.
- *     The guest's own flat "outer ground" polygons are already in the
- *     framebuffer by then (they are drawn before the pitch), so the plane
- *     covers them; the pitch, boards and stands that follow cover the plane. */
+/* Diagnostic tracer (PSX_GROUND_TRACE=<file>): one line per textured prim in
+ * submission order, with the frame's display clear as a separator. It is how
+ * docs/WIDE_GROUND.md 7 identifies which guest prims are drawn after the
+ * layer (the apron, the hoardings, the stands, the crowd). Off unless the env
+ * var names a file. */
+static FILE *s_gnd_trace;
+static int   s_gnd_trace_init, s_gnd_frame_no, s_gnd_seq;
+
+static void gnd_trace_open(void)
+{
+    if (s_gnd_trace_init) return;
+    s_gnd_trace_init = 1;
+    const char *p = getenv("PSX_GROUND_TRACE");
+    if (p && *p) s_gnd_trace = fopen(p, "w");
+}
+
+static void gnd_trace_clear(int x, int y, int w, int h)
+{
+    gnd_trace_open();
+    if (!s_gnd_trace) return;
+    s_gnd_frame_no++;
+    s_gnd_seq = 0;
+    fprintf(s_gnd_trace, "CLEAR %d %d %d %d %d\n",
+            s_gnd_frame_no, x, y, w, h);
+    fflush(s_gnd_trace);
+}
+
+static void gnd_trace_prim(const int *xs, const int *ys, const int *us,
+                           const int *vs, uint16_t tp, uint16_t cx,
+                           uint16_t cy, double area)
+{
+    gnd_trace_open();
+    if (!s_gnd_trace) return;
+    fprintf(s_gnd_trace,
+            "P %d %d %d %d %d %d %d %d %.1f %04X %d %d %d %d %d %d %d %d "
+            "%d %d %d %d",
+            s_gnd_frame_no, s_gnd_seq++, xs[0], ys[0], xs[1], ys[1],
+            xs[2], ys[2], area, tp, cx, cy,
+            us[0], vs[0], us[1], vs[1], us[2], vs[2],
+            s_tw_mask_x, s_tw_mask_y, s_tw_off_x, s_tw_off_y);
+    for (int i = 0; i < 3; i++) {
+        double wx, wz;
+        if (gnd_ground_at(xs[i], ys[i], &wx, &wz))
+            fprintf(s_gnd_trace, " %.0f %.0f", wx, wz);
+        else
+            fprintf(s_gnd_trace, " X X");
+    }
+    fputc('\n', s_gnd_trace);
+}
+
+/* ---- [video] wide_ground_apron: the apron recolour ------------------------
+ * The ground beyond the hoardings is one large untextured flat polygon (the
+ * tireless measurements in docs/WIDE_GROUND.md 8.1-8.3: no tan texel on the
+ * pages the apron's prims report, and no textured prim's modulation produces
+ * it; the colour is within +-2 of (150,120,90) over the whole corner while the
+ * grass varies +-10). So the patch recolours that polygon and nothing else.
+ *
+ * Predicate (all must hold; no draw index anywhere):
+ *   - a flat triangle (the guest submits the apron as GL_TRIANGLES, n = 3);
+ *   - the wide match raster is armed (stock 4:3 and menus untouched);
+ *   - wide and short: bbox width >= 100 px, height <= 100 px;
+ *   - warm brown: mean 5-bit r > g+2, g > b+1 and r >= 11, and not dark
+ *     (a player boot, a shadow, a board are either small, grey or unbright).
+ * The replacement is the pitch's measured mean grass RGB (88,116,60) - the
+ * same constant tier 1 uses; no mow variation, because the stripes belong to
+ * the pitch and the apron is beyond them.
+ * Switch: wide_ground_apron in game.toml, read once (default on). */
+static int gnd_apron_on = -1;
+
+static int gnd_apron_read(void)
+{
+    if (gnd_apron_on >= 0) return gnd_apron_on;
+    gnd_apron_on = 1;                       /* default on */
+    FILE *f = fopen("game.toml", "r");
+    char line[256];
+    int in_video = 0;
+    if (!f) return gnd_apron_on;
+    while (fgets(line, sizeof line, f)) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '[') { in_video = strncmp(p, "[video]", 7) == 0; continue; }
+        if (!in_video || strncmp(p, "wide_ground_apron", 17) != 0) continue;
+        p = strchr(p, '=');
+        if (!p) continue;
+        p++;
+        while (*p == ' ' || *p == '\t') p++;
+        gnd_apron_on = strncmp(p, "true", 4) == 0 || strncmp(p, "1", 1) == 0;
+    }
+    fclose(f);
+    return gnd_apron_on;
+}
+
+/* Exported for the predicate self-test (tests/apron_selftest.c). */
+int gl_ground_apron_predicate(const int *xs, const int *ys,
+                              const uint16_t *cs, uint16_t *out)
+{
+    if (!gnd_apron_read()) return 0;
+    if (gpu_ws_match_raster_width() <= 512) return 0;
+    if (!s_gnd.on) return 0;
+    int ymin = ys[0], ymax = ys[0], xmin = xs[0], xmax = xs[0];
+    for (int i = 1; i < 3; i++) {
+        if (ys[i] < ymin) ymin = ys[i];
+        if (ys[i] > ymax) ymax = ys[i];
+        if (xs[i] < xmin) xmin = xs[i];
+        if (xs[i] > xmax) xmax = xs[i];
+    }
+    if (ymax - ymin > 100 || xmax - xmin < 100) return 0;
+    int r = 0, g = 0, b = 0;
+    for (int i = 0; i < 3; i++) {
+        r += cs[i] & 0x1F; g += (cs[i] >> 5) & 0x1F; b += (cs[i] >> 10) & 0x1F;
+    }
+    r /= 3; g /= 3; b /= 3;
+    if (!(r > g + 2 && g > b + 1 && r >= 11)) return 0;
+    if (out) {
+        const uint16_t grass = (uint16_t)(11 | (14 << 5) | (7 << 10));
+        out[0] = out[1] = out[2] = grass;
+    }
+    return 1;
+}
+
+static int gnd_apron_flat(const int *xs, const int *ys,
+                          const uint16_t *cs, uint16_t *out)
+{
+    int hit = gl_ground_apron_predicate(xs, ys, cs, out);
+    if (hit && !rth_replaying())
+        psx_mod_counter_add(
+            "we2002.widescreen.native-raster.ground-apron-flat", 1);
+    return hit;
+}
+
+/* Untextured/flat counterpart of gnd_trace_prim: same file, same frame
+ * separators, kind "F", with the 15-bit colour per vertex. Only triangles and
+ * quads are useful (lines come through here too). */
+static void gnd_trace_flat(GLenum mode, const int *xs, const int *ys,
+                           const uint16_t *cs, int n)
+{
+    gnd_trace_open();
+    if (!s_gnd_trace || n < 3) return;
+    const char *k = mode == GL_TRIANGLES ? "T" : "L";
+    fprintf(s_gnd_trace, "F %d %d %s %d", s_gnd_frame_no, s_gnd_seq++, k, n);
+    for (int i = 0; i < n; i++)
+        fprintf(s_gnd_trace, " %d %d %04X", xs[i], ys[i], cs[i]);
+    fputc('\n', s_gnd_trace);
+}
+
+/* Called from every textured prim before it is submitted: vote its page
+ * (area-weighted) so the pitch page is known, and trace its screen order. */
 static void gnd_before_prim(uint16_t tp, uint16_t cx, uint16_t cy, double area)
 {
     if (!s_gnd.on || s_gnd_drawing) return;
@@ -4920,6 +5280,7 @@ static void glb_fill_rect(int x,int y,int w,int h,uint16_t c){
              * layer goes under everything it submits. The pitch page is
              * resolved from the votes of the frames before this one (flat
              * colour until the first frame has voted). */
+            gnd_trace_clear(x, y, w, h);
             gnd_resolve_page();
             s_gnd_drawing = 1;
             gnd_draw(wide);
