@@ -14,6 +14,7 @@
 #include "psx_cycles.h"
 #include "psx_netplay.h"
 #include "crash_trace.h"
+#include "exit_trace.h"
 #include "fntrace.h"
 #include <stdatomic.h>
 #include <stdio.h>
@@ -311,7 +312,37 @@ void starvation_watchdog_check(void) {
          * teardown, which can block on a lock the wedged thread still holds - the
          * run then cannot even be killed (2026-11-14: taskkill reported "no
          * running instance" while the process kept the debug port).
-         * TerminateProcess / _exit skip all of that and cannot hang. */
+         * TerminateProcess / _exit skip all of that and cannot hang.
+         *
+         * TerminateProcess does not run atexit, so this used to be the one
+         * death that left NO artifact naming itself (2026-11-18: exit code 3,
+         * no WER, psx_last_run_report.json untouched — docs/INIT_EXIT3.md).
+         * exit_trace writes the named line first, then does the same hard
+         * exit. */
+        {
+            char detail[192];
+            snprintf(detail, sizeof(detail),
+                     "stall_us=%llu heartbeats=%u func=0x%08X exc=%d "
+                     "wedge=0x%08X",
+                     (unsigned long long)(now - last),
+                     atomic_load_explicit(&s_heartbeats, memory_order_relaxed),
+                     g_debug_current_func_addr, psx_get_in_exception(),
+                     g_debug_last_store_pc);
+            /* Name it on disk BEFORE anything that can wedge: the crash report
+             * below walks the native stack and serialises every ring, which is
+             * the artifact a reader wants (COP0 cause/EPC, dispatch tail), but
+             * it is also the part that could fail. */
+            PSX_EXIT_TRACE_RECORD("starvation_watchdog", 3, detail);
+            fprintf(stderr, "starvation_watchdog: writing psx_last_run_report.json\n");
+            fflush(stderr);
+            /* The run report used to be skipped here for the reason the hard
+             * exit exists: atexit is never reached. Calling the serializer
+             * directly writes the same report an SEH would, tagged with this
+             * origin — a silent exit code 3 becomes a full post-mortem. */
+            psx_crash_trace_dump("starvation_watchdog", NULL);
+            PSX_EXIT_TRACE_TERMINATE("starvation_watchdog", 3, detail);
+        }
+        /* exit_trace never returns; keep the compiler honest. */
 #if defined(_WIN32)
         TerminateProcess(GetCurrentProcess(), 3u);
 #endif

@@ -5,6 +5,11 @@
 static unsigned wedge_priority(uint32_t wedge_kind) {
     switch (wedge_kind) {
     case 1: return 4; /* hard freeze */
+    /* NOTE: these are PRIORITIES, not exit codes. `case 2 -> 3` was read as
+     * "the runtime exits 3 on an exception re-entry storm" during the
+     * 2026-11-18 INIT investigation; it never was. The only process exit code
+     * 3 in the runtime is starvation_ring.c's watchdog (and the UCRT's
+     * abort()); see docs/INIT_EXIT3.md. */
     case 2: return 3; /* exception re-entry storm */
     case 3: return 2; /* slow frames */
     case 5: return 1; /* logical spin */

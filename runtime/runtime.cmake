@@ -463,6 +463,7 @@ ${PSXRECOMP_ROOT}/runtime/src/psx_guest_yield.c
     ${PSXRECOMP_ROOT}/runtime/src/psx_cycles.c
     ${PSXRECOMP_ROOT}/runtime/src/psx_icache.c
     ${PSXRECOMP_ROOT}/runtime/src/starvation_ring.c
+    ${PSXRECOMP_ROOT}/runtime/src/exit_trace.c
     ${PSXRECOMP_ROOT}/runtime/src/latency_ring.c
     ${PSXRECOMP_ROOT}/runtime/src/present_image_ring.c
     ${PSXRECOMP_ROOT}/runtime/src/gpu_timeline.c
