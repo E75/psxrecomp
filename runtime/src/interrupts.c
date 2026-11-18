@@ -634,6 +634,27 @@ extern int g_psx_dispatch_depth;
 static uint32_t s_compiled_interrupt_resume_pc = 0;
 static uint32_t s_last_interrupt_check_pc = 0;
 static uint64_t s_last_interrupt_check_cycle = UINT64_MAX;
+/* The kernel current-TCB (PCB[0]) at THIS delivery's entry. A synchronous
+ * handler that returns instead of RFE'ing may only resume the interrupted
+ * thread when the TCB has not moved; see psx_rfe_escape_check. Host-only,
+ * saved/restored across nested deliveries like exception_jmpbuf. */
+static uint32_t s_delivery_entry_tcb = 0;
+
+/* PSX_IRQ_CALL_TRACE=1: one line per interrupt DELIVERED while a
+ * host-initiated guest call is in flight (psx_guest_call_depth > 0), plus the
+ * matching RFE repairs. That delivery has no guest block leader of its own, so
+ * which latch supplied its resume PC is the whole question
+ * (docs/INTERRUPTS.md). Inert otherwise: one cached getenv, one depth load per
+ * delivery, not per block check. */
+static int irq_call_trace_on(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        const char *e = getenv("PSX_IRQ_CALL_TRACE");
+        s = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return s;
+}
 /* Poll-throttle counter for fast IRQ paths — host-only; must not survive
  * rewind or load#N can hit the 16K poll edge at a different guest point. */
 static uint32_t s_fast_maintenance = 0;
@@ -853,6 +874,14 @@ void psx_rfe_mark_escape(void) {
  * longjmp back to psx_check_interrupts (cpu->pc preserved across the longjmp). */
 void psx_rfe_escape_check(CPUState* cpu) {
     psx_sr_trace("rfe_check", cpu);
+    /* Set when the synchronous handler finished WITHOUT an RFE: it returned to
+     * the host dispatch (cpu->pc == 0) while in_exception. The delivery is then
+     * complete, but its resume PC must not be DISPATCHED from inside the handler
+     * window - doing so runs the interrupted code with the handler's window live
+     * (in_exception stays 1, the epilogue never restores the GPRs), which is the
+     * INIT/A0h(70h) wedge (docs/INTERRUPTS.md). Unwind to the delivery frame
+     * instead; its epilogue treats this exactly like a same-thread RFE return. */
+    int completion_escape = 0;
     /* The kernel's ReturnFromException loads the resume PC from the thread's TCB
      * into k0 (`lw k0,128(k1)`) and jumps to it. A host-initiated guest call has no
      * guest PC of its own, so a slot saved by the runtime scheduler can hold 0
@@ -884,8 +913,33 @@ void psx_rfe_escape_check(CPUState* cpu) {
         }
         if (fix != 0u) {
             extern uint32_t g_pc0_src;
-            g_pc0_src = 3u;   /* PSX_PC0_SRC_K0 */
-            cpu->pc = fix;
+            /* The delivery's OWN architectural EPC is a resume point, not a
+             * dispatch target: complete the delivery outside the handler window.
+             * Guarded on an unchanged current TCB, so a genuine thread switch
+             * (entry TCB != PCB[0] now) keeps the delivery's own exit contract
+             * - restoring this thread's saved GPRs over the new one is the
+             * corruption Fix B exists to prevent.
+             *
+             * Every other source (a host call's continuation, or nothing) is
+             * NOT a resume PC for the interrupted thread. Leave cpu->pc as the
+             * implausible value it was: the dispatch loop returns when the
+             * handler returned with pc 0, and a LEGACY delivery's epilogue then
+             * restores the interrupted GPRs and hands control back to the live
+             * host chain (traps.c: the sentinel is "the ISR returned to the
+             * host", never a guest resume point). Dispatching a host-call
+             * continuation from inside the handler window is what wedged
+             * INIT's A0h(70h) call (docs/INTERRUPTS.md). */
+            if ((g_isr_resume_src == PSX_ISR_SRC_EPC ||
+                 g_isr_resume_src == PSX_ISR_SRC_ARCH_EPC) &&
+                g_exc_escape_reason == PSX_EXC_ESCAPE_NONE) {
+                uint32_t pcb = cpu->read_word(0x108u);
+                uint32_t tcb = pcb ? cpu->read_word(pcb & 0x1FFFFFFFu) : 0u;
+                if (s_delivery_entry_tcb != 0u && tcb == s_delivery_entry_tcb) {
+                    g_pc0_src = 3u;   /* PSX_PC0_SRC_K0 */
+                    cpu->pc = fix;
+                    completion_escape = 1;
+                }
+            }
         }
         /* Name the field that supplied the bad target, once: the kernel's
          * ReturnFromException takes it from the thread TCB (`lw k0,128(k1)`,
@@ -893,21 +947,32 @@ void psx_rfe_escape_check(CPUState* cpu) {
          * delivery EPC, COP0.EPC and the vector pair, so the next occurrence
          * says whether the slot held code bytes (a jr/rfe word) or a stale PC. */
         static int s_named;
-        if (!s_named) {
+        static int s_named_traced;
+        const int named_trace = irq_call_trace_on() && s_named_traced < 200;
+        if (!s_named || named_trace) {
             s_named = 1;
+            if (named_trace) s_named_traced++;
             uint32_t pcb = cpu->read_word(0x108u);
             uint32_t tcb = pcb ? cpu->read_word(pcb & 0x1FFFFFFFu) : 0u;
             uint32_t slot = tcb ? cpu->read_word(tcb + 136u) : 0u;
             fprintf(stderr,
-                    "psx_guest_call: bad ISR target 0x%08X -> 0x%08X (src %u); "
+                    "psx_guest_call: bad ISR target 0x%08X -> 0x%08X (src %u, "
+                    "applied %d); "
                     "tcb=0x%08X slot+136=0x%08X epc=0x%08X arch_epc=0x%08X "
-                    "vector=0x%08X/0x%08X\n",
-                    bad, fix, (unsigned)g_isr_resume_src, tcb, slot,
+                    "vector=0x%08X/0x%08X depth=%d resume=0x%08X "
+                    "dirty=0x%08X compiled=0x%08X ra=0x%08X sp=0x%08X "
+                    "func=0x%08X dispatch_depth=%d\n",
+                    bad, fix, (unsigned)g_isr_resume_src, completion_escape,
+                    tcb, slot,
                     g_exception_real_epc, cpu->cop0[COP0_EPC],
-                    cpu->read_word(0x80000080u), cpu->read_word(0x80000084u));
+                    cpu->read_word(0x80000080u), cpu->read_word(0x80000084u),
+                    g_psx_guest_call_depth, psx_guest_call_resume_pc(),
+                    g_dirty_safe_resume_pc, s_compiled_interrupt_resume_pc,
+                    (unsigned)cpu->gpr[31], (unsigned)cpu->gpr[29],
+                    (unsigned)g_debug_current_func_addr, g_psx_dispatch_depth);
             fflush(stderr);
         }
-        psx_guest_call_note_isr_return(0, bad, fix);
+        psx_guest_call_note_isr_return(0, bad, completion_escape ? fix : 0u);
     } else if (in_exception && g_rfe_escape_pending &&
                cpu->pc != PSX_EXC_SENTINEL_PC) {
         psx_guest_call_note_isr_return(1, 0, cpu->pc);
@@ -920,10 +985,17 @@ void psx_rfe_escape_check(CPUState* cpu) {
      * the trampoline keeps dispatching cpu->pc = the real resume EPC, which is
      * exactly how a suspended thread continues at its own PC. */
     extern void* psx_fiber_current(void); /* psx_fiber.h is included further down */
-    if (g_rfe_escape_pending && in_exception &&
+    if ((g_rfe_escape_pending || completion_escape) && in_exception &&
         cpu->pc != PSX_EXC_SENTINEL_PC &&
         psx_fiber_current() == g_exception_owner_fiber) {
         g_rfe_escape_pending = 0;
+        /* A handler that RETURNED instead of RFE'ing is the same same-thread
+         * completion: name it like an RFE return so the epilogue's restore
+         * discriminator (mode 1 PC equality, mode 3 reason + TCB equality)
+         * restores the interrupted GPRs. The TCB guard above already declined
+         * every switch. */
+        if (completion_escape)
+            g_exc_escape_reason = PSX_EXC_ESCAPE_RFE_RETURN;
         /* A LEGACY_SENTINEL delivery escaping to a NON-sentinel PC means the
          * handler switched threads and RFE'd to the new thread's real EPC.
          * Record the completion truthfully as an RFE return so the epilogue's
@@ -994,6 +1066,7 @@ void interrupts_init(void) {
     g_rfe_escape_pending = 0;
     g_pending_exception_longjmp = 0;
     s_fast_maintenance = 0;
+    s_delivery_entry_tcb = 0;
     {
         extern uint32_t g_dirty_safe_resume_pc;
         g_dirty_safe_resume_pc = 0;
@@ -1039,6 +1112,7 @@ void interrupts_resync_after_restore(void) {
     s_last_interrupt_check_cycle = UINT64_MAX;
     s_fast_maintenance = 0;
     total_checks = 0;
+    s_delivery_entry_tcb = 0;
     {
         extern uint32_t g_dirty_safe_resume_pc;
         g_dirty_safe_resume_pc = 0;
@@ -1789,6 +1863,35 @@ irq_deliver_eval:
         }
     }
 
+    /* Delivery measurement (docs/INTERRUPTS.md). An interrupt taken while a
+     * host-initiated guest call is in flight has no guest block leader of its
+     * own: the CPU is inside a dispatched callee, so "the interrupted
+     * instruction" exists only in the latches or in cpu->pc. Print every such
+     * delivery so the resume-PC policy can be judged from data, not inference. */
+    if (g_psx_guest_call_depth != 0 && irq_call_trace_on()) {
+        static uint64_t s_trace_seq;
+        extern int g_cosim_dirty_pump_site;
+        s_trace_seq++;
+        fprintf(stderr,
+                "psx_interrupts: delivery-in-call #%llu cyc=%llu frame=%u "
+                "istat=%03X imask=%03X sr=%08X dirty=%08X compiled=%08X "
+                "cpu_pc=%08X depth=%d call_resume=%08X sentinel=%08X "
+                "pump_site=%d dispatch_depth=%d nest=%d prev_exc=%d "
+                "real_pc=%08X epc=%08X reason=%d\n",
+                (unsigned long long)s_trace_seq,
+                (unsigned long long)psx_get_cycle_count(),
+                (unsigned)s_frame_count, (unsigned)(i_stat & 0x7FFu),
+                (unsigned)(i_mask & 0x7FFu), (unsigned)sr,
+                (unsigned)g_dirty_safe_resume_pc,
+                (unsigned)s_compiled_interrupt_resume_pc, (unsigned)cpu->pc,
+                g_psx_guest_call_depth, (unsigned)psx_guest_call_resume_pc(),
+                (unsigned)psx_guest_call_sentinel(), g_cosim_dirty_pump_site,
+                g_psx_dispatch_depth, exception_nest_depth, prev_in_exception,
+                (unsigned)g_exception_real_epc, (unsigned)cpu->cop0[COP0_EPC],
+                (int)g_exc_escape_reason);
+        fflush(stderr);
+    }
+
     /* Save the interrupted code's full register state.
      *
      * On real hardware, the exception handler saves all GPRs to the
@@ -1822,6 +1925,12 @@ irq_deliver_eval:
     extern uint32_t psx_read_word(uint32_t addr);   /* memory.c (plain RAM read) */
     uint32_t entry_pcb = psx_read_word(0x108u);
     uint32_t entry_tcb = entry_pcb ? psx_read_word(entry_pcb & 0x1FFFFFFFu) : 0u;
+    /* Publish this delivery's entry TCB for psx_rfe_escape_check: a handler that
+     * returns instead of RFE'ing may only resume the interrupted thread when
+     * PCB[0] still names it. Nested deliveries save/restore it with the jmpbuf
+     * frame below. */
+    uint32_t prev_delivery_entry_tcb = s_delivery_entry_tcb;
+    s_delivery_entry_tcb = entry_tcb;
 
     /* Dispatch the BIOS exception handler.
      * BEV (SR bit 22) selects between 0x80000080 and 0xBFC00180.
@@ -2008,6 +2117,7 @@ irq_deliver_eval:
      * delivery returns, the outer handler is live again and its RFE must land
      * in the outer setjmp frame, not this exited one. */
     memcpy(&exception_jmpbuf, &saved_exception_jmpbuf, sizeof(jmp_buf));
+    s_delivery_entry_tcb = prev_delivery_entry_tcb;
     /* Ape memcard fix #3: restore the resume-PC latch cleared at handler entry
      * (see above). Sits with the other post-dispatch-loop restores so an
      * RFE/RestoreState longjmp — which lands in the setjmp loop above — can't
@@ -2145,6 +2255,25 @@ irq_deliver_eval:
     }
     int do_restore =
         (g_exc_escape_reason == PSX_EXC_ESCAPE_LEGACY_SENTINEL || same_thread_resume);
+    /* Exit half of the in-call delivery measurement (docs/INTERRUPTS.md): the
+     * resume policy's real effect is here - whether the interrupted callee got
+     * its GPRs back, and at which PC the delivery leaves the CPU. */
+    if (g_psx_guest_call_depth != 0 && irq_call_trace_on()) {
+        fprintf(stderr,
+                "psx_interrupts: delivery-in-call-exit seq=%llu exit_pc=%08X "
+                "real_epc=%08X reason=%d same_thread=%d restore=%d "
+                "v0=%08X/%08X v1=%08X/%08X ra=%08X/%08X entry_tcb=%08X "
+                "exit_tcb=%08X depth=%d\n",
+                (unsigned long long)g_irqctx_seq,
+                (unsigned)cpu->pc, (unsigned)g_exception_real_epc,
+                (int)g_exc_escape_reason, same_thread_resume, do_restore,
+                (unsigned)cpu->gpr[2], (unsigned)saved_gpr[2],
+                (unsigned)cpu->gpr[3], (unsigned)saved_gpr[3],
+                (unsigned)cpu->gpr[31], (unsigned)saved_gpr[31],
+                (unsigned)entry_tcb, (unsigned)exit_tcb,
+                g_psx_guest_call_depth);
+        fflush(stderr);
+    }
     /* Ring exit-half: every delivery records which escape path it took and
      * whether the interrupted GPRs were restored (Tomba menu wedge evidence). */
     {
