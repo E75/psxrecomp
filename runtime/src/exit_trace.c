@@ -24,6 +24,7 @@
 
 #include "exit_trace.h"
 #include "psx_cycles.h"
+#include "psx_memory.h"
 
 #if !defined(_WIN32)
 #include <unistd.h>
@@ -38,6 +39,12 @@ extern int psx_get_in_exception(void);
 
 #define EXIT_TRACE_LOG   "psx_exit_trace.log"
 #define EXIT_TRACE_STACK "psx_exit_trace_stack.txt"
+
+/* Runtime memory API (declared by each consumer; psx_memory.h does not export
+ * the pointer, only the geometry helpers). */
+extern unsigned char *memory_get_ram_ptr(void);
+extern uint32_t memory_get_ram_bytes(void);
+extern uint32_t psx_read_word(uint32_t a);
 
 #define NOTE_CAP 16
 
@@ -77,17 +84,48 @@ static void write_termination_line(const char *origin, int code,
     char ts[32];
     ts[0] = '\0';
     if (tm) strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", tm);
+    /* Kernel interrupt-hook pair (see docs/BOOT_BLOCKERS.md 9.8): SaveState
+     * records its caller's $ra/$sp here and the game installs it as its entry.
+     * A C body reaches the BIOS through a host call, whose $ra is the
+     * 0x8F000000 sentinel - so this word is the cheapest test for "the hook
+     * holds a host-call sentinel instead of a guest PC". */
+    const uint32_t hook_ra = psx_read_word(0x8005FF38u);
+    const uint32_t hook_sp = psx_read_word(0x8005FF3Cu);
+    /* How many sentinel words sit in guest RAM at all, and where: the same
+     * defect can land in any struct, and 0x8F000000 is never a legal guest
+     * pointer. */
+    int sentinels = 0;
+    uint32_t sent_first[4] = {0, 0, 0, 0};
+    {
+        const unsigned char *ram = memory_get_ram_ptr();
+        const uint32_t bytes = memory_get_ram_bytes();
+        if (ram) {
+            for (uint32_t off = 0; off + 4u <= bytes; off += 4u) {
+                uint32_t w;
+                memcpy(&w, ram + off, sizeof w);
+                if (w == 0x8F000000u) {
+                    if (sentinels < 4) sent_first[sentinels] = 0x80000000u + off;
+                    sentinels++;
+                }
+            }
+        }
+    }
     fprintf(f,
             "{\"origin\":\"%s\",\"exit_code\":%d,\"detail\":\"%s\","
             "\"site\":\"%s:%d\",\"pid\":%lu,\"timestamp\":\"%s\","
             "\"current_func\":\"0x%08X\",\"last_store_pc\":\"0x%08X\","
-            "\"cycle\":%llu,\"in_exception\":%d,\"trace\":%d}\n",
+            "\"cycle\":%llu,\"in_exception\":%d,\"trace\":%d,"
+            "\"hook_ra\":\"0x%08X\",\"hook_sp\":\"0x%08X\","
+            "\"sentinel_words\":%d,\"sentinel_at\":[\"0x%08X\",\"0x%08X\","
+            "\"0x%08X\",\"0x%08X\"]}\n",
             origin ? origin : "(null)", code, detail ? detail : "",
             file ? file : "(unknown)", line,
             (unsigned long)_getpid(), ts,
             g_debug_current_func_addr, g_debug_last_store_pc,
             (unsigned long long)psx_get_cycle_count(),
-            psx_get_in_exception(), psx_exit_trace_active());
+            psx_get_in_exception(), psx_exit_trace_active(),
+            hook_ra, hook_sp, sentinels,
+            sent_first[0], sent_first[1], sent_first[2], sent_first[3]);
     fclose(f);
 }
 

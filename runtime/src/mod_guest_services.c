@@ -9,9 +9,11 @@
 #include "psx_cycle_freeze.h"
 #include "psx_guest_call.h"
 #include "psx_memory.h"
+#include "psx_cycles.h"
 #include "psx_static_guest.h"
 #include "spu.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ── host-initiated guest calls: the caller's real continuation ─────────────
@@ -142,6 +144,85 @@ uint32_t psx_guest_call_sentinel(void)
 
 uint32_t g_isr_resume_src = 0;
 
+/* ── PSX_BIOS_TRACE=<path>: the BIOS-vector host calls, both directions ─────
+ *
+ * A hybrid C body reaches the kernel through we_bios_tail(), which calls
+ * psx_mod_call_guest(cpu, 0xA0|0xB0|0xC0, ...) with the function index in $t1.
+ * That funnel is the only place both halves of a kernel call are visible: the
+ * four arguments the C body published, whether the dispatch came back, and the
+ * kernel's return value in $v0. GUEST-side calls to the same vector (a `jal`
+ * from recompiled/interpreter code) do NOT pass here, so a comparison run swaps
+ * the body onto the guest side (WE_HYBRID_SKIP) - then the C wrapper is still
+ * what forwards, and both streams carry the same shape.
+ *
+ * Every line also samples the kernel's EvCB table (`*(0x120)`, 22 entries of
+ * 0x1C): OpenEvent (B0h 08h) is supposed to append a descriptor there, so
+ * "n" before/after answers whether the kernel allocated, and `match` says
+ * whether the (class, spec) pair this call asked for is present afterwards.
+ * Inert when unset (one getenv per process). */
+static FILE *s_bios_trace;
+static int   s_bios_trace_init;
+static int   s_bios_trace_lines;
+
+static FILE *bios_trace_file(void)
+{
+    if (!s_bios_trace_init) {
+        const char *e = getenv("PSX_BIOS_TRACE");
+        s_bios_trace_init = 1;
+        if (e && *e) s_bios_trace = fopen(e, "w");
+    }
+    return s_bios_trace;
+}
+
+/* (class, spec) of the kernel's EvCB table: entries used, and the index of the
+ * requested pair (-1 = absent), with that entry's status word. */
+static void bios_trace_evcb(uint32_t want_class, uint32_t want_spec,
+                            int *used, int *match, uint32_t *status)
+{
+    *used = 0;
+    *match = -1;
+    *status = 0;
+    const uint32_t base = psx_mod_read_word(0x120u);
+    if (base == 0u) return;
+    const uint32_t off = base & 0x1FFFFFu;
+    if (off + 22u * 0x1Cu >= psx_ram_live_bytes()) return;
+    for (int i = 0; i < 22; i++) {
+        const uint32_t e = 0x80000000u + off + (uint32_t)i * 0x1Cu;
+        const uint32_t cls = psx_mod_read_word(e);
+        if (cls != 0u) (*used)++;
+        if (cls == want_class && psx_mod_read_word(e + 8u) == want_spec) {
+            *match = i;
+            *status = psx_mod_read_word(e + 4u);
+        }
+    }
+}
+
+static void bios_trace_call(const char *half, uint32_t vec, uint32_t index,
+                            uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,
+                            uint32_t caller_ra, uint32_t sp, uint32_t ret,
+                            int came_back)
+{
+    FILE *f = bios_trace_file();
+    if (!f || s_bios_trace_lines >= 400) return;
+    int used = 0, match = -1;
+    uint32_t status = 0;
+    bios_trace_evcb(a0, a1, &used, &match, &status);
+    if (came_back < 0) {
+        fprintf(f, "%s vec=%02X fn=%02X a0=%08X a1=%08X a2=%08X a3=%08X "
+                   "idx_reg=%02X caller_ra=%08X sp=%08X cyc=%llu "
+                   "evcb_used=%d match=%d\n",
+                half, vec, index, a0, a1, a2, a3, index, caller_ra, sp,
+                (unsigned long long)psx_get_cycle_count(), used, match);
+    } else {
+        fprintf(f, "%s vec=%02X fn=%02X ret=%08X came_back=%d evcb_used=%d "
+                   "match=%d status=%08X cyc=%llu\n",
+                half, vec, index, ret, came_back, used, match, status,
+                (unsigned long long)psx_get_cycle_count());
+    }
+    fflush(f);
+    s_bios_trace_lines++;
+}
+
 void psx_guest_call_note_isr_return(int ok, uint32_t bad_target, uint32_t used)
 {
     if (ok) {
@@ -166,6 +247,15 @@ uint32_t psx_mod_call_guest_ex(struct CPUState* cpu, uint32_t function,
     uint32_t regs[32];
     const uint32_t pc = cpu->pc, hi = cpu->hi, lo = cpu->lo;
     memcpy(regs, cpu->gpr, sizeof regs);
+
+    const int bios_trace = (function == 0xA0u || function == 0xB0u ||
+                            function == 0xC0u) && bios_trace_file() != NULL;
+    const uint32_t bios_index = cpu->gpr[9];
+    const uint32_t bios_ra = regs[31];
+    const uint32_t bios_sp = cpu->gpr[29];
+    if (bios_trace)
+        bios_trace_call("enter", function, bios_index, a0, a1, a2, a3,
+                        bios_ra, bios_sp, 0u, -1);
 
     /* Refuse a call whose target is not a guest code address (a null function
      * pointer in decompiled C reaches here as we_gcall(0)). Dispatching it would
@@ -224,6 +314,9 @@ uint32_t psx_mod_call_guest_ex(struct CPUState* cpu, uint32_t function,
     psx_guest_call_leave(pushed);
     psx_guest_call_note_return(came_back);
     if (!came_back) call_log("non-returning call:", function, regs[31]);
+    if (bios_trace)
+        bios_trace_call("exit", function, bios_index, a0, a1, a2, a3,
+                        bios_ra, bios_sp, result, came_back ? 1 : 0);
     if (returned) *returned = came_back;
     return result;
 }
