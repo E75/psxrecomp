@@ -19,6 +19,7 @@
 #include "bios_hle.h"
 #include "cpu_state.h"
 #include "psx_bios_backend.h"
+#include "psx_static_guest.h"
 
 /* ── State published to the rest of the runtime ─────────────────────────── */
 
@@ -107,6 +108,8 @@ void psx_dispatch(CPUState *cpu, uint32_t addr)
 
 void psx_dispatch_call(CPUState *cpu, uint32_t addr, uint32_t return_addr)
 {
+    if (g_psx_static_guest_mode)
+        psx_static_guest_note(PSX_SG_FUNNEL_DISPATCH_CALL, addr, return_addr);
     if (!psx_bios_active || !psx_bios_active->dispatch_call) return;
     psx_bios_active->dispatch_call(cpu, addr, return_addr);
 }

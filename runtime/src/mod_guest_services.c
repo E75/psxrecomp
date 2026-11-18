@@ -9,6 +9,7 @@
 #include "psx_cycle_freeze.h"
 #include "psx_guest_call.h"
 #include "psx_memory.h"
+#include "psx_static_guest.h"
 #include "spu.h"
 #include <stdio.h>
 #include <string.h>
@@ -202,6 +203,8 @@ uint32_t psx_mod_call_guest_ex(struct CPUState* cpu, uint32_t function,
     if (pushed && g_psx_guest_call_depth > 0)
         s_sentinel[g_psx_guest_call_depth - 1] = return_address;
     const uint64_t boundaries_before = s_boundaries;
+    if (g_psx_static_guest_mode)
+        psx_static_guest_note(PSX_SG_FUNNEL_MOD_CALL_GUEST, function, regs[31]);
     psx_snapshot_host_call_begin();
     psx_dispatch_call(cpu, function, return_address);
     /* Positive return test: the dispatch reported that it reached this call's

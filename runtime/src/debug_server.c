@@ -27,6 +27,7 @@
 #include "overlay_loader.h"
 #include "overlay_capture.h"
 #include "code_provider.h"
+#include "psx_static_guest.h"
 #include "overlay_backend.h"
 #include "cpu_state.h"
 #include "psx_openxr.h"
@@ -3056,7 +3057,19 @@ static void handle_dirty_ram_stats(int id, const char *json)
                       (unsigned)dirty_ram_text_diverged_bitmap_word(i));
         if (n >= (int)sizeof(buf) - 64) break;
     }
-    n += snprintf(buf + n, sizeof(buf) - n, "]}\n");
+    n += snprintf(buf + n, sizeof(buf) - n,
+                  "],\"static_guest\":{\"mode\":%d,"
+                  "\"dispatch_call\":%llu,\"mod_call_guest\":%llu,"
+                  "\"interp\":%llu,\"span\":%llu,\"native_handoff\":%llu,"
+                  "\"distinct\":%u}}",
+                  psx_static_guest_mode(),
+                  (unsigned long long)psx_static_guest_total(PSX_SG_FUNNEL_DISPATCH_CALL),
+                  (unsigned long long)psx_static_guest_total(PSX_SG_FUNNEL_MOD_CALL_GUEST),
+                  (unsigned long long)psx_static_guest_total(PSX_SG_FUNNEL_INTERP),
+                  (unsigned long long)psx_static_guest_total(PSX_SG_FUNNEL_SPAN),
+                  (unsigned long long)psx_static_guest_total(PSX_SG_FUNNEL_NATIVE_HANDOFF),
+                  psx_static_guest_distinct());
+    n += snprintf(buf + n, sizeof(buf) - n, "}\n");
     send_fmt("%s", buf);
 }
 

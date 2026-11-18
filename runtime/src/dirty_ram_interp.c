@@ -38,6 +38,7 @@
 #include "fntrace.h"  /* fntrace_is_game_started / fntrace_mark_game_started */
 #include "psx_segment_miss.h"  /* segment misses in static game code (§5.5) */
 #include "draw_distance.h"    /* [[draw_distance.clamp]] sites */
+#include "psx_static_guest.h"  /* guest-entry funnel counters (docs/STATIC_PORT.md) */
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -2585,7 +2586,18 @@ int dirty_ram_dispatch(CPUState* cpu, uint32_t addr, uint32_t stop_addr) {
     g_dirty_interp_active = 1;
     int prev_phase = g_exec_phase;
     g_exec_phase = 1;
+    const uint64_t insns_before = g_dirty_ram_insns_run;
     int r = dirty_ram_dispatch_inner(cpu, addr, stop_addr);
+    if (r == 1 && g_psx_static_guest_mode) {
+        /* dirty_ram_dispatch is also the ROUTER to native overlay code: it
+         * returns 1 with zero instructions executed when it handed the entry
+         * to a compiled body (g_dirty_ram_native_handoffs). Only a run that
+         * retired instructions is guest execution. */
+        psx_static_guest_note(g_dirty_ram_insns_run != insns_before
+                                  ? PSX_SG_FUNNEL_INTERP
+                                  : PSX_SG_FUNNEL_NATIVE_HANDOFF,
+                              addr, cpu->gpr[31]);
+    }
 
     /* pc=0 producer tripwire: the dirty path reported "handled" yet published a
      * null PC — the abnormal-exit source we're hunting (MMX6 boot wedge). Latch
@@ -2717,6 +2729,8 @@ int dirty_ram_run_span(CPUState* cpu, uint32_t start_pc, uint32_t stop_pc,
     dirty_ram_ld_delay_flush(cpu);
     f.insns = g_dirty_ram_insns_run - first;
     if (f.reason) s_span_failure = f;
+    if (g_psx_static_guest_mode)
+        psx_static_guest_note(PSX_SG_FUNNEL_SPAN, start_pc, stop_pc);
     return f.reason == 0u;
 }
 

@@ -366,6 +366,7 @@ ${PSXRECOMP_ROOT}/runtime/src/psx_guest_yield.c
     ${PSXRECOMP_ROOT}/runtime/src/psx_ram_geometry.c
     ${PSXRECOMP_ROOT}/runtime/src/kernel_patch_ranges.c
     ${PSXRECOMP_ROOT}/runtime/src/guest_tty.c
+    ${PSXRECOMP_ROOT}/runtime/src/psx_static_guest.c
     ${PSXRECOMP_ROOT}/runtime/src/gpu.c
     ${PSXRECOMP_ROOT}/runtime/src/vram_ext.c
     ${PSXRECOMP_ROOT}/runtime/src/vfx_config.c
