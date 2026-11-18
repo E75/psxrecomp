@@ -302,6 +302,8 @@ static void gnd_trace_flat(GLenum mode, const int *xs, const int *ys,
                            const uint16_t *cs, int n);
 static int  gnd_apron_flat(const int *xs, const int *ys,
                            const uint16_t *cs, uint16_t *out);
+static int  gnd_apron_tex(uint16_t *tp, uint16_t *cx, uint16_t *cy,
+                          int *us, int *vs);
 static PFN_glGenRenderbuffers  p_glGenRenderbuffers;
 static PFN_glDeleteRenderbuffers p_glDeleteRenderbuffers;
 static PFN_glBindRenderbuffer  p_glBindRenderbuffer;
@@ -4030,6 +4032,25 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
     int base_x = (texpage & 0xF) * 64;
     int base_y = ((texpage >> 4) & 1) * 256;
     int depth  = (texpage >> 7) & 3; if (depth > 2) depth = 2;
+    /* [video] wide_ground_apron: the apron is a textured prim after all -
+     * page (896,0) 4-bit, CLUT (368,487), sampling the flat mauve quadrant
+     * u 128..255 v 192..255. Redirect it to the pitch's own page/CLUT and
+     * its grass band; no texel, palette or guest memory is touched.
+     * docs/WIDE_GROUND.md 8.5. */
+    {
+        uint16_t rtp = texpage, rcx = clut_x, rcy = clut_y;
+        int rus[3] = { us[0], us[1], us[2] };
+        int rvs[3] = { vs[0], vs[1], vs[2] };
+        float rcol[9];
+        if (gnd_apron_tex(&rtp, &rcx, &rcy, rus, rvs)) {
+            texpage = rtp; clut_x = rcx; clut_y = rcy;
+            us = rus; vs = rvs;
+            /* The strip also carries a brown modulation; without dropping it
+             * the green texel comes out tan again. */
+            for (int i = 0; i < 9; i++) rcol[i] = 1.0f;
+            col = rcol;
+        }
+    }
     /* [video] wide_ground: vote this prim's page/CLUT by screen area; the
      * green page that wins is the pitch and becomes the ground layer's
      * texture (docs/WIDE_GROUND.md 2). */
@@ -5198,6 +5219,76 @@ static int gnd_apron_flat(const int *xs, const int *ys,
         psx_mod_counter_add(
             "we2002.widescreen.native-raster.ground-apron-flat", 1);
     return hit;
+}
+
+/* ---- [video] wide_ground_apron: the apron's page redirect ----------------
+ * Measured on the celebration state (runs/ground/apron_state_slot01.pst):
+ * the tan beyond the hoardings is prim #258, tpage (896,0) 4-bit, CLUT
+ * (368,487), sampling u 128..255, v 192..255 - the flat mauve quadrant of
+ * that page. Decoded with CLUT (320,510) the same page shows no tan, which is
+ * why the earlier page hunt missed it; with (368,487) it is a flat tan field.
+ * The page's other quadrants (crowd, goal net) are outside that uv window, so
+ * they are never redirected.
+ *
+ * The patch is a sampler redirect: same geometry, same prim, but the pitch's
+ * page/CLUT (detected by the layer, s_gnd.texpage) and its grass band
+ * (u 0..127, v 64..255). No texel, palette or guest write, so it is fully
+ * reversible by the switch. */
+/* The texel a paletted page holds at (u,v) for this prim's CLUT, as 5-bit. */
+static int gnd_texel5(uint16_t tp, uint16_t cx, uint16_t cy, int u, int v,
+                      int *r, int *g, int *b)
+{
+    if (!s_vram) return 0;
+    int depth = (tp >> 7) & 3;
+    int px = (tp & 0xF) * 64 + (u >> (depth == 0 ? 2 : depth == 1 ? 1 : 0));
+    int py = ((tp >> 4) & 1) * 256 + v;
+    if (px < 0 || px >= 1024 || py < 0 || py >= 512) return 0;
+    uint16_t w = s_vram[py * 1024 + px];
+    uint16_t raw;
+    if (depth == 0) {
+        uint16_t c = s_vram[((cy & 511) * 1024) + ((cx + ((w >> ((u & 3) * 4)) & 0xF)) & 1023)];
+        raw = c;
+    } else if (depth == 1) {
+        uint16_t c = s_vram[((cy & 511) * 1024) + ((cx + ((w >> ((u & 1) * 8)) & 0xFF)) & 1023)];
+        raw = c;
+    } else {
+        raw = w;
+    }
+    *r = raw & 0x1F; *g = (raw >> 5) & 0x1F; *b = (raw >> 10) & 0x1F;
+    return 1;
+}
+
+static int gnd_apron_tex(uint16_t *tp, uint16_t *cx, uint16_t *cy,
+                         int *us, int *vs)
+{
+    if (!gnd_apron_read()) return 0;
+    if (gpu_ws_match_raster_width() <= 512) return 0;
+    if (!s_gnd.on || !s_gnd.texpage) return 0;
+    /* The apron is a ground strip seen edge-on: all three uv points sit in the
+     * low band (v 184..255) of whatever page/CLUT this stadium uses (measured:
+     * (896,0)/(368,487) in one state, (960,0)/(384,487) in another). The texel
+     * itself must be tan, which keeps the goal net (white/grey) and the crowd
+     * out even though they share the page. */
+    for (int i = 0; i < 3; i++)
+        if (vs[i] < 184 || vs[i] > 258) return 0;
+    int r, g, b;
+    if (!gnd_texel5(*tp, *cx, *cy, us[0] & 255, vs[0] & 255, &r, &g, &b))
+        return 0;
+    if (!(r > g + 2 && g > b + 2 && r >= 12)) return 0;   /* tan, not white */
+    if (!gnd_texel5(*tp, *cx, *cy, us[1] & 255, vs[1] & 255, &r, &g, &b))
+        return 0;
+    if (!(r > g + 2 && g > b + 2 && r >= 12)) return 0;
+    *tp = s_gnd.texpage;
+    *cx = s_gnd.clut_x;
+    *cy = s_gnd.clut_y;
+    for (int i = 0; i < 3; i++) {
+        us[i] &= 127;          /* the pitch page's green column */
+        vs[i] = 64 + (vs[i] & 63);   /* its grass band v 64..127 */
+    }
+    if (!rth_replaying())
+        psx_mod_counter_add(
+            "we2002.widescreen.native-raster.ground-apron-tex", 1);
+    return 1;
 }
 
 /* Untextured/flat counterpart of gnd_trace_prim: same file, same frame
