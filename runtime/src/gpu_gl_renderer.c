@@ -293,6 +293,8 @@ static void gl_perf_mirror_end(void);   /* mirror pass (timestamp pair; splits s
 static int s_ws_ablate = 0;
 static void flush_tex_batch(void); /* textured-prim batch — defined below, flushed from coherency points */
 static void flush_flat_batch(void); /* flat/gouraud GEO batch (MotK starfield 0x68 dots) */
+static void gnd_vote(uint16_t texpage, uint16_t cx, uint16_t cy, double area);
+static void gnd_before_prim(uint16_t texpage, uint16_t cx, uint16_t cy, double area);
 static PFN_glGenRenderbuffers  p_glGenRenderbuffers;
 static PFN_glDeleteRenderbuffers p_glDeleteRenderbuffers;
 static PFN_glBindRenderbuffer  p_glBindRenderbuffer;
@@ -4011,6 +4013,16 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
     int base_x = (texpage & 0xF) * 64;
     int base_y = ((texpage >> 4) & 1) * 256;
     int depth  = (texpage >> 7) & 3; if (depth > 2) depth = 2;
+    /* [video] wide_ground: vote this prim's page/CLUT by screen area; the
+     * green page that wins is the pitch and becomes the ground layer's
+     * texture (docs/WIDE_GROUND.md 2). */
+    {
+        double ax = (double)(xs[1] - xs[0]), ay = (double)(ys[1] - ys[0]);
+        double bx = (double)(xs[2] - xs[0]), by = (double)(ys[2] - ys[0]);
+        double area = (ax * by - ay * bx) * 0.5;
+        if (area < 0.0) area = -area;
+        if (area >= 256.0) gnd_before_prim(texpage, clut_x, clut_y, area);
+    }
 
     flush_cpu_upload();   /* if a CPU->VRAM upload is pending it flushes the batch first */
     if (!s_selected_bank_tex)
@@ -4527,6 +4539,343 @@ static void glb_draw_gouraud_triangle(int x0,int y0,uint16_t c0,int x1,int y1,ui
     gpu_triangle(x0,y0,c0, x1,y1,c1, x2,y2,c2, s_semi_en?s_semi_mode:-1);
     precise_consumed();
 }
+/* ==== [video] wide_ground: ground + stadium layer of the wide match =======
+ *
+ * The native-wide match frame is 682x240, but the world is still authored for
+ * the guest's 512-px graph: at the WIDE camera its ground mesh ends before the
+ * frame edges and the columns/corners it does not cover show the clear and the
+ * flat outer-ground polygons (the "void", docs/WIDE_GROUND.md 1).
+ *
+ * This layer draws into the SAME VRAM framebuffer, right after the frame's
+ * display clear and therefore under every primitive the guest submits after
+ * it. Tiers (the `wide_ground` value):
+ *   1  flat: one display-sized quad in the measured mean grass colour, with
+ *      the pitch's mow direction; the pre-plane baseline.
+ *   2  plane: a world-space ground grid projected with the guest's own camera
+ *      (view rotation 0x80063818, TR 0x8006382C, GTE OFX/OFY, projection
+ *      distance H 0x800757F4, pushed once per frame by
+ *      src/mods/we2002_wide_ground.c), textured with the page/CLUT the pitch
+ *      itself is drawn with - no invented art.
+ * A projected grid stays put when the camera pans, which a screen-space band
+ * cannot. Everything is off (one branch) when the key is 0, when the
+ * native-wide match raster is not armed, and in a 512-wide frame; the gate on
+ * a match screen lives in the mod.
+ */
+typedef struct {
+    int      on;            /* 0 off, 1 flat fill, 2 projected plane        */
+    int      valid;
+    int16_t  rt[9];         /* camera view rotation, row major, 4.12        */
+    int32_t  tr[3];         /* camera view translation (GTE TR)             */
+    int32_t  ofx, ofy;      /* GTE screen offset, whole pixels              */
+    int32_t  projh;         /* GTE projection plane distance H              */
+    uint16_t texpage;       /* pitch texture page word (auto-detected)      */
+    uint16_t clut_x, clut_y;
+    int      page_frames;   /* frames the page identity has been stable     */
+} GndCam;
+static GndCam   s_gnd;
+static uint64_t s_gnd_frames;      /* clears that got a ground draw        */
+static uint64_t s_gnd_tris;        /* ground triangles submitted           */
+
+/* Is this page leafy enough to be the pitch? The guest's frames also carry
+ * larger stand/crowd/ad pages, so "largest textured area" alone can pick the
+ * wrong one. A pitch page is paletted and its CLUT (or, for 16-bit, its
+ * texels) is dominated by green: g clearly above r and b. Reads the CPU VRAM
+ * mirror gpu.c keeps (valid in 15-bit mode, where the layer runs). */
+static int gnd_page_is_grass(uint16_t texpage, uint16_t cx, uint16_t cy)
+{
+    if (!s_vram) return 1;
+    int base_x = (texpage & 0xF) * 64;
+    int base_y = ((texpage >> 4) & 1) * 256;
+    int depth = (texpage >> 7) & 3;
+    int green = 0, total = 0;
+    if (depth >= 2) {
+        for (int y = 0; y < 64; y += 8) {
+            for (int x = 0; x < 64; x += 8) {
+                uint16_t p = s_vram[((base_y + y) & 511) * 1024
+                                    + ((base_x + x) & 1023)];
+                int r = p & 0x1F, g = (p >> 5) & 0x1F, b = (p >> 10) & 0x1F;
+                total++;
+                if (g > r + 2 && g > b + 2) green++;
+            }
+        }
+    } else {
+        int n = depth == 0 ? 16 : 256;
+        for (int i = 0; i < n; i++) {
+            int px = (cx + i) & 1023, py = cy & 511;
+            uint16_t p = s_vram[py * 1024 + px];
+            int r = p & 0x1F, g = (p >> 5) & 0x1F, b = (p >> 10) & 0x1F;
+            if ((p & 0x7FFF) == 0) continue;    /* unused entry */
+            total++;
+            if (g > r + 2 && g > b + 2) green++;
+        }
+    }
+    return total > 0 && green * 5 >= total * 3;   /* >= 60 % green */
+}
+/* The pitch page/CLUT are detected from the guest's own textured prims: among
+ * the pages whose palette is green (the function above), the one carrying the
+ * largest textured screen area IS the pitch - the ground covers most of the
+ * frame. Votes are summed per page for the current frame; the winner becomes
+ * the layer's source at the next clear. */
+#define GND_VOTES 8
+static struct { uint16_t tp, cx, cy; double area; } s_gnd_vote[GND_VOTES];
+static int      s_gnd_nvote;
+
+static int      s_gnd_drawing;   /* re-entrancy guard (plane -> prims)      */
+
+
+static void gnd_vote(uint16_t texpage, uint16_t cx, uint16_t cy, double area)
+{
+    if (!s_gnd.on || area <= 0.0) return;
+    if (!gnd_page_is_grass(texpage, cx, cy)) return;
+    for (int i = 0; i < s_gnd_nvote; i++) {
+        if (s_gnd_vote[i].tp == texpage && s_gnd_vote[i].cx == cx
+            && s_gnd_vote[i].cy == cy) {
+            s_gnd_vote[i].area += area;
+            return;
+        }
+    }
+    if (s_gnd_nvote == GND_VOTES) {
+        int lo = 0;
+        for (int i = 1; i < GND_VOTES; i++)
+            if (s_gnd_vote[i].area < s_gnd_vote[lo].area) lo = i;
+        if (s_gnd_vote[lo].area >= area) return;
+        s_gnd_vote[lo].tp = texpage; s_gnd_vote[lo].cx = cx;
+        s_gnd_vote[lo].cy = cy; s_gnd_vote[lo].area = area;
+        return;
+    }
+    s_gnd_vote[s_gnd_nvote].tp = texpage;
+    s_gnd_vote[s_gnd_nvote].cx = cx;
+    s_gnd_vote[s_gnd_nvote].cy = cy;
+    s_gnd_vote[s_gnd_nvote].area = area;
+    s_gnd_nvote++;
+}
+
+/* The frame is over: the page with the most textured screen area becomes the
+ * layer's source, once. A match's pitch page is a scene constant, so the first
+ * green page that wins is kept - re-resolving every frame made two pages
+ * alternate winner and the layer flicker on a static scene (measured: five
+ * distinct hashes over 200 frames instead of one). */
+static void gnd_resolve_page(void)
+{
+    if (s_gnd_nvote <= 0) return;
+    if (s_gnd.texpage == 0) {
+        int best = 0;
+        for (int i = 1; i < s_gnd_nvote; i++)
+            if (s_gnd_vote[i].area > s_gnd_vote[best].area) best = i;
+        if (s_gnd_vote[best].area >= 4096.0) {
+            s_gnd.texpage = s_gnd_vote[best].tp;
+            s_gnd.clut_x = s_gnd_vote[best].cx;
+            s_gnd.clut_y = s_gnd_vote[best].cy;
+            s_gnd.page_frames = 1;
+        }
+    }
+    s_gnd_nvote = 0;
+}
+
+/* Mean grass colour of the pitch as drawn (RGB 888, measured at the WIDE
+ * camera over the pitch interior, docs/WIDE_GROUND.md 3). Used by tier 1. */
+#define GND_FLAT_R 88
+#define GND_FLAT_G 116
+#define GND_FLAT_B 60
+
+/* World extent of the plane (pitch: +-13088 x +-8432 world units, y = 0 is
+ * the grass; 240 units = 1 m). The plane is deliberately larger than any
+ * camera can see past the stands, so no far edge is ever on screen. */
+#define GND_HALF_X   34000.0
+#define GND_HALF_Z   28000.0
+#define GND_CELL_X    2000.0
+#define GND_CELL_Z    2000.0
+#define GND_NEAR        12.0   /* view-space z (world units) */
+
+/* Texels per world unit for the plane's uv: one page (256 texels) spans
+ * ~100 m, which keeps the grain the same size as the pitch's under the same
+ * camera. The pitch's own uv scale is not recoverable from the prim stream
+ * (docs/WIDE_GROUND.md 3 records the fit attempt and this choice). */
+#define GND_TEX_PER_UNIT   (1.0 / 96.0)
+
+void gl_ground_set(int on, const int16_t rot[9], const int32_t tr[3],
+                   int ofx, int ofy, int projh)
+{
+    int was = s_gnd.on;
+    s_gnd.on = on < 0 ? 0 : (on > 2 ? 2 : on);
+    if (rot) memcpy(s_gnd.rt, rot, sizeof s_gnd.rt);
+    if (tr)  memcpy(s_gnd.tr, tr, sizeof s_gnd.tr);
+    s_gnd.ofx = ofx; s_gnd.ofy = ofy; s_gnd.projh = projh;
+    s_gnd.valid = (s_gnd.projh > 0 && s_gnd.projh < 0x10000 && tr != NULL);
+    /* Leaving the match drops the detected page: the next match scene can use
+     * a different one. */
+    if (!s_gnd.on && was) { s_gnd.texpage = 0; s_gnd_nvote = 0; }
+}
+
+/* Diagnostics for the debug server / tests (docs/WIDE_GROUND.md 6). */
+void gl_ground_stats(int *on, int *valid, int *texpage,
+                     unsigned long long *frames, unsigned long long *tris)
+{
+    if (on) *on = s_gnd.on;
+    if (valid) *valid = s_gnd.valid;
+    if (texpage) *texpage = s_gnd.texpage;
+    if (frames) *frames = s_gnd_frames;
+    if (tris) *tris = s_gnd_tris;
+}
+
+/* World -> view, PS1 RTP with shift 12: MAC = (RT*V + TR*4096) SAR 12. */
+static void gnd_view(double wx, double wz, double *vx, double *vy, double *vz)
+{
+    const double r0 = 4096.0;
+    *vx = (double)s_gnd.tr[0]
+        + ((double)s_gnd.rt[0] * wx + (double)s_gnd.rt[2] * wz) / r0;
+    *vy = (double)s_gnd.tr[1]
+        + ((double)s_gnd.rt[3] * wx + (double)s_gnd.rt[5] * wz) / r0;
+    *vz = (double)s_gnd.tr[2]
+        + ((double)s_gnd.rt[6] * wx + (double)s_gnd.rt[8] * wz) / r0;
+}
+
+typedef struct { double wx, wz, vx, vy, vz; } GndPt;
+
+/* Near-plane clip on view z. Keeps the world coords of the new vertices so
+ * the texture follows the clip (a cell under the camera does not tear). */
+static int gnd_clip_near(const GndPt *in, int n, GndPt *out)
+{
+    int m = 0;
+    for (int i = 0; i < n; i++) {
+        const GndPt *a = &in[i], *b = &in[(i + 1) % n];
+        double da = a->vz - GND_NEAR, db = b->vz - GND_NEAR;
+        if (da >= 0.0) out[m++] = *a;
+        if ((da >= 0.0) != (db >= 0.0)) {
+            double t = da / (da - db);
+            GndPt p;
+            p.wx = a->wx + (b->wx - a->wx) * t;
+            p.wz = a->wz + (b->wz - a->wz) * t;
+            p.vx = a->vx + (b->vx - a->vx) * t;
+            p.vy = a->vy + (b->vy - a->vy) * t;
+            p.vz = GND_NEAR;
+            out[m++] = p;
+        }
+    }
+    return m;
+}
+
+/* One projected ground triangle, perspective-correct uv (the same q the GPU
+ * carries for world prims: 1/z normalized to the largest of the three). */
+static void gnd_tri(const GndPt *p, int ia, int ib, int ic,
+                    int shift, int wide)
+{
+    int xs[3], ys[3], us[3], vs[3];
+    float q[3];
+    const GndPt *v[3] = { &p[ia], &p[ib], &p[ic] };
+    double idz[3];
+    for (int i = 0; i < 3; i++) {
+        double x = (double)s_gnd.ofx + v[i]->vx * (double)s_gnd.projh / v[i]->vz;
+        double y = (double)s_gnd.ofy + v[i]->vy * (double)s_gnd.projh / v[i]->vz;
+        x += shift;
+        if (x < -4096) x = -4096; else if (x > 4096) x = 4096;
+        if (y < -4096) y = -4096; else if (y > 4096) y = 4096;
+        xs[i] = (int)floor(x + 0.5);
+        ys[i] = (int)floor(y + 0.5);
+        us[i] = (int)floor(v[i]->wx * GND_TEX_PER_UNIT + 0.5);
+        vs[i] = (int)floor(v[i]->wz * GND_TEX_PER_UNIT + 0.5);
+        idz[i] = 1.0 / v[i]->vz;
+    }
+    double qm = idz[0] > idz[1] ? idz[0] : idz[1];
+    if (idz[2] > qm) qm = idz[2];
+    q[0] = (float)(idz[0] / qm); q[1] = (float)(idz[1] / qm); q[2] = (float)(idz[2] / qm);
+    /* Cheap off-screen reject (the GPU clip would drop it anyway). */
+    if ((xs[0] < -8 && xs[1] < -8 && xs[2] < -8) ||
+        (xs[0] > wide + 8 && xs[1] > wide + 8 && xs[2] > wide + 8) ||
+        (ys[0] < -8 && ys[1] < -8 && ys[2] < -8) ||
+        (ys[0] > 248 && ys[1] > 248 && ys[2] > 248)) return;
+    int lim[4] = { 0, 0, 255, 255 };
+    float col[9] = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
+    glb_set_perspective_triangle(1, q[0], q[1], q[2]);
+    gpu_textured_triangle(xs, ys, us, vs, col, s_gnd.texpage,
+                          s_gnd.clut_x, s_gnd.clut_y, 0, -1, lim);
+    glb_set_perspective_triangle(0, 0.0f, 0.0f, 0.0f);
+    s_gnd_tris++;
+}
+
+/* Tier 1: one draw-band-sized quad in the measured mean grass colour. Drawn
+ * as a fill (same path as the guest's own clear), so it costs one scissored
+ * glClear and is invisible behind the pitch the guest draws next. */
+static void gnd_draw_flat(int wide)
+{
+    uint16_t c = (uint16_t)((GND_FLAT_R >> 3) | ((GND_FLAT_G >> 3) << 5)
+                            | ((GND_FLAT_B >> 3) << 10));
+    int h = s_area_y2 - s_area_y1 + 1;
+    if (h <= 0) h = 240;
+    gpu_fill(s_area_x1, s_area_y1, wide, h, c);
+    s_gnd_tris += 2;
+}
+
+/* Draw the layer. Called from glb_fill_rect after the frame's display clear. */
+static void gnd_draw(int wide)
+{
+    if (s_gnd.on <= 1 || !s_gnd.texpage) { gnd_draw_flat(wide); return; }
+    const int shift = (wide - 512) / 2;   /* the arm's symmetric reveal */
+    /* Neutral prim state: the guest's mask test / texture window / texture
+     * bank belong to the prims that follow, so save and restore them. */
+    const int smc = s_mask_check, sms = s_mask_set;
+    const int tw0 = s_tw_mask_x, tw1 = s_tw_mask_y, tw2 = s_tw_off_x, tw3 = s_tw_off_y;
+    const int bank = s_selected_bank_tex, live_clut = s_selected_bank_live_clut;
+    s_mask_check = 0; s_mask_set = 0;
+    s_tw_mask_x = s_tw_mask_y = s_tw_off_x = s_tw_off_y = 0;
+    s_selected_bank_tex = 0; s_selected_bank_live_clut = 0;
+    for (double wx = -GND_HALF_X; wx < GND_HALF_X; wx += GND_CELL_X) {
+        for (double wz = -GND_HALF_Z; wz < GND_HALF_Z; wz += GND_CELL_Z) {
+            /* Skip cells the guest's own pitch mesh covers completely: the
+             * plane only has to exist outside the touch/goal lines. No margin:
+             * the area behind a goal line is exactly where the void shows. */
+            if (fabs(wx) <= 13088.0 && fabs(wx + GND_CELL_X) <= 13088.0 &&
+                fabs(wz) <= 8432.0 && fabs(wz + GND_CELL_Z) <= 8432.0)
+                continue;
+            GndPt quad[4];
+            const double qx[4] = { wx, wx + GND_CELL_X, wx + GND_CELL_X, wx };
+            const double qz[4] = { wz, wz, wz + GND_CELL_Z, wz + GND_CELL_Z };
+            int behind = 0;
+            for (int i = 0; i < 4; i++) {
+                quad[i].wx = qx[i]; quad[i].wz = qz[i];
+                gnd_view(qx[i], qz[i], &quad[i].vx, &quad[i].vy, &quad[i].vz);
+                if (quad[i].vz < GND_NEAR) behind++;
+            }
+            if (behind == 4) continue;
+            GndPt poly[8];
+            int n = behind ? gnd_clip_near(quad, 4, poly) : 4;
+            if (n < 3) continue;
+            if (!behind) memcpy(poly, quad, sizeof quad), n = 4;
+            for (int i = 1; i + 1 < n; i++)
+                gnd_tri(poly, 0, i, i + 1, shift, wide);
+        }
+    }
+    s_mask_check = smc; s_mask_set = sms;
+    s_tw_mask_x = tw0; s_tw_mask_y = tw1; s_tw_off_x = tw2; s_tw_off_y = tw3;
+    s_selected_bank_tex = bank; s_selected_bank_live_clut = live_clut;
+}
+
+/* Called from every textured prim before it is submitted. Two jobs:
+ *   - vote its page (area-weighted) so the pitch page is known;
+ *   - draw the plane at the LAST possible moment that is still under the
+ *     pitch: the first green-page prim large enough to be a ground tile.
+ *     The guest's own flat "outer ground" polygons are already in the
+ *     framebuffer by then (they are drawn before the pitch), so the plane
+ *     covers them; the pitch, boards and stands that follow cover the plane. */
+static void gnd_before_prim(uint16_t tp, uint16_t cx, uint16_t cy, double area)
+{
+    if (!s_gnd.on || s_gnd_drawing) return;
+    gnd_vote(tp, cx, cy, area);
+}
+
+/* The frame's display clear: the guest clears its 512x240 match band at the
+ * start of the scene list. The band is the DRAW area (the other framebuffer
+ * band is the one being scanned out), so the test is the draw-area origin and
+ * width, not the display rect - a texture-page clear (a render target) or a
+ * small rect never matches. */
+static int gnd_is_display_clear(int x, int y, int w, int h, int wide)
+{
+    if ((int)w < 480 || (int)h < 200) return 0;
+    if (x != s_area_x1 || y != s_area_y1) return 0;
+    if (wide != s_area_x2 - s_area_x1 + 1) return 0;   /* the armed clip */
+    return 1;
+}
+
 static void glb_fill_rect(int x,int y,int w,int h,uint16_t c){
     if (pass_refuse_write("fill", x, y, w, h)) return;
     /* [video] vram_extension: a fill inside the wide framebuffer's overflow
@@ -4561,6 +4910,26 @@ static void glb_fill_rect(int x,int y,int w,int h,uint16_t c){
     }
     if (!s_raster_ok) return;
     gpu_fill(x,y,w,h,c);
+    /* [video] wide_ground: the frame's own clear just landed, so the ground
+     * plane can go under the scene. Only in the armed wide match frame; the
+     * predicates are the arm and the display rect, never a config string. */
+    if (s_gnd.on && s_gnd.valid) {
+        int wide = gpu_ws_match_raster_width();
+        if (wide > 512 && gnd_is_display_clear(x, y, w, h, wide)) {
+            /* A new frame's clear: the guest's scene list starts here, so the
+             * layer goes under everything it submits. The pitch page is
+             * resolved from the votes of the frames before this one (flat
+             * colour until the first frame has voted). */
+            gnd_resolve_page();
+            s_gnd_drawing = 1;
+            gnd_draw(wide);
+            s_gnd_drawing = 0;
+            s_gnd_frames++;
+            if (!rth_replaying())
+                psx_mod_counter_add(
+                    "we2002.widescreen.native-raster.ground-draw", 1);
+        }
+    }
 }
 static void glb_copy_rect(int sx,int sy,int dx,int dy,int w,int h){
     if (pass_refuse_write("copy", dx, dy, w, h)) return;
