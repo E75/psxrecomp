@@ -99,6 +99,12 @@ extern "C" void psx_event_step_conservative_env_init(void);
 #include "recomp_audio_drc.h"
 #include "memcard.h"
 #include "boot_path.h"
+/* [saves] skip_card_slot_screen, defined in src/mods/we2002_no_card_slot.c.
+ * Declared here rather than through its header so the framework runtime does
+ * not need the game's src/mods directory on its include path (boot_path.h is
+ * staged into psxrecomp/runtime/include by the seed patch; this key adds no
+ * second copy of that plumbing). */
+extern "C" void we2002_card_slot_configure(int enabled);
 #include "debug_server.h"
 #include "host_sampler.h"
 #include "crash_trace.h"
@@ -15900,6 +15906,10 @@ int main(int argc, char** argv) {
      * the first run, so the game's "create option file?" prompt never runs.
      * The card model lives in src/mods/boot_path.c; off means inert. */
     bool saves_seed_option_file  = false;
+    /* [saves] skip_card_slot_screen: answer the boot card-slot panel with slot
+     * 1 (src/mods/we2002_no_card_slot.c). On by default: a PC always has the
+     * card in slot 1. false = stock boot, the panel waits for CIRCLE. */
+    bool saves_skip_card_slot_screen = true;
     /* [assets] native disc sector source. */
     std::string assets_disc_dir;
     bool        assets_preload         = true;
@@ -16087,6 +16097,7 @@ int main(int argc, char** argv) {
             saves_format_on_corrupt = gc.runtime.saves.format_on_corrupt;
             saves_slot2             = gc.runtime.saves.slot2;
             saves_seed_option_file  = gc.runtime.saves.seed_option_file;
+            saves_skip_card_slot_screen = gc.runtime.saves.skip_card_slot_screen;
             assets_disc_dir         = resolve_path_key(
                 "assets.disc_dir", gc.runtime.assets.disc_dir_configured.c_str(),
                 gc.runtime.assets.disc_dir.string().c_str(), "config");
@@ -18940,6 +18951,9 @@ session_reboot:
      * bytes, header 'S','C',0x11,0x02) and is never written over an existing
      * option file. Inert unless [saves] seed_option_file is on. */
     we2002_boot_configure(saves_seed_option_file ? 1 : 0);
+    /* [saves] skip_card_slot_screen: the card panel between the intro and the
+     * option-file load screen. Same "just play" path; inert unless on. */
+    we2002_card_slot_configure(saves_skip_card_slot_screen ? 1 : 0);
     if (saves_seed_option_file) {
         static const char kOptionSeed[] = "assets/option_seed.bin";
         char seed_path[PSX_PATH_RESOLVE_MAX];

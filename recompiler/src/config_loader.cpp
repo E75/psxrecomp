@@ -392,6 +392,9 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
             rt.saves.slot2 = toml::find<bool>(sv, "slot2");
         if (sv.contains("seed_option_file"))
             rt.saves.seed_option_file = toml::find<bool>(sv, "seed_option_file");
+        if (sv.contains("skip_card_slot_screen"))
+            rt.saves.skip_card_slot_screen =
+                toml::find<bool>(sv, "skip_card_slot_screen");
     }
     if (cfg.contains("assets")) {
         const toml::value& av = toml::find(cfg, "assets");

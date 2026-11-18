@@ -195,6 +195,11 @@ struct SavesConfig {
     // the first run, so the game's "create option file?" prompt never runs.
     // Inert unless the game links runtime/boot_path.c and reads the key.
     bool seed_option_file  = false;
+    // [saves] skip_card_slot_screen: answer the boot memory-card slot panel
+    // with slot 1 and continue to the game's option-file load screen, so a PC
+    // player never sees the card question. The default is the PC behaviour; a
+    // game without the matching plugin ignores it. false = stock boot.
+    bool skip_card_slot_screen = true;
 };
 
 // [assets] -- native disc asset provider (runtime/src/asset_provider.c). Serves
