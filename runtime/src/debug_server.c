@@ -487,6 +487,98 @@ static WriteTraceAllEntry *s_wtrace_all = NULL;
 static uint64_t s_wtrace_all_seq  = 0;
 static uint32_t s_wtrace_all_head = 0;
 
+/* ---- scratch write ring (PSX_SCRATCH_TRACE) ----
+ * `wtrace_all` DOES record scratch stores (memory.c calls the write check from
+ * every scratch branch), but every record sits behind PSX_HOTPATH_PROBES: with
+ * the probes off the ring is inert for RAM too, and with them on its 4M entries
+ * roll in seconds during a match. This ring is the same record shape, scoped to
+ * the scratchpad and independent of the hotpath gate, so a probe can arm one
+ * 1 KiB window and still find the last write to it after the fact.
+ *
+ *   PSX_SCRATCH_TRACE=1                        whole scratchpad
+ *   PSX_SCRATCH_TRACE=1F8000A0-1F800100        [lo,hi) hex, 0x optional
+ *   PSX_SCRATCH_TRACE=0 / unset                off: one int test per store
+ *
+ * docs/SCRATCH_TRACE.md owns the measurement it was built for. */
+#define SCRATCH_TRACE_CAP (1u << 18)
+typedef struct {
+    uint64_t seq;
+    uint32_t addr;
+    uint32_t old_val;
+    uint32_t new_val;
+    uint32_t pc;
+    uint32_t ra;
+    uint32_t frame;
+    uint8_t  w;
+    uint8_t  pad[3];
+} ScratchTraceEntry;
+static ScratchTraceEntry *s_scratch = NULL;
+static uint64_t s_scratch_seq  = 0;
+static uint32_t s_scratch_head = 0;
+static int      s_scratch_on   = -1;   /* -1 = env not read yet */
+static uint32_t s_scratch_lo   = 0x1F800000u;
+static uint32_t s_scratch_hi   = 0x1F800400u;
+static char     s_scratch_env_error[64] = "";
+
+static int scratch_trace_parse(void)
+{
+    const char *e = getenv("PSX_SCRATCH_TRACE");
+    s_scratch_on = 0;
+    if (!e || !*e || (e[0] == '0' && e[1] == '\0')) return 0;
+    if (!(e[0] == '1' && e[1] == '\0')) {
+        const char *dash = strchr(e, '-');
+        char lo_s[24] = {0};
+        if (!dash || (size_t)(dash - e) >= sizeof(lo_s)) {
+            snprintf(s_scratch_env_error, sizeof(s_scratch_env_error),
+                     "expected LO-HI, got '%.24s'", e);
+            return 0;
+        }
+        memcpy(lo_s, e, (size_t)(dash - e));
+        {
+            const char *hip = dash + 1;
+            uint32_t lo = (uint32_t)strtoul(lo_s, NULL, 16);
+            uint32_t hi = (uint32_t)strtoul(hip, NULL, 16);
+            if (lo >= hi || hi > 0x1F800400u || lo < 0x1F800000u) {
+                snprintf(s_scratch_env_error, sizeof(s_scratch_env_error),
+                         "window 0x%08X-0x%08X outside the scratchpad", lo, hi);
+                return 0;
+            }
+            s_scratch_lo = lo;
+            s_scratch_hi = hi;
+        }
+    }
+    s_scratch_on = 1;
+    return 1;
+}
+
+static inline int scratch_trace_on(void)
+{
+    if (s_scratch_on < 0) scratch_trace_parse();
+    return s_scratch_on;
+}
+
+/* One ordered record per scratch store. Same fields (and JSON order) as a
+ * wtrace_all record, plus the pre-store value. */
+static void scratch_trace_record(uint32_t addr, uint32_t old_val,
+                                 uint32_t new_val, uint8_t width)
+{
+    ScratchTraceEntry *e;
+    if (!s_scratch) {
+        s_scratch = (ScratchTraceEntry *)calloc(SCRATCH_TRACE_CAP, sizeof(*s_scratch));
+        if (!s_scratch) { s_scratch_on = 0; return; }
+    }
+    e = &s_scratch[s_scratch_head];
+    e->seq     = s_scratch_seq++;
+    e->addr    = addr;
+    e->old_val = old_val;
+    e->new_val = new_val;
+    e->pc      = g_debug_last_store_pc;
+    e->ra      = debug_cpu_ptr ? debug_cpu_ptr->gpr[31] : 0u;
+    e->frame   = (uint32_t)s_frame_count;
+    e->w       = width;
+    s_scratch_head = (s_scratch_head + 1) % SCRATCH_TRACE_CAP;
+}
+
 /* ---- wtrace_transition ring (ALWAYS-ON; selected ranges; value changes only)
  * The catch-all write ring intentionally records every write, but hot paths can
  * roll it before a boot-to-menu transition is diagnosed. This ring keeps a
@@ -11633,6 +11725,12 @@ void debug_server_trace_write_check(uint32_t phys, uint32_t old_val,
     /* Render passes are rolled back; keep them out of the live timeline's
      * fingerprints and write traces (docs/RENDER_PASSES.md). */
     if (g_psx_render_pass_active) return;
+    /* Scratch stores get their own ordered ring, independent of the hotpath
+     * gate: PSX_HOTPATH_PROBES=0 (the default) makes wtrace_all inert for EVERY
+     * write, which reads as "the scratch write is invisible" (docs/SCRATCH_TRACE.md). */
+    if (phys - 0x1F800000u < 0x400u && scratch_trace_on() &&
+        phys >= s_scratch_lo && phys < s_scratch_hi)
+        scratch_trace_record(phys, old_val, new_val, width);
     if (!hotpath_probes_on()) return;   /* PSX_HOTPATH_PROBES=0: pacing run */
     if (s_fmv_quiet) {
         if (psx_fp_write_eligible(phys, psx_ram_live_bytes())) psx_fp_note_quiet(&s_fp);
@@ -12797,6 +12895,88 @@ static void handle_wtrace_all_reset(int id, const char *json)
         memset(s_wtrace_all, 0,
                (size_t)WRITE_TRACE_ALL_CAP * sizeof(WriteTraceAllEntry));
     send_ok(id);
+}
+
+static void handle_scratch_trace_stats(int id, const char *json)
+{
+    (void)json;
+    uint64_t total = s_scratch_seq;
+    send_fmt("{\"id\":%d,\"ok\":true,\"enabled\":%d,"
+             "\"lo\":\"0x%08X\",\"hi\":\"0x%08X\",\"error\":\"%s\","
+             "\"total\":%llu,\"capacity\":%u,\"oldest_seq\":%llu,"
+             "\"newest_seq\":%llu}",
+             id, scratch_trace_on(), s_scratch_lo, s_scratch_hi,
+             s_scratch_env_error, (unsigned long long)total, SCRATCH_TRACE_CAP,
+             (unsigned long long)(total > SCRATCH_TRACE_CAP
+                                  ? total - SCRATCH_TRACE_CAP : 0),
+             (unsigned long long)(total ? total - 1 : 0));
+}
+
+static void handle_scratch_trace_reset(int id, const char *json)
+{
+    (void)json;
+    s_scratch_seq  = 0;
+    s_scratch_head = 0;
+    if (s_scratch)
+        memset(s_scratch, 0, (size_t)SCRATCH_TRACE_CAP * sizeof(*s_scratch));
+    send_ok(id);
+}
+
+/* Same JSON record shape as wtrace_all_dump (seq, addr, new, pc, ra, frame, w)
+ * plus `old`, so one parser reads both rings. */
+static void handle_scratch_trace_dump(int id, const char *json)
+{
+    char lo_str[32], hi_str[32];
+    uint32_t flo = 0, fhi = 0xFFFFFFFFu;
+    if (json_get_str(json, "addr_lo", lo_str, sizeof(lo_str)))
+        flo = hex_to_u32(lo_str) & 0x1FFFFFFFu;
+    if (json_get_str(json, "addr_hi", hi_str, sizeof(hi_str)))
+        fhi = hex_to_u32(hi_str) & 0x1FFFFFFFu;
+    int max_out = json_get_int(json, "count", 256);
+    if (max_out < 1) max_out = 1;
+    if (max_out > 2048) max_out = 2048;
+    int newest_first = json_get_int(json, "newest", 0) != 0;
+
+    uint64_t total = s_scratch_seq;
+    uint32_t avail = (total < SCRATCH_TRACE_CAP)
+                     ? (uint32_t)total : SCRATCH_TRACE_CAP;
+    uint32_t start = (total < SCRATCH_TRACE_CAP) ? 0 : s_scratch_head;
+
+    size_t BUF_SZ = 256u + (size_t)max_out * 220u;
+    char *buf = (char *)malloc(BUF_SZ);
+    if (!buf) { send_err(id, "oom"); return; }
+    size_t pos = 0;
+    uint32_t emitted = 0;
+    pos += snprintf(buf + pos, BUF_SZ - pos,
+                    "{\"id\":%d,\"ok\":true,\"enabled\":%d,\"total\":%llu,"
+                    "\"available\":%u,\"entries\":[",
+                    id, scratch_trace_on(), (unsigned long long)total, avail);
+    for (uint32_t i = 0; i < avail && (int)emitted < max_out && pos < BUF_SZ - 320; i++) {
+        uint32_t idx;
+        if (newest_first) {
+            uint32_t newest = (s_scratch_head + SCRATCH_TRACE_CAP - 1u)
+                              % SCRATCH_TRACE_CAP;
+            idx = (newest + SCRATCH_TRACE_CAP - (i % SCRATCH_TRACE_CAP))
+                  % SCRATCH_TRACE_CAP;
+        } else {
+            idx = (start + i) % SCRATCH_TRACE_CAP;
+        }
+        ScratchTraceEntry *e = &s_scratch[idx];
+        if (!e->seq && !e->addr) continue;   /* unwritten slot */
+        if (e->addr < flo || e->addr >= fhi) continue;
+        pos += snprintf(buf + pos, BUF_SZ - pos,
+                        "%s{\"seq\":%llu,\"addr\":\"0x%08X\","
+                        "\"old\":\"0x%08X\",\"new\":\"0x%08X\","
+                        "\"pc\":\"0x%08X\",\"ra\":\"0x%08X\","
+                        "\"frame\":%u,\"w\":%u}",
+                        (emitted == 0) ? "" : ",",
+                        (unsigned long long)e->seq, e->addr, e->old_val,
+                        e->new_val, e->pc, e->ra, e->frame, (unsigned)e->w);
+        emitted++;
+    }
+    pos += snprintf(buf + pos, BUF_SZ - pos, "],\"emitted\":%u}", emitted);
+    debug_server_send_line(buf);
+    free(buf);
 }
 
 static void handle_wtrace_all_dump(int id, const char *json)
@@ -16312,6 +16492,9 @@ static const CmdEntry s_commands[] = {
     { "wtrace_boot_reset",   handle_wtrace_boot_clear },
     /* Always-on catch-all wtrace ring (parity with psx-beetle). */
     { "wtrace_all_dump",     handle_wtrace_all_dump },
+    { "scratch_trace_dump",  handle_scratch_trace_dump },
+    { "scratch_trace_stats", handle_scratch_trace_stats },
+    { "scratch_trace_reset", handle_scratch_trace_reset },
     { "wtrace_all_stats",    handle_wtrace_all_stats },
     { "wtrace_all_reset",    handle_wtrace_all_reset },
     { "wtrace_trans_dump",   handle_wtrace_trans_dump },
