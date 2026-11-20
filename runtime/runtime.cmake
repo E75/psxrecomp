@@ -83,6 +83,14 @@ else()
     option(PSX_DEBUG_TOOLS "Build with TCP debug server + heartbeat + per-block recording" ON)
 endif()
 
+# PSX_INTERP_FATAL: the 100%-native finish line. ON => any interpreted guest
+# instruction is a fatal error naming its PC. Off by default while a
+# configuration still has an uncovered path; PSX_INTERP_FATAL=1 in the
+# environment does the same per run without a rebuild (docs in the game repo:
+# docs/NATIVE_100_PLAN.md, definition of done 3-4).
+option(PSX_INTERP_FATAL
+    "Every interpreted guest instruction is fatal - the 100%-native build" OFF)
+
 # A title may opt in only after auditing every trusted media preparer used by
 # its mod commit. Older recomp-ui pins ignore this capability and remain sync.
 option(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE
@@ -2137,6 +2145,14 @@ function(psxrecomp_add_runtime_target target)
     # also visible to psx-beetle / non-runtime-helper targets.
     if(NOT PSX_DEBUG_TOOLS)
         target_compile_definitions(${target} PRIVATE PSX_NO_DEBUG_TOOLS=1)
+    endif()
+
+    # 100%-native finish line (docs in the game repo: NATIVE_100_PLAN.md).
+    # The option is declared at the top of runtime.cmake; it only adds the
+    # compile definition here. The env var PSX_INTERP_FATAL=1 does the same
+    # per run without a rebuild.
+    if(PSX_INTERP_FATAL)
+        target_compile_definitions(${target} PRIVATE PSX_INTERP_FATAL=1)
     endif()
 
     if(PSXRECOMP_HAS_RECOMP_NET)
