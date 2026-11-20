@@ -41,6 +41,7 @@
 #include "psx_static_guest.h"  /* guest-entry funnel counters (docs/STATIC_PORT.md) */
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -2537,9 +2538,45 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
  * PSX_RECURSION_LIMIT. One-shot. NOT a fix — the upstream bogus-pointer divergence
  * still needs the oracle; this converts a hard crash into a catchable, diagnosed
  * bail (Rule 15: make the failure observable). */
+/* ── the 100%-native finish line ───────────────────────────────────────────
+ *
+ * `PSX_INTERP_FATAL` (CMake option, default off) or the environment variable of
+ * the same name turns every interpreted guest instruction into a hard failure
+ * naming the PC.  A finished port has a compiled body for every instruction, so
+ * this can never fire; while a mode is still uncovered it stays off and the
+ * `dirty_ram_stats` counter reports the gaps instead.
+ *
+ * The distinction that matters: the recompiled BIOS (LLE) is static code, not
+ * this path.  Entering here means the guest reached RAM bytes that no compiled
+ * image claims - a runtime install, a patched page, or an overlay variant whose
+ * capture was never baked (docs/NATIVE_100_PLAN.md, definition of done 3-4).
+ */
+static int s_interp_fatal = -1;
+
+static int interp_fatal_on(void)
+{
+    if (s_interp_fatal < 0) {
+#ifdef PSX_INTERP_FATAL
+        s_interp_fatal = 1;
+#else
+        const char *e = getenv("PSX_INTERP_FATAL");
+        s_interp_fatal = (e && *e && *e != '0') ? 1 : 0;
+#endif
+    }
+    return s_interp_fatal;
+}
+
 int dirty_ram_dispatch(CPUState* cpu, uint32_t addr, uint32_t stop_addr) {
     extern int g_psx_dispatch_depth;
     extern void psx_fatal_halt(const char *reason);
+
+    if (interp_fatal_on()) {
+        fprintf(stderr, "dirty_ram_interp: FATAL no compiled body for pc=0x%08X "
+                        "(stop=0x%08X, ra=0x%08X): PSX_INTERP_FATAL is on\n",
+                addr, stop_addr, cpu ? cpu->gpr[31] : 0u);
+        fflush(stderr);
+        abort();
+    }
     /* `addr` is architectural: the interpreter runs at exactly this PC, so a
      * retail RAM-mirror PC (0x807xxxxx) keeps its own $ra/EPC while fetch_word
      * and the dirty/overlay page checks fold it to the bytes it executes
