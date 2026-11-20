@@ -49,6 +49,25 @@ int psx_guest_pc_plausible(uint32_t pc)
 
 int psx_guest_call_depth(void) { return g_psx_guest_call_depth; }
 
+/* ── transient-argument contract (psx_guest_call.h, docs/INIT_EXIT3.md 12) ──
+ * Default off: PSX_KEEP_CALL_ARGS must opt in, so the shipped boot keeps the
+ * historical full restore. Latched once. */
+static int s_keep_call_args = -1;
+
+int psx_guest_call_keep_args_enabled(void)
+{
+    if (s_keep_call_args < 0) {
+        const char *e = getenv("PSX_KEEP_CALL_ARGS");
+        s_keep_call_args = (e && e[0] && e[0] != '0') ? 1 : 0;
+    }
+    return s_keep_call_args;
+}
+
+void psx_guest_call_set_keep_args(int on)
+{
+    s_keep_call_args = on ? 1 : 0;
+}
+
 uint32_t psx_guest_call_resume_pc(void)
 {
     /* Outermost frame first: the guest continuation of the whole nested C
@@ -223,6 +242,56 @@ static void bios_trace_call(const char *half, uint32_t vec, uint32_t index,
     s_bios_trace_lines++;
 }
 
+/* ── PSX_CALL_TRACE=<path>: the transient argument chain, both sides ────────
+ *
+ * The wrapper publishes a call's $a0..$a3 and then restores the caller's 32
+ * registers, so "what the callee left in $a0..$a3" is invisible from outside.
+ * This logs it: the caller's words at entry, the words the C site published,
+ * and the CALLEE's words before they are restored (docs/INIT_EXIT3.md 12).
+ * PSX_CALL_TRACE_PC=<hex,hex,...> keeps only calls to those targets (the card
+ * stubs at 0x8004FEA4 / 0x8004FEB4 / 0x8003867C), so a boot log stays small.
+ * Inert when unset (one getenv per process). */
+static FILE *s_call_trace;
+static int   s_call_trace_init;
+static int   s_call_trace_lines;
+static uint32_t s_call_trace_pc[8];
+static int   s_call_trace_pc_n;
+
+static void call_trace_filter(void)
+{
+    const char *e = getenv("PSX_CALL_TRACE_PC");
+    if (!e) return;
+    while (*e && s_call_trace_pc_n < 8) {
+        char *end = 0;
+        unsigned long v = strtoul(e, &end, 0);
+        if (end == e) break;
+        s_call_trace_pc[s_call_trace_pc_n++] = (uint32_t)v;
+        e = (*end == ',') ? end + 1 : end;
+        while (*e == ' ' || *e == ',') e++;
+    }
+}
+
+static FILE *call_trace_file(void)
+{
+    if (!s_call_trace_init) {
+        const char *e = getenv("PSX_CALL_TRACE");
+        s_call_trace_init = 1;
+        if (e && *e) {
+            s_call_trace = fopen(e, "w");
+            call_trace_filter();
+        }
+    }
+    return s_call_trace;
+}
+
+static int call_trace_wanted(uint32_t function)
+{
+    if (s_call_trace_pc_n == 0) return 1;
+    for (int i = 0; i < s_call_trace_pc_n; i++)
+        if (s_call_trace_pc[i] == function) return 1;
+    return 0;
+}
+
 void psx_guest_call_note_isr_return(int ok, uint32_t bad_target, uint32_t used)
 {
     if (ok) {
@@ -256,6 +325,17 @@ uint32_t psx_mod_call_guest_ex(struct CPUState* cpu, uint32_t function,
     if (bios_trace)
         bios_trace_call("enter", function, bios_index, a0, a1, a2, a3,
                         bios_ra, bios_sp, 0u, -1);
+    const int trace = call_trace_file() != NULL && call_trace_wanted(function);
+    if (trace && s_call_trace_lines < 4000) {
+        fprintf(s_call_trace,
+                "enter tgt=%08X ra=%08X idx=%02X depth=%d caller_a0=%08X a1=%08X "
+                "a2=%08X a3=%08X pub_a0=%08X a1=%08X a2=%08X a3=%08X sp=%08X cyc=%llu\n",
+                function, bios_ra, bios_index, g_psx_guest_call_depth,
+                regs[4], regs[5], regs[6], regs[7], a0, a1, a2, a3, bios_sp,
+                (unsigned long long)psx_get_cycle_count());
+        fflush(s_call_trace);
+        s_call_trace_lines++;
+    }
 
     /* Refuse a call whose target is not a guest code address (a null function
      * pointer in decompiled C reaches here as we_gcall(0)). Dispatching it would
@@ -305,8 +385,19 @@ uint32_t psx_mod_call_guest_ex(struct CPUState* cpu, uint32_t function,
     const int came_back = (s_boundaries != boundaries_before) ||
                           (cpu->gpr[31] == return_address);
     const uint32_t result = cpu->gpr[2];
+    const uint32_t callee_a0 = cpu->gpr[4], callee_a1 = cpu->gpr[5];
+    const uint32_t callee_a2 = cpu->gpr[6], callee_a3 = cpu->gpr[7];
     if (framed) cpu->gpr[29] = sp0;
     memcpy(cpu->gpr, regs, sizeof regs);
+    /* Transient-argument contract (psx_guest_call.h): $a0..$a3 are caller-saved,
+     * so the guest's next `jal` inherits what the callee left. Off = historical
+     * full restore, bit-for-bit. */
+    if (psx_guest_call_keep_args_enabled()) {
+        cpu->gpr[4] = callee_a0;
+        cpu->gpr[5] = callee_a1;
+        cpu->gpr[6] = callee_a2;
+        cpu->gpr[7] = callee_a3;
+    }
     cpu->pc = pc;
     cpu->hi = hi;
     cpu->lo = lo;
@@ -314,6 +405,17 @@ uint32_t psx_mod_call_guest_ex(struct CPUState* cpu, uint32_t function,
     psx_guest_call_leave(pushed);
     psx_guest_call_note_return(came_back);
     if (!came_back) call_log("non-returning call:", function, regs[31]);
+    if (trace && s_call_trace_lines < 4000) {
+        fprintf(s_call_trace,
+                "leave tgt=%08X ret=%08X came_back=%d callee_a0=%08X a1=%08X "
+                "a2=%08X a3=%08X kept=%d cyc=%llu\n",
+                function, result, came_back ? 1 : 0,
+                callee_a0, callee_a1, callee_a2, callee_a3,
+                psx_guest_call_keep_args_enabled(),
+                (unsigned long long)psx_get_cycle_count());
+        fflush(s_call_trace);
+        s_call_trace_lines++;
+    }
     if (bios_trace)
         bios_trace_call("exit", function, bios_index, a0, a1, a2, a3,
                         bios_ra, bios_sp, result, came_back ? 1 : 0);
