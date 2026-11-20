@@ -3161,7 +3161,11 @@ static void handle_dirty_ram_stats(int id, const char *json)
                   (unsigned long long)psx_static_guest_total(PSX_SG_FUNNEL_SPAN),
                   (unsigned long long)psx_static_guest_total(PSX_SG_FUNNEL_NATIVE_HANDOFF),
                   psx_static_guest_distinct());
-    n += snprintf(buf + n, sizeof(buf) - n, "}\n");
+    /* The object closed with "}}" above (static_guest + this reply); do NOT
+     * append another "}" or newline here. The old extra "}\n" made the wire
+     * reply "...}}\n\n", so every strict client (json.loads on the whole
+     * buffer: native_audit.py, static_port_measure.py) failed with
+     * "Extra data". send_fmt adds the reply's own newline. */
     send_fmt("%s", buf);
 }
 

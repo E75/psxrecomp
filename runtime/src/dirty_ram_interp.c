@@ -2546,10 +2546,22 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
  * this can never fire; while a mode is still uncovered it stays off and the
  * `dirty_ram_stats` counter reports the gaps instead.
  *
+ * WHERE the check lives matters.  `dirty_ram_dispatch()` is not just the
+ * interpreter: it is also the router to compiled game/overlay bodies, and the
+ * generated dispatch reaches it for EVERY game-text PC (a clean page that the
+ * BIOS static table does not key falls through here as a "static miss").  A
+ * check at the router's front door therefore fires on a handoff that retires
+ * zero instructions - the boot EXE entry 0x80010008 was the first such false
+ * alarm (PSX_INTERP_FATAL reported it while `insns_run` stayed 0, because the
+ * baseline clear had already made the page native-safe).  The check belongs at
+ * the one point where the block is committed to interpretation:
+ * `interp_fatal_commit()`, called after every native/overlay route in
+ * `dirty_ram_dispatch_inner()` and before its first executed instruction.
+ *
  * The distinction that matters: the recompiled BIOS (LLE) is static code, not
- * this path.  Entering here means the guest reached RAM bytes that no compiled
- * image claims - a runtime install, a patched page, or an overlay variant whose
- * capture was never baked (docs/NATIVE_100_PLAN.md, definition of done 3-4).
+ * this path.  Reaching the commit point means the guest reached RAM bytes that
+ * no compiled image claims - a runtime install, a patched page, or an overlay
+ * variant whose capture was never baked (docs/NATIVE_100_PLAN.md, DoD 3-4).
  */
 static int s_interp_fatal = -1;
 
@@ -2566,17 +2578,23 @@ static int interp_fatal_on(void)
     return s_interp_fatal;
 }
 
+/* Called only where the interpreter is about to retire real guest
+ * instructions (see the block above).  Reports the block entry, the call's
+ * stop address and the caller's $ra so a gap names the site that reached it. */
+static void interp_fatal_commit(CPUState* cpu, uint32_t addr, uint32_t stop_addr)
+{
+    if (!interp_fatal_on()) return;
+    fprintf(stderr, "dirty_ram_interp: FATAL no compiled body for pc=0x%08X "
+                    "(stop=0x%08X, ra=0x%08X): PSX_INTERP_FATAL is on\n",
+            addr, stop_addr, cpu ? cpu->gpr[31] : 0u);
+    fflush(stderr);
+    abort();
+}
+
 int dirty_ram_dispatch(CPUState* cpu, uint32_t addr, uint32_t stop_addr) {
     extern int g_psx_dispatch_depth;
     extern void psx_fatal_halt(const char *reason);
 
-    if (interp_fatal_on()) {
-        fprintf(stderr, "dirty_ram_interp: FATAL no compiled body for pc=0x%08X "
-                        "(stop=0x%08X, ra=0x%08X): PSX_INTERP_FATAL is on\n",
-                addr, stop_addr, cpu ? cpu->gpr[31] : 0u);
-        fflush(stderr);
-        abort();
-    }
     /* `addr` is architectural: the interpreter runs at exactly this PC, so a
      * retail RAM-mirror PC (0x807xxxxx) keeps its own $ra/EPC while fetch_word
      * and the dirty/overlay page checks fold it to the bytes it executes
@@ -3317,6 +3335,11 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
             }
         }
     }
+    /* The commit point: every native/overlay route above has declined and the
+     * entry IRQ poll has had its chance to surface without executing anything,
+     * so this block is about to run real guest instructions from live RAM.
+     * PSX_INTERP_FATAL fires HERE, never at the router's front door. */
+    interp_fatal_commit(cpu, addr, stop_addr);
     for (int i = 0; i < MAX_INSNS_PER_DISPATCH; i++) {
         uint32_t next_pc = 0;
 #ifndef PSX_NO_DEBUG_TOOLS
