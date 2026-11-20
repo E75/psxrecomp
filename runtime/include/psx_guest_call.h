@@ -93,6 +93,22 @@ uint32_t psx_guest_call_resume_pc(void);
 int  psx_guest_call_enter(uint32_t caller_ra, uint32_t sp);
 void psx_guest_call_leave(int pushed);
 
+/* Transient-argument contract (docs/INIT_EXIT3.md 12).
+ *
+ * $a0..$a3 are CALLER-saved: after a guest `jal F` they hold whatever F left,
+ * and recompiled code that makes the next `jal` without setting arguments
+ * inherits those words. A decompiled body has no such chain - the wrapper
+ * restored the C caller's four words after every host call - so a `(void)`
+ * stub that follows (`B0h(4B)` StartCard, `A0h(70h)` _bu_init) published the
+ * C frame's stale words instead of the kernel's leftovers.
+ *
+ * With this contract on, psx_mod_call_guest_ex() keeps the CALLEE's $a0..$a3
+ * (everything else is restored as before), so the chain a guest body observes
+ * is reproduced. PSX_KEEP_CALL_ARGS=1 (or psx_guest_call_set_keep_args(1))
+ * turns it on; unset keeps the historical full restore bit-for-bit. */
+int  psx_guest_call_keep_args_enabled(void);
+void psx_guest_call_set_keep_args(int on);
+
 /* An interrupt was delivered while a host call was in flight (interrupts.c). */
 void psx_guest_call_note_irq(void);
 
