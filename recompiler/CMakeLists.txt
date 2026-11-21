@@ -1150,6 +1150,7 @@ if(BUILD_TESTING)
                 aot_base_recovery
                 bios_resident_shard
                 computed_stride_jump_codegen
+                index_in_guard_slot_jump_codegen
                 msvc_cps_codegen
                 overlay_guard_codegen
                 overlay_store_barrier_codegen

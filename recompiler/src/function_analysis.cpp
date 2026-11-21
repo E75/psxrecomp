@@ -786,8 +786,13 @@ bool resolve_exact_bounded_jump_table(
         producer_lo = exe.header.load_address;
         producer_hi = exe.analysis_end_address();
     }
-    if (producer_lo >= producer_hi || (producer_lo & 3u) != 0u ||
-        (producer_hi & 3u) != 0u) {
+    // The producer is an image, whose size need not be a multiple of 4 (an
+    // overlay record ends on its last whole word, an EXE on its last byte).
+    // Round the readable window to whole words instead of rejecting the image:
+    // the table read below still requires every slot to fit with 4 bytes.
+    producer_lo = (producer_lo + 3u) & ~3u;
+    producer_hi &= ~3u;
+    if (producer_lo >= producer_hi) {
         return false;
     }
     auto jr_word = read(jr_pc);
@@ -864,47 +869,84 @@ bool resolve_exact_bounded_jump_table(
     lw_offset = static_cast<int32_t>(
         static_cast<int16_t>(*lw_word & 0xFFFFu));
 
-    // The address add and index scale must be the two instructions immediately
-    // before the load. This deliberately excludes raw-window coincidences.
+    // The address add is immediately before the load. The index scale is
+    // either immediately before the add (canonical) or scheduled into the
+    // bounds BEQ's delay slot, with the table-base LUI/ADDIU after it
+    // (SELECT2's screen-id table: `sltiu; beq; sll(delay); lui; addu; lw`).
+    // Both forms put exactly one scale and one base add before the load; a raw
+    // window that has neither is still rejected.
     uint32_t addu_pc = lw_pc - 4u;
-    uint32_t sll_pc = addu_pc - 4u;
     auto addu_word = read(addu_pc);
-    auto sll_word = read(sll_pc);
-    if (!addu_word.has_value() || !sll_word.has_value()) return false;
+    if (!addu_word.has_value()) return false;
     uint32_t addu_op = (*addu_word >> 26) & 0x3Fu;
     uint32_t addu_rs = (*addu_word >> 21) & 0x1Fu;
     uint32_t addu_rt = (*addu_word >> 16) & 0x1Fu;
     uint32_t addu_rd = (*addu_word >> 11) & 0x1Fu;
     uint32_t addu_shamt = (*addu_word >> 6) & 0x1Fu;
     uint32_t addu_fn = *addu_word & 0x3Fu;
-    uint32_t sll_op = (*sll_word >> 26) & 0x3Fu;
-    uint32_t sll_rs = (*sll_word >> 21) & 0x1Fu;
-    uint32_t index_reg = (*sll_word >> 16) & 0x1Fu;
-    uint32_t scaled_reg = (*sll_word >> 11) & 0x1Fu;
-    uint32_t sll_shamt = (*sll_word >> 6) & 0x1Fu;
-    uint32_t sll_fn = *sll_word & 0x3Fu;
     if (addu_op != 0u || addu_fn != 0x21u || addu_shamt != 0u ||
-        addu_rd != lw_base ||
-        sll_op != 0u || sll_fn != 0u || sll_rs != 0u || sll_shamt != 2u ||
-        index_reg == 0u || scaled_reg == 0u ||
-        (scaled_reg != addu_rs && scaled_reg != addu_rt)) {
+        addu_rd != lw_base || in_delay_slot(addu_pc)) {
         return false;
     }
+    uint32_t sll_pc = 0, index_reg = 0, scaled_reg = 0;
+    for (uint32_t back = 1u; back <= 4u; back++) {
+        if (addu_pc < entry + back * 4u) break;
+        uint32_t pc = addu_pc - back * 4u;
+        auto word = read(pc);
+        if (!word.has_value()) break;
+        uint32_t w_op = (*word >> 26) & 0x3Fu;
+        uint32_t w_rs = (*word >> 21) & 0x1Fu;
+        uint32_t w_rd = (*word >> 11) & 0x1Fu;
+        uint32_t w_shamt = (*word >> 6) & 0x1Fu;
+        uint32_t w_fn = *word & 0x3Fu;
+        if (w_op != 0u || w_fn != 0u || w_rs != 0u || w_shamt != 2u)
+            continue;
+        uint32_t candidate_index = (*word >> 16) & 0x1Fu;
+        if (w_rd == 0u || candidate_index == 0u ||
+            (w_rd != addu_rs && w_rd != addu_rt))
+            continue;
+        sll_pc = pc;
+        index_reg = candidate_index;
+        scaled_reg = w_rd;
+        break;
+    }
+    if (sll_pc == 0u) return false;
     uint32_t base_reg = scaled_reg == addu_rs ? addu_rt : addu_rs;
-    if (base_reg == 0u || base_reg == scaled_reg ||
-        in_delay_slot(addu_pc)) {
-        return false;
-    }
+    if (base_reg == 0u || base_reg == scaled_reg) return false;
 
     // Exact guards: sltiu; beq; nop; sll, or sltiu; beq; lui; addiu; sll.
     // The latter schedules the table's LUI in the bounds branch's delay slot.
-    // Keep both forms in parity with the Python capture verifier.
-    if (sll_pc < entry + 12u) return false;
-    uint32_t guard_pc = sll_pc - 8u;
-    uint32_t bound_pc = sll_pc - 12u;
+    // The third form (above) schedules the SLL itself in that delay slot and
+    // defines the base after the guard, so the guard pair sits just before it.
+    // Keep every form in parity with the Python capture verifier.
+    bool sll_in_guard_slot = false;
+    if (sll_pc >= entry + 8u) {
+        auto prev = read(sll_pc - 4u);
+        sll_in_guard_slot = prev.has_value() && is_control(sll_pc - 4u, *prev);
+    }
+    if (!sll_in_guard_slot) {
+        if (sll_pc < entry + 12u) return false;
+    }
+    uint32_t guard_pc = sll_in_guard_slot ? sll_pc - 4u : sll_pc - 8u;
+    uint32_t bound_pc = sll_in_guard_slot ? sll_pc - 8u : sll_pc - 12u;
     auto before_scale = read(sll_pc - 4u);
     if (!before_scale.has_value()) return false;
-    bool scheduled_base = *before_scale != 0u;
+    // The word before the scale is either a NOP, the table constant's ADDIU
+    // (the "scheduled base" form), or an unrelated instruction in the bounds
+    // branch's delay slot (GAME.BIN: `sltiu; beq; lui s4,0x1F80; sll; lui at;
+    // addu; lw`). Only a scale-adjacent write to the table base means the
+    // constant is scheduled there; anything else is delay-slot work and must
+    // leave the index alone.
+    uint32_t before_op = (*before_scale >> 26) & 0x3Fu;
+    bool scheduled_base = false;
+    if (!sll_in_guard_slot && *before_scale != 0u &&
+        (before_op == 0x0Fu || before_op == 0x09u) &&
+        exact_instruction_writes_gpr(*before_scale, base_reg)) {
+        scheduled_base = true;
+    } else if (!sll_in_guard_slot && *before_scale != 0u &&
+               exact_instruction_writes_gpr(*before_scale, index_reg)) {
+        return false;
+    }
     if (scheduled_base) {
         // R3000 JR would see the old target register without this load delay.
         if (lw_pc != jr_pc - 8u) return false;
@@ -1022,6 +1064,19 @@ bool resolve_exact_bounded_jump_table(
         (low_pc != 0u &&
          writes_between(lui_pc + 4u, low_pc, source_reg))) {
         return false;
+    }
+    if (sll_in_guard_slot) {
+        // The scale follows the bounds check here, so the base definition is
+        // the only thing that may sit between them, and neither the scaled
+        // index nor the guard's index may be clobbered before the add.
+        for (uint32_t pc = sll_pc + 4u; pc < addu_pc; pc += 4u) {
+            auto word = read(pc);
+            if (!word.has_value() || is_control(pc, *word)) return false;
+        }
+        if (writes_between(sll_pc + 4u, addu_pc, index_reg) ||
+            writes_between(sll_pc + 4u, addu_pc, scaled_reg)) {
+            return false;
+        }
     }
 
     int64_t base64 = static_cast<int64_t>(upper);
