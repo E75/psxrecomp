@@ -254,6 +254,11 @@ uint32_t sio_get_trace(const SioTraceEntry **buf_out, int *write_idx_out);
 /* Current SIO byte sequence — used by SIO PC tracer for cross-referencing. */
 uint32_t sio_get_seq(void);
 
+/* The card protocol's working state byte (McState). Read-only; the interrupt
+ * delivery trace pairs it with sio_get_seq() to show where a delivery lands in
+ * the byte stream (docs/INIT_EXIT3.md 13). */
+int sio_get_mc_state_now(void);
+
 /* Returns 1 if a memcard protocol exchange is in progress on either
  * slot. Callers (notably the VBlank scheduler) use this to defer
  * interrupt delivery so the BIOS's pad polling routine — which fires

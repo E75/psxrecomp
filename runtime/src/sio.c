@@ -474,6 +474,13 @@ uint32_t sio_get_seq(void) {
     return sio_trace_seq;
 }
 
+/* The card protocol's working state byte. Read-only, for the delivery trace in
+ * interrupts.c: a delivery that lands between two byte steps is only
+ * interpretable together with the state the model had when it was taken. */
+int sio_get_mc_state_now(void) {
+    return (int)mc_state;
+}
+
 int sio_card_protocol_active(void) {
     /* Active if either slot has an in-flight protocol, or the working
      * mc_state is non-idle. */

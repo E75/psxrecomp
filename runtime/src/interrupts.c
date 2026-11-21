@@ -655,6 +655,41 @@ static int irq_call_trace_on(void)
     }
     return s;
 }
+
+/* PSX_IRQ_DELIVER_TRACE=1: one line per delivery taken while a host-initiated
+ * guest call is in flight, carrying what the delivery contract question needs
+ * (docs/INIT_EXIT3.md 13):
+ *   path      - redirect (RestoreState longjmp), rfe, syscall, sentinel or a
+ *               plain handler return
+ *   acked     - the handler cleared the source bit itself, before the
+ *               runtime's boundary fallback had a chance to
+ *   mc/byte   - the card model's (working state byte, byte-stream seq) pair
+ *               before and after the delivery, so "the pair slips by one at
+ *               its 11th byte" is a measured number, not an inference
+ * Inert unless the flag is set and a host call is in flight. */
+static int irq_deliver_trace_on(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        const char *e = getenv("PSX_IRQ_DELIVER_TRACE");
+        s = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return s;
+}
+
+/* PSX_IRQ_RESTORE_COMPLETE=1: a RestoreState redirect whose restored return PC
+ * is the delivery's OWN EPC completes the delivery instead of re-dispatching
+ * the interrupted block inside the handler window (docs/INIT_EXIT3.md 13).
+ * Unset keeps the historical re-dispatch byte-for-byte. */
+static int irq_restore_complete_on(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        const char *e = getenv("PSX_IRQ_RESTORE_COMPLETE");
+        s = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return s;
+}
 /* Poll-throttle counter for fast IRQ paths — host-only; must not survive
  * rewind or load#N can hit the 16K poll edge at a different guest point. */
 static uint32_t s_fast_maintenance = 0;
@@ -1752,6 +1787,21 @@ irq_deliver_eval:
     exception_entries_total++;
     uint32_t pre_handler_istat = i_stat;  /* snapshot for cooldown decision */
 
+    /* Delivery-contract trace (docs/INIT_EXIT3.md 13): capture the source
+     * state and the card model's (state, byte-seq) pair before the handler
+     * runs; the report after the dispatch loop says which completion path the
+     * delivery took and whether the handler acked it itself. */
+    const int dtrace = (g_psx_guest_call_depth != 0) && irq_deliver_trace_on();
+    const uint32_t dt_stat0 = i_stat;
+    uint32_t dt_handler0 = 0;                 /* vector target, filled below */
+    const uint32_t dt_sr0 = cpu->cop0[COP0_SR];
+    int      dt_mc0   = 0;
+    uint32_t dt_byte0 = 0;
+    if (dtrace) {
+        dt_mc0   = sio_get_mc_state_now();
+        dt_byte0 = sio_get_seq();
+    }
+
     /* Set COP0 Cause: ExcCode=0 (interrupt). The ~0x7C mask deliberately
      * preserves the whole IP field, because a pure software interrupt must
      * present the guest-written IP0/IP1 bits unmodified (the guest's dispatcher
@@ -1977,6 +2027,7 @@ irq_deliver_eval:
     /* Record which fiber owns this setjmp. Any subsequent longjmp must
      * happen on this same fiber; if a non-owner fiber needs to longjmp
      * it must switch back here first (see deferred_exception_longjmp). */
+    if (dtrace) dt_handler0 = target_pc;   /* the entry point this delivery dispatches */
     void *prev_owner_fiber = g_exception_owner_fiber;
     int   prev_pending = g_pending_exception_longjmp;
     g_exception_owner_fiber = psx_fiber_current();
@@ -2063,6 +2114,39 @@ irq_deliver_eval:
             g_irqctx_ring[(g_irqctx_seq - 1u) & (IRQCTX_RING_CAP - 1u)].redirects++;
             g_psx_dispatch_depth = 0;
             debug_server_log_restore_event(3, cpu->pc, (uint32_t)jmp_val);
+            if (g_psx_guest_call_depth != 0 && irq_deliver_trace_on()) {
+                extern uint64_t s_frame_count;
+                fprintf(stderr,
+                        "psx_irq_redirect: seq=%llu frame=%u pc=%08X epc=%08X "
+                        "sentinel=%08X same=%d depth=%d nest=%d\n",
+                        (unsigned long long)g_irqctx_seq, (unsigned)s_frame_count,
+                        (unsigned)cpu->pc, (unsigned)g_exception_real_epc,
+                        (unsigned)PSX_EXC_SENTINEL_PC,
+                        g_exception_real_epc != 0u &&
+                            same_guest_pc(cpu->pc, g_exception_real_epc),
+                        g_psx_guest_call_depth, exception_nest_depth);
+                fflush(stderr);
+            }
+            /* PSX_IRQ_RESTORE_COMPLETE (gated, default off): RestoreState restores
+             * the save buffer and jumps to its saved $ra. When that saved PC is
+             * THIS delivery's own EPC the jump is "return to the interrupted
+             * instruction" and the delivery is complete; re-dispatching it here
+             * would run the interrupted block inside the handler window and the
+             * live host frame would then resume the same block a second time.
+             *
+             * Measured on WE2002 (docs/INIT_EXIT3.md 13.4): on the card path the
+             * restored PC is 0x80044E48 - the game thread's blocking-call return,
+             * NOT this delivery's EPC (0xBFC0766C) - so this guard never fires
+             * there, and dropping the EPC test (completing EVERY in-call
+             * RestoreState) wedges the cold boot at frame 118: the redirect is
+             * the kernel's resume-into-the-thread mechanism, not a handler
+             * continuation. Kept gated and off: the measurement, not a fix. */
+            if (irq_restore_complete_on() && g_psx_guest_call_depth != 0 &&
+                g_exception_real_epc != 0u &&
+                same_guest_pc(cpu->pc, g_exception_real_epc)) {
+                g_exc_escape_reason = PSX_EXC_ESCAPE_RFE_RETURN;
+                break;
+            }
             target_pc = cpu->pc;
             continue;
         }
@@ -2081,6 +2165,11 @@ irq_deliver_eval:
         /* jmp_val 0 (normal return) or 1 (ReturnFromException): done. */
         break;
     }
+    /* After the dispatch loop: what the handler left in I_STAT is the ack
+     * answer. Captured here, before the boundary fallback below can clear it. */
+    const uint32_t dt_stat1 = i_stat;
+    const uint32_t dt_redirects =
+        g_irqctx_ring[(g_irqctx_seq - 1u) & (IRQCTX_RING_CAP - 1u)].redirects;
     /* Ack exactly once per delivery. Hardware leaves the ack to the handler
      * (I_STAT write). If the SAME bit is still pending after a full delivery AND
      * the guest resumes at the SAME PC, the handler could not ack it - an
@@ -2107,6 +2196,38 @@ irq_deliver_eval:
         }
         s_last_pend = i_stat & i_mask & 0x7FFu;
         s_last_pc = resumed;
+    }
+    if (dtrace) {
+        extern uint64_t s_frame_count;
+        const uint32_t sio_bit = (uint32_t)(1u << IRQ_SIO0);
+        const char *path;
+        if (dt_redirects)
+            path = "redirect";
+        else if (g_exc_escape_reason == PSX_EXC_ESCAPE_RFE_RETURN)
+            path = "rfe";
+        else if (g_exc_escape_reason == PSX_EXC_ESCAPE_SYSCALL_RETURN)
+            path = "syscall";
+        else if (g_exc_escape_reason == PSX_EXC_ESCAPE_LEGACY_SENTINEL)
+            path = "sentinel";
+        else
+            path = "return";
+        fprintf(stderr,
+                "psx_irq_deliver: seq=%llu cyc=%llu frame=%u istat=%03X "
+                "post_handler=%03X acked=%d path=%s redirects=%u reason=%d "
+                "handler=%08X epc=%08X exit_pc=%08X sr=%08X "
+                "mc=%d/%u->%d/%u depth=%d\n",
+                (unsigned long long)g_irqctx_seq,
+                (unsigned long long)psx_get_cycle_count(),
+                (unsigned)s_frame_count,
+                (unsigned)(dt_stat0 & 0x7FFu), (unsigned)(dt_stat1 & 0x7FFu),
+                (dt_stat0 & sio_bit) ? !(dt_stat1 & sio_bit) : 0,
+                path, (unsigned)dt_redirects, (int)g_exc_escape_reason,
+                (unsigned)dt_handler0, (unsigned)g_exception_real_epc,
+                (unsigned)cpu->pc, (unsigned)dt_sr0,
+                dt_mc0, (unsigned)dt_byte0,
+                sio_get_mc_state_now(), (unsigned)sio_get_seq(),
+                g_psx_guest_call_depth);
+        fflush(stderr);
     }
     /* Restore previous exception-owner state. Supports nested exceptions
      * if they ever arise (uncommon but harmless). */
