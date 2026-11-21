@@ -2978,6 +2978,15 @@ GeneratedFunction CodeGenerator::generate_function(
             if (block_addr == func.start_addr) continue;
             cps_cur_continuations_.push_back(block_addr);
         }
+        // A jump table may target an instruction inside a block. The switch
+        // below reaches it with a local label, but another image's computed
+        // jump (`jr` through a shared method table) reaches the same arm
+        // through the flat trampoline: it needs a dispatch key, or the
+        // dispatcher has no body for a compiled arm that is already here.
+        for (uint32_t label : extra_labels_) {
+            if (label != func.start_addr)
+                cps_cur_continuations_.push_back(label);
+        }
     }
 
     std::stringstream body_ss;
@@ -3328,6 +3337,14 @@ std::vector<GeneratedFunction> CodeGenerator::generate_alias_group(
             if (!live_blocks.count(block_addr)) continue;
             if (alias_entries.count(block_addr)) continue;
             cps_cur_continuations_.push_back(block_addr);
+        }
+        // Interior jump-table arms are compiled labels of this host too; a
+        // computed jump from another image reaches them through the flat
+        // trampoline, so they need the same dispatch keys (see
+        // generate_function).
+        for (uint32_t label : extra_labels_) {
+            if (alias_entries.count(label)) continue;
+            cps_cur_continuations_.push_back(label);
         }
     }
 
